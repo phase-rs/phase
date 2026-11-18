@@ -152,7 +152,8 @@
     "loading": "Carregando {{name}}",
     "unimplemented": "Não implementado: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Virada"
+    "tapped": "Virada",
+    "reloadArt": "Toque para recarregar a arte"
   },
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",
@@ -162,6 +163,7 @@
     "report": "Relatar um problema",
     "reported": "Relatado ✓",
     "reportNotSent": "Não enviado",
+    "reloadArt": "Recarregar arte",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",

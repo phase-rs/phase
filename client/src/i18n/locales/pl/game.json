@@ -152,7 +152,8 @@
     "loading": "Wczytywanie {{name}}",
     "unimplemented": "Niezaimplementowane: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Obrócona"
+    "tapped": "Obrócona",
+    "reloadArt": "Dotknij, aby ponownie wczytać grafikę"
   },
   "preview": {
     "holdCtrlBack": "Przytrzymaj Ctrl, aby zobaczyć tylną stronę",
@@ -162,6 +163,7 @@
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
     "reportNotSent": "Nie wysłano",
+    "reloadArt": "Wczytaj grafikę ponownie",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",

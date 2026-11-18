@@ -152,7 +152,8 @@
     "loading": "Loading {{name}}",
     "unimplemented": "Unimplemented: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Tapped"
+    "tapped": "Tapped",
+    "reloadArt": "Tap to reload art"
   },
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
@@ -162,6 +163,7 @@
     "report": "Report a problem",
     "reported": "Reported ✓",
     "reportNotSent": "Not sent",
+    "reloadArt": "Reload art",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",

@@ -454,6 +454,7 @@
     "dfc": "双面牌",
     "faceDownName": "面朝下的牌",
     "loading": "正在加载{{name}}",
+    "reloadArt": "点击重新加载插画",
     "tapped": "已横置",
     "unimplemented": "未实现：{{mechanics}}"
   },
@@ -2406,6 +2407,7 @@
     "holdCtrlFront": "按住 Ctrl 以显示正面",
     "parse": "解析",
     "ptDeltaFrom": "来自{{source}}的{{delta}}",
+    "reloadArt": "重新加载插画",
     "report": "报告问题",
     "reportNotSent": "未发送",
     "reported": "已报告 ✓",

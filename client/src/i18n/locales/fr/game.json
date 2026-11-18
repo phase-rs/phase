@@ -152,7 +152,8 @@
     "loading": "Chargement de {{name}}",
     "unimplemented": "Non implémenté : {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Engagé"
+    "tapped": "Engagé",
+    "reloadArt": "Toucher pour recharger l'illustration"
   },
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
@@ -162,6 +163,7 @@
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
     "reportNotSent": "Non envoyé",
+    "reloadArt": "Recharger l'illustration",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
