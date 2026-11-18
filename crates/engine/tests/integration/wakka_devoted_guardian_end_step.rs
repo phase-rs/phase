@@ -12,6 +12,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -229,4 +230,71 @@ fn wakka_blinked_in_response_to_its_trigger_still_rewards() {
     // CR 400.7: the returned Wakka is a new object, not the ability's source,
     // so it is one of the "other" creatures.
     assert_eq!(counters(&b.runner, wakka, CounterType::Plus1Plus1), 1);
+}
+
+/// Beast, Erudite Aerialist: "As long as you've put one or more +1/+1 counters on
+/// Beast this turn, he has flying." The same self-referential counter history,
+/// read by a static: only a +1/+1 counter, and only one Beast's controller put
+/// on it, counts (CR 122.1). Battlegrowth ({G} instant): "Put a +1/+1 counter on
+/// target creature."
+#[test]
+fn beast_flies_only_after_you_put_a_plus_one_counter_on_it() {
+    const BEAST: &str = "As long as you've put one or more +1/+1 counters on Beast this turn, he has flying.\nWhenever Beast deals combat damage to a player, draw a card.";
+    const BATTLEGROWTH: &str = "Put a +1/+1 counter on target creature.";
+    for (case, caster, scar, flying) in [
+        ("you, +1/+1", P0, false, true),
+        ("opponent, +1/+1", P1, false, false),
+        ("you, -1/-1", P0, true, false),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let beast = s
+            .add_creature(P0, "Beast, Erudite Aerialist", 3, 3)
+            .from_oracle_text(BEAST)
+            .id();
+        let (name, text, shard, color, kind) = if scar {
+            (
+                "Scar",
+                SCAR,
+                ManaCostShard::BlackRed,
+                ManaColor::Black,
+                CounterType::Minus1Minus1,
+            )
+        } else {
+            (
+                "Battlegrowth",
+                BATTLEGROWTH,
+                ManaCostShard::Green,
+                ManaColor::Green,
+                CounterType::Plus1Plus1,
+            )
+        };
+        let spell = s
+            .add_spell_to_hand_from_oracle(caster, name, true, text)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![shard],
+                generic: 0,
+            })
+            .id();
+        s.add_basic_land(caster, color);
+        let mut r = s.build();
+        r.state_mut().priority_player = caster;
+        r.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+        r.cast(spell).target_object(beast).resolve();
+        assert_eq!(
+            counters(&r, beast, kind),
+            1,
+            "reach guard ({case}): the counter"
+        );
+        assert!(
+            r.state().stack.is_empty()
+                && matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+            "{case}: settled"
+        );
+        assert_eq!(
+            r.state().objects[&beast].has_keyword(&Keyword::Flying),
+            flying,
+            "{case}"
+        );
+    }
 }
