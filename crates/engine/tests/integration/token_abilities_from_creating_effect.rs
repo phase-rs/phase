@@ -258,7 +258,7 @@ fn a_copy_of_the_creator_makes_spawns_with_the_ability_its_effect_defines() {
 
 const BROOD_BIRTHING: &str = "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, create one of those tokens.";
 
-/// P0 with `casts` copies of Brood Birthing (verbatim Oracle, {1}{G}) and the mana for them.
+/// P0 with `casts` copies of Brood Birthing (verbatim Oracle, {1}{R}) and the mana for them.
 fn brood_board(casts: usize) -> (GameRunner, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -267,13 +267,13 @@ fn brood_board(casts: usize) -> (GameRunner, Vec<ObjectId>) {
             scenario
                 .add_spell_to_hand_from_oracle(P0, "Brood Birthing", false, BROOD_BIRTHING)
                 .with_mana_cost(ManaCost::Cost {
-                    shards: vec![ManaCostShard::Green],
+                    shards: vec![ManaCostShard::Red],
                     generic: 1,
                 })
                 .id()
         })
         .collect();
-    let mut pool = mana(broods[0], ManaType::Green, casts);
+    let mut pool = mana(broods[0], ManaType::Red, casts);
     pool.extend(mana(broods[0], ManaType::Colorless, casts));
     scenario.with_mana_pool(P0, pool);
     (scenario.build(), broods)
