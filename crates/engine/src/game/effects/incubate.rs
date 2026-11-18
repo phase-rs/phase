@@ -11,6 +11,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::CardId;
+use crate::types::proposed_event::CounterCause;
 use crate::types::zones::Zone;
 
 /// CR 701.53a: Incubate N — create an Incubator token that enters the
@@ -80,6 +81,8 @@ pub fn resolve(
             obj_id,
             CounterType::Plus1Plus1,
             n,
+            // CR 614.16: incubate's counters are placed by a resolving ability.
+            CounterCause::ResolvingEffect,
             events,
         )
     {
@@ -349,6 +352,7 @@ mod tests {
                     actor,
                     object_id,
                     counter_type,
+                    ..
                 },
             count,
             ..

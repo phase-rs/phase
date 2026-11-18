@@ -316,6 +316,10 @@ pub fn build_resolved_from_def_with_targets(
     // parser-stamped `SiblingCondition` never reaches the resolved sub and the
     // keyword list collapses after the first false gate.
     resolved.sibling_condition = def.sibling_condition;
+    // CR 608.2c: Carry the parser-stamped list-slot identity through so a
+    // further target slot of one instruction ("destroy target artifact, target
+    // creature, ...") continues the instruction its preceding slot began.
+    resolved.instruction_join = def.instruction_join;
     // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
     // through so try_materialize_reflexive_trigger can route a gated modal
     // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
@@ -13252,6 +13256,7 @@ fn build_mode_sequences(
 
 #[cfg(test)]
 mod tests {
+    use crate::types::ability::TurnWindow;
     use std::cell::RefCell;
 
     use super::DistributionCoverage::{AnySubset, EveryRecipient};
@@ -24112,9 +24117,10 @@ mod tests {
         assert!(quantity_expr_references_target_creature(&damage));
 
         let spell_filter = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(target_power_filter()),
+                window: TurnWindow::ThisTurn,
             },
         };
         assert!(quantity_expr_references_target_creature(&spell_filter));

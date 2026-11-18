@@ -16,7 +16,7 @@
  * WASM adapter, deckCompatibility, useBracketEstimate) are mocked so the
  * test only exercises the warning-chip render condition.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -156,6 +156,7 @@ beforeEach(() => {
       lastFormat: null,
       lastPlayerCount: 2,
       lastMatchType: "Bo1",
+      lastLoopDetection: { type: "Off" },
     });
   });
 });
@@ -312,6 +313,47 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
       const search = await startMatchAndReadSearch();
       expect(search).toContain("format=Momir");
       expect(search).toContain("match=bo3");
+    });
+  });
+
+  describe("combo detector preference", () => {
+    async function comboDetectorSegments() {
+      const label = (await screen.findByText("Combo Detector (experimental)")).closest("label");
+      if (!label) throw new Error("the combo detector segments sit inside a label");
+      return {
+        off: within(label).getByText("Off", { selector: "button" }),
+        interactive: within(label).getByText("Interactive", { selector: "button" }),
+      };
+    }
+
+    it("seeds from the remembered choice and carries it into the game URL", async () => {
+      act(() => {
+        usePreferencesStore.setState({
+          lastFormat: "Momir",
+          lastPlayerCount: 2,
+          lastLoopDetection: { type: "Interactive" },
+        });
+      });
+      renderGameSetupPage();
+
+      const { off, interactive } = await comboDetectorSegments();
+      expect(interactive).toHaveClass("bg-indigo-600");
+      expect(off).not.toHaveClass("bg-indigo-600");
+
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("button", { name: /^Start Match/ }));
+      expect((await screen.findByTestId("game-route")).textContent ?? "").toContain("loop=interactive");
+    });
+
+    it("persists each toggle, the last one written winning", async () => {
+      renderGameSetupPage();
+      const user = userEvent.setup();
+
+      await user.click((await comboDetectorSegments()).interactive);
+      expect(usePreferencesStore.getState().lastLoopDetection).toEqual({ type: "Interactive" });
+
+      await user.click((await comboDetectorSegments()).off);
+      expect(usePreferencesStore.getState().lastLoopDetection).toEqual({ type: "Off" });
     });
   });
 

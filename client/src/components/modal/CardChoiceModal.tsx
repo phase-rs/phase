@@ -9,6 +9,7 @@ import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type {
   CounterMatch,
   CounterType,
@@ -123,7 +124,7 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
-type SpellCopyOrderChoice = Extract<WaitingFor, { type: "SpellCopyOrderChoice" }>;
+type MemberOrderChoice = Extract<WaitingFor, { type: "MemberOrderChoice" }>;
 
 function selectionInteractionId(
   interaction: ViewerInteraction | null,
@@ -299,9 +300,9 @@ export function CardChoiceModal() {
     case "EmpowerJaceChoice":
       if (!canActForWaitingState) return null;
       return <EmpowerJaceChoiceModal data={waitingFor.data} />;
-    case "SpellCopyOrderChoice":
+    case "MemberOrderChoice":
       if (!canActForWaitingState) return null;
-      return <SpellCopyOrderChoiceModal data={waitingFor.data} />;
+      return <MemberOrderChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -402,6 +403,7 @@ export function CardChoiceModal() {
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
           })}
+          reason={t("cardChoice.discard.reason.connive")}
         />
       );
     case "DiscardChoice":
@@ -437,6 +439,7 @@ export function CardChoiceModal() {
           key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
+          reason={t("cardChoice.discard.reason.ward")}
         />
       );
     case "WardSacrificeChoice":
@@ -588,9 +591,9 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               key={id}
               type="button"
               aria-label={obj.name}
-              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
+              className={`relative rounded-lg transition ${
                 isSelected
-                  ? "ring-2 ring-emerald-400/80"
+                  ? "z-10 ring-2 ring-emerald-400/80"
                   : "ring-1 ring-white/10 hover:ring-white/35"
               }`}
               initial={{ opacity: 0, y: 40, scale: 0.9 }}
@@ -601,17 +604,17 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage {...objectImageProps(obj)} size="normal" />
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  isSelected
-                    ? "bg-emerald-500/80 text-white"
-                    : "bg-slate-800/90 text-slate-300"
-                }`}
-              >
-                {isSelected
-                  ? t("cardChoice.badges.selected")
-                  : t("cardChoice.badges.choose")}
-              </span>
+              {/* Over the card, as every strip draws its selection: below lg
+                  the strip sizes its cards to fill its height, so anything
+                  stacked under a card would be cut off. The label wraps inside
+                  a narrow card rather than spilling onto its neighbours. */}
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-center text-xs font-bold text-white [overflow-wrap:anywhere]">
+                    {t("cardChoice.badges.selected")}
+                  </span>
+                </div>
+              )}
             </motion.button>
           );
         })}
@@ -1219,16 +1222,22 @@ function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
   );
 }
 
-// CR 405.3 + CR 707.10: the controller of a batch of spell copies picks the
-// spell whose copy goes on the stack next. Display-only: the engine supplies
-// `choices` and enforces legality; clicking a spell dispatches a single-object
+// CR 608.2f + CR 405.3: the controller of an ordered member loop picks which
+// member is processed next — a spell copy, or a per-member instruction whose
+// iterations pause for a payment. Display-only: the engine supplies `choices`
+// and enforces legality; clicking a member dispatches a single-object
 // SelectCards.
-function SpellCopyOrderChoiceModal({ data }: { data: SpellCopyOrderChoice["data"] }) {
+function MemberOrderChoiceModal({ data }: { data: MemberOrderChoice["data"] }) {
   const { t } = useTranslation("game");
+  const copyBatch = data.purpose === "SpellCopies";
   return (
     <SingleObjectPickModal
-      title={t("cardChoice.spellCopyOrder.title")}
-      subtitle={t("cardChoice.spellCopyOrder.subtitle")}
+      title={t(
+        copyBatch ? "cardChoice.spellCopyOrder.title" : "cardChoice.memberOrder.title",
+      )}
+      subtitle={t(
+        copyBatch ? "cardChoice.spellCopyOrder.subtitle" : "cardChoice.memberOrder.subtitle",
+      )}
       choices={data.choices}
     />
   );
@@ -2550,6 +2559,11 @@ function PayCostDispatch({ data, promptKey }: { data: PayCost["data"]; promptKey
               ? t("cardChoice.discard.titleManaAbility")
               : t("cardChoice.discard.titleAdditionalCost")
           }
+          reason={
+            isManaAbility
+              ? t("cardChoice.discard.reason.manaAbility")
+              : t("cardChoice.discard.reason.additionalCost")
+          }
           canCancel={!isManaAbility}
         />
       );
@@ -2754,6 +2768,7 @@ function CollectEvidenceModal({
 function DiscardModal({
   data,
   title,
+  reason,
   canCancel = false,
 }: {
   data: { cards: ObjectId[]; count: number } & {
@@ -2761,12 +2776,19 @@ function DiscardModal({
     unless_filter?: TargetFilter;
   };
   title?: string;
+  /**
+   * Why the prompt asks for a discard (Ward, Connive, a cost), when its title
+   * says more than the instruction. A short screen drops the title and puts
+   * the reason before the instruction instead.
+   */
+  reason?: string;
   canCancel?: boolean;
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
+  const isCompactHeight = useIsCompactHeight();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const hasUnlessOption = data.unless_filter != null;
   const isUpTo = data.up_to === true;
@@ -2827,6 +2849,87 @@ function DiscardModal({
   // The confirm button always shows the discard count (even in keep-mode where
   // `selected` tracks the keep set — invert to show how many will be discarded).
   const discardSelectedForLabel = active ? data.cards.length - selected.size : selected.size;
+  const confirmLabel = t("cardChoice.buttons.discardCount", {
+    selected: discardSelectedForLabel,
+    count: data.count,
+  });
+
+  const keepToggle = keepEligible ? (
+    <button
+      type="button"
+      className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
+      onClick={onToggleKeep}
+    >
+      {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
+    </button>
+  ) : null;
+
+  // The grid keeps its place in the tree under either header, so turning the
+  // phone mid-prompt keeps its sort and grouping. On a short screen the
+  // counter is left to screen readers while the confirm shows the same count;
+  // in keep-mode the confirm still counts discards, so the keep count stays.
+  const body = (
+    <>
+      {!isCompactHeight && keepToggle && <div className="px-1 pb-1">{keepToggle}</div>}
+      <SelectableCardGrid
+        cards={data.cards}
+        objects={objects}
+        value={selected}
+        onChange={setSelected}
+        cap={cap}
+        tone={tone}
+        badgeLabel={badgeLabel}
+        counterText={counterText}
+        hoverProps={hoverProps}
+        onConfirm={handleConfirm}
+        canConfirm={isReady}
+        counterDisplay={isCompactHeight && !active ? "screenReaderOnly" : "visible"}
+        toolbarControlSize={isCompactHeight ? "touch" : "standard"}
+        toolbarStart={isCompactHeight ? keepToggle : null}
+      />
+    </>
+  );
+
+  // On a short screen (a landscape phone) every line of chrome takes height
+  // from the cards, and the standard layout's title, instruction, counter and
+  // footer confirm each repeat the discard. One header line carries the
+  // instruction and a confirm that shows the count, and "Keep instead" joins
+  // the toolbar row. The instruction stands in for the title, keeping the
+  // reason a title names (Ward, Connive, a cost) in front of it.
+  if (isCompactHeight) {
+    return (
+      <ChoiceOverlay
+        title={
+          reason
+            ? t("cardChoice.discard.instructionWithReason", { reason, instruction: subtitle })
+            : subtitle
+        }
+        headerActions={
+          <>
+            {canCancel && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className={menuButtonClass({ tone: "slate", size: "sm" })}
+              >
+                {t("choiceOverlay.cancel")}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleConfirm}
+              disabled={!isReady}
+              className={menuButtonClass({ tone: "cyan", size: "sm", disabled: !isReady })}
+            >
+              {confirmLabel}
+            </button>
+          </>
+        }
+      >
+        {body}
+      </ChoiceOverlay>
+    );
+  }
 
   return (
     <ChoiceOverlay
@@ -2835,53 +2938,14 @@ function DiscardModal({
       footer={
         canCancel ? (
           <CostActionFooter onCancel={handleCancel}>
-            <ConfirmButton
-              onClick={handleConfirm}
-              disabled={!isReady}
-              label={t("cardChoice.buttons.discardCount", {
-                selected: discardSelectedForLabel,
-                count: data.count,
-              })}
-            />
+            <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
           </CostActionFooter>
         ) : (
-          <ConfirmButton
-            onClick={handleConfirm}
-            disabled={!isReady}
-            label={t("cardChoice.buttons.discardCount", {
-              selected: discardSelectedForLabel,
-              count: data.count,
-            })}
-          />
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
         )
       }
     >
-      <>
-        {keepEligible && (
-          <div className="px-1 pb-1">
-            <button
-              type="button"
-              className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
-              onClick={onToggleKeep}
-            >
-              {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
-            </button>
-          </div>
-        )}
-        <SelectableCardGrid
-          cards={data.cards}
-          objects={objects}
-          value={selected}
-          onChange={setSelected}
-          cap={cap}
-          tone={tone}
-          badgeLabel={badgeLabel}
-          counterText={counterText}
-          hoverProps={hoverProps}
-          onConfirm={handleConfirm}
-          canConfirm={isReady}
-        />
-      </>
+      {body}
     </ChoiceOverlay>
   );
 }

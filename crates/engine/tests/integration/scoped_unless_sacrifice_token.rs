@@ -150,7 +150,12 @@ fn scoped_unless_sacrifice_skips_an_eliminated_pending_payer() {
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
 
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     expect_unless(&runner, P2);
     runner
         .act(GameAction::PayUnlessCost { pay: false })
@@ -180,7 +185,12 @@ fn scoped_unless_sacrifice_settles_earlier_declines_when_final_payer_is_eliminat
         .expect("P1 declines before P2 leaves");
     expect_unless(&runner, P2);
 
-    eliminate_player(runner.state_mut(), P2, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P2,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert_eq!(
         zombie_count(&runner),
@@ -207,7 +217,12 @@ fn scoped_unless_sacrifice_keeps_a_departed_decliners_tokens_owed() {
         .expect("P1 declines before leaving");
     expect_unless(&runner, P2);
 
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     expect_unless(&runner, P2);
     pay_sacrifice(&mut runner, p2_creature);
 
@@ -232,7 +247,12 @@ fn scoped_unless_sacrifice_abandons_when_its_original_controller_leaves() {
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
 
-    eliminate_player(runner.state_mut(), P0, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert!(runner.state().pending_player_scope_unless_payment.is_none());
     assert_eq!(zombie_count(&runner), 0);
@@ -297,7 +317,12 @@ fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_
         WaitingFor::ReplacementChoice { player: P1, .. }
     ));
 
-    eliminate_player(runner.state_mut(), P0, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert!(runner.state().pending_player_scope_unless_payment.is_none());
     assert!(runner.state().pending_replacement.is_none());

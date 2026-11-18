@@ -16,7 +16,7 @@ use crate::types::mana::ManaCost;
 use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::resolution::OptionalEffectFrame;
+use crate::types::resolution::{OptionalEffectFrame, ParkedOpponentMayPoll};
 use crate::types::zones::Zone;
 use crate::types::ResolutionOptionalPaymentChoice;
 
@@ -165,6 +165,13 @@ fn handle_optional_effect_choice_inner(
                 trigger_events: pending_events,
                 trigger_match_count: pending_count,
                 return_result_occurrence,
+                replacement_action,
+                // A parked poll cursor owns no prompt, so it cannot be the frame
+                // an answer consumes: `validate` refuses a state whose top
+                // direct-choice frame does not match the live `WaitingFor`, and a
+                // parked cursor's gate is `AfterChild`. Bound rather than elided
+                // so a later field forces this re-audit.
+                parked_poll: _,
             } = frame;
             let choice = if accept {
                 AutoMayChoice::Accept
@@ -196,8 +203,15 @@ fn handle_optional_effect_choice_inner(
                 &mut state.active_return_result_occurrence,
                 return_result_occurrence,
             );
-            let result =
-                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+            // CR 614.6 + CR 615.5 + CR 608.2c: a "may" offered inside a replacement's own action
+            // resolves inside that action, so its "that much" reads the action's amount. The
+            // guard covers only this decision's resolution and drops before
+            // `resume_pending_continuation_if_priority`, so the enclosing spell's tail and any
+            // other work queued beneath this frame read their own amounts.
+            let result = {
+                let _action = crate::game::quantity::resume_replacement_action(replacement_action);
+                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1)
+            };
             state.active_return_result_occurrence = previous_return_occurrence;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_events = previous_trigger_events;
@@ -438,7 +452,15 @@ fn handle_opponent_may_choice_inner(
                     // the chosen instruction then does nothing.
                     sub.context = ability.context.clone();
                     sub.context.optional_effect_performed = true;
-                    state.park_ability_continuation(PendingContinuation::new(sub, state));
+                    // CR 614.6 + CR 615.5 + CR 608.2c: the parked rest belongs to the
+                    // replacement action the offer was made in, so it captures that action.
+                    let pending = {
+                        let _action = crate::game::quantity::resume_replacement_action(
+                            frame.replacement_action,
+                        );
+                        PendingContinuation::new(sub, state)
+                    };
+                    state.park_ability_continuation(pending);
                 }
                 state.waiting_for = WaitingFor::MultiTargetSelection {
                     player: promptee,
@@ -462,8 +484,103 @@ fn handle_opponent_may_choice_inner(
                 ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
             }
             set_active_priority(state);
-            effects::resolve_ability_chain(state, &ability, events, 1)
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // CR 614.6 + CR 615.5 + CR 608.2c: the accepted action resolves inside the
+            // replacement action the offer was made in. The guard covers only this resolution
+            // and drops before the re-offer and `resume_pending_continuation_if_priority`.
+            let resolved = {
+                let _action =
+                    crate::game::quantity::resume_replacement_action(frame.replacement_action);
+                effects::resolve_ability_chain(state, &ability, events, 1)
+            };
+            resolved.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+            // CR 118.12 + CR 101.4: an acceptance answers one responder, not
+            // the poll. Dash Hopes' ruling is explicit: "As soon as any
+            // player performs the action, the spell is countered, but the
+            // remaining players still get the option." Re-park the frame for
+            // the next responder instead of letting the first acceptance end
+            // the poll.
+            //
+            // The re-offered frame carries the ORIGINAL ability (this
+            // promptee's bindings — scoped player, payer, rebound anaphor —
+            // are theirs alone and must not leak to the next responder),
+            // with `optional_effect_performed` set so a later all-decline
+            // does not fire the "if no one does" rider for an action that
+            // was performed.
+            //
+            // Only when a later responder still HAS the option (CR 608.2d)
+            // — `acceptance_leaves_the_option_open` is the authority, and
+            // the Sin Prodder case is why the re-offer is not unconditional.
+            //
+            // The accepted action may or may not have resolved to completion.
+            // CR 101.4 owes the next responder an offer either way, so the
+            // only question is whether this poll may own the prompt right
+            // now: exactly one frame may (`MultipleDirectChoiceOwners`), and
+            // an action that suspended on a prompt of its own — a CR 616.1
+            // replacement-ordering choice, say — holds it.
+            //
+            // Settled priority: install the offer as the live prompt.
+            // Otherwise: park the cursor beneath that live prompt, where it
+            // owns nothing and arms once the frames above it are gone. Same
+            // two roles a `Parked`/`Armed` Cipher offer and a past-cursor-0
+            // `DieRoll` carry, and the reason `parked_poll` moves the gate to
+            // `AfterChild`.
+            if acceptance_leaves_the_option_open(&ability.effect) {
+                let mut reoffered = frame.ability.clone();
+                reoffered.context.optional_effect_performed = true;
+                // CR 614.6 + CR 615.5 + CR 608.2c: the next responder's offer belongs to the
+                // same resolution as this one, so it copies this frame's context, the
+                // replacement action it was made in included, rather than capturing the
+                // context now (this action's guard has already dropped).
+                let mut offer = OptionalEffectFrame {
+                    parked_poll: None,
+                    ability: reoffered,
+                    ..frame.clone()
+                };
+                // CR 608.2d: each seat is judged when its own offer is made, and
+                // the two branches below make that offer at different times, so
+                // they judge at different times.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    // Settled: this offer goes live NOW, so it is judged now —
+                    // through the same authority as the fan-out and the decline
+                    // path, so a re-offer can no more name a seat that has left
+                    // the game or cannot take the option than they can.
+                    if let Some((next, rest)) =
+                        effects::next_offerable_seat(state, &frame.ability, &remaining)
+                    {
+                        state
+                            .install_direct_choice_frame(
+                                crate::types::resolution::ResolutionFrame::OptionalEffect(offer),
+                                WaitingFor::OpponentMayChoice {
+                                    player: next,
+                                    decision_subject_id,
+                                    source_id,
+                                    description,
+                                    remaining: rest,
+                                },
+                            )
+                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    }
+                } else if let Some((&next, rest)) = remaining.split_first() {
+                    // Suspended: the offer is not made until the cursor arms,
+                    // which is after the accepted action finishes. Judging the
+                    // seats HERE would be judging them too early — the accepted
+                    // action can still change who may accept, in both directions
+                    // — so the cursor is parked unjudged and
+                    // `arm_parked_opponent_may_poll` judges it at the moment the
+                    // offer is actually made.
+                    offer.parked_poll = Some(Box::new(ParkedOpponentMayPoll {
+                        next,
+                        remaining: rest.to_vec(),
+                        decision_subject_id,
+                        source_id,
+                        description,
+                    }));
+                    state
+                        .park_opponent_may_poll_beneath_live_prompt(offer)
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                }
+            }
         }
     } else {
         return advance_opponent_may_offer(
@@ -520,6 +637,10 @@ fn advance_opponent_may_offer(
         .take_active_optional_effect_frame()
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?
     {
+        // CR 614.6 + CR 615.5 + CR 608.2c: the all-declined completion resolves inside the
+        // replacement action the offer was made in. The guard drops at the end of this block,
+        // before `resume_pending_continuation_if_priority`.
+        let _action = crate::game::quantity::resume_replacement_action(frame.replacement_action);
         resolve_all_declined_opponent_may(state, &frame.ability, events)?;
     }
     resume_pending_continuation_if_priority(state, events)?;
@@ -527,11 +648,166 @@ fn advance_opponent_may_offer(
     Ok(state.waiting_for.clone())
 }
 
+/// CR 101.4: Arms a parked any-player poll cursor — the offer for the responder
+/// after an acceptance whose action suspended on a prompt of its own.
+///
+/// Called from `resume_resolution_frames`, i.e. only once the frames above the
+/// cursor are gone and priority has settled, which is what puts the next offer
+/// after the accepted action's own child prompt rather than racing it. Clearing
+/// `parked_poll` moves the frame's gate back to `DirectChoice`, so the frame and
+/// the prompt it is permitted to consume become consistent in the same step —
+/// the invariant `install_direct_choice_frame` enforces when it installs a fresh
+/// owner, held here by mutating a frame that is already the top one, exactly as
+/// `cipher::arm_parked_encode_offer` does.
+///
+/// CR 102.1 + CR 800.4f + CR 608.2d: the parked seats are judged here, not at
+/// park time, because the accepted action resolves in between and can remove a
+/// responder from the game or take their option away. With no seat left to ask,
+/// the poll closes instead of arming.
+pub(crate) fn arm_parked_opponent_may_poll(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let Some((poll, ability, replacement_action)) =
+        state.active_optional_effect_frame().and_then(|frame| {
+            frame.parked_poll.as_deref().cloned().map(|poll| {
+                (
+                    poll,
+                    frame.ability.as_ref().clone(),
+                    frame.replacement_action,
+                )
+            })
+        })
+    else {
+        return Ok(());
+    };
+
+    // CR 102.1 + CR 800.4f + CR 608.2d: the cursor was parked before the
+    // accepted action resolved, and that action can change who may still be
+    // asked — a responder can leave the game while it resolves (CR 104.3a +
+    // CR 800.4a, taking their objects with them), and "If an object requires a
+    // player who has left the game to pay a cost or choose whether to pay a
+    // cost, that cost is not paid." A seat can also simply stop being able to
+    // take the option (CR 608.2d). So the parked seats are judged HERE, when
+    // the offer is actually made, through the same authority the fan-out and
+    // the decline path use (`effects::next_offerable_seat`) rather than
+    // trusting the seat recorded at park time.
+    //
+    // `poll.next` is the seat that was next when the cursor parked, so it goes
+    // back at the head of the queue to be judged like any other.
+    let mut seats = Vec::with_capacity(poll.remaining.len() + 1);
+    seats.push(poll.next);
+    seats.extend_from_slice(&poll.remaining);
+
+    let Some((next, rest)) = effects::next_offerable_seat(state, &ability, &seats) else {
+        // CR 101.4 + CR 800.4f: no seat is left to ask, so the poll is over and
+        // its frame closes. A parked poll exists only because an earlier
+        // responder accepted, so the "if no one does" rider is already spent —
+        // the completion below is a no-op for that reason, not by omission, and
+        // it stays routed through the one authority so a future producer that
+        // parks an unperformed poll still fires the rider.
+        debug_assert!(
+            ability.context.optional_effect_performed,
+            "a parked poll is only created after a responder accepted"
+        );
+        state
+            .take_active_optional_effect_frame()
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+            .expect("a parked poll's frame stays active until it is armed or closed");
+        set_active_priority(state);
+        // CR 614.6 + CR 615.5 + CR 608.2c: like every resolution of this frame's ability, the
+        // completion resolves inside the replacement action the poll was offered in.
+        let _action = crate::game::quantity::resume_replacement_action(replacement_action);
+        return resolve_all_declined_opponent_may(state, &ability, events);
+    };
+
+    if let Some(frame) = state.active_optional_effect_frame_mut() {
+        frame.parked_poll = None;
+    }
+    state.waiting_for = WaitingFor::OpponentMayChoice {
+        player: next,
+        decision_subject_id: poll.decision_subject_id,
+        source_id: poll.source_id,
+        description: poll.description,
+        remaining: rest,
+    };
+    Ok(())
+}
+
+/// CR 101.4 + CR 608.2d: whether an acceptance leaves the offer standing for the
+/// responders after it, which is what decides if the poll outlives the first
+/// acceptance.
+///
+/// CR 101.4 polls every eligible player and nothing in it stops the poll when one
+/// player chooses, so continuation is never a per-card policy. What ends a later
+/// responder's option is CR 608.2d — "The player can't choose an option that's
+/// illegal or impossible." So the only question is whether the accepted action is
+/// still available to the next responder:
+///
+/// - **Self-funded actions stay available.** Each responder pays or suffers out of
+///   their own resources, so an earlier acceptance consumes nothing of theirs.
+///   Dash Hopes and Temporal Extortion both carry the printed ruling "As soon as
+///   any player performs the action, the spell is countered, but the remaining
+///   players still get the option." Browbeat and Book Burning ("any player may
+///   have ~ deal N damage to them") are the same shape; they have no rulings of
+///   their own, so they are classified from the mechanism, not from a quotation.
+/// - **One-shot actions on a single object do not.** Sin Prodder's "any opponent
+///   may have YOU put that card into your graveyard" moves one specific card
+///   once. After the first acceptance the option is impossible, which is exactly
+///   why its printed ruling says "Once a player does so ... Sin Prodder's trigger
+///   has no further action."
+///
+/// The distinction is already carried by the AST at the one site that needs it:
+/// the accept branch binds the action's subject to the responder for precisely
+/// the self-funded shapes (`PayCost`'s payer, `DealDamage`'s target) and leaves
+/// every other effect aimed wherever the card aimed it. Reading that rather than
+/// storing a policy field keeps one predicate covering the whole class.
+///
+/// Fail-closed: an effect shape not listed here stops the poll, which is the
+/// behaviour every path had before the poll was made to continue at all. A new
+/// self-funded shape must opt in here, and the Sin Prodder row is the control
+/// that proves the predicate is actually consulted.
+fn acceptance_leaves_the_option_open(effect: &Effect) -> bool {
+    matches!(effect, Effect::PayCost { .. } | Effect::DealDamage { .. })
+}
+
 fn resolve_all_declined_opponent_may(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    // CR 118.12 + the Dash Hopes ruling ("As soon as any player performs the
+    // action, the spell is countered, but the remaining players still get the
+    // option"): because such a poll continues past the first acceptance, a LATER
+    // decline reaches this path even though the action WAS performed, and the
+    // "if no one does" rider must not fire then — Browbeat's one seat took the 5
+    // damage, so nobody draws three cards.
+    //
+    // The performed bit CANNOT carry that fact on its own, and the qualifier is
+    // the correction to round 3 rather than a narrowing for convenience: an
+    // acceptance sets the bit RECURSIVELY down the chain
+    // (`set_optional_effect_performed_recursive`), so a nested poll inherits it
+    // from an ENCLOSING optional that was accepted and never spent anything of
+    // its own. `effects::declined_by_every_seat_branch` resets the bit for this
+    // exact reason ("not an acceptance inherited from an enclosing optional"),
+    // so reading it here unqualified closed the rider of every nested poll under
+    // an accepted outer optional.
+    //
+    // Why the qualifier is EXACT for a poll that ends at its first acceptance:
+    // such a poll never re-offers, so no decline can reach this function after
+    // one of its OWN seats accepted, and a set bit is therefore necessarily
+    // inherited. Only a poll that continues past an acceptance can have spent
+    // its own rider, so only those polls may read the bit as their own.
+    //
+    // Residual, disclosed rather than hidden: for a CONTINUING poll nested under
+    // an accepted enclosing optional, the inherited bit is still
+    // indistinguishable from its own acceptance. Closing that needs the fact
+    // stored per-poll on `OptionalEffectFrame` instead of in the chain context.
+    if acceptance_leaves_the_option_open(&ability.effect)
+        && ability.context.optional_effect_performed
+    {
+        return Ok(());
+    }
     if let Some(branch) = effects::declined_by_every_seat_branch(ability) {
         effects::resolve_ability_chain(state, &branch, events, 1)
             .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
@@ -606,6 +882,7 @@ pub(super) fn handle_unless_payment_choose_cost(
         effect_description,
         mut remaining_choices,
         mut chosen,
+        affected_object,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -668,6 +945,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                     effect_description,
                     remaining_choices,
                     chosen,
+                    affected_object,
                 };
                 return Ok(action_result(events, state.waiting_for.clone()));
             }
@@ -689,6 +967,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                 // Disjunctive (`OneOf`) unless-costs are single-payer — the
                 // "any player" poll never co-occurs with a sub-cost choice.
                 remaining: Vec::new(),
+                affected_object,
                 repeat: None,
             };
             handle_unless_payment(state, next, true, events)
@@ -715,6 +994,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                 trigger_event,
                 effect_description,
                 remaining: Vec::new(),
+                affected_object,
                 repeat: None,
             };
             handle_unless_payment(state, next, false, events)
@@ -800,9 +1080,6 @@ fn pay_top_library_exile_cost(
                 source_id,
                 exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                 drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                // Cost-payment exile/sacrifice deliveries are never library
-                // placements.
-                library_placement: None,
             },
             events,
         ) {
@@ -891,6 +1168,7 @@ fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
         repeat: None,
     };
 }
@@ -1044,6 +1322,7 @@ pub(super) fn handle_unless_payment(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -1882,6 +2161,7 @@ pub(super) fn handle_unless_payment(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         post_action_event_start,
         events,
     )
@@ -1908,6 +2188,7 @@ fn finish_unless_payment(
     trigger_event: Option<GameEvent>,
     effect_description: Option<String>,
     remaining: Vec<PlayerId>,
+    affected_object: Option<ObjectId>,
     mut post_action_event_start: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
@@ -1942,6 +2223,7 @@ fn finish_unless_payment(
                 trigger_event: trigger_event.clone(),
                 effect_description: effect_description.clone(),
                 remaining: rest.to_vec(),
+                affected_object,
                 repeat: None,
             };
             return Ok(action_result(events, state.waiting_for.clone()));
@@ -2309,6 +2591,8 @@ pub(crate) fn payment_continuation_prompt(state: &GameState) -> Option<WaitingFo
         trigger_event: trigger_event.clone(),
         effect_description: effect_description.clone(),
         remaining: remaining.clone(),
+        // The choice to pay is already made; this continuation only finishes it.
+        affected_object: None,
     })
 }
 
@@ -2569,6 +2853,7 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
     trigger_event: Option<GameEvent>,
     effect_description: Option<String>,
     remaining: Vec<PlayerId>,
+    affected_object: Option<ObjectId>,
     repeat: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -2579,6 +2864,7 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     };
     let result = handle_unless_payment(state, waiting_for, true, events)?;
@@ -2727,6 +3013,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -2747,6 +3034,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
             trigger_event: trigger_event.clone(),
             effect_description: effect_description.clone(),
             remaining: remaining.clone(),
+            affected_object,
             repeat,
         },
         events,
@@ -2770,6 +3058,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -2786,6 +3075,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     })
 }
@@ -2806,6 +3096,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -2851,6 +3142,7 @@ pub(super) fn handle_unless_payment_activate_ability(
             trigger_event,
             effect_description,
             remaining,
+            affected_object,
             repeat,
         },
         None,
@@ -3641,6 +3933,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining,
+            affected_object: None,
             repeat: None,
         };
         state
@@ -3884,6 +4177,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
         crate::game::engine::apply_as_current(
             &mut state,
@@ -3976,6 +4270,7 @@ mod tests {
                         trigger_event: None,
                         effect_description: None,
                         remaining: vec![],
+                        affected_object: None,
                         repeat: None,
                     };
                     let result = payment_action(&mut state, pay);
@@ -4195,6 +4490,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             payment_action(&mut state, pay);
@@ -4236,6 +4532,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             payment_action(&mut state, true);
@@ -4308,6 +4605,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             let mut events = payment_action(&mut state, true).events;
@@ -4414,6 +4712,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![],
+            affected_object: None,
             repeat: None,
         };
         let mut events = payment_action(&mut state, true).events;
@@ -4526,6 +4825,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             assert!(matches!(
@@ -5482,11 +5782,13 @@ mod tests {
         ability.optional = true;
         ability.optional_for = Some(crate::types::ability::OpponentMayScope::AnyPlayer);
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: PlayerId(0),
@@ -5496,6 +5798,302 @@ mod tests {
             remaining,
         };
         state
+    }
+
+    fn pay_five_life() -> Effect {
+        Effect::PayCost {
+            cost: crate::types::ability::AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        }
+    }
+
+    /// CR 101.4 + CR 608.2d: a self-funded acceptance leaves the offer standing
+    /// for everyone after it, so the poll outlives it. This is Dash Hopes' and
+    /// Temporal Extortion's printed ruling ("As soon as any player performs the
+    /// action ... the remaining players still get the option") asserted at the
+    /// building-block level, so it covers every card whose accepted action is
+    /// paid out of the responder's own resources rather than one card's text.
+    #[test]
+    fn a_self_funded_acceptance_leaves_the_poll_open_for_the_next_responder() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+
+        // Positive reach-guard: the first responder really is on the clock, so a
+        // later assertion about P1 cannot pass on an engine that offered nobody
+        // anything.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the poll must open on the active player (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("a payable self-funded acceptance resolves");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(1)
+            ),
+            "the acceptance answers one responder, not the poll: P1 must still be \
+             offered (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// The early-stop control, and the reason the re-offer is not unconditional.
+    ///
+    /// Sin Prodder's "any opponent may have YOU put that card into your
+    /// graveyard" is a one-shot action on a single object: once it is performed,
+    /// CR 608.2d makes the same choice impossible for every later responder,
+    /// which is why its printed ruling says "Once a player does so ... Sin
+    /// Prodder's trigger has no further action." Every effect whose subject is
+    /// not the responder takes this path, so the control is written at that
+    /// shape (a controller-scoped `GainLife`) rather than at one card.
+    ///
+    /// This row fails on an engine that re-offers after every acceptance.
+    #[test]
+    fn a_one_shot_acceptance_ends_the_poll_for_the_remaining_responders() {
+        let mut state = opponent_may_state(gain_life(1), vec![PlayerId(1), PlayerId(2)]);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "reach-guard: the poll must open on the active player, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the one-shot acceptance resolves");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OpponentMayChoice { .. }),
+            "the performed one-shot action leaves no legal choice for the \
+             remaining responders (CR 608.2d), so the poll must end, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// Attach an "If no one does" rider to the poll frame `opponent_may_state`
+    /// just pushed — a `Not(OptionalEffectPerformed)`-gated sub that gains the
+    /// controller 3. This is Browbeat's shape ("Any player may have Browbeat deal
+    /// 5 damage to them. If no one does, target player draws three cards.") at the
+    /// building-block level, composed onto the existing helper rather than
+    /// duplicating it.
+    fn with_if_no_one_does_rider(state: &mut GameState) {
+        let mut rider = ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+        rider.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        });
+        state
+            .active_optional_effect_frame_mut()
+            .expect("the poll frame the helper just pushed")
+            .ability
+            .sub_ability = Some(Box::new(rider));
+    }
+
+    /// CR 118.12 + CR 608.2d: a continuing poll SPENDS its "if no one does" rider
+    /// at the first acceptance, so a later responder's decline must not fire it.
+    /// Browbeat: one seat took the 5 damage, so nobody draws three cards.
+    ///
+    /// The row that was missing when round 3 added the guard this pins — the
+    /// suppression had no test of its own, so narrowing the guard could have
+    /// neutered it unnoticed. Paired with
+    /// `an_unspent_rider_fires_when_every_responder_declines` below: this one
+    /// fails on an engine that fires the rider regardless of the acceptance, that
+    /// one fails on an engine that suppresses it regardless, and neither can pass
+    /// vacuously because each asserts the opposite life total on the same board.
+    #[test]
+    fn a_spent_rider_does_not_fire_when_a_later_responder_declines() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        with_if_no_one_does_rider(&mut state);
+        let life_before = state.players[0].life;
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("a payable self-funded acceptance resolves");
+
+        // Positive reach-guards: the acceptance really was performed (CR 118.12
+        // binds the payment to the accepting seat, so P0 is 5 life down), and the
+        // poll really did continue, so the decline below is a LATER one.
+        assert_eq!(
+            state.players[0].life,
+            life_before - 5,
+            "reach-guard: the accepting seat paid its own 5 life"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(1)
+            ),
+            "reach-guard: the poll continues past the acceptance, got {:?}",
+            state.waiting_for
+        );
+
+        for seat in [PlayerId(1), PlayerId(2)] {
+            if matches!(state.waiting_for, WaitingFor::OpponentMayChoice { .. }) {
+                crate::game::engine::apply(
+                    &mut state,
+                    seat,
+                    GameAction::DecideOptionalEffect { accept: false },
+                )
+                .expect("a later responder declines");
+            }
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before - 5,
+            "a player DID pay, so the \"if no one does\" rider is spent and must \
+             not gain the controller 3 on a later decline (CR 118.12)"
+        );
+    }
+
+    /// CR 608.2d + CR 101.4: the unspent case. Nobody accepts a fresh poll, so
+    /// its rider fires once the last seat declines.
+    #[test]
+    fn an_unspent_rider_fires_when_every_responder_declines() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        with_if_no_one_does_rider(&mut state);
+        let life_before = state.players[0].life;
+
+        for seat in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::OpponentMayChoice { player, .. } if player == seat
+                ),
+                "reach-guard: every seat is offered in turn, got {:?} for {seat:?}",
+                state.waiting_for
+            );
+            crate::game::engine::apply(
+                &mut state,
+                seat,
+                GameAction::DecideOptionalEffect { accept: false },
+            )
+            .expect("each responder declines");
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 3,
+            "no player paid, so the \"if no one does\" rider fires (CR 608.2d)"
+        );
+    }
+
+    /// CR 101.4 + CR 616.1: an acceptance whose own action suspends on a prompt
+    /// of its own still owes an offer to the responders after it.
+    ///
+    /// Two competing life-loss modifiers replace the accepted payment, which is
+    /// a CR 616.1 choice the paying player must answer mid-resolution: "If two
+    /// or more replacement and/or prevention effects are attempting to modify
+    /// the way an event affects an object or player, … the affected player
+    /// chooses one to apply." That rule cites CR 101.4 for its own ordering, so
+    /// the two rules here are the same poll seen from both ends. The poll cannot
+    /// own the prompt while that choice is live — only one frame may — so its
+    /// cursor parks beneath it and arms once the choice is answered.
+    ///
+    /// This is blocker 1 of the #10741 round-3 review. The engine before this
+    /// change gated the re-offer on an already-settled priority and so dropped
+    /// every remaining responder in exactly this case; reverting that gate makes
+    /// the final assertion below fail with `Priority`.
+    #[test]
+    fn a_poll_survives_a_child_prompt_raised_by_the_accepted_action() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        // CR 616.1: two applicable LoseLife replacements on a permanent the
+        // payer controls, so the payment cannot settle until it is told which
+        // one applies first.
+        let modifiers = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Competing Life-Loss Modifiers".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&modifiers)
+            .expect("the modifier permanent was just created")
+            .replacement_definitions = vec![
+            crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::LoseLife,
+            )
+            .quantity_modification(crate::types::ability::QuantityModification::DOUBLE)
+            .description("Double".to_string()),
+            crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::LoseLife,
+            )
+            .quantity_modification(crate::types::ability::QuantityModification::Plus { value: 1 })
+            .description("Plus one".to_string()),
+        ]
+        .into();
+
+        // Positive reach-guard: the first responder is on the clock.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the poll must open on the active player (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("an acceptance whose payment defers to a replacement choice is legal");
+
+        // Positive reach-guard for this test's whole premise: the acceptance
+        // really did suspend on a child prompt. Without it the final assertion
+        // would also pass on an engine where the payment simply resolved to
+        // completion, which is the case the sibling test already covers.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the accepted payment must suspend on its own CR 616.1 ordering \
+             choice for this row to exercise the parked-cursor path, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("the payer orders the competing replacements");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, ref remaining, .. }
+                    if player == PlayerId(1) && remaining.as_slice() == [PlayerId(2)]
+            ),
+            "the responders after an acceptance that suspended must still be \
+             offered the option (CR 101.4), got {:?}",
+            state.waiting_for
+        );
     }
 
     #[test]
@@ -5592,11 +6190,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5626,11 +6226,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5666,11 +6268,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5703,11 +6307,13 @@ mod tests {
         )));
         optional.sub_ability = Some(Box::new(if_you_do));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5738,11 +6344,13 @@ mod tests {
         continuation_sub.sub_link = SubAbilityLink::ContinuationStep;
         optional.sub_ability = Some(Box::new(continuation_sub));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5772,11 +6380,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5806,11 +6416,13 @@ mod tests {
         let mut optional = ResolvedAbility::new(gain_life(2), vec![], source_id, PlayerId(0));
         optional.optional = true;
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5900,6 +6512,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
         (state, hand)
@@ -6009,6 +6622,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6036,6 +6650,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6155,6 +6770,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6214,6 +6830,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6251,6 +6868,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
             repeat: None,
         };
 
@@ -6299,6 +6917,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6326,6 +6945,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6367,6 +6987,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -6405,6 +7026,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -6440,6 +7062,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -6471,6 +7094,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -6534,6 +7158,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![second_costs.clone()],
             chosen: vec![],
+            affected_object: None,
         };
 
         // First pick: index 0 (PayLife{3}). Expected post-state: still in
@@ -6685,6 +7310,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![oneof_wu.clone()],
             chosen: vec![],
+            affected_object: None,
         };
 
         // First pick: {W} (index 0). State remains UnlessPaymentChooseCost.
@@ -6765,6 +7391,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![oneof_wu],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -6833,6 +7460,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6987,6 +7615,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7034,6 +7663,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7157,6 +7787,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7216,6 +7847,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7303,6 +7935,8 @@ mod tests {
                 PlayerId(1),
                 PlayerCounterKind::Poison,
                 5,
+                // The unless-payment under test is a cost — fail closed.
+                crate::types::proposed_event::CounterCause::Other,
             )
             .is_prohibited(),
             "the `You`-scoped prohibition must bite its own controller"
@@ -7314,6 +7948,8 @@ mod tests {
                 PlayerId(0),
                 PlayerCounterKind::Poison,
                 5,
+                // The unless-payment under test is a cost — fail closed.
+                crate::types::proposed_event::CounterCause::Other,
             )
             .is_prohibited(),
             "the `You`-scoped prohibition must not bite P0"
@@ -7330,6 +7966,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
             repeat: None,
         };
 
@@ -7373,6 +8010,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
             repeat: None,
         };
 
@@ -7442,6 +8080,8 @@ mod tests {
                     PlayerId(0),
                     PlayerCounterKind::Poison,
                     5,
+                    // The unless-payment under test is a cost — fail closed.
+                    crate::types::proposed_event::CounterCause::Other,
                 )
                 .is_prohibited(),
                 "the prohibition must bite the prompted player"
@@ -7459,6 +8099,7 @@ mod tests {
                 effect_description: None,
                 remaining_choices: vec![vec![poison.clone(), life.clone()]],
                 chosen: vec![],
+                affected_object: None,
             };
             state
         };
@@ -7592,6 +8233,7 @@ mod dandan_read_sweep_tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 

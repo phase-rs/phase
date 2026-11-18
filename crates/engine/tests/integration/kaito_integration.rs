@@ -650,7 +650,7 @@ fn kaito_layer_animation_stops_without_loyalty_counters() {
         GameEvent::CounterRemoved {
             object_id,
             counter_type: CounterType::Loyalty,
-            count: 4,
+            count: 4, ..
         } if *object_id == kaito_id
     )));
     layers::evaluate_layers(runner.state_mut());

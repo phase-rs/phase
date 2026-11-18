@@ -70,7 +70,6 @@ function setGameStores(
     gameState,
     waitingFor,
     dispatch: legacyDispatch,
-    undo: vi.fn(),
     stateHistory: [],
   });
   useMultiplayerStore.setState({

@@ -7,7 +7,8 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{
-    all_consuming, cond, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, cond, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+    verify,
 };
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -41,8 +42,8 @@ use super::oracle_nom::prevention::{
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    controller_phrase_among, parse_self_reference, parse_type_filter_word, parse_type_phrase,
-    ControllerPhrase,
+    controller_phrase_among, parse_controller_suffix, parse_self_reference, parse_type_filter_word,
+    parse_type_phrase, ControllerPhrase,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
@@ -54,6 +55,7 @@ use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
     CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
@@ -145,6 +147,12 @@ fn parse_replacement_line_inner(
     // Routes that consult `enters_with_fails_closed` record the line as the
     // `enters_with_clause` gap. An arm that reads every sentence of such a line
     // must dispatch above this gate.
+    // CR 614.1c + CR 603.6d + CR 706.4: "As ~ enters, roll <dice>. ~ enters
+    // with <counters> equal to the result." reads both sentences, so it
+    // dispatches above the gate below (Neverwinter Hydra, Hammer Jammer).
+    if let Some(Ok(def)) = as_enters_roll_enters_with_outcome(&norm_lower) {
+        return Some(def.description(text.to_string()));
+    }
     if is_line_owned_enters_with_clause(&norm_lower) {
         return None;
     }
@@ -4775,6 +4783,122 @@ impl EntersWithGap {
     }
 }
 
+/// CR 614.1c + CR 706.1: is this parsed "As ~ enters, <body>" body a bare
+/// die-roll instruction the as-enters roll composition can carry? A results
+/// table (CR 706.3) is out of class; a roll modifier is part of the roll
+/// (CR 706.2). Every gating or choice-bearing field must be empty, as in
+/// [`as_enters_one_shot_is_admissible`], and the roll must be the whole body.
+fn is_as_enters_roll_prefix(def: &AbilityDefinition) -> bool {
+    let bare_roll = match &*def.effect {
+        Effect::RollDie { results, .. } => results.is_empty(),
+        _ => false,
+    };
+    bare_roll && def.sub_ability.is_none() && is_mandatory_unconditional_node(def)
+}
+
+/// CR 614.1c + CR 706.1: split a two-sentence "As ~ enters, roll <dice>.
+/// <enters-with sentence>" line into its parsed roll and its second sentence
+/// (a subslice of `norm_lower`). `None` for any other shape: a quoted span, a
+/// unit count other than two, no as-enters frame, no entry verb in the second
+/// sentence, or a first-sentence body that is not a bare die roll.
+fn split_as_enters_roll_prefix(norm_lower: &str) -> Option<(AbilityDefinition, &str)> {
+    if nom_primitives::strip_double_quoted_spans(norm_lower) != norm_lower {
+        return None;
+    }
+    let units = alphanumeric_sentence_units(norm_lower);
+    let [frame_unit, enters_with_unit] = units.as_slice() else {
+        return None;
+    };
+    let (body, ()) = parse_as_self_enters_frame(frame_unit).ok()?;
+    nom_primitives::scan_at_word_boundaries(enters_with_unit, parse_entry_verb_with)?;
+    // Punctuation cleanup on the pre-tokenized body (drop the sentence terminator).
+    let body = body.trim().trim_end_matches('.').trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut roll = parse_effect_chain(body, AbilityKind::Spell);
+    if !is_as_enters_roll_prefix(&roll) {
+        return None;
+    }
+    // CR 107.3m: the X of an as-enters roll is the X paid for the spell that
+    // became the permanent.
+    if let Effect::RollDie { count, .. } = &mut *roll.effect {
+        rewrite_variable_x_to_cost_x_paid(count);
+    }
+    Some((roll, enters_with_unit))
+}
+
+/// Is this execute node a modification of how the entering permanent itself
+/// enters (CR 614.1c: counters, CR 122.6; tapped, CR 614.1d)? Allowlist: any
+/// other effect is not an event modifier of this permanent.
+fn is_self_entry_modifier(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            ..
+        } | Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
+/// CR 614.1c + CR 603.6d + CR 706.4 + CR 122.6: the single composition
+/// authority for "As ~ enters, roll <dice>. ~ enters with <counters> equal to
+/// the result / the total of those results." The roll happens as part of the
+/// entry event and the counters it determines are given as the permanent
+/// enters, so one `Moved` replacement carries both: the roll heads the execute
+/// chain and the enters-with sentence's self modifiers follow it.
+///
+/// `None` when the line is not this shape. `Some(Ok(def))` when the second
+/// sentence is an ungated, self-only enters-with replacement whose execute is
+/// self entry modifiers only. Otherwise `Some(Err(..))` with the line's
+/// [`classify_multi_sentence`] verdict, so a line this composition does not
+/// claim keeps exactly the verdict it had without it.
+fn as_enters_roll_enters_with_outcome(
+    norm_lower: &str,
+) -> Option<Result<ReplacementDefinition, EntersWithDecline>> {
+    let (roll, sentence) = split_as_enters_roll_prefix(norm_lower)?;
+    let claimed = enters_with_counters_outcome(sentence, sentence)
+        .ok()
+        .and_then(|mut inner| {
+            // CR 614.12: the frame's "this creature" names only this permanent.
+            let self_only = matches!(inner.event, ReplacementEvent::Moved)
+                && inner.valid_card == Some(TargetFilter::SelfRef);
+            // A gate on the counter sentence would also gate the roll.
+            let ungated = inner.condition.is_none();
+            let execute = inner.execute.take()?;
+            (self_only && ungated && chain_is_self_entry_modifiers(&execute)).then(|| {
+                inner.execute = Some(Box::new(roll.sub_ability(*execute)));
+                inner
+            })
+        });
+    Some(claimed.ok_or_else(|| classify_multi_sentence(&alphanumeric_sentence_units(norm_lower))))
+}
+
+/// Every node of `execute` (through `sub_ability`) is a self entry modifier.
+fn chain_is_self_entry_modifiers(execute: &AbilityDefinition) -> bool {
+    let mut node = Some(execute);
+    while let Some(def) = node {
+        if !is_self_entry_modifier(&def.effect) {
+            return false;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    true
+}
+
+/// The sentence units of `text` that carry a word: punctuation-only fragments
+/// are not sentences. Shared by the multi-sentence enters-with classifier and
+/// the as-enters roll composition so the two read the same units.
+fn alphanumeric_sentence_units(text: &str) -> Vec<&str> {
+    nom_primitives::split_sentence_units(text)
+        .into_iter()
+        .filter(|unit| unit.chars().any(char::is_alphanumeric))
+        .collect()
+}
+
 /// CR 614.1c + CR 608.2c: the multi-sentence step of
 /// [`enters_with_counters_outcome`]. One replacement carries one enters-with
 /// sentence, so a line of several sentences is classified, never claimed
@@ -4782,17 +4906,21 @@ impl EntersWithGap {
 /// ("… and with \"Pay 3 life: Regenerate this creature.\"") does not split the
 /// line, and punctuation-only fragments are not sentences.
 ///
-/// `None` when the line has no entry verb followed by "with " or is a single
-/// sentence; otherwise the line's [`classify_multi_sentence`] verdict. Shared
+/// `None` when the line has no entry verb followed by "with ", is a single
+/// sentence, or is an as-enters roll line the composition claims
+/// ([`as_enters_roll_enters_with_outcome`]); otherwise the composition's
+/// decline or the line's [`classify_multi_sentence`] verdict. Shared
 /// by the enters-with arm and the replacement dispatcher's gate
 /// ([`is_line_owned_enters_with_clause`]) so the two cannot drift.
 fn multi_sentence_enters_with_decline(norm_lower: &str) -> Option<EntersWithDecline> {
     nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with)?;
+    match as_enters_roll_enters_with_outcome(norm_lower) {
+        Some(Ok(_)) => return None,
+        Some(Err(decline)) => return Some(decline),
+        None => {}
+    }
     let masked = nom_primitives::strip_double_quoted_spans(norm_lower);
-    let units: Vec<&str> = nom_primitives::split_sentence_units(&masked)
-        .into_iter()
-        .filter(|unit| unit.chars().any(char::is_alphanumeric))
-        .collect();
+    let units = alphanumeric_sentence_units(&masked);
     (units.len() > 1).then(|| classify_multi_sentence(&units))
 }
 
@@ -4824,6 +4952,13 @@ fn enters_with_counters_outcome(
     // CR 614.1c: no entry verb followed by "with " anywhere — not this shape.
     if nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with).is_none() {
         return Err(EntersWithDecline::NotThisShape);
+    }
+
+    // CR 614.1c + CR 603.6d + CR 706.4: an "As ~ enters, roll <dice>." frame
+    // followed by its enters-with sentence is one replacement; the composition
+    // authority owns both its claim and its decline.
+    if let Some(outcome) = as_enters_roll_enters_with_outcome(norm_lower) {
+        return outcome.map(|def| def.description(original_text.to_string()));
     }
 
     // CR 614.1c + CR 608.2c: one replacement carries one enters-with sentence;
@@ -6188,7 +6323,7 @@ enum EntersWithGate {
 /// Returns the unless-free head plus the outcome. Routing order matters: the
 /// "you've cast another spell" route must precede the generic static-condition
 /// route, because the generic route would parse the same tail as a plain
-/// `SpellsCastThisTurn >= 2` WITHOUT the own-cast exclusion marker that
+/// `SpellsCast >= 2` WITHOUT the own-cast exclusion marker that
 /// "another" requires (per Gatherer ruling — a permanent's own cast does not
 /// count as "another spell").
 fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
@@ -6210,9 +6345,10 @@ fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
                 head,
                 EntersWithGate::Parsed(ReplacementCondition::UnlessQuantity {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -7817,6 +7953,15 @@ fn replacement_condition_from_static(
             GatePolarity::OnlyIf => Some(ReplacementCondition::HasMaxSpeed),
             GatePolarity::Unless => None,
         },
+        // CR 725.1 + CR 301.5a: read live by the static-condition authority.
+        condition @ (StaticCondition::IsMonarch { .. } | StaticCondition::SourceIsEquipped) => {
+            match polarity {
+                GatePolarity::OnlyIf => Some(ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(condition),
+                }),
+                GatePolarity::Unless => None,
+            }
+        }
         StaticCondition::ClassLevelGE { level } => match polarity {
             GatePolarity::OnlyIf => Some(ReplacementCondition::ClassLevelGE { level }),
             GatePolarity::Unless => None,
@@ -7864,7 +8009,6 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -7874,6 +8018,7 @@ fn replacement_condition_from_static(
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
@@ -7889,7 +8034,6 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
-        | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceIsHarnessed
@@ -12982,29 +13126,7 @@ enum WhileAntecedent {
 /// twice that much life instead." → `Parsed(OnlyIfQuantity { lhs: LifeTotal,
 /// comparator: LE, rhs: Fixed{5}, active_player_req: None })`.
 fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
-    // Locate the antecedent's "while " clause: it appears between
-    // " {verb_anchor} while " and the comma terminating the antecedent.
-    // Single nom combinator chain — locate verb anchor, consume gate marker,
-    // capture condition body in one pass.
-    let Ok((after_verb, _)) = (
-        take_until::<_, _, OracleError<'_>>(verb_anchor),
-        tag::<_, _, OracleError<'_>>(verb_anchor),
-    )
-        .parse(lower)
-    else {
-        return WhileAntecedent::Absent;
-    };
-    // The " while " gate need not be flush against the verb anchor: for damage
-    // replacements the recipient clause ("noncombat damage to a permanent or
-    // player") sits between the anchor and the gate, so scan forward to the gate
-    // marker. The life-gain caller's flush case is the empty-prefix match.
-    let Ok((_, (_, _, condition_text))) = (
-        take_until::<_, _, OracleError<'_>>(" while "),
-        tag::<_, _, OracleError<'_>>(" while "),
-        take_until::<_, _, OracleError<'_>>(","),
-    )
-        .parse(after_verb)
-    else {
+    let Some(condition_text) = while_antecedent_clause(lower, verb_anchor) else {
         return WhileAntecedent::Absent;
     };
     // A guard clause IS present from here on; every failure path below must fail
@@ -13032,6 +13154,33 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
         rhs,
         active_player_req: None,
     })
+}
+
+/// CR 614.1a: the text of a "while <condition>" antecedent: after `verb_anchor`, up to the
+/// comma that ends the antecedent.
+fn while_antecedent_clause<'a>(lower: &'a str, verb_anchor: &str) -> Option<&'a str> {
+    // Locate the verb anchor, then take the antecedent: everything after the
+    // anchor up to the comma that ends it.
+    let (_, (_, _, antecedent)) = (
+        take_until::<_, _, OracleError<'_>>(verb_anchor),
+        tag::<_, _, OracleError<'_>>(verb_anchor),
+        take_until::<_, _, OracleError<'_>>(","),
+    )
+        .parse(lower)
+        .ok()?;
+    // The " while " gate need not be flush against the verb anchor: for damage
+    // replacements the recipient clause ("noncombat damage to a permanent or
+    // player") sits between the anchor and the gate, so scan forward to the gate
+    // marker. The life-gain caller's flush case is the empty-prefix match. The
+    // scan runs only inside the antecedent, so a " while " after its comma is
+    // not this antecedent's guard.
+    let (condition_text, _) = (
+        take_until::<_, _, OracleError<'_>>(" while "),
+        tag::<_, _, OracleError<'_>>(" while "),
+    )
+        .parse(antecedent)
+        .ok()?;
+    Some(condition_text)
 }
 
 /// CR 604.2 + CR 614.1a: Result of splitting a leading "As long as <state>, "
@@ -14213,8 +14362,16 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
         .quantity_modification(modification)
         .description(original_text.to_string());
-    if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
+    if let Some((valid_card, anchor)) = parse_counter_replacement_valid_card(lower) {
         def = def.valid_card(valid_card);
+        // CR 614.16: effect-worded doublers ("if an effect would put ...",
+        // Doubling Season) apply only to effect-caused placements; bare
+        // wordings ("counters would be put on ...", Constrictor) stay
+        // cause-blind. The gate arm reads the placement's `CounterCause` at
+        // runtime.
+        if matches!(anchor, CounterScopeAnchor::EffectWorded) {
+            def = def.condition(ReplacementCondition::EffectCausedPlacement);
+        }
     }
     // CR 614.1a: Vorinclex/Halving Season count doublers-and-halvers scope by the
     // player *putting* the counters (the actor), per the official Vorinclex ruling
@@ -14247,8 +14404,18 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     Some(def)
 }
 
-fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
-    let (_, (), after_anchor) =
+/// CR 614.16: which counter-replacement scope wording the anchor matched —
+/// the effect-worded branch ("an effect would put ...", Doubling Season)
+/// stamps `ReplacementCondition::EffectCausedPlacement` on the def, the bare
+/// branch ("counters would be put on ...", Constrictor) leaves it untagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CounterScopeAnchor {
+    EffectWorded,
+    Bare,
+}
+
+fn parse_counter_replacement_valid_card(lower: &str) -> Option<(TargetFilter, CounterScopeAnchor)> {
+    let (_, anchor, after_anchor) =
         nom_primitives::scan_preceded(lower, parse_counter_replacement_scope_anchor)?;
     let (filter, rest) = parse_type_phrase_folding(after_anchor);
     if !is_counter_replacement_object_scope(&filter)
@@ -14256,7 +14423,7 @@ fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
     {
         return None;
     }
-    Some(filter)
+    Some((filter, anchor))
 }
 
 fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
@@ -14270,16 +14437,22 @@ fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
     }
 }
 
-fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
+fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, CounterScopeAnchor> {
+    alt((
+        value(
+            CounterScopeAnchor::Bare,
             tag::<_, _, OracleError<'_>>("counters would be put on "),
-            tag("counter would be put on "),
+        ),
+        value(CounterScopeAnchor::Bare, tag("counter would be put on ")),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put one or more counters on "),
+        ),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put a counter on "),
-        )),
-    )
+        ),
+    ))
     .parse(input)
 }
 
@@ -14354,9 +14527,13 @@ fn parse_global_object_counter_prohibition(
 }
 
 /// CR 614.17 + CR 614.6 + CR 122.1: Parse inverted type-scoped counter
-/// prohibitions such as "Creatures can't have counters put on them." Lowers to
-/// the same `AddCounter` + `Prevent` replacement as Solemnity's object-counter
-/// line, scoped to a single permanent type on the battlefield.
+/// prohibitions such as "Creatures can't have counters put on them." (bare),
+/// "Creatures you control can't have -1/-1 counters put on them." (Darksteel
+/// Angel; Melira, Sylvok Outcast), and "Creatures your opponents control
+/// can't have +1/+1 counters put on them." (Blightbeetle). Lowers to the same
+/// `AddCounter` + `Prevent` replacement as Solemnity's object-counter line,
+/// scoped to the named population on the battlefield and — when the text
+/// names a counter type — to that type via `counter_match`.
 fn parse_inverted_typed_counter_prohibition(
     lower: &str,
     original_text: &str,
@@ -14366,32 +14543,67 @@ fn parse_inverted_typed_counter_prohibition(
     // put on them") rather than the object ("Counters can't be put on
     // creatures"). Same replacement class, so it reuses the shared type-list
     // combinators and covers every permanent type (and comma/or-separated
-    // lists) in one arm.
+    // lists) in one arm. Two optional axes compose inside it: a controller
+    // qualifier on the subject and a counter-type restriction on the
+    // prohibition.
     let mut combinator = all_consuming(terminated(
-        terminated(
+        (
             separated_list1(
                 parse_counter_prohibition_type_separator,
                 parse_counter_prohibition_type,
             ),
-            tag::<_, _, OracleError<'_>>(" can't have counters put on them"),
+            // Optional controller qualifier. `opt` never fails and never
+            // partially consumes, so the bare form falls through to
+            // " can't have …" unchanged.
+            opt(preceded(
+                tag(" "),
+                verify(parse_controller_suffix, |controller| {
+                    matches!(controller, ControllerRef::You | ControllerRef::Opponent)
+                }),
+            )),
+            tag::<_, _, OracleError<'_>>(" can't have "),
+            // Optional counter type. An `alt` (typed arm first), not `opt` +
+            // tag: nom sequences do not backtrack into a succeeded `opt`, so
+            // if the type parser ever consumed "counters" as a `Generic`
+            // token the bare form would fail closed. Separate arms retry the
+            // bare form from the start.
+            alt((
+                map(
+                    terminated(
+                        terminated(nom_primitives::parse_counter_type_typed, tag(" ")),
+                        tag("counters put on them"),
+                    ),
+                    Some,
+                ),
+                value(None, tag("counters put on them")),
+            )),
         ),
         opt(tag(".")),
     ));
-    let (_rest, type_filters) = combinator.parse(lower.trim()).ok()?;
+    let (_, (type_filters, controller, _, counter_type)) = combinator.parse(lower.trim()).ok()?;
     let type_filter = match type_filters.as_slice() {
         [single] => single.clone(),
         _ => TypeFilter::AnyOf(type_filters),
     };
+    let typed = match controller {
+        Some(ctrl) => TypedFilter::new(type_filter).controller(ctrl),
+        None => TypedFilter::new(type_filter),
+    };
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .valid_card(attach_zone_to_filter(
-                TargetFilter::Typed(TypedFilter::new(type_filter)),
-                Zone::Battlefield,
-            ))
-            .quantity_modification(QuantityModification::Prevent)
-            .description(original_text.to_string()),
-    )
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .valid_card(attach_zone_to_filter(
+            TargetFilter::Typed(typed),
+            Zone::Battlefield,
+        ))
+        .quantity_modification(QuantityModification::Prevent)
+        .description(original_text.to_string());
+    // CR 122.1 + CR 614.1a: a named counter type restricts the replacement to
+    // that type; the counter-agnostic wording leaves `counter_match` unset
+    // (any-counter behavior, as before).
+    if let Some(ct) = counter_type {
+        def = def.counter_match(CounterMatch::OfType(ct));
+    }
+    Some(def)
 }
 
 fn parse_counter_prohibition_type_separator(input: &str) -> OracleResult<'_, &str> {
@@ -14905,6 +15117,10 @@ fn parse_damage_heal_self_replacement(
     )
 }
 
+/// CR 614.1a + CR 614.6: "If damage would be dealt to ~ / you, <effect> that many …
+/// instead" replaces the damage event with `<effect>` (Phytohydra, Force Bubble). This is
+/// a substitution, not a prevention effect (CR 615.1a), so damage that can't be prevented
+/// is still replaced.
 fn parse_damage_to_self_instead_followup_with_provenance(
     norm_lower: &str,
     normalized: &str,
@@ -14973,10 +15189,14 @@ fn parse_damage_to_self_instead_followup_with_provenance(
         &mut ctx,
     );
 
-    let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
-        .prevention_shield(PreventionAmount::All)
+    // `DamageDone`, not `DealtDamage`: `dealt_damage_applier` returns the event unchanged,
+    // so on that event these lines replaced nothing.
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
         .execute(followup.value)
         .description(original_text.to_string());
+    if recipient_scope.is_none() {
+        def = def.damage_target_filter(damage_target_controller());
+    }
     if let Some(scope) = recipient_scope {
         // CR 614.1: scope the replacement to damage dealt TO the source's own
         // object (the "shield around whatever it's affecting"). The runtime
@@ -15029,7 +15249,6 @@ fn parse_damage_to_player_instead_followup(
 
     Some(Lowered {
         value: ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .prevention_shield(PreventionAmount::All)
             .damage_target_filter(damage_target_any_player())
             .execute(followup.value)
             .description(original_text.to_string()),
@@ -15531,6 +15750,10 @@ pub(crate) enum PreventionFailClosed {
     SourceScope,
     /// A coordinated "and it <verb> …" clause after the prevention clause.
     CoordinatedConjunct,
+    /// Additional effects listed after a comma.
+    ListedRider,
+    /// A printed "while <state>" guard that does not lift to a `ReplacementCondition`.
+    WhileGuard,
 }
 
 impl PreventionFailClosed {
@@ -15539,6 +15762,8 @@ impl PreventionFailClosed {
         match self {
             Self::SourceScope => "prevention_source_scope",
             Self::CoordinatedConjunct => "prevention_conjunct",
+            Self::ListedRider => "prevention_listed_rider",
+            Self::WhileGuard => "prevention_while_guard",
         }
     }
 }
@@ -15669,6 +15894,16 @@ fn parse_damage_prevention_replacement_with_provenance(
     if has_coordinated_predicate_conjunct(working_lower) {
         return Err(PreventionDecline::FailsClosed(
             PreventionFailClosed::CoordinatedConjunct,
+        ));
+    }
+
+    // CR 615.5: "prevent that damage, remove that many …, then …" lists additional
+    // effects this parser can't carry (Bloatfly Swarm, Sekki, Seasons' Guide). Fail
+    // closed: a shield without them reads as supported, and a gate quantity on the
+    // same line would discharge the swallow audit.
+    if nom_primitives::scan_contains(working_lower, "prevent that damage, ") {
+        return Err(PreventionDecline::FailsClosed(
+            PreventionFailClosed::ListedRider,
         ));
     }
 
@@ -15998,12 +16233,36 @@ fn parse_damage_prevention_replacement_with_provenance(
     // because a `valid_card`-less pure-event shield is neither self- nor object-
     // scoped and must not take the self-scoped branch.
     let recipient_is_self_scoped = matches!(&valid_card_filter, Some(TargetFilter::SelfRef));
+    // CR 604.2 + CR 611.3a: a "while <state>" antecedent gates the shield itself, so the
+    // effect isn't applicable (CR 615.12) while the state doesn't hold: Jared Carthalion
+    // outside the monarchy takes the damage and gains nothing. `valid_card` scopes the
+    // pronoun: "it" is the source only on a self-scoped shield. An uncarriable guard
+    // must not become an unconditional shield, here or in a later route: it fails
+    // closed, and the route lands the line as `Effect::unimplemented`.
+    let while_condition = while_antecedent_clause(working_lower, "would ")
+        .map(|clause| {
+            crate::parser::oracle_static::parse_affected_scoped_static_condition(
+                clause,
+                valid_card_filter.as_ref(),
+            )
+            .and_then(|condition| {
+                replacement_condition_from_static(condition, GatePolarity::OnlyIf)
+            })
+            .ok_or(PreventionDecline::FailsClosed(
+                PreventionFailClosed::WhileGuard,
+            ))
+        })
+        .transpose()?;
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
-    if let Some(cond) = prefix_condition {
-        def = def.condition(cond);
-    }
+    def = match (prefix_condition, while_condition) {
+        (Some(prefix), Some(guard)) => def.condition(ReplacementCondition::And {
+            conditions: vec![prefix, guard],
+        }),
+        (Some(condition), None) | (None, Some(condition)) => def.condition(condition),
+        (None, None) => def,
+    };
 
     // CR 615.5: A prevention effect may include an additional effect referring to
     // the prevented amount ("Put a -1/-1 counter on ~ for each 1 damage prevented
@@ -17931,13 +18190,14 @@ mod tests {
         let rep = parsed
             .replacements
             .iter()
-            .find(|r| matches!(r.event, ReplacementEvent::DealtDamage))
+            .find(|r| matches!(r.event, ReplacementEvent::DamageDone))
             .expect("damage-substitution replacement must exist (was inert on main)");
-        assert!(
-            matches!(rep.shield_kind, ShieldKind::Prevention { .. }),
-            "the substituted damage must be prevented, got {:?}",
-            rep.shield_kind
+        assert_eq!(
+            rep.shield_kind,
+            ShieldKind::None,
+            "CR 614.1a: the damage is replaced, not prevented"
         );
+        assert!(rep.damage_modification.is_none());
         let execute = rep
             .execute
             .as_ref()
@@ -18533,9 +18793,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(filter),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -19476,13 +19737,9 @@ mod tests {
         )
         .expect("damage-to-self counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -19504,7 +19761,9 @@ mod tests {
         )
         .expect("damage-to-controller counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -19527,12 +19786,8 @@ mod tests {
         .expect("damage-to-player exile-top replacement should parse");
 
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         let execute = def.execute.as_ref().expect("execute present");
         assert!(
@@ -19548,9 +19803,128 @@ mod tests {
                     actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 }
             ),
-            "expected ExileTop against prevented damage recipient, got {:?}",
+            "expected ExileTop against replaced damage recipient, got {:?}",
             execute.effect
         );
+    }
+
+    /// CR 614.1a + CR 615.1a: every "...instead" damage line is a substitution on
+    /// `DamageDone`, whatever the recipient. A line with "prevent" and no "instead"
+    /// stays a prevention effect.
+    #[test]
+    fn damage_instead_lines_are_substitutions_scoped_to_their_recipient() {
+        for (name, text) in [
+            (
+                "Phytohydra",
+                "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            ),
+            (
+                "Lichenthrope",
+                "If damage would be dealt to this creature, put that many -1/-1 counters on it instead.",
+            ),
+            (
+                "Dralnu, Lich Lord",
+                "If damage would be dealt to Dralnu, sacrifice that many permanents instead.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("object line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+            assert_eq!(def.damage_target_filter, None, "{name}");
+        }
+        for (name, text) in [
+            (
+                "Force Bubble",
+                "If damage would be dealt to you, put that many depletion counters on this enchantment instead.",
+            ),
+            (
+                "Delaying Shield",
+                "If damage would be dealt to you, put that many delay counters on this enchantment instead.",
+            ),
+            (
+                "Nefarious Lich",
+                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("player line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
+            assert_eq!(def.valid_card, None, "{name}");
+            assert_eq!(
+                def.damage_target_filter,
+                Some(damage_target_controller()),
+                "{name}"
+            );
+        }
+
+        // Phantom Centaur's line says "prevent", so it stays a CR 615 prevention effect.
+        let def = parse_replacement_line(
+            "If damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+            "Phantom Centaur",
+        )
+        .expect("prevention line should parse");
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+    }
+
+    /// CR 301.5a + CR 701.21a: "sacrifice an Equipment attached to ~" names a population,
+    /// in replacement and triggered text alike.
+    #[test]
+    fn sacrifice_attached_to_source_on_an_effect_keeps_the_relation() {
+        fn has_attached_to_source(target: &TargetFilter) -> bool {
+            matches!(
+                target,
+                TargetFilter::Typed(typed) if typed.properties.contains(&FilterProp::AttachedTo {
+                    to: crate::types::ability::AttachmentReferent::Source,
+                })
+            )
+        }
+
+        let jouster = parse_oracle_text(
+            "If damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = jouster.replacements[0]
+            .execute
+            .as_ref()
+            .expect("rider present");
+        assert!(
+            matches!(&*execute.effect, Effect::Sacrifice { target, .. } if has_attached_to_source(target)),
+            "got {:?}",
+            execute.effect
+        );
+
+        let three_dog = parse_oracle_text(
+            "Whenever you attack, you may pay {2} and sacrifice an Aura attached to Three Dog. When you sacrifice an Aura this way, for each other attacking creature you control, create a token that's a copy of that Aura attached to that creature.",
+            "Three Dog, Galaxy News DJ",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut found = false;
+        for trigger in &three_dog.triggers {
+            let Some(execute) = trigger.execute.as_deref() else {
+                continue;
+            };
+            let mut node = Some(execute);
+            while let Some(ability) = node {
+                if let Effect::Sacrifice { target, .. } = &*ability.effect {
+                    found |= has_attached_to_source(target);
+                }
+                node = ability.sub_ability.as_deref();
+            }
+        }
+        assert!(found, "got {:?}", three_dog.triggers);
     }
 
     #[test]
@@ -23363,10 +23737,10 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn { .. },
+                            qty: QuantityRef::LifeLost { .. },
                         }
                     ),
-                    "count should use LifeLostThisTurn, got {count:?}"
+                    "count should use LifeLost, got {count:?}"
                 );
             }
             other => panic!("Expected PutCounter, got {other:?}"),
@@ -28853,6 +29227,60 @@ mod tests {
         // CR 122.1a + CR 614.1a: Doubling Season's modern wording uses "those
         // counters" — counter-agnostic, so no `counter_match` is set.
         assert_eq!(def.counter_match, None);
+        // CR 614.16 (V8): the effect-worded branch stamps the eligibility
+        // gate — combat wither, costs, and turn-based actions stay undoubled.
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::EffectCausedPlacement)
+            ),
+            "Doubling Season's counter clause must carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_bare_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Winding Constrictor's bare "counters would be put
+        // on" wording carries no "effect" restriction, so the def stays
+        // untagged and keeps doubling combat wither.
+        let def = parse_replacement_line(
+            "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.",
+            "Winding Constrictor",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.condition, None,
+            "bare-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_actor_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Vorinclex's actor-worded "if you would put"
+        // wording carries no "effect" restriction, so the def stays untagged
+        // and keeps doubling loyalty costs and lore counters.
+        let def = parse_replacement_line(
+            "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(
+            def.condition, None,
+            "actor-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
     }
 
     #[test]
@@ -29105,6 +29533,111 @@ mod tests {
                 ),
                 "{oracle_type} must scope to {expected:?} on the battlefield"
             );
+        }
+    }
+
+    #[test]
+    fn controlled_population_counter_type_prohibition_parses() {
+        // CR 614.6 + CR 122.1 + CR 614.17: "Creatures you control can't have
+        // -1/-1 counters put on them." (Darksteel Angel; Melira, Sylvok
+        // Outcast) and "Creatures your opponents control can't have +1/+1
+        // counters put on them." (Blightbeetle) lower to the AddCounter+Prevent
+        // replacement scoped to that controller's creatures on the
+        // battlefield, matching only the named counter type.
+        for (text, controller, counter_type) in [
+            (
+                "Creatures you control can't have -1/-1 counters put on them.",
+                ControllerRef::You,
+                CounterType::Minus1Minus1,
+            ),
+            (
+                "Creatures your opponents control can't have +1/+1 counters put on them.",
+                ControllerRef::Opponent,
+                CounterType::Plus1Plus1,
+            ),
+        ] {
+            let def =
+                parse_replacement_line(text, "T").unwrap_or_else(|| panic!("{text:?} must parse"));
+            assert_eq!(def.event, ReplacementEvent::AddCounter);
+            assert_eq!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent)
+            );
+            assert!(
+                matches!(
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.type_filters == vec![TypeFilter::Creature]
+                            && tf.controller == Some(controller)
+                            && tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::InZone { zone: Zone::Battlefield }
+                            ))
+                ),
+                "{text:?} must scope to its controller's creatures on the battlefield"
+            );
+            assert_eq!(
+                def.counter_match,
+                Some(CounterMatch::OfType(counter_type)),
+                "{text:?} must match only its named counter type"
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_population_prohibition_rejects_unattested_shapes() {
+        // Positive reach-guard: the attested shape parses. Without it, an arm
+        // that rejects everything would pass these negatives vacuously.
+        parse_replacement_line(
+            "Creatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+        )
+        .expect("attested prohibition must parse (reach-guard)");
+        // No printed card quantifies the population ("All creatures …") or
+        // uses "placed on" in this shape (MTGJSON census 5.3.0+20261116) —
+        // the arm stays tight to the class.
+        for text in [
+            "All creatures you control can't have -1/-1 counters put on them.",
+            "Creatures you control can't have -1/-1 counters placed on them.",
+        ] {
+            assert!(
+                parse_replacement_line(text, "T").is_none(),
+                "{text:?} must not parse (no printed card exhibits it)"
+            );
+        }
+    }
+
+    #[test]
+    fn darksteel_angel_full_oracle_routes_counter_line_to_replacement() {
+        use crate::types::ability::Effect;
+
+        // CR 614.17 + CR 122.1: the full Darksteel Angel oracle routes line 3
+        // through priority 8 to the counter-prohibition arm: one AddCounter
+        // Prevent replacement, and no Unimplemented gap on the counters line.
+        let parsed = parse_oracle_text(
+            "Flying, indestructible\nYou can't lose the game and your opponents can't win the game.\nCreatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+            &["Flying".to_string(), "Indestructible".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Angel".to_string()],
+        );
+        assert!(
+            parsed.replacements.iter().any(|d| {
+                d.event == ReplacementEvent::AddCounter
+                    && d.quantity_modification == Some(QuantityModification::Prevent)
+            }),
+            "line 3 must lower to an AddCounter Prevent replacement; replacements = {:?}",
+            parsed.replacements
+        );
+        for ability in &parsed.abilities {
+            if let Effect::Unimplemented { description, .. } = ability.effect.as_ref() {
+                let text = description.as_deref().unwrap_or("");
+                assert!(
+                    // allow-noncombinator: string assertion in a test, not parsing dispatch.
+                    !text.to_lowercase().contains("counter"),
+                    "no Unimplemented gap may remain on the counters line: {text:?}"
+                );
+            }
         }
     }
 
@@ -33740,6 +34273,302 @@ mod tests {
             .any(|p| matches!(p, FilterProp::Attacking { .. })));
     }
 
+    /// The one `DamageDone` definition a printed prevention line produced.
+    fn damage_done_definition(
+        text: &str,
+        name: &str,
+        keywords: &[&str],
+    ) -> Option<ReplacementDefinition> {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+        let mut damage = parsed
+            .replacements
+            .into_iter()
+            .filter(|r| r.event == ReplacementEvent::DamageDone);
+        let definition = damage.next();
+        assert!(damage.next().is_none(), "{name}: one DamageDone definition");
+        definition
+    }
+
+    /// CR 604.2 + CR 611.3a: a printed "while <state>" antecedent gates the shield
+    /// itself. The four "while it has a +1/+1 counter on it" cards carry a counter
+    /// gate on the host; Jared Carthalion's "while you're the monarch" and Outfitted
+    /// Jouster's "while it's equipped" carry the static condition. Every one keeps
+    /// its unconditional-amount, self-scoped shield.
+    #[test]
+    fn printed_while_guards_gate_their_prevention_shields() {
+        let counter_gate = ReplacementCondition::OnlyIfQuantity {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Source,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+            active_player_req: None,
+        };
+        let cases = [
+            (
+                "Undergrowth Champion",
+                "If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from this creature.\nLandfall — Whenever a land you control enters, put a +1/+1 counter on this creature.",
+                counter_gate.clone(),
+            ),
+            (
+                "Oathsworn Knight",
+                "This creature enters with four +1/+1 counters on it.\nThis creature attacks each combat if able.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from it.",
+                counter_gate.clone(),
+            ),
+            (
+                "Polukranos, Unchained",
+                "Polukranos enters with six +1/+1 counters on it. It escapes with twelve +1/+1 counters on it instead.\nIf damage would be dealt to Polukranos while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it.\n{1}{B}{G}: Polukranos fights another target creature.\nEscape—{4}{B}{G}, Exile six other cards from your graveyard.",
+                counter_gate.clone(),
+            ),
+            (
+                "Ugin's Conjurant",
+                "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from this creature.",
+                counter_gate,
+            ),
+            (
+                "Jared Carthalion, True Heir",
+                "When Jared Carthalion enters, target opponent becomes the monarch. You can't become the monarch this turn.\nIf damage would be dealt to Jared Carthalion while you're the monarch, prevent that damage and put that many +1/+1 counters on it.",
+                ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(StaticCondition::IsMonarch {
+                        player: PlayerScope::Controller,
+                    }),
+                },
+            ),
+            (
+                "Outfitted Jouster",
+                "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+                ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(StaticCondition::SourceIsEquipped),
+                },
+            ),
+        ];
+        for (name, text, guard) in cases {
+            let def = damage_done_definition(text, name, &[])
+                .unwrap_or_else(|| panic!("{name}: the prevention shield must parse"));
+            assert_eq!(def.condition, Some(guard), "{name}");
+            assert_eq!(
+                def.shield_kind,
+                ShieldKind::Prevention {
+                    amount: PreventionAmount::All
+                },
+                "{name}"
+            );
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        }
+
+        // Negatives: the same shield shape with no "while" stays ungated.
+        for (name, text) in [
+            (
+                "Protean Hydra",
+                "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage and remove that many +1/+1 counters from it.\nWhenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+            ),
+            (
+                "Ironscale Hydra",
+                "If a creature would deal combat damage to this creature, prevent that damage and put a +1/+1 counter on this creature.",
+            ),
+            (
+                "Gloom Surgeon",
+                "If combat damage would be dealt to this creature, prevent that damage and exile that many cards from the top of your library.",
+            ),
+        ] {
+            let def = damage_done_definition(text, name, &[])
+                .unwrap_or_else(|| panic!("{name}: the prevention shield must parse"));
+            assert_eq!(def.condition, None, "{name}");
+        }
+        let centaur = damage_done_definition(
+            "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+            "Phantom Centaur",
+            &["Protection"],
+        )
+        .expect("Phantom Centaur: the prevention shield must parse");
+        assert_eq!(centaur.condition, None);
+
+        // Sanwell's prefix gate is still the line's only condition.
+        let sanwell = damage_done_definition(
+            "As long as an artifact creature you control is attacking, prevent all damage that would be dealt to Sanwell.\nWhenever Sanwell becomes tapped, exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.",
+            "Sanwell, Avenger Ace",
+            &[],
+        )
+        .expect("Sanwell: the prevention shield must parse");
+        assert!(
+            matches!(
+                &sanwell.condition,
+                Some(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    },
+                    ..
+                })
+            ),
+            "got {:?}",
+            sanwell.condition
+        );
+
+        // Magma Pummeler declines before the shield route: its "When one or more
+        // counters are removed … this way" sentence keeps it a static gap.
+        let pummeler = parse_oracle_text(
+            "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it. When one or more counters are removed from this creature this way, it deals that much damage to any target.",
+            "Magma Pummeler",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(pummeler
+            .replacements
+            .iter()
+            .all(|r| r.event != ReplacementEvent::DamageDone));
+        assert!(pummeler.abilities.iter().any(|a| matches!(
+            &*a.effect,
+            Effect::Unimplemented { name, .. } if name == "static_structure"
+        )));
+    }
+
+    /// `while_antecedent_clause` returns the guard text between the verb anchor's
+    /// " while " and the comma, and nothing for a line with no such guard.
+    #[test]
+    fn while_antecedent_clause_reads_only_a_guard_after_the_anchor() {
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~ while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from ~.",
+                "would ",
+            ),
+            Some("it has a +1/+1 counter on it")
+        );
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~, prevent that damage and remove that many +1/+1 counters from it.",
+                "would ",
+            ),
+            None
+        );
+        // A " while " before the anchor is not this antecedent's guard.
+        assert_eq!(
+            while_antecedent_clause(
+                "while ~ is tapped, damage that would be dealt to ~ is prevented, then",
+                "would "
+            ),
+            None
+        );
+        // No comma ends the antecedent.
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~ while it's equipped prevent that damage.",
+                "would ",
+            ),
+            None
+        );
+    }
+
+    /// `while_antecedent_clause` reads a guard only inside the antecedent: a
+    /// " while " after the comma that ends it is not the shield's guard. No
+    /// printed Oracle line has " while " after the antecedent's comma, so this is
+    /// a building-block test on a phrase. The nearest printed card carries its
+    /// guard inside the antecedent: Undergrowth Champion, "If damage would be
+    /// dealt to this creature while it has a +1/+1 counter on it, prevent that
+    /// damage and remove a +1/+1 counter from this creature." (CR 614.1a).
+    #[test]
+    fn while_antecedent_clause_ignores_a_while_after_the_antecedent_comma() {
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~, prevent that damage while it's untapped, then draw a card.",
+                "would ",
+            ),
+            None
+        );
+    }
+
+    /// CR 615.5: additional effects listed after "prevent that damage," fail closed
+    /// as a line-owned gap, not a shield missing its riders. Bloatfly Swarm and
+    /// Sekki, Seasons' Guide are the printed cards with that list.
+    #[test]
+    fn prevention_listed_riders_fail_closed() {
+        for (name, text, keywords, line) in [
+            (
+                "Bloatfly Swarm",
+                "Flying\nThis creature enters with five +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters from it, then give each player a rad counter for each +1/+1 counter removed this way.",
+                vec!["Flying".to_string()],
+                "If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters from it, then give each player a rad counter for each +1/+1 counter removed this way.",
+            ),
+            (
+                "Sekki, Seasons' Guide",
+                "Sekki enters with eight +1/+1 counters on it.\nIf damage would be dealt to Sekki, prevent that damage, remove that many +1/+1 counters from Sekki, and create that many 1/1 colorless Spirit creature tokens.\nSacrifice eight Spirits: Return this card from your graveyard to the battlefield.",
+                Vec::new(),
+                "If damage would be dealt to Sekki, prevent that damage, remove that many +1/+1 counters from Sekki, and create that many 1/1 colorless Spirit creature tokens.",
+            ),
+        ] {
+            assert_eq!(
+                damage_prevention_fails_closed(line, name),
+                Some(PreventionFailClosed::ListedRider),
+                "{name}"
+            );
+            let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .all(|r| r.event != ReplacementEvent::DamageDone),
+                "{name}: no shield may stand in for the listed riders: {:?}",
+                parsed.replacements
+            );
+            assert!(
+                parsed.abilities.iter().any(|a| matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "prevention_listed_rider"
+                )),
+                "{name}: {:?}",
+                parsed.abilities
+            );
+            // Reach guard: the line's neighbour, "enters with … +1/+1 counters", still
+            // parses through the same pass.
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .any(|r| r.event == ReplacementEvent::Moved),
+                "{name}: {:?}",
+                parsed.replacements
+            );
+        }
+    }
+
+    /// CR 604.2 + CR 611.3a: a "while <state>" guard that does not lift to a
+    /// `ReplacementCondition` fails closed as a line-owned gap, never an unconditional
+    /// shield. Every printed guarded prevention line lifts its guard (Jared Carthalion,
+    /// "If damage would be dealt to Jared Carthalion while you're the monarch, prevent that
+    /// damage and put that many +1/+1 counters on it.", in
+    /// `printed_while_guards_gate_their_prevention_shields`), so this building-block test
+    /// uses a guard no printed card has.
+    #[test]
+    fn an_uncarriable_while_guard_fails_closed() {
+        const LINE: &str =
+            "If damage would be dealt to this creature while it's attacking, prevent that damage.";
+        assert_eq!(
+            damage_prevention_fails_closed(LINE, "Probe Card"),
+            Some(PreventionFailClosed::WhileGuard)
+        );
+        let parsed = parse_oracle_text(LINE, "Probe Card", &[], &["Creature".to_string()], &[]);
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "{:?}",
+            parsed.replacements
+        );
+        assert!(
+            parsed.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_while_guard"
+            )),
+            "{:?}",
+            parsed.abilities
+        );
+    }
+
     /// CR 604.2 + CR 611.3a: an unbridgeable "as long as" gate on a replacement
     /// line lands as a line-owned `Effect::unimplemented` instead of the static
     /// chain's modification-less fallback.
@@ -33991,10 +34820,11 @@ mod tests {
             def.condition,
             Some(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Opponent {
                             aggregate: crate::types::ability::AggregateFunction::Sum,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -34183,6 +35013,100 @@ mod tests {
             "{:?}",
             packleader.abilities
         );
+    }
+
+    fn roll_norm(line: &str) -> String {
+        replace_self_refs(&strip_reminder_text(line), "Roll Witness").to_lowercase()
+    }
+
+    /// R2/R3 helper rows. CR 614.1c + CR 603.6d + CR 706.4: the composition
+    /// claims an ungated self-only roll line, and the dispatcher gate then no
+    /// longer owns it; every line it declines keeps `Clause` and stays
+    /// line-owned. The gated, distributive and non-modifier lines reach the new
+    /// composition check (`split_as_enters_roll_prefix` admits them, and their
+    /// enters-with sentence parses alone), so their gap is that check's, not an
+    /// upstream decline.
+    #[test]
+    fn as_enters_roll_composition_claims_and_declines() {
+        for line in [
+            "As this creature enters, roll X d6. It enters with a number of +1/+1 counters on it equal to the total of those results.",
+            "As this creature enters, roll a six-sided die. This creature enters with a number of funk counters on it equal to the result.",
+        ] {
+            let norm = roll_norm(line);
+            assert!(
+                matches!(as_enters_roll_enters_with_outcome(&norm), Some(Ok(_))),
+                "{norm}"
+            );
+            assert!(!is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(multi_sentence_enters_with_decline(&norm), None, "{norm}");
+        }
+        // `(line, admitted by the split, reaches the composition's own check)`.
+        for (line, admitted, reaches_check) in [
+            // A gate the enters-with reader carries as a condition: the
+            // composition's ungated check declines it.
+            (
+                "As this creature enters, roll a six-sided die. If this creature was kicked, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A gate the enters-with reader itself declines.
+            (
+                "As this creature enters, roll a six-sided die. If you cast it, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                false,
+            ),
+            // A distributive subject: not this permanent (CR 614.12).
+            (
+                "As this creature enters, roll a six-sided die. Each other creature you control enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A non-modifier node (the keyword grant) in the execute.
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with flying and with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result. This creature enters with a number of charge counters on it equal to the result.",
+                false,
+                false,
+            ),
+        ] {
+            let norm = roll_norm(line);
+            assert!(is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(
+                as_enters_roll_enters_with_outcome(&norm).map(Result::err),
+                admitted.then_some(Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))),
+                "{norm}"
+            );
+            let split = split_as_enters_roll_prefix(&norm);
+            assert_eq!(split.is_some(), admitted, "{norm}");
+            if let Some((_, sentence)) = split {
+                assert_eq!(
+                    enters_with_counters_outcome(sentence, sentence).is_ok(),
+                    reaches_check,
+                    "reach guard, the enters-with sentence parses alone: {sentence}"
+                );
+            }
+        }
+        // A results table is out of class (CR 706.3): the roll prefix declines.
+        let mut table_roll = parse_effect_chain("roll a d20", AbilityKind::Spell);
+        assert!(is_as_enters_roll_prefix(&table_roll));
+        if let Effect::RollDie { results, .. } = &mut *table_roll.effect {
+            results.push(crate::types::ability::DieResultBranch {
+                min: 1,
+                max: 20,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+            });
+        }
+        assert!(!is_as_enters_roll_prefix(&table_roll));
     }
 
     /// CR 614.1c: the typed decline separates "my shape, gate fails closed" and

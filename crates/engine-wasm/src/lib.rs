@@ -315,15 +315,26 @@ fn decode_persisted_seat_state(json: &str) -> Result<SeatState, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-fn parse_initialize_format_config(
-    decoded: Result<FormatConfig, String>,
-) -> Result<FormatConfig, serde_json::Value> {
+fn parse_initialize_config<T>(
+    decoded: Result<T, String>,
+    what: &str,
+) -> Result<T, serde_json::Value> {
     decoded.map_err(|error| {
         serde_json::json!({
             "error": true,
-            "reasons": [format!("Format config deserialization failed: {error}")],
+            "reasons": [format!("{what} deserialization failed: {error}")],
         })
     })
+}
+
+/// An absent match config is the default; one that fails to decode is refused.
+fn initialize_match_config(
+    decoded: Option<Result<MatchConfig, String>>,
+) -> Result<MatchConfig, serde_json::Value> {
+    decoded.map_or_else(
+        || Ok(MatchConfig::default()),
+        |decoded| parse_initialize_config(decoded, "Match config"),
+    )
 }
 
 #[cfg(test)]
@@ -623,7 +634,7 @@ mod external_format_config_tests {
         let decoded = serde_json::from_value::<FormatConfig>(malformed_js_config)
             .map_err(|error| error.to_string());
 
-        let error = parse_initialize_format_config(decoded)
+        let error = parse_initialize_config(decoded, "Format config")
             .expect_err("malformed JS config must not fall back to Standard");
 
         assert_eq!(error["error"], true);
@@ -631,6 +642,50 @@ mod external_format_config_tests {
             .as_str()
             .expect("error reason is a string")
             .contains("Format config deserialization failed"));
+    }
+
+    #[test]
+    fn undecodable_initialize_match_config_is_refused_not_defaulted() {
+        let decode = |json: serde_json::Value| {
+            serde_json::from_value::<MatchConfig>(json).map_err(|error| error.to_string())
+        };
+
+        let error = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Bogus" },
+        }))))
+        .expect_err("an undecodable match config must not fall back to the default");
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Match config deserialization failed"));
+
+        let decoded = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Interactive" },
+        }))))
+        .expect("a decodable match config passes through");
+        assert_eq!(decoded.match_type, MatchType::Bo3);
+        assert_eq!(
+            decoded.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
+
+        assert_eq!(
+            initialize_match_config(None).expect("an absent match config is the default"),
+            MatchConfig::default()
+        );
+
+        let legacy = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo1",
+            "loop_detection": { "type": "On" },
+        }))))
+        .expect("a stored legacy `On` match config still loads");
+        assert_eq!(
+            legacy.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
     }
 
     #[test]
@@ -2334,7 +2389,8 @@ fn occupied_refusal(reason: &str) -> JsValue {
 /// Initialize a new game for local (single-player / AI) play.
 /// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
 /// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
-/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
+/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined; an
+/// undecodable one is refused with `{error, reasons}`.
 /// player_count: number of players — defaults to 2 if not provided.
 /// first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
 /// Names are resolved against the card database loaded via load_card_database().
@@ -2571,11 +2627,14 @@ fn initialize_game_impl(
             serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
                 .map_err(|error| error.to_string())
         });
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
+    let match_config = match initialize_match_config(
+        (!match_config_js.is_null() && !match_config_js.is_undefined()).then(|| {
+            serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+                .map_err(|error| error.to_string())
+        }),
+    ) {
+        Ok(config) => config,
+        Err(error) => return to_js(&error),
     };
     match initialize_game_inner(
         deck_data,
@@ -2610,8 +2669,9 @@ fn initialize_game_inner(
     // default must be chosen FOR this seat count (see
     // `resolve_and_validate_initialize_format_config`).
     let decoded_format_config = match format_config {
-        Some(config) => Some(parse_initialize_format_config(
+        Some(config) => Some(parse_initialize_config(
             config.and_then(decode_initialize_format_config),
+            "Format config",
         )?),
         None => None,
     };
@@ -6392,17 +6452,105 @@ mod restored_card_db_requirements_tests {
 
     /// A routing probe, apart from the hand-back sequence: during the turn
     /// Mindslaver hands to P2, P1's decision asked as P1's own seat, which the
-    /// controller never does, is still P2's to make (CR 723.5) and goes out
-    /// with no thread.
+    /// controller never does, is P2's to make (CR 723.5), so P1 is asked
+    /// nothing. The refused build leaves P1's thread as it was.
     #[test]
-    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_uses_no_thread() {
+    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_builds_no_request() {
         use engine::game::scenario::P1;
         let mut log = Vec::new();
         reach_the_turn_mindslaver_controls(&mut log);
 
-        let as_owner = build_llm_decision(P1, &log);
-        assert_eq!(thread_of(&as_owner), serde_json::Value::Null, "{as_owner}");
-        assert!(as_owner["threadTurn"].is_null(), "{as_owner}");
+        let history = serde_json::to_string(&log).expect("the log serializes");
+        let as_owner = build_llm_decision_request_inner(
+            "Medium",
+            P1.0,
+            THREADED_ENDPOINT,
+            &history,
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(as_owner, serde_json::Value::Null);
+        assert!(
+            has_open_llm_thread(P1),
+            "a refused build leaves the owner's thread open"
+        );
+
+        clear_game_state();
+    }
+
+    /// Issue #10999: a seat is asked only a decision it may make. While P1
+    /// holds priority, P0 has none, so a build for P0 returns no request
+    /// instead of P1's decision rendered from P1's view, P1's hand included.
+    #[test]
+    fn a_build_for_a_seat_with_no_decision_returns_no_request() {
+        let asked = PlayerId(0);
+        let acting = PlayerId(1);
+        install_llm_decision(acting);
+
+        let built = build_llm_decision_request_inner(
+            "Medium",
+            asked.0,
+            THREADED_ENDPOINT,
+            "[]",
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(built, serde_json::Value::Null);
+
+        // Reach guard: asked as the seat that holds it, the decision builds.
+        build_llm_decision(acting, &[]);
+
+        clear_game_state();
+    }
+
+    /// Issue #10939 under CR 723.1 + CR 723.4 + CR 723.5, on the printed card: during the
+    /// turn Mindslaver hands to P2, P2 casts P1's Lightning Bolt for P1, and
+    /// the target choice is P1's decision, asked as P2. Its options name each
+    /// target as P1's board does: P1 is "You" in both, every other seat is
+    /// named by number.
+    #[test]
+    fn the_targets_of_a_decision_mindslaver_controls_are_named_as_its_owners_board_names_them() {
+        use engine::game::scenario::P1;
+        let p2 = PlayerId(2);
+        let mut log = Vec::new();
+        reach_the_turn_mindslaver_controls(&mut log);
+
+        assert_eq!(authorized_seat(), p2);
+        let (bolt, card_id) = with_state(|state| {
+            let bolt = state.players[usize::from(P1.0)]
+                .hand
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Lightning Bolt")
+                .expect("P1 holds its Lightning Bolt");
+            (bolt, state.objects[&bolt].card_id)
+        })
+        .expect("the game is installed");
+        submit_logged(
+            &mut log,
+            p2,
+            GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            },
+        );
+
+        let delegated = build_llm_decision(p2, &log);
+        let body = delegated["request"]["body"]
+            .as_str()
+            .expect("a request body");
+        assert!(body.contains("You are Player 1."), "{body}");
+        for option in [
+            "Choose Target (Target: Player 0)",
+            "Choose Target (Target: You)",
+            "Choose Target (Target: Player 2)",
+        ] {
+            assert!(body.contains(option), "{option}\n{body}");
+        }
 
         clear_game_state();
     }
@@ -9020,7 +9168,14 @@ fn build_llm_decision_request_inner(
         engine::game::layers::flush_layers(state);
         let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
         let contract = AiDecisionContract::issue(state, semantic_owner);
-        if contract.candidates.is_empty() {
+        // Only the seat the engine authorizes to submit this decision is asked
+        // it: its owner, or the owner's controller (CR 723.5). For any other
+        // seat, `ai_semantic_owner` names whoever is acting, so without this a
+        // seat with no decision to make would get the acting player's
+        // decision, rendered from that player's view, hand included. Refused
+        // before the standing pass and the thread memory are consulted, so a
+        // refused build changes nothing.
+        if contract.authorized_actor != PlayerId(player_id) || contract.candidates.is_empty() {
             return serde_json::Value::Null;
         }
         let is_standing_pass = LLM_DECISION_MEMORY.with(|cell| {
@@ -12932,7 +13087,7 @@ mod deck_list_seat_validation_tests {
         let decoded: Result<FormatConfig, String> =
             serde_json::from_value(serde_json::to_value(config).unwrap())
                 .map_err(|error| error.to_string());
-        let decoded = parse_initialize_format_config(decoded)
+        let decoded = parse_initialize_config(decoded, "Format config")
             .map_err(|envelope| envelope["reasons"][0].as_str().unwrap().to_string())?;
         resolve_initialize_format_config(Some(decoded), 2, draft_session_min_deck_size)
     }

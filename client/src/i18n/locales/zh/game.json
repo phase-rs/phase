@@ -454,6 +454,7 @@
     "dfc": "双面牌",
     "faceDownName": "面朝下的牌",
     "loading": "正在加载{{name}}",
+    "reloadArt": "点击重新加载插画",
     "tapped": "已横置",
     "unimplemented": "未实现：{{mechanics}}"
   },
@@ -593,6 +594,13 @@
       "titleSplit": "分配剩余的牌"
     },
     "discard": {
+      "instructionWithReason": "{{reason}}：{{instruction}}",
+      "reason": {
+        "additionalCost": "额外费用",
+        "connive": "筹谋",
+        "manaAbility": "法术力异能",
+        "ward": "守护"
+      },
       "subtitleExact_one": "选择{{count}}张牌弃掉",
       "subtitleExact_other": "选择{{count}}张牌弃掉",
       "subtitleKeep_one": "选择1张牌保留 —— 其余的弃掉",
@@ -921,6 +929,10 @@
       "subtitle": "选择其复制品将下一个进入堆叠的咒语",
       "title": "排列复制品顺序"
     },
+    "memberOrder": {
+      "title": "排列牌张顺序",
+      "subtitle": "选择下一张要处理的牌"
+    },
     "station": {
       "label": "蓄势",
       "labelWithCharge": "蓄势（+{{charge}}个充电指示物）",
@@ -1179,9 +1191,6 @@
     "allocationIncreaseAria": "增加{{subject}}的重复次数",
     "allocationSum": "已分配 {{total}} 次重复中的 {{allocated}} 次。",
     "allocationTitle": "将重复次数分配到各目标：",
-    "announce": "宣告",
-    "announceAria": "宣告{{subject}}",
-    "announceTitle": "选择每次重复宣告的目标：",
     "confirm": "使用捷径",
     "convokeInfo_one": "每次循环自动横置至多 1 个生物以召集。",
     "convokeInfo_other": "每次循环自动横置至多 {{count}} 个生物以召集。",
@@ -1211,17 +1220,17 @@
     },
     "respondDeclaredTitle": "提议的宣告：",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}的替代性效应",
     "respondSubtitle": "对手提议使用循环捷径。你可以接受，或指定该序列停止的位置。",
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
-    "untilLethal": "重复直到游戏结束。",
     "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",
       "Decking": "此循环让一名对手抓空牌库。",
       "ExtraTurns": "此循环能获得无限个额外回合。",
       "ImmediateWin": "此循环能赢得游戏。",
-      "LethalDamage": "此循环造成致命伤害。",
+      "LethalDamage": "此循环使一名对手的生命值降至0或更低。",
       "PoisonLoss": "此循环会造成致命的中毒指示物。"
     }
   },
@@ -2252,6 +2261,20 @@
     "Untap": "重置步骤",
     "Upkeep": "维持步骤"
   },
+  "phaseShortName": {
+    "BeginCombat": "战斗开始",
+    "Cleanup": "净化",
+    "CombatDamage": "战斗伤害",
+    "DeclareAttackers": "攻击",
+    "DeclareBlockers": "阻挡",
+    "Draw": "抓牌",
+    "End": "结束",
+    "EndCombat": "战斗结束",
+    "PostCombatMain": "主阶段2",
+    "PreCombatMain": "主阶段1",
+    "Untap": "重置",
+    "Upkeep": "维持"
+  },
   "phaseStop": {
     "beginCombatDescription": "选择攻击者之前的最后一个优先权窗口。",
     "beginCombatLabel": "战斗开始步骤",
@@ -2384,7 +2407,9 @@
     "holdCtrlFront": "按住 Ctrl 以显示正面",
     "parse": "解析",
     "ptDeltaFrom": "来自{{source}}的{{delta}}",
+    "reloadArt": "重新加载插画",
     "report": "报告问题",
+    "reportNotSent": "未发送",
     "reported": "已报告 ✓",
     "rulingCount_one": "{{count}}条规则释疑",
     "rulingCount_other": "{{count}}条规则释疑",
@@ -2439,7 +2464,8 @@
     "chooseSubtitle": "选择要让哪个替代性效应生效。",
     "composesNote": "每个效应都会生效 —— 顺序会改变它们的结合方式。",
     "confirmOrder": "确认顺序",
-    "dragHint": "拖动以重新排序，或使用箭头。",
+    "dragHandleNamed": "拖动{{name}}以重新排序",
+    "dragHint": "拖动 <grip>⠿</grip> 手柄以重新排序，或使用箭头。",
     "eyebrow": "结算顺序",
     "moveDownNamed": "将{{name}}后移",
     "moveUpNamed": "将{{name}}前移",

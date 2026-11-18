@@ -2347,6 +2347,43 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         );
     }
 
+    // CR 103.2a: latch each seat's submitted starting-deck size — the netted
+    // library plus the placed command-zone decklist cards (commanders when the
+    // format seats them, Oathbreaker signature spells), single-counted by
+    // construction through `net_command_zone` (a copy netted out of the
+    // library is counted exactly once, in the command zone). Sideboards,
+    // companions, planar / scheme / attraction / contraption decks, and emblems
+    // are NOT starting-deck cards (CR 103.2a / CR 702.139b) and are excluded.
+    // `Player::starting_deck_size` never changes mid-game: Whtz's "had"
+    // reads this snapshot, not the live library.
+    // Boundary: engine-replaced libraries (Horde challenge decks) keep the
+    // submitted-placeholder count — no starting-deck reader exists for those
+    // seats, so the latch is inert there rather than silently redefined.
+    let starting_size = |deck: &PlayerDeckPayload| -> u32 {
+        let main: u32 = netted_main_deck(deck).iter().map(|entry| entry.count).sum();
+        let mut placed_zone = 0u32;
+        if place_commanders {
+            placed_zone += deck.commander.iter().map(|entry| entry.count).sum::<u32>();
+        }
+        if oathbreaker {
+            placed_zone += deck
+                .signature_spell
+                .iter()
+                .map(|entry| entry.count)
+                .sum::<u32>();
+        }
+        main.saturating_add(placed_zone)
+    };
+    for (seat, deck) in std::iter::once(&payload.player)
+        .chain(std::iter::once(&payload.opponent))
+        .chain(&payload.ai_decks)
+        .enumerate()
+    {
+        if let Some(player) = state.players.get_mut(seat) {
+            player.starting_deck_size = starting_size(deck);
+        }
+    }
+
     // Shuffle each player's library and supplementary decks.
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
@@ -2870,6 +2907,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -2923,6 +2961,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -3109,6 +3148,130 @@ mod tests {
         assert_eq!(state.players[0].library.len(), 6); // 4 + 2
         assert_eq!(state.players[1].library.len(), 3);
         assert_eq!(state.objects.len(), 9); // 6 + 3
+    }
+
+    fn whtz_face() -> CardFace {
+        let mut face = make_creature_face();
+        face.name = "Whtz, the Bibliophile".to_string();
+        face.oracle_text = Some(
+            "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.".to_string(),
+        );
+        face
+    }
+
+    fn filler_face(name: &str) -> CardFace {
+        let mut face = make_instant_face();
+        face.name = name.to_string();
+        face.oracle_text = None;
+        face
+    }
+
+    /// CR 103.2a: the latch counts the submitted starting deck once —
+    /// netted library plus the placed commander, single-counted by
+    /// construction. P0 lists Whtz in the main (198 others + Whtz) and in the
+    /// command zone: raw slots sum to 200, the latch nets to 199. P1's main
+    /// holds 199 Whtz-distinct cards plus Whtz: raw slots sum to 201, the
+    /// latch nets to 200. Sideboards and companions never count.
+    #[test]
+    fn starting_deck_size_latches_netted_commander_deck_counts() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 2, 42);
+        let whtz = || DeckEntry {
+            card: whtz_face(),
+            count: 1,
+        };
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![whtz()];
+                    for i in 0..198 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler P0 {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![whtz()],
+                sideboard: vec![DeckEntry {
+                    card: filler_face("Sideboard P0"),
+                    count: 15,
+                }],
+                companion: vec![DeckEntry {
+                    card: filler_face("Companion P0"),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![whtz()];
+                    for i in 0..199 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler P1 {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![whtz()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // Placed counts prove the single-count construction.
+        assert_eq!(state.players[0].library.len(), 198);
+        assert_eq!(state.players[1].library.len(), 199);
+        assert_eq!(state.players[0].starting_deck_size, 199);
+        assert_eq!(state.players[1].starting_deck_size, 200);
+    }
+
+    /// The Oathbreaker signature spell counts exactly once —
+    /// a copy listed in both the main and the signature-spell slot nets to
+    /// its single command-zone placement.
+    #[test]
+    fn starting_deck_size_counts_oathbreaker_signature_spell_once() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::oathbreaker(), 2, 42);
+        let sig = || DeckEntry {
+            card: filler_face("Signature Spell"),
+            count: 1,
+        };
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![sig()];
+                    for i in 0..59 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![DeckEntry {
+                    card: filler_face("Oathbreaker"),
+                    count: 1,
+                }],
+                signature_spell: vec![sig()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: filler_face("Opp"),
+                    count: 3,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // 60 listed main - 1 netted signature double + 1 commander + 1 signature.
+        assert_eq!(state.players[0].library.len(), 59);
+        assert_eq!(state.players[0].starting_deck_size, 61);
     }
 
     /// A minimal card database containing only the five snow basic lands, so a

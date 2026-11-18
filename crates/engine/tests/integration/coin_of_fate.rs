@@ -714,13 +714,13 @@ fn candidates_after_resolution(frame: &GameState) -> Vec<ObjectId> {
 fn coin_of_fate_paid_object_identity_reaches_the_loop_comparators() {
     const ALL: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
         strict: true,
-        ring_walk: true,
-        settlement: true,
+        recorded_period: true,
+        mandatory_replay: true,
     };
     const NONE: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
         strict: false,
-        ring_walk: false,
-        settlement: false,
+        recorded_period: false,
+        mandatory_replay: false,
     };
 
     let mut board = board();

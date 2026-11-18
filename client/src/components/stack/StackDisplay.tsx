@@ -9,6 +9,7 @@ import { StackTargetArcs } from "./StackTargetArcs.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { MultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
+import { useTargetingPromptStore } from "../../stores/targetingPromptStore.ts";
 import {
   getSeatCount,
   getWaitingForObjectChoiceIds,
@@ -61,6 +62,8 @@ const STACK_RIGHT_OFFSET_PX = 112;
 // Minimum gap kept between the panel and the top/bottom viewport edges so the
 // header controls never clip off-screen on short windows or deep stacks.
 const VERTICAL_VIEWPORT_INSET = 12;
+// Gap kept between the panel's header and the targeting prompt, above or below it.
+const TARGETING_PROMPT_GAP = 8;
 
 function getViewportSize() {
   if (typeof window === "undefined") {
@@ -103,6 +106,10 @@ export function StackDisplay({
   // Cards derive width AND height from one scale, so this stays aspect-correct.
   const userStackScale = usePreferencesStore((s) => s.flexLayout.scales?.stack) ?? 1;
   const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
+  // Where the targeting prompt sits, both edges 0 while none is shown.
+  // TargetingOverlay publishes them; see the top clamp below for their use.
+  const targetingPromptTopPx = useTargetingPromptStore((s) => s.topPx);
+  const targetingPromptBottomPx = useTargetingPromptStore((s) => s.bottomPx);
 
   useEffect(() => {
     function handleResize() {
@@ -198,17 +205,41 @@ export function StackDisplay({
   // Collapse slides the panel out toward its docked edge: right dock → positive
   // x (off the right), left dock → negative x (off the left).
   const collapsedX = dockedLeft ? -collapsedOffset : collapsedOffset;
-  // Resolve the fractional anchor to an explicit, viewport-clamped pixel top.
-  // Centering on `topFraction` is the default, but when the pile is taller than
-  // the viewport (deep stacks / short windows) a centered top edge slides above
-  // y=0 and clips the header controls. Clamp the top edge into
-  // [inset, viewport - panelHeight - inset]; when the panel can't fit, the lower
-  // bound collapses to `inset` so it pins to the top (header stays visible) and
-  // overflow spills off the bottom (oldest entries) instead.
-  const panelTopPx = Math.min(
-    Math.max(viewport.height * topFraction - panelHeight / 2, VERTICAL_VIEWPORT_INSET),
-    Math.max(VERTICAL_VIEWPORT_INSET, viewport.height - panelHeight - VERTICAL_VIEWPORT_INSET),
+  // Resolve the fractional anchor to an explicit pixel top. The panel centres
+  // on `topFraction`, held up so its bottom keeps the viewport inset. The top
+  // inset is a floor that wins over both: when the pile is taller than the
+  // viewport (deep stacks / short windows) the held-up top edge would slide
+  // above y=0 and clip the header controls, so the panel pins at the floor
+  // (header stays visible) and the bottom of the pile, the top-of-stack
+  // entry's card, spills off the bottom instead.
+  const preferredTopPx = Math.min(
+    viewport.height * topFraction - panelHeight / 2,
+    viewport.height - panelHeight - VERTICAL_VIEWPORT_INSET,
   );
+  const viewportTopPx = Math.max(VERTICAL_VIEWPORT_INSET, preferredTopPx);
+  // A targeting prompt renders on a layer above this panel
+  // (`GAME_Z_LAYER.dialogHost`) and stays there, so the panel keeps its header
+  // clear of the prompt instead (#11004). Covered, the header's controls can be
+  // neither seen nor reliably tapped, and its dock-side toggle is the only
+  // control that moves the panel to the other side, off the targets the prompt
+  // asks for. A header that already ends at least the gap above the prompt
+  // stays put: the split layout starts the prompt below its seat panes, and
+  // pushing a tall panel under it there would only spill more of the pile off
+  // the bottom. Any other panel starts no higher than the gap below the
+  // prompt. With no prompt both edges are 0, so the panel keeps its
+  // viewport-clamped top (the 12px inset already exceeds the 8px gap).
+  //
+  // The check is vertical only, even where the centred prompt does not reach
+  // the panel horizontally: the panel's horizontal extent depends on the rail
+  // and Flex Layout drag offsets, which this clamp cannot see (a drag offset
+  // also still applies on top of the result). The prompt's edges are in
+  // viewport pixels and this `top` resolves against GamePage's `contain-paint`
+  // board container, which starts at the viewport top, so the two agree.
+  const headerClearsPrompt =
+    viewportTopPx + PANEL_HEADER_HEIGHT + TARGETING_PROMPT_GAP <= targetingPromptTopPx;
+  const panelTopPx = headerClearsPrompt
+    ? viewportTopPx
+    : Math.max(viewportTopPx, targetingPromptBottomPx + TARGETING_PROMPT_GAP);
   // Anchor to the docked edge. Only the right side reserves room for the right
   // action rail (`--game-right-rail-offset`); the left edge has no such rail.
   const panelAnchorStyle: CSSProperties = dockedLeft

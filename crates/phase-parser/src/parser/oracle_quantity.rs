@@ -41,6 +41,7 @@ use crate::parser::oracle_target::{
     parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
 };
 use crate::parser::oracle_util::{merge_or_filters, parse_count_multiplier};
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AggregateFunction, AttackSubject, CardTypeSetSource, CombatHistoryScope, Comparator,
     ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp,
@@ -573,6 +574,8 @@ pub(crate) fn parse_quantity_ref_with_context(
                     // Count context ("for each opponent dealt …") has no
                     // "N or more distinct sources" restriction — default 1.
                     min_sources: 1,
+                    // This grammar names an opponent explicitly — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             });
         }
@@ -1082,7 +1085,11 @@ pub(crate) fn parse_cda_quantity_with_context(
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(text) {
         if let Some((scope, filter)) = parse_spell_history_clause(rest, CountScope::Controller) {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty: QuantityRef::SpellsCast {
+                    scope,
+                    filter,
+                    window: TurnWindow::ThisTurn,
+                },
             });
         }
     }
@@ -2120,22 +2127,21 @@ pub(crate) fn parse_event_context_quantity_with_context(
         return Some(expr);
     }
 
+    // CR 706.2: "the result" of a coin flip / die roll — the result amount
+    // is exposed via the same EventContextAmount channel that "that much" /
+    // "that many" use (Adorable Kitten "You gain life equal to the result"
+    // after roll-a-die). Both compile to the same runtime resolver. The whole
+    // phrase only: a remainder falls through to the `Offset` arms.
+    if let Ok(("", qty)) = nom_quantity::parse_die_result_ref(lower) {
+        return Some(QuantityExpr::Ref { qty });
+    }
+
     match lower {
         // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
         "that much" | "that many" | "that many cards" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             })
-        }
-        // CR 706.2: "the result" of a coin flip / die roll — the result amount
-        // is exposed via the same EventContextAmount channel that "that much" /
-        // "that many" use (Adorable Kitten "You gain life equal to the result"
-        // after roll-a-die). Both compile to the same runtime resolver.
-        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
-        "the result" => {
-            return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            });
         }
         // CR 608.2k: bare anaphoric "its" — referent bound at parse time by the
         // enclosing clause's subject/target. Emits `Anaphoric` so context
@@ -2240,7 +2246,7 @@ pub(crate) fn parse_event_context_quantity_with_context(
     }
 
     // Fall back to parse_quantity_ref for named quantity patterns
-    // (e.g., "the life you've lost this turn" → LifeLostThisTurn).
+    // (e.g., "the life you've lost this turn" → LifeLost).
     // Strip leading "the " article before matching. If that fails, try the full
     // phrase only for CommanderManaValue — that grammar requires the leading
     // article (Stinging Study's "where X is the mana value of a commander…").
@@ -2791,7 +2797,7 @@ pub(crate) fn parse_for_each_clause_expr_deferred(
 
 /// "Other spell(s) cast this turn" (Storm Entity class): all spells cast this
 /// turn by any player, excluding the resolving spell. Composes
-/// `SpellsCastThisTurn { scope: All }` with offset −1, clamped at zero.
+/// `SpellsCast { scope: All }` with offset −1, clamped at zero.
 /// Uses `All` (not `Controller`) because Oracle text counts every other
 /// spell, including opponents'.
 fn parse_other_spells_cast_this_turn_for_each(clause: &str) -> Option<QuantityExpr> {
@@ -2808,9 +2814,10 @@ fn parse_other_spells_cast_this_turn_for_each(clause: &str) -> Option<QuantityEx
     Some(QuantityExpr::ClampMin {
         inner: Box::new(QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::All,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
             offset: -1,
@@ -3947,6 +3954,8 @@ fn parse_for_each_clause_with_they_controller(
                 source: source.map(Box::new),
                 // Count context has no "N or more distinct sources" restriction — default 1.
                 min_sources: 1,
+                // This grammar names an opponent explicitly — keep `Opponent`.
+                relation: PlayerRelation::Opponent,
             },
         });
     }
@@ -4065,7 +4074,11 @@ fn parse_for_each_clause_with_they_controller(
     // patterns; the shared helper locates the verb phrase mid-clause so a trailing
     // cast-origin qualifier survives. CR 400.1 + CR 601.2a.
     if let Some((scope, filter)) = parse_spell_history_clause(clause, CountScope::Controller) {
-        return Some(QuantityRef::SpellsCastThisTurn { scope, filter });
+        return Some(QuantityRef::SpellsCast {
+            scope,
+            filter,
+            window: TurnWindow::ThisTurn,
+        });
     }
 
     if let Some(qty) = parse_suspended_card_clause(clause) {
@@ -5573,6 +5586,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{CombatOnly}}"
@@ -5598,6 +5613,8 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{Any}}"
@@ -5619,6 +5636,8 @@ mod tests {
                         kind: DamageKindFilter::NoncombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{NoncombatOnly}}"
@@ -6698,6 +6717,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }
             }
@@ -6719,6 +6740,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }
             }
@@ -6752,6 +6775,8 @@ mod tests {
                             kind: DamageKindFilter::CombatOnly,
                             source: None,
                             min_sources: 1,
+                            // Opponent grammar — keep `Opponent`.
+                            relation: PlayerRelation::Opponent,
                         },
                     }
                 },
@@ -6788,6 +6813,8 @@ mod tests {
                     })),
 
                     min_sources: 1,
+                    // Opponent grammar — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             }
         );
@@ -6809,6 +6836,8 @@ mod tests {
                     source: Some(Box::new(TargetFilter::SelfRef)),
 
                     min_sources: 1,
+                    // Opponent grammar — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             }
         );
@@ -6831,6 +6860,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must parse to unfiltered OpponentDealtDamage"
@@ -7157,9 +7188,10 @@ mod tests {
             QuantityExpr::ClampMin {
                 inner: Box::new(QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::All,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     }),
                     offset: -1,
@@ -7195,6 +7227,28 @@ mod tests {
                 qty: QuantityRef::EventContextAmount
             })
         );
+    }
+
+    /// CR 706.4 + CR 706.2: "the total of those results" (Neverwinter Hydra,
+    /// Hydradoodle) names the same die-result channel as "the result". The
+    /// phrase is matched whole: a suffixed phrase is not consumed by this arm,
+    /// and the CDA authority stays blind to the bare die-result phrase (the
+    /// where-X binder relies on that).
+    #[test]
+    fn parse_event_context_quantity_die_result_aggregate() {
+        let event_amount = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        assert_eq!(
+            parse_event_context_quantity("the total of those results"),
+            event_amount
+        );
+        assert_eq!(parse_event_context_quantity("the result"), event_amount);
+        assert_ne!(
+            parse_event_context_quantity("the total of those results plus one"),
+            event_amount
+        );
+        assert_eq!(parse_cda_quantity("the total of those results"), None);
     }
 
     /// The TOTAL channel. Every phrase here names an unqualified
@@ -7653,8 +7707,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 }
             })
         );
@@ -8412,8 +8467,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 }
             })
         );
@@ -8421,8 +8477,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 }
             })
         );
@@ -8452,8 +8509,9 @@ mod tests {
     fn parse_quantity_ref_life_lost() {
         assert_eq!(
             parse_quantity_ref("life you've lost"),
-            Some(QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Controller
+            Some(QuantityRef::LifeLost {
+                player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             })
         );
     }
@@ -9823,7 +9881,11 @@ mod tests {
             parse_for_each_clause("spell you've cast this turn from anywhere other than your hand")
                 .expect("cast-origin for-each clause must parse");
         match qty {
-            QuantityRef::SpellsCastThisTurn { scope, filter } => {
+            QuantityRef::SpellsCast {
+                scope,
+                filter,
+                window: TurnWindow::ThisTurn,
+            } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
                 assert_eq!(
@@ -9832,7 +9894,7 @@ mod tests {
                     "filter must carry Not(InZone(Hand))"
                 );
             }
-            other => panic!("expected SpellsCastThisTurn, got {other:?}"),
+            other => panic!("expected SpellsCast, got {other:?}"),
         }
     }
 
@@ -9840,9 +9902,10 @@ mod tests {
     fn for_each_spell_bare_no_filter() {
         assert_eq!(
             parse_for_each_clause("spell you've cast this turn"),
-            Some(QuantityRef::SpellsCastThisTurn {
+            Some(QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             }),
         );
     }
@@ -9981,7 +10044,12 @@ mod tests {
         .expect("cast-origin CDA spell-history clause must parse");
         match expr {
             QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
@@ -9991,7 +10059,7 @@ mod tests {
                     "filter must carry Not(InZone(Hand))"
                 );
             }
-            other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+            other => panic!("expected SpellsCast ref, got {other:?}"),
         }
     }
 
@@ -10008,7 +10076,12 @@ mod tests {
         .expect("qualifier-then-time cast-origin clause must parse");
         match expr {
             QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
@@ -10018,7 +10091,7 @@ mod tests {
                     "filter must carry Not(InZone(Hand))"
                 );
             }
-            other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+            other => panic!("expected SpellsCast ref, got {other:?}"),
         }
     }
 
@@ -10027,9 +10100,10 @@ mod tests {
         assert_eq!(
             parse_cda_quantity("the number of spells you've cast this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
         );
