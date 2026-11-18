@@ -433,6 +433,77 @@ pub(crate) fn settle_player_scope_choice_after_departure(
     }
 }
 
+/// CR 800.4a + CR 800.4f + CR 101.4: after a player leaves, bring an open
+/// choose-all-then-act unless poll in line with the players still in the game.
+/// A departed seat pays nothing; a departed controller's resolving ability
+/// ceases to exist. When the departure completes collection, the poll is
+/// delivered here and the resolution's remaining tail is left to the
+/// departure's caller (`DepartureResume::ResolutionTail`), which resumes it and
+/// runs the action's one post-action pipeline.
+pub(crate) fn settle_simultaneous_unless_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<super::elimination::DepartureResume, EngineError> {
+    use super::elimination::DepartureResume;
+    use effects::simultaneous_unless::{DeliveryOutcome, SimultaneousUnlessReconciliation};
+
+    match effects::simultaneous_unless::reconcile_after_departure(state) {
+        SimultaneousUnlessReconciliation::Unchanged | SimultaneousUnlessReconciliation::Retired => {
+            Ok(DepartureResume::Settled)
+        }
+        SimultaneousUnlessReconciliation::Prompted(chooser) => {
+            // CR 117.2e: the republished prompt is the wait; it names a living
+            // chooser.
+            state.priority_player = chooser;
+            Ok(DepartureResume::Settled)
+        }
+        SimultaneousUnlessReconciliation::Settle => {
+            // Taking the carrier releases the poll's hold on its resolution, so
+            // no priority wait ever coexists with a live carrier (CR 117.2e).
+            let carrier = state
+                .pending_simultaneous_unless
+                .take()
+                .expect("a settled poll keeps its carrier");
+            // CR 117.2e + CR 117.3b + CR 800.4j: provisional. No player has
+            // priority while the ability is still resolving, but the caller's
+            // resume runs only under a priority wait; this names the seat the
+            // completed resolution's own grant gives priority to.
+            set_priority(state, super::engine::living_priority_seat(state));
+            let base = events.len();
+            let mut delivered = Vec::new();
+            let outcome = effects::simultaneous_unless::deliver(state, *carrier, &mut delivered, 0)
+                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+            events.extend(delivered);
+            match outcome {
+                DeliveryOutcome::Delivered { span } => {
+                    // CR 603.2 + CR 603.2c: the delivery's triggered abilities are
+                    // collected once and every occurrence scanned is claimed, so
+                    // the caller's pipeline places them without collecting them
+                    // again (CR 603.3b).
+                    super::triggers::collect_departure_triggers_into_deferred(
+                        state,
+                        events,
+                        base + span.start,
+                        None,
+                    );
+                    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        // CR 117.2e + CR 608.2c: the resolution is still under
+                        // way and owes its tail.
+                        Ok(DepartureResume::ResolutionTail)
+                    } else {
+                        // A delivery primitive's prompt is the wait; its answer
+                        // settles the resolution.
+                        Ok(DepartureResume::Settled)
+                    }
+                }
+                // CR 616.1: the replacement choice is the wait; its resume runs
+                // the parked remainder and its own pipeline.
+                DeliveryOutcome::Paused => Ok(DepartureResume::Settled),
+            }
+        }
+    }
+}
+
 /// CR 800.4a + CR 608.2d + CR 608.2m: after a player leaves, bring an open
 /// resolution-time object choice ("choose a creature you control") back in line
 /// with the game. The candidates stored on the prompt were scanned when it was
@@ -7017,6 +7088,8 @@ pub(super) fn handle_resolution_choice(
                                 state.objects[&card_id].incarnation,
                             ),
                             discard_frame,
+                            // CR 701.9a: a resolving effect's discard choice.
+                            cause: crate::types::game_state::DiscardCause::Effect,
                             fan_out: None,
                             preceding_events: events[events_before_effect..].to_vec(),
                         },

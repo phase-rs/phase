@@ -38402,9 +38402,10 @@ pub enum RepeatForTiming {
     #[default]
     Sequential,
     /// CR 608.2c + CR 101.4: a leading "for each <count>, <instruction>" —
-    /// every iteration is an instance of one instruction. RUNTIME: the parser
-    /// stamps this; no resolver reads it yet, so it currently resolves on the
-    /// round-by-round driver like `Sequential`.
+    /// every iteration is an instance of one instruction. RUNTIME: read by the
+    /// engine's CR 101.4 admission authority (`effects::simultaneous_unless::admits`),
+    /// which resolves an admitted scoped unless poll choose-all-then-act; a shape
+    /// it does not admit resolves on the round-by-round driver like `Sequential`.
     SimultaneousInstances,
 }
 

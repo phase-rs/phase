@@ -1363,6 +1363,20 @@ pub(super) fn handle_unless_payment(
                 .to_string(),
         ));
     }
+    // CR 101.4 + CR 118.12a: an answer to an open choose-all-then-act poll is
+    // recorded, not paid; nothing happens until every seat has answered.
+    if effects::simultaneous_unless::binds(state, player, pending_effect.source_id) {
+        let event_start = events.len();
+        let waiting_for = match effects::simultaneous_unless::answer_branch(state, pay, &cost)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        {
+            effects::simultaneous_unless::WalkOutcome::Prompted => state.waiting_for.clone(),
+            effects::simultaneous_unless::WalkOutcome::Complete => {
+                settle_simultaneous_unless(state, events, SettlePipeline::RunFrom { event_start })?
+            }
+        };
+        return Ok(action_result(events, waiting_for));
+    }
 
     let mut payment_failed = !pay;
     let post_action_event_start = None;
@@ -3162,6 +3176,16 @@ pub(super) fn handle_ward_discard_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::WardDiscardChoice {
+        player,
+        pending_effect,
+        ..
+    } = &waiting_for
+    {
+        if effects::simultaneous_unless::binds(state, *player, pending_effect.source_id) {
+            return answer_simultaneous_unless_pick(state, &waiting_for, &chosen, events);
+        }
+    }
     let WaitingFor::WardDiscardChoice {
         player,
         cards: legal_cards,
@@ -3229,7 +3253,7 @@ pub(super) fn handle_ward_discard_choice(
     Ok(state.waiting_for.clone())
 }
 
-fn eligible_unless_sacrifice_permanents(
+pub(crate) fn eligible_unless_sacrifice_permanents(
     state: &GameState,
     player: PlayerId,
     sac_source: ObjectId,
@@ -3655,6 +3679,16 @@ pub(super) fn handle_ward_sacrifice_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::WardSacrificeChoice {
+        player,
+        pending_effect,
+        ..
+    } = &waiting_for
+    {
+        if effects::simultaneous_unless::binds(state, *player, pending_effect.source_id) {
+            return answer_simultaneous_unless_pick(state, &waiting_for, &chosen, events);
+        }
+    }
     let WaitingFor::WardSacrificeChoice {
         player,
         permanents,
@@ -3886,6 +3920,81 @@ pub(super) fn set_active_priority(state: &mut GameState) {
     let player = living_priority_seat(state);
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+}
+
+/// CR 101.4: a pick answering an open choose-all-then-act poll. The last
+/// answer settles the poll; the reducer epilogue runs this action's post-action
+/// pipeline (the ward-choice arms return their wait to it).
+fn answer_simultaneous_unless_pick(
+    state: &mut GameState,
+    prompt: &WaitingFor,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match effects::simultaneous_unless::answer_pick(state, prompt, chosen)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        effects::simultaneous_unless::WalkOutcome::Prompted => Ok(state.waiting_for.clone()),
+        effects::simultaneous_unless::WalkOutcome::Complete => {
+            settle_simultaneous_unless(state, events, SettlePipeline::ReducerEpilogue)
+        }
+    }
+}
+
+/// Who runs the post-action pipeline after a poll's last answer is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettlePipeline {
+    /// The answering handler returns its result directly, so the settle runs
+    /// the pipeline over the action's events from `event_start`.
+    RunFrom { event_start: usize },
+    /// The answering handler returns its wait to the reducer, whose epilogue
+    /// runs the pipeline.
+    ReducerEpilogue,
+}
+
+/// CR 101.4 + CR 608.2f: the last answer of a choose-all-then-act poll is in;
+/// every chosen action happens together and the resolution continues.
+/// CR 117.3b + CR 800.4j: priority is provisionally the active player's (or the
+/// next living seat's), the seat the completed resolution's own grant names.
+/// Exactly one post-action pipeline runs for the answer (CR 603.3 triggers,
+/// CR 704.3 state-based actions). A delivery paused on a CR 616.1 replacement
+/// choice leaves that choice as the wait; its resume runs the rest.
+fn settle_simultaneous_unless(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    pipeline: SettlePipeline,
+) -> Result<WaitingFor, EngineError> {
+    // Taking the carrier releases the poll's hold on its resolution, so no
+    // priority wait ever coexists with a live carrier (CR 117.2e).
+    let carrier = state.pending_simultaneous_unless.take().ok_or_else(|| {
+        EngineError::InvalidAction("CR 101.4: no unless poll to settle".to_string())
+    })?;
+    set_active_priority(state);
+    match effects::simultaneous_unless::deliver(state, *carrier, events, 0)
+        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+    {
+        effects::simultaneous_unless::DeliveryOutcome::Paused => {
+            return Ok(state.waiting_for.clone());
+        }
+        effects::simultaneous_unless::DeliveryOutcome::Delivered { .. } => {}
+    }
+    resume_pending_continuation_if_priority(state, events)?;
+    match pipeline {
+        SettlePipeline::RunFrom { event_start } => {
+            let default_wf = state.waiting_for.clone();
+            let wf = engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                event_start,
+                &default_wf,
+                false,
+                false,
+            )?;
+            state.waiting_for = wf;
+        }
+        SettlePipeline::ReducerEpilogue => {}
+    }
+    Ok(state.waiting_for.clone())
 }
 
 fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> ActionResult {

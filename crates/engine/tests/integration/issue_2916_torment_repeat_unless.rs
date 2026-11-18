@@ -7,12 +7,15 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, PlayerFilter, RepeatForTiming, ResolvedAbility,
-    UnlessPayModifier,
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, PlayerFilter, RepeatForTiming,
+    ResolvedAbility, UnlessPayModifier,
 };
 use engine::types::actions::{GameAction, UnlessCostBranch};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const TORMENT_ORACLE: &str = "Repeat the following process X times. Each opponent loses 3 life unless that player sacrifices a nonland permanent of their choice or discards a card.";
 
@@ -98,6 +101,70 @@ fn torment_repeat_x_declined_unless_choices_resume_each_iteration() {
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "Torment should return to priority after both repeat iterations, got {:?}",
         runner.state().waiting_for
+    );
+}
+
+/// CR 608.2e (D3.14): Torment of Hailfire's "Repeat the following process X
+/// times" stays round by round, cast through the production pipeline: "Each
+/// repetition through this process is done separately", so the card P1 chose
+/// to discard on the first repetition is in the graveyard before the second
+/// repetition's prompt.
+#[test]
+fn torment_cast_discards_each_round_before_the_next_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let torment = scenario
+        .add_spell_to_hand_from_oracle(P0, "Torment of Hailfire", false, TORMENT_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    let card = scenario.add_card_to_hand(P1, "Filler Card");
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(torment).x(2).resolve();
+    drop(outcome);
+
+    let index = match &runner.state().waiting_for {
+        WaitingFor::UnlessPaymentChooseCost { player, costs, .. } => {
+            assert_eq!(*player, P1, "round 1 asks P1");
+            costs
+                .iter()
+                .position(|cost| matches!(cost, AbilityCost::Discard { .. }))
+                .expect("the discard branch is offered")
+        }
+        other => panic!("expected P1's round-1 prompt, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseUnlessCostBranch {
+            choice: UnlessCostBranch::Pay { index },
+        })
+        .expect("P1 chooses to discard");
+    runner
+        .act(GameAction::SelectCards { cards: vec![card] })
+        .expect("P1 discards the card");
+
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::UnlessPayment { player, .. } | WaitingFor::UnlessPaymentChooseCost { player, .. }
+                if *player == P1
+        ),
+        "reach guard: round 2's prompt is open, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&card].zone,
+        Zone::Graveyard,
+        "round 1's discard happened before round 2's prompt"
     );
 }
 

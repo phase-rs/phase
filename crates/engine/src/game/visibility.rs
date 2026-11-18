@@ -1599,6 +1599,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     if let Some(choice) = filtered.pending_player_scope_choice.as_mut() {
         choice.selections.clear();
     }
+    // CR 101.4a + CR 101.4b: a choose-all-then-act unless poll's answers are
+    // public, but a card chosen to be discarded stays unrevealed until it is
+    // discarded ("cards chosen to be discarded this way won't be revealed until
+    // they're discarded"), so a seated viewer keeps only its own hidden picks
+    // and an unseated viewer none.
+    if let Some(poll) = filtered.pending_simultaneous_unless.as_deref_mut() {
+        poll.hidden_discards
+            .retain(|(seat, _)| Some(*seat) == viewer);
+    }
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
     // identities and origins for later private choices, and the orders owners
     // have already chosen (CR 401.4: the order isn't revealed). The public
@@ -1956,6 +1965,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 .pending_player_scope_sacrifice_choice
                 .iter_mut()
                 .flat_map(|choice| choice.completion.deferred_events.iter_mut()),
+        )
+        .chain(
+            filtered
+                .pending_simultaneous_unless
+                .iter_mut()
+                .flat_map(|poll| poll.trigger_event.iter_mut()),
         )
     {
         redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
@@ -4435,7 +4450,8 @@ fn redact_ability_triggered_causes(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `CollectEvidenceChoice` and `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`,
 /// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
-/// `pending_player_scope_choice`, `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
+/// `pending_player_scope_choice`, `pending_player_scope_unless_payment`,
+/// `pending_simultaneous_unless` (with its `trigger_event`), `pending_scoped_library_search`,
 /// `pending_library_search_delivery`, `epic_effects` and the prevention riders of
 /// `replacement_continuations`, which every shield's `runtime_execute` names
 /// (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
@@ -4822,6 +4838,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     }
     if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
         redact_ability_payment(&mut pending.pending_effect, hidden_ids);
+    }
+    if let Some(poll) = state.pending_simultaneous_unless.as_deref_mut() {
+        redact_ability_payment(&mut poll.ability, hidden_ids);
     }
     if let Some(search) = state.pending_scoped_library_search.as_mut() {
         redact_ability_payment(&mut search.ability, hidden_ids);
@@ -6456,6 +6475,23 @@ mod tests {
                 resolving_entry: None,
             },
         );
+        state.pending_simultaneous_unless = Some(Box::new(
+            crate::types::game_state::PendingSimultaneousUnless {
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), paid, owner)),
+                unless_pay: crate::types::ability::UnlessPayModifier {
+                    cost: crate::types::ability::AbilityCost::Tap,
+                    payer: TargetFilter::ScopedPlayer,
+                },
+                instances: 1,
+                current_player: opponent_id,
+                next_instance: 0,
+                remaining_players: Vec::new(),
+                answers: Vec::new(),
+                hidden_discards: Vec::new(),
+                trigger_event: Some(event.clone()),
+                resolving_entry: None,
+            },
+        ));
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: opponent_id,
             trigger_controller: Some(opponent_id),
@@ -6724,6 +6760,11 @@ mod tests {
                     push("pending_player_scope_sacrifice_choice", &from_event(event));
                 }
             }
+            if let Some(poll) = state.pending_simultaneous_unless.as_deref() {
+                for event in poll.trigger_event.iter() {
+                    push("pending_simultaneous_unless", &from_event(event));
+                }
+            }
             match &state.waiting_for {
                 WaitingFor::TriggerTargetSelection {
                     trigger_event,
@@ -6849,6 +6890,7 @@ mod tests {
             "deferred_entry_events",
             "unsettled_entry_batch_events",
             "pending_player_scope_sacrifice_choice",
+            "pending_simultaneous_unless",
             "transient_continuous_effects duration_event_source",
             "departed 1 object",
             "departed 1 entry ability",
@@ -6954,6 +6996,7 @@ mod tests {
             "/unsettled_entry_batch_events/",
             "/consumed_before_priority_trigger_events/",
             "/pending_player_scope_sacrifice_choice/",
+            "/pending_simultaneous_unless/",
             "/waiting_for/",
             "/transient_continuous_effects/",
             "/departed_stack_spells/",
@@ -8080,6 +8123,30 @@ mod tests {
                             current_player: opponent_id,
                             cost: pay_life(),
                         }));
+                }),
+            ),
+            (
+                "pending_simultaneous_unless",
+                "/pending_simultaneous_unless/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_simultaneous_unless = Some(Box::new(
+                        crate::types::game_state::PendingSimultaneousUnless {
+                            ability: effect(),
+                            unless_pay: crate::types::ability::UnlessPayModifier {
+                                cost: pay_life(),
+                                payer: TargetFilter::ScopedPlayer,
+                            },
+                            instances: 1,
+                            current_player: opponent_id,
+                            next_instance: 0,
+                            remaining_players: Vec::new(),
+                            answers: Vec::new(),
+                            hidden_discards: Vec::new(),
+                            trigger_event: None,
+                            resolving_entry: None,
+                        },
+                    ));
                 }),
             ),
             (
@@ -13396,6 +13463,7 @@ mod tests {
                 effect_kind: crate::types::ability::EffectKind::Discard,
                 paused_card: crate::types::identifiers::ObjectIncarnationRef::of(hidden, 0),
                 discard_frame: None,
+                cause: crate::types::game_state::DiscardCause::Effect,
                 fan_out: None,
                 preceding_events: Vec::new(),
             }));

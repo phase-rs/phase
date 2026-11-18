@@ -10102,7 +10102,12 @@ pub(crate) fn process_triggers_observing(
     // CR 603.3 + CR 603.3b + CR 608.2n: while an instant or sorcery owes its final
     // part, what triggers waits in the queue for the resolution's batch instead
     // of being put on the stack now.
-    if super::stack::resolving_spell_owes_final_part(state) {
+    // CR 603.3 + CR 117.2e: likewise while a choose-all-then-act unless poll holds
+    // its resolution open (Rottenmouth Viper): no player receives priority until it
+    // is delivered.
+    if super::stack::resolving_spell_owes_final_part(state)
+        || super::effects::simultaneous_unless::holds_resolution(state)
+    {
         collect_triggers_into_deferred_observing(state, events, action_departures);
         return;
     }
@@ -15526,9 +15531,13 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     // `CastOffer`) do not require a typed resolution-stack frame. They still
     // suspend the parent object, so its carrier and deferred observers must
     // remain live until the shared choice dispatcher has completed them.
+    // CR 101.4 + CR 117.2e: an open choose-all-then-act unless poll
+    // (Rottenmouth Viper) suspends its resolution across several players'
+    // prompts; it stays the resolving object until the poll is delivered.
     if state.resolving_stack_entry.is_some()
         && (super::engine_resolution_choices::handles(&state.waiting_for)
-            || matches!(state.waiting_for, WaitingFor::CopyRetarget { .. }))
+            || matches!(state.waiting_for, WaitingFor::CopyRetarget { .. })
+            || super::effects::simultaneous_unless::holds_resolution(state))
     {
         return false;
     }
@@ -50655,6 +50664,180 @@ pub mod tests {
             drain_deferred_trigger_queue(&mut state, &mut events),
             Some(WaitingFor::OrderTriggers { .. })
         ));
+    }
+
+    /// A resolving triggered ability whose resolution has raised an unless
+    /// prompt and owns no resolution-stack frame, plus a battlefield watcher
+    /// whose "whenever you draw a card" trigger is not part of it.
+    fn unless_prompt_mid_resolution() -> (GameState, GameEvent) {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(9_601),
+            PlayerId(0),
+            "Polling Source".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = create_object(
+            &mut state,
+            CardId(9_602),
+            PlayerId(0),
+            "Polling Trigger".to_string(),
+            Zone::Stack,
+        );
+        let lose_life = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: entry,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(lose_life.clone()),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            repeat: None,
+            cost: AbilityCost::Tap,
+            pending_effect: Box::new(lose_life),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            affected_object: None,
+        };
+
+        let watcher = create_object(
+            &mut state,
+            CardId(9_603),
+            PlayerId(0),
+            "Draw Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Drawn);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        state
+            .objects
+            .get_mut(&watcher)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+        let drawn = create_object(
+            &mut state,
+            CardId(9_604),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Hand,
+        );
+        let draw = GameEvent::CardDrawn {
+            player_id: PlayerId(0),
+            object_id: drawn,
+            nth_in_turn: 1,
+            nth_in_step: 1,
+        };
+        (state, draw)
+    }
+
+    /// An open choose-all-then-act poll's carrier, as a resolution installs it.
+    fn simultaneous_unless_carrier(
+        state: &GameState,
+    ) -> crate::types::game_state::PendingSimultaneousUnless {
+        let entry = state.resolving_stack_entry.as_ref().unwrap();
+        let WaitingFor::UnlessPayment { pending_effect, .. } = &state.waiting_for else {
+            unreachable!("the fixture waits on an unless prompt");
+        };
+        crate::types::game_state::PendingSimultaneousUnless {
+            ability: pending_effect.clone(),
+            unless_pay: crate::types::ability::UnlessPayModifier {
+                cost: AbilityCost::Tap,
+                payer: TargetFilter::ScopedPlayer,
+            },
+            instances: 2,
+            current_player: PlayerId(1),
+            next_instance: 0,
+            remaining_players: Vec::new(),
+            answers: Vec::new(),
+            hidden_discards: Vec::new(),
+            trigger_event: None,
+            resolving_entry: Some(entry.id),
+        }
+    }
+
+    /// CR 608.2c + CR 117.2e + CR 101.4: a generic unless prompt does not keep
+    /// its resolving ability open (its prompt carries the rest), but an open
+    /// choose-all-then-act poll does, until its carrier is taken. Keyed on the
+    /// carrier, not on the prompt's shape.
+    #[test]
+    fn an_open_simultaneous_unless_poll_holds_its_resolution_until_taken() {
+        let (mut state, _) = unless_prompt_mid_resolution();
+        assert!(
+            resolution_completion_can_settle(&state),
+            "a generic unless prompt settles its resolving ability, as before"
+        );
+
+        state.pending_simultaneous_unless = Some(Box::new(simultaneous_unless_carrier(&state)));
+        assert!(
+            !resolution_completion_can_settle(&state),
+            "the poll holds its resolution while it collects"
+        );
+
+        state.pending_simultaneous_unless.take();
+        assert!(
+            resolution_completion_can_settle(&state),
+            "taking the carrier releases the resolution"
+        );
+    }
+
+    /// CR 603.3 + CR 117.2e: what triggers while a choose-all-then-act poll
+    /// holds its resolution waits in the queue instead of going on the stack
+    /// over the poll's prompt. Control: without the poll the same trigger is put
+    /// on the stack.
+    #[test]
+    fn triggers_park_while_a_simultaneous_unless_poll_holds_its_resolution() {
+        let (mut state, draw) = unless_prompt_mid_resolution();
+        let mut control = state.clone();
+        process_triggers(&mut control, std::slice::from_ref(&draw));
+        assert_eq!(
+            control.stack.len(),
+            1,
+            "positive control: with no poll the draw trigger goes on the stack"
+        );
+        assert!(control.deferred_triggers.is_empty());
+
+        state.pending_simultaneous_unless = Some(Box::new(simultaneous_unless_carrier(&state)));
+        process_triggers(&mut state, std::slice::from_ref(&draw));
+        assert!(
+            state.stack.is_empty(),
+            "nothing is put on the stack while the poll holds its resolution"
+        );
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the draw trigger waits in the deferred queue"
+        );
     }
 
     /// Build a `TriggeredManaResume` naming `node`, with an otherwise inert

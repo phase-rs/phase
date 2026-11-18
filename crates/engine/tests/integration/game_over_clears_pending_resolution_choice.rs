@@ -204,6 +204,10 @@ fn assert_no_parked_resolution_work(state: &GameState) {
             state.pending_player_scope_sacrifice_choice.is_some(),
         ),
         (
+            "pending_simultaneous_unless",
+            state.pending_simultaneous_unless.is_some(),
+        ),
+        (
             "pending_mass_library_order_choice",
             state.pending_mass_library_order_choice.is_some(),
         ),
@@ -3101,4 +3105,111 @@ fn a_continuing_game_finishes_paused_damage_post_loss() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+const ROTTENMOUTH_VIPER: &str = "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents. This spell costs {1} less to cast for each permanent sacrificed this way.
+Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.";
+
+/// Rottenmouth Viper with one blight counter attacks P1, whose Grizzly Bears
+/// and card in hand make both branches payable. Its trigger adds the second
+/// counter, so the choose-all-then-act poll has two instances; P1 declines the
+/// first and is at its second prompt, with nothing delivered yet.
+fn viper_poll_at_its_second_prompt(
+    match_config: Option<MatchConfig>,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = board(2);
+    let viper = scenario
+        .add_creature_from_oracle(P0, "Rottenmouth Viper", 6, 6, ROTTENMOUTH_VIPER)
+        .id();
+    scenario.with_counter(
+        viper,
+        engine::types::counter::CounterType::Generic("blight".to_string()),
+        1,
+    );
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let card = scenario.add_card_to_hand(P1, "Filler Card");
+    let mut runner = scenario.build();
+    if let Some(config) = match_config {
+        runner.state_mut().set_match_config(config);
+    }
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, engine::game::combat::AttackTarget::Player(P1))])
+        .expect("Viper attacks P1");
+    runner.advance_until_stack_empty();
+    runner
+        .act(GameAction::ChooseUnlessCostBranch {
+            choice: engine::types::actions::UnlessCostBranch::Decline,
+        })
+        .expect("P1 declines the first instance");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPaymentChooseCost { player, .. } if player == P1
+        ),
+        "reach guard: P1's second prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().pending_simultaneous_unless.is_some(),
+        "reach guard: the poll is collecting"
+    );
+    assert!(
+        carrier_is_live(&runner),
+        "reach guard: the Viper trigger is still resolving"
+    );
+    assert_eq!(runner.state().players[1].life, 20, "nothing delivered yet");
+    (runner, bears, card)
+}
+
+/// V13a. CR 104.1 + CR 104.3a: the only opponent concedes while the poll is
+/// collecting; the game ends and nothing of the poll survives.
+#[test]
+fn conceding_under_a_choose_all_then_act_poll_ends_the_game() {
+    let (mut runner, _, _) = viper_poll_at_its_second_prompt(None);
+
+    concede(&mut runner, P1);
+
+    assert!(runner.state().pending_simultaneous_unless.is_none());
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+/// V13b. CR 104.1: a trusted best-of-three forfeit retires the collecting poll
+/// without delivering any of it.
+#[test]
+fn trusted_match_forfeit_retires_a_choose_all_then_act_poll() {
+    let (mut runner, bears, card) = viper_poll_at_its_second_prompt(Some(MatchConfig {
+        match_type: MatchType::Bo3,
+        ..Default::default()
+    }));
+    runner.state_mut().match_score = MatchScore {
+        p0_wins: 1,
+        p1_wins: 1,
+        draws: 1,
+    };
+    runner.state_mut().game_number = 4;
+    runner.state_mut().sideboard_submitted = vec![P0, P1];
+    runner.state_mut().next_game_chooser = Some(P1);
+
+    apply_trusted_match_forfeit(runner.state_mut(), P1, MatchForfeitCause::HostKick)
+        .expect("the authenticated two-seat Bo3 forfeit is admitted");
+
+    assert!(runner.state().pending_simultaneous_unless.is_none());
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+    assert_eq!(runner.state().players[1].life, 20);
+    assert_trusted_match_retired(
+        &runner,
+        MatchForfeitResult {
+            winner: P0,
+            forfeiting_player: P1,
+            cause: MatchForfeitCause::HostKick,
+        },
+        MatchScore {
+            p0_wins: 2,
+            p1_wins: 1,
+            draws: 1,
+        },
+        4,
+    );
 }

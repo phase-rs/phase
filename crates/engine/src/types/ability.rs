@@ -1954,6 +1954,15 @@ pub struct SpellContext {
     /// ordinary ability-chain handoffs without widening every ability literal.
     #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
     pub face_down_in_exile: ExileConcealment,
+    /// CR 701.9a vs CR 118.12: why this node's discard happens. Node-local:
+    /// `apply_parent_chain_context` keeps a child's own cause, so a cost-paying
+    /// delivery node never makes a chained instruction's discard a cost. See
+    /// [`crate::types::game_state::DiscardCause`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::game_state::DiscardCause::is_effect"
+    )]
+    pub discard_cause: crate::types::game_state::DiscardCause,
     /// CR 201.5a: the granter stamped on the definition this ability was built from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,

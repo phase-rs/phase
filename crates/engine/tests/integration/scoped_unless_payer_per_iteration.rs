@@ -30,16 +30,23 @@
 use engine::game::combat::AttackTarget;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::AbilityCost;
 use engine::types::actions::{GameAction, UnlessCostBranch};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{
+    GameState, PendingSimultaneousUnless, PersistedGameState, PersistedRestoreFinalization,
+    SimultaneousUnlessAnswer, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaSourceSelection};
+use engine::types::mana::{ManaColor, ManaSourceSelection, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const P2: PlayerId = PlayerId(2);
 
@@ -83,6 +90,13 @@ fn viper_attacking_with_blight_counters(
     player_count: u8,
     starting_blight_counters: u32,
 ) -> (GameRunner, ObjectId) {
+    let (scenario, viper) = viper_board(player_count, starting_blight_counters);
+    (viper_attacks(scenario, viper), viper)
+}
+
+/// Rottenmouth Viper on P0's battlefield with `starting_blight_counters`, and
+/// no other permanent or card for anyone.
+fn bare_viper_board(player_count: u8, starting_blight_counters: u32) -> (GameScenario, ObjectId) {
     let mut scenario = GameScenario::new_n_player(player_count, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let viper = scenario
@@ -91,20 +105,32 @@ fn viper_attacking_with_blight_counters(
     if starting_blight_counters > 0 {
         scenario.with_counter(viper, BLIGHT(), starting_blight_counters);
     }
+    (scenario, viper)
+}
+
+/// `bare_viper_board` with, for every opponent seat, a Grizzly Bears named
+/// "Grizzly Bears {seat}" and a card named "Filler Card {seat}" in hand.
+fn viper_board(player_count: u8, starting_blight_counters: u32) -> (GameScenario, ObjectId) {
+    let (mut scenario, viper) = bare_viper_board(player_count, starting_blight_counters);
     for seat in 1..player_count {
         let pid = PlayerId(seat);
         scenario.add_creature(pid, &format!("Grizzly Bears {seat}"), 2, 2);
         let card = format!("Filler Card {seat}");
         scenario.with_cards_in_hand(pid, &[card.as_str()]);
     }
+    (scenario, viper)
+}
 
+/// Build `scenario`, attack P1 with the Viper and resolve its attack trigger up
+/// to whatever prompt it produces.
+fn viper_attacks(scenario: GameScenario, viper: ObjectId) -> GameRunner {
     let mut runner = scenario.build();
     runner.advance_to_combat();
     runner
         .declare_attackers(&[(viper, AttackTarget::Player(P1))])
         .expect("Viper attacks P1");
     runner.advance_until_stack_empty();
-    (runner, viper)
+    runner
 }
 
 /// Bellowing Mauler on P0's battlefield with its end-step trigger resolved up
@@ -172,10 +198,19 @@ fn viper_attack_trigger_offers_the_choice_to_each_opponent() {
     assert_eq!(runner.life(P0), 20, "the controller loses nothing");
 }
 
-/// CR 608.2c + CR 608.2h: the preceding instruction adds a blight counter,
-/// then the repeat count is determined from Viper's current counters. Starting
-/// with one counter makes the attack trigger's second counter observable: P1
-/// must receive and decline two separate unless prompts, losing 4 life each.
+/// CR 608.2c + CR 608.2h + CR 101.4: the preceding instruction adds a blight
+/// counter, then the repeat count is determined from Viper's current counters.
+/// Starting with one counter makes the attack trigger's second counter
+/// observable: P1 answers two prompts, losing no life until both are in.
+///
+/// The ruling's order: "While resolving Rottenmouth Viper's triggered ability,
+/// your opponent chooses a card to be discarded without revealing it, chooses a
+/// nonland permanent to be sacrificed, or chooses to do neither. … Then that
+/// player repeats that process if it hasn't yet been done once for each blight
+/// counter on Rottenmouth Viper. Finally, that player discards the chosen
+/// cards, sacrifices the chosen permanents, and loses 4 life the appropriate
+/// number of times." So both prompts precede any life loss, and the trigger is
+/// still the resolving object (CR 608.2c + CR 117.2e) at each of them.
 #[test]
 fn viper_attack_repeats_the_unless_clause_for_each_blight_counter() {
     let (mut runner, viper) = viper_attacking_with_blight_counters(2, 1);
@@ -188,31 +223,30 @@ fn viper_attack_repeats_the_unless_clause_for_each_blight_counter() {
     for iteration in 0..2 {
         match &runner.state().waiting_for {
             WaitingFor::UnlessPaymentChooseCost { player, costs, .. } => {
-                assert_eq!(*player, P1, "each iteration is scoped to the opponent");
+                assert_eq!(*player, P1, "each instance is scoped to the opponent");
                 assert_eq!(costs.len(), 2, "both unless-cost branches remain available");
             }
             other => panic!("expected unless prompt {iteration}, got {other:?}"),
         }
-        runner
-            .act(GameAction::ChooseUnlessCostBranch {
-                choice: UnlessCostBranch::Decline,
-            })
-            .expect("decline the current iteration's unless cost");
-        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.life(P1),
+            20,
+            "CR 101.4: every choice precedes any life loss (prompt {iteration})"
+        );
+        assert_poll_holds_its_resolution(&runner, viper, &format!("prompt {iteration}"));
+        // No `advance_until_stack_empty` between the answers: the second prompt
+        // is raised by the first answer itself.
+        decline(&mut runner);
     }
 
-    // CR 101.4 + Gatherer ruling: the opponent makes all of their choices
-    // first, then loses 4 life the appropriate number of times.
     assert_eq!(runner.life(P1), 12, "two counters cause two 4-life losses");
+    // A fanned-out instance would tax P1's own opponent, the controller.
     assert_eq!(runner.life(P0), 20, "the controller is not taxed");
     assert!(
         runner.state().stack.is_empty(),
         "the trigger fully resolves"
     );
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P0 }
-    ));
+    assert_poll_released(&runner, P0, "after the second decline");
 }
 
 /// CR 118.12a: the cost's "of their choice" resolves against the PROMPTEE, so
@@ -307,13 +341,31 @@ fn viper_etb_trigger_offers_the_choice_to_each_opponent() {
         "the life is lost only on a declined payment, never silently"
     );
     assert_eq!(outcome.life_delta(P0), 0, "the controller loses nothing");
+    drop(outcome);
+
+    // CR 101.4: the enters trigger runs the same choose-all-then-act
+    // poll, which keeps the trigger's own `ZoneChanged` event for its delivery.
+    assert!(
+        matches!(
+            poll(&runner).and_then(|carrier| carrier.trigger_event.as_ref()),
+            Some(GameEvent::ZoneChanged { .. })
+        ),
+        "the poll captured the enters event: {:?}",
+        poll(&runner).map(|carrier| &carrier.trigger_event)
+    );
+    assert_poll_holds_its_resolution(&runner, resolved_viper, "P1's prompt");
+    decline(&mut runner);
+    assert_eq!(runner.life(P1), 16, "the declined instance is delivered");
+    assert_eq!(runner.life(P0), 20);
+    assert_poll_released(&runner, P0, "after the decline");
 }
 
 /// CR 608.2f + CR 101.4: with three seats, EACH opponent is polled, in turn
-/// order, and the controller is never polled at all.
+/// order, and the controller is never polled at all. Every prompt precedes
+/// every action, and the trigger is still resolving at the last one.
 #[test]
 fn viper_three_player_polls_each_opponent_in_turn_order() {
-    let (mut runner, _viper) = viper_attacking(3);
+    let (mut runner, viper) = viper_attacking(3);
 
     match &runner.state().waiting_for {
         WaitingFor::UnlessPaymentChooseCost { player, .. } => {
@@ -336,11 +388,18 @@ fn viper_three_player_polls_each_opponent_in_turn_order() {
         }
         other => panic!("expected the second opponent's unless prompt, got {other:?}"),
     }
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "CR 101.4: P1's decline has not cost life while P2 chooses"
+    );
+    assert_poll_holds_its_resolution(&runner, viper, "P2's prompt");
     runner
         .act(GameAction::ChooseUnlessCostBranch {
             choice: UnlessCostBranch::Decline,
         })
         .expect("P2 declines");
+    assert_poll_released(&runner, P0, "after the last decline");
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -352,60 +411,56 @@ fn viper_three_player_polls_each_opponent_in_turn_order() {
     assert_eq!(runner.life(P2), 16, "the second opponent declined");
 }
 
-/// CR 608.2f: the seats resolve INDEPENDENTLY — one opponent paying does not
-/// spare the other, and each pays out of their own permanents.
+/// CR 608.2f + CR 101.4: the seats answer INDEPENDENTLY, in turn order, each
+/// finishing every instance before the next seat starts; one opponent paying
+/// does not spare the other, and every chosen action happens together at the
+/// end ("each opponent in turn order makes all of their choices, then all of
+/// the actions occur simultaneously").
 #[test]
 fn viper_three_player_one_opponent_pays_while_the_other_declines() {
-    let (mut runner, _viper) = viper_attacking(3);
-    let p1_permanents = battlefield_ids(&runner, P1);
+    let (mut runner, viper) = viper_attacking_with_blight_counters(3, 1);
+    let bears = object_named(&runner, "Grizzly Bears 1");
+    let card = object_named(&runner, "Filler Card 1");
+    let mut order = Vec::new();
 
-    runner
-        .act(GameAction::ChooseUnlessCostBranch {
-            choice: UnlessCostBranch::Pay { index: 0 },
-        })
-        .expect("P1 chooses the sacrifice branch");
-    let sacrificed = match &runner.state().waiting_for {
-        WaitingFor::WardSacrificeChoice {
-            player, permanents, ..
-        } => {
-            assert_eq!(*player, P1, "P1 picks from P1's own permanents");
-            *permanents
-                .first()
-                .expect("P1 has a sacrificeable permanent")
-        }
-        other => panic!("expected P1's sacrifice selection, got {other:?}"),
-    };
-    assert!(
-        p1_permanents.contains(&sacrificed),
-        "the sacrificed permanent must be P1's own"
-    );
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![sacrificed],
-        })
-        .expect("P1 sacrifices the chosen permanent");
+    order.push(prompted(&runner));
+    choose_branch(&mut runner, Branch::Sacrifice);
+    order.push(prompted(&runner));
+    pick(&mut runner, bears);
+    order.push(prompted(&runner));
+    choose_branch(&mut runner, Branch::Discard);
+    order.push(prompted(&runner));
+    pick(&mut runner, card);
 
-    match &runner.state().waiting_for {
-        WaitingFor::UnlessPaymentChooseCost { player, .. } => {
-            assert_eq!(*player, P2, "P2 is still polled independently")
+    for instance in 0..2 {
+        order.push(prompted(&runner));
+        assert_eq!(
+            runner.state().objects[&bears].zone,
+            Zone::Battlefield,
+            "CR 101.4: P1's chosen permanent stays until every seat has answered"
+        );
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Hand,
+            "CR 101.4a: P1's chosen card stays in hand until every seat has answered"
+        );
+        if instance == 0 {
+            assert_poll_holds_its_resolution(&runner, viper, "P2's first prompt");
         }
-        other => panic!("expected P2's unless prompt, got {other:?}"),
+        decline(&mut runner);
     }
-    runner
-        .act(GameAction::ChooseUnlessCostBranch {
-            choice: UnlessCostBranch::Decline,
-        })
-        .expect("P2 declines");
-    runner.advance_until_stack_empty();
-
-    assert_eq!(runner.life(P0), 20, "the controller is untouched");
-    assert_eq!(runner.life(P1), 20, "paying spares P1 the life loss");
-    assert_eq!(runner.life(P2), 16, "declining costs P2 the life");
     assert_eq!(
-        runner.state().objects[&sacrificed].zone,
-        Zone::Graveyard,
-        "P1's payment actually sacrificed their permanent"
+        order,
+        vec![P1, P1, P1, P1, P2, P2],
+        "CR 101.4: P1 answers both instances (branch, pick, branch, pick) before P2"
     );
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
+    assert_eq!(runner.life(P0), 20, "the controller is untouched");
+    assert_eq!(runner.life(P1), 20, "paying both instances spares P1");
+    assert_eq!(runner.life(P2), 12, "declining both costs P2 8 life");
+    assert_poll_released(&runner, P0, "after P2's last decline");
 }
 
 /// CR 608.2f + CR 101.4 (issue #7198): Bellowing Mauler's `each player` subject
@@ -858,4 +913,1430 @@ fn viper_branch_and_pick_prompts_open_no_mana_window() {
             runner.state().waiting_for
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 101.4 choose-all-then-act: Rottenmouth Viper's poll
+// ---------------------------------------------------------------------------
+
+const P3: PlayerId = PlayerId(3);
+
+/// Verbatim Oracle texts of the cards the integration fixture does not carry.
+const FIERY_TEMPER: &str = "Fiery Temper deals 3 damage to any target.\nMadness {R} (If you discard this card, discard it into exile. When you do, cast it for its madness cost or put it into your graveyard.)";
+const MIND_CONTROL: &str = "Enchant creature\nYou control enchanted creature.";
+const ABYSSAL_PERSECUTOR: &str =
+    "Flying, trample\nYou can't win the game and your opponents can't lose the game.";
+
+fn poll(runner: &GameRunner) -> Option<&PendingSimultaneousUnless> {
+    runner.state().pending_simultaneous_unless.as_deref()
+}
+
+fn object_named(runner: &GameRunner, name: &str) -> ObjectId {
+    let mut found = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.name == name)
+        .map(|object| object.id);
+    let id = found
+        .next()
+        .unwrap_or_else(|| panic!("no object is named {name}"));
+    assert!(found.next().is_none(), "{name} names one object");
+    id
+}
+
+fn zone_of(runner: &GameRunner, object: ObjectId) -> Zone {
+    runner.state().objects[&object].zone
+}
+
+/// Stack entries whose source is `source`.
+fn stack_entries_from(runner: &GameRunner, source: ObjectId) -> usize {
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == source)
+        .count()
+}
+
+/// Queued triggered abilities whose source is `source`.
+fn deferred_from(runner: &GameRunner, source: ObjectId) -> usize {
+    runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .filter(|context| context.pending.source_id == source)
+        .count()
+}
+
+/// CR 608.2c + CR 117.2e: the Viper's trigger is still the resolving object
+/// while its poll collects: it is the poll's bound entry, nothing is on the
+/// stack, and no player has priority.
+fn assert_poll_holds_its_resolution(runner: &GameRunner, viper: ObjectId, context: &str) {
+    let carrier = poll(runner).unwrap_or_else(|| panic!("{context}: the poll is open"));
+    let entry = runner
+        .state()
+        .resolving_stack_entry
+        .as_ref()
+        .unwrap_or_else(|| panic!("{context}: the Viper trigger is still resolving"));
+    assert_eq!(
+        entry.source_id, viper,
+        "{context}: the resolving entry is the Viper's trigger"
+    );
+    assert_eq!(
+        carrier.resolving_entry,
+        Some(entry.id),
+        "{context}: the poll is bound to that entry"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "{context}: nothing is put on the stack while the trigger resolves"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{context}: no player has priority while the trigger resolves"
+    );
+}
+
+/// CR 608.2n + CR 117.3b: the poll was delivered, the trigger has left the
+/// stack, and `player` has priority.
+fn assert_poll_released(runner: &GameRunner, player: PlayerId, context: &str) {
+    assert!(poll(runner).is_none(), "{context}: the poll is closed");
+    assert!(
+        runner.state().resolving_stack_entry.is_none(),
+        "{context}: the trigger has left the stack"
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player },
+        "{context}: priority goes to the active player"
+    );
+}
+
+/// The player answering the open unless or pick prompt.
+fn prompted(runner: &GameRunner) -> PlayerId {
+    match &runner.state().waiting_for {
+        WaitingFor::UnlessPayment { player, .. }
+        | WaitingFor::UnlessPaymentChooseCost { player, .. }
+        | WaitingFor::WardSacrificeChoice { player, .. }
+        | WaitingFor::WardDiscardChoice { player, .. } => *player,
+        other => panic!("expected an unless or pick prompt, got {other:?}"),
+    }
+}
+
+/// CR 118.12a: decline the open unless prompt.
+fn decline(runner: &mut GameRunner) {
+    let action = match &runner.state().waiting_for {
+        WaitingFor::UnlessPaymentChooseCost { .. } => GameAction::ChooseUnlessCostBranch {
+            choice: UnlessCostBranch::Decline,
+        },
+        WaitingFor::UnlessPayment { .. } => GameAction::PayUnlessCost { pay: false },
+        other => panic!("expected an unless prompt to decline, got {other:?}"),
+    };
+    runner.act(action).expect("the decline is accepted");
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Branch {
+    Sacrifice,
+    Discard,
+}
+
+impl Branch {
+    fn names(self, cost: &AbilityCost) -> bool {
+        match self {
+            Branch::Sacrifice => matches!(cost, AbilityCost::Sacrifice(_)),
+            Branch::Discard => matches!(cost, AbilityCost::Discard { .. }),
+        }
+    }
+}
+
+/// CR 118.12a: choose to pay `branch` at the open unless prompt, which opens
+/// that branch's pick.
+fn choose_branch(runner: &mut GameRunner, branch: Branch) {
+    let action = match &runner.state().waiting_for {
+        WaitingFor::UnlessPaymentChooseCost { costs, .. } => {
+            let index = costs
+                .iter()
+                .position(|cost| branch.names(cost))
+                .unwrap_or_else(|| panic!("{branch:?} is offered: {costs:?}"));
+            GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Pay { index },
+            }
+        }
+        WaitingFor::UnlessPayment { cost, .. } => {
+            assert!(
+                branch.names(cost),
+                "{branch:?} is the offered cost: {cost:?}"
+            );
+            GameAction::PayUnlessCost { pay: true }
+        }
+        other => panic!("expected an unless prompt, got {other:?}"),
+    };
+    runner.act(action).expect("choosing a branch is accepted");
+}
+
+/// Pick `object` at the open pick prompt.
+fn pick(runner: &mut GameRunner, object: ObjectId) {
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![object],
+        })
+        .expect("the pick is accepted");
+}
+
+/// Pass priority while it is a priority wait, so the stack's top object
+/// resolves up to the first prompt it raises (no trigger-ordering shortcut).
+fn pass_until_prompt(runner: &mut GameRunner) {
+    for _ in 0..16 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the pass is accepted");
+    }
+    panic!("no prompt was raised: {:?}", runner.state().waiting_for);
+}
+
+/// Build `scenario`, attack P1 with the Viper and pass until its trigger
+/// raises its first prompt (or a CR 616.1 choice).
+fn viper_attacks_without_advancing(scenario: GameScenario, viper: ObjectId) -> GameRunner {
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+        .expect("Viper attacks P1");
+    pass_until_prompt(&mut runner);
+    runner
+}
+
+fn concede(runner: &mut GameRunner, player: PlayerId) {
+    runner
+        .act(GameAction::Concede { player_id: player })
+        .expect("a concession is accepted");
+}
+
+fn is_eliminated(runner: &GameRunner, player: PlayerId) -> bool {
+    runner.state().players[player.0 as usize].is_eliminated
+}
+
+/// Save and restore through persistence: capture, decode, admit, finalize.
+fn round_trip(state: &GameState) -> GameState {
+    let json = serde_json::to_string(&PersistedGameState::capture(state.clone()))
+        .expect("capture: the state serializes");
+    serde_json::from_str::<PersistedGameState>(&json)
+        .expect("decode: the persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("admit: the persisted state is admissible")
+        .finalize_after_rehydration(|_| Ok(()))
+        .expect("finalize: the restored state is publishable")
+}
+
+/// V1. CR 101.4 + CR 118.12a: an object chosen for an earlier instance can't be
+/// chosen again ("Cards or permanents they've chosen previously during this
+/// process can't be chosen again"), and nothing moves until the last answer.
+#[test]
+fn viper_picks_stay_put_until_the_last_answer_and_are_not_offered_twice() {
+    let (mut runner, viper) = viper_attacking_with_blight_counters(2, 1);
+    let bears = object_named(&runner, "Grizzly Bears 1");
+    let card = object_named(&runner, "Filler Card 1");
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+
+    // The second instance: P1's only nonland permanent is already chosen, so
+    // only the discard branch is offered.
+    match &runner.state().waiting_for {
+        WaitingFor::UnlessPayment { player, cost, .. } => {
+            assert_eq!(*player, P1);
+            assert!(
+                matches!(cost, AbilityCost::Discard { .. }),
+                "the sacrifice branch's pool excludes the chosen Bears: {cost:?}"
+            );
+        }
+        other => panic!("expected P1's second prompt, got {other:?}"),
+    }
+    choose_branch(&mut runner, Branch::Discard);
+    match &runner.state().waiting_for {
+        WaitingFor::WardDiscardChoice { player, cards, .. } => {
+            assert_eq!(*player, P1);
+            assert_eq!(cards, &vec![card], "reach guard: the second pick is open");
+        }
+        other => panic!("expected P1's discard pick, got {other:?}"),
+    }
+    assert_eq!(zone_of(&runner, bears), Zone::Battlefield);
+    assert_eq!(zone_of(&runner, card), Zone::Hand);
+    assert_poll_holds_its_resolution(&runner, viper, "the second pick");
+
+    pick(&mut runner, card);
+    assert_eq!(zone_of(&runner, bears), Zone::Graveyard);
+    assert_eq!(zone_of(&runner, card), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20, "both instances were paid");
+    assert_eq!(runner.life(P0), 20);
+    assert_poll_released(&runner, P0, "after the last pick");
+}
+
+/// V1b. CR 603.2 + CR 704.3: a last answer that is a decline settles the poll
+/// through the answer's own post-action pipeline: both instances' life losses
+/// trigger Exquisite Blood ("Whenever an opponent loses life, you gain that
+/// much life.") once each.
+#[test]
+fn viper_last_decline_puts_each_life_loss_trigger_on_the_stack() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(2, 1);
+    let blood = scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+    let mut runner = viper_attacks(scenario, viper);
+
+    decline(&mut runner);
+    assert_eq!(
+        stack_entries_from(&runner, blood),
+        0,
+        "nothing triggered yet"
+    );
+    decline(&mut runner);
+
+    assert_eq!(runner.life(P1), 12);
+    assert_eq!(
+        stack_entries_from(&runner, blood),
+        2,
+        "CR 603.2: one trigger per life-loss event"
+    );
+    assert!(poll(&runner).is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 28);
+}
+
+/// V1c. CR 704.3 + CR 704.5a: a player brought to 0 life by the delivery loses
+/// before anyone gets priority.
+#[test]
+fn viper_last_decline_checks_state_based_actions_before_priority() {
+    let (mut scenario, viper) = viper_board(2, 1);
+    scenario.with_life(P1, 4);
+    let mut runner = viper_attacks(scenario, viper);
+
+    decline(&mut runner);
+    assert_eq!(
+        runner.life(P1),
+        4,
+        "reach guard: no loss before the last answer"
+    );
+    decline(&mut runner);
+
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+    assert!(poll(&runner).is_none());
+}
+
+/// V1d. A last answer that is a pick settles through the reducer epilogue's
+/// pipeline, once, through either ward pick arm.
+#[test]
+fn viper_last_pick_runs_one_pipeline_through_either_pick_arm() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    for branch in [Branch::Sacrifice, Branch::Discard] {
+        let (mut scenario, viper) = viper_board(2, 1);
+        let blood = scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+        let mut runner = viper_attacks(scenario, viper);
+        let picked = match branch {
+            Branch::Sacrifice => object_named(&runner, "Grizzly Bears 1"),
+            Branch::Discard => object_named(&runner, "Filler Card 1"),
+        };
+
+        decline(&mut runner);
+        choose_branch(&mut runner, branch);
+        assert!(
+            matches!(
+                (&runner.state().waiting_for, branch),
+                (WaitingFor::WardSacrificeChoice { .. }, Branch::Sacrifice)
+                    | (WaitingFor::WardDiscardChoice { .. }, Branch::Discard)
+            ),
+            "{branch:?}: reach guard: the pick prompt is open, got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(runner.life(P1), 20, "{branch:?}: reach guard");
+        pick(&mut runner, picked);
+
+        assert_eq!(
+            stack_entries_from(&runner, blood),
+            1,
+            "{branch:?}: the one declined instance triggers once"
+        );
+        assert_eq!(runner.life(P1), 16, "{branch:?}");
+        assert_eq!(zone_of(&runner, picked), Zone::Graveyard, "{branch:?}");
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.life(P0), 24, "{branch:?}");
+    }
+}
+
+/// V1e. CR 704.3 + CR 704.5a: the pick arms check state-based actions too.
+#[test]
+fn viper_last_pick_checks_state_based_actions_before_priority() {
+    for branch in [Branch::Sacrifice, Branch::Discard] {
+        let (mut scenario, viper) = viper_board(2, 1);
+        scenario.with_life(P1, 4);
+        let mut runner = viper_attacks(scenario, viper);
+        let picked = match branch {
+            Branch::Sacrifice => object_named(&runner, "Grizzly Bears 1"),
+            Branch::Discard => object_named(&runner, "Filler Card 1"),
+        };
+
+        decline(&mut runner);
+        choose_branch(&mut runner, branch);
+        pick(&mut runner, picked);
+
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) },
+            "{branch:?}"
+        );
+        assert!(poll(&runner).is_none(), "{branch:?}");
+    }
+}
+
+/// V5. CR 608.2d: an opponent with nothing to sacrifice or discard has only the
+/// option not to pay, so it is not prompted at all.
+#[test]
+fn viper_opponent_with_nothing_to_pay_is_not_prompted() {
+    let (scenario, viper) = bare_viper_board(2, 1);
+    let runner = viper_attacks(scenario, viper);
+
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: the attack trigger resolved"
+    );
+    assert_eq!(blight_counters(&runner, viper), 2);
+    assert_eq!(runner.life(P1), 12, "both instances went unpaid");
+    assert_poll_released(&runner, P0, "after the first walk");
+}
+
+/// V6. CR 608.2d + CR 118.3: once every payable object is chosen, the remaining
+/// instances go unpaid without a prompt.
+#[test]
+fn viper_exhausted_pool_declines_the_remaining_instance() {
+    let (mut scenario, viper) = bare_viper_board(2, 1);
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = viper_attacks(scenario, viper);
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+
+    assert_eq!(zone_of(&runner, bears), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 16, "the second instance went unpaid");
+    assert_poll_released(&runner, P0, "after the only pick");
+}
+
+/// The board of V7 / A1: P1 controls two creatures and holds a card; P1 chose
+/// its Grizzly Bears for the first instance and is picking a permanent for the
+/// second.
+fn viper_second_sacrifice_pick() -> (GameRunner, ObjectId, ObjectId) {
+    let (mut scenario, viper) = viper_board(2, 1);
+    let other = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+    let mut runner = viper_attacks(scenario, viper);
+    let bears = object_named(&runner, "Grizzly Bears 1");
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+    choose_branch(&mut runner, Branch::Sacrifice);
+    match &runner.state().waiting_for {
+        WaitingFor::WardSacrificeChoice {
+            player, permanents, ..
+        } => {
+            assert_eq!(*player, P1);
+            assert_eq!(
+                permanents,
+                &vec![other],
+                "reach guard: the second pick excludes the first"
+            );
+        }
+        other => panic!("expected P1's second sacrifice pick, got {other:?}"),
+    }
+    (runner, bears, other)
+}
+
+/// V7. CR 101.4 + CR 118.3: a pick naming the earlier instance's object is
+/// refused against the live pool, not the prompt's list, and changes nothing.
+#[test]
+fn viper_pick_naming_an_earlier_choice_is_refused() {
+    let (mut runner, bears, _) = viper_second_sacrifice_pick();
+    let before = runner.state().clone();
+
+    let refusal = runner
+        .act(GameAction::SelectCards { cards: vec![bears] })
+        .expect_err("an earlier instance's pick is refused");
+
+    assert!(
+        matches!(refusal, EngineError::InvalidAction(_)),
+        "got {refusal:?}"
+    );
+    assert_eq!(runner.state(), &before, "the refused pick changes nothing");
+}
+
+/// A1. The AI's candidates at the second pick come from the prompt's reduced
+/// pool, so they never name the earlier pick.
+#[test]
+fn viper_second_pick_ai_candidates_exclude_the_earlier_pick() {
+    let (runner, bears, other) = viper_second_sacrifice_pick();
+    let actions = engine::ai_support::legal_actions(runner.state());
+
+    assert!(
+        actions.contains(&GameAction::SelectCards { cards: vec![other] }),
+        "reach guard: the remaining permanent is a candidate: {actions:?}"
+    );
+    assert!(
+        !actions.contains(&GameAction::SelectCards { cards: vec![bears] }),
+        "the earlier pick is not a candidate: {actions:?}"
+    );
+}
+
+/// V9. CR 616.1 on the delivery's discard: the affected card's owner orders
+/// Leyline of the Void and Rest in Peace, then the parked unpaid instances run
+/// and the held trigger settles at that answer's resume.
+#[test]
+fn viper_discard_replacement_choice_resumes_the_rest_of_the_delivery() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(3, 1);
+    scenario.add_real_card(P0, "Leyline of the Void", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "Rest in Peace", Zone::Battlefield, db);
+    let mut runner = viper_attacks(scenario, viper);
+    let card = object_named(&runner, "Filler Card 1");
+
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+    decline(&mut runner);
+    decline(&mut runner);
+    decline(&mut runner);
+
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => assert_eq!(*player, P1),
+        other => panic!("expected P1's CR 616.1 choice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 orders the replacements");
+
+    assert_eq!(zone_of(&runner, card), Zone::Exile);
+    assert_eq!(runner.life(P1), 16);
+    assert_eq!(runner.life(P2), 12);
+    assert_eq!(runner.life(P0), 20);
+    assert_poll_released(&runner, P0, "after the replacement answer");
+}
+
+/// V9b. CR 616.1 on the sacrifice batch, then on the resumed tail's discard.
+#[test]
+fn viper_sacrifice_then_discard_replacement_choices_resume_in_order() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(3, 1);
+    scenario.add_real_card(P0, "Leyline of the Void", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "Rest in Peace", Zone::Battlefield, db);
+    let mut runner = viper_attacks(scenario, viper);
+    let bears = object_named(&runner, "Grizzly Bears 1");
+    let card = object_named(&runner, "Filler Card 2");
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+    decline(&mut runner);
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+    decline(&mut runner);
+
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => assert_eq!(*player, P1),
+        other => panic!("expected P1's CR 616.1 choice for the Bears, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 orders the replacements");
+    assert_eq!(zone_of(&runner, bears), Zone::Exile);
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => assert_eq!(*player, P2),
+        other => panic!("expected P2's CR 616.1 choice for its card, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P2 orders the replacements");
+
+    assert_eq!(zone_of(&runner, card), Zone::Exile);
+    assert_eq!(runner.life(P1), 16);
+    assert_eq!(runner.life(P2), 16);
+    assert_eq!(runner.life(P0), 20);
+    assert_poll_released(&runner, P0, "after the second replacement answer");
+}
+
+/// V10. CR 118.12: the chosen discard pays a cost, so Library of Leng ("If an
+/// effect causes you to discard a card, …") does not apply.
+#[test]
+fn viper_discard_is_a_cost_library_of_leng_does_not_apply() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(2, 0);
+    scenario.add_real_card(P1, "Library of Leng", Zone::Battlefield, db);
+    let mut runner = viper_attacks(scenario, viper);
+    let card = object_named(&runner, "Filler Card 1");
+
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+
+    assert_eq!(zone_of(&runner, card), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20);
+    assert_poll_released(&runner, P0, "no top-of-library option was offered");
+}
+
+/// V10b. CR 702.35a: a madness card chosen for the discard is discarded into
+/// exile and its madness trigger follows.
+#[test]
+fn viper_madness_card_chosen_for_the_discard_is_exiled() {
+    let (mut scenario, viper) = bare_viper_board(2, 0);
+    let temper = scenario
+        .add_spell_to_hand_from_oracle(P1, "Fiery Temper", true, FIERY_TEMPER)
+        .id();
+    let mut runner = viper_attacks(scenario, viper);
+
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, temper);
+
+    assert_eq!(zone_of(&runner, temper), Zone::Exile);
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(
+        stack_entries_from(&runner, temper) + deferred_from(&runner, temper),
+        1,
+        "the madness trigger is offered: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// V11. CR 608.2h + the ruling ("use the number of blight counters that were on
+/// it as it last existed on the battlefield"): sacrificed in response, the
+/// Viper gets no counter from its own trigger and the count is fixed once.
+#[test]
+fn viper_sacrificed_in_response_counts_its_last_known_counters() {
+    let (mut scenario, viper) = viper_board(2, 1);
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+        .expect("Viper attacks P1");
+    assert_eq!(
+        stack_entries_from(&runner, viper),
+        1,
+        "reach guard: the attack trigger is on the stack"
+    );
+
+    runner
+        .act(activate_altar(altar))
+        .expect("P0 activates Ashnod's Altar");
+    if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        pick(&mut runner, viper);
+    }
+    assert_eq!(
+        zone_of(&runner, viper),
+        Zone::Graveyard,
+        "the Viper was sacrificed"
+    );
+    pass_until_prompt(&mut runner);
+
+    let carrier = poll(&runner).expect("the poll is open");
+    assert_eq!(carrier.instances, 1, "one counter as it last existed");
+    decline(&mut runner);
+    assert_eq!(runner.life(P1), 16);
+}
+
+/// V12. CR 104.3a + CR 800.4f + CR 704.3: the last chooser concedes, which
+/// completes collection. The concession's own action delivers the poll, puts
+/// its life-loss trigger on the stack once and checks state-based actions
+/// before anyone gets priority.
+#[test]
+fn viper_last_chooser_conceding_delivers_the_poll_in_the_concession() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(4, 0);
+    let blood = scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+    scenario.with_life(P1, 4);
+    let mut runner = viper_attacks(scenario, viper);
+    let bears = object_named(&runner, "Grizzly Bears 2");
+
+    decline(&mut runner);
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+    assert_eq!(
+        poll(&runner).map(|carrier| carrier.current_player),
+        Some(P3)
+    );
+    assert_eq!(zone_of(&runner, bears), Zone::Battlefield);
+    assert_eq!(runner.life(P1), 4);
+    assert_poll_holds_its_resolution(&runner, viper, "P3's prompt");
+
+    concede(&mut runner, P3);
+
+    assert_eq!(zone_of(&runner, bears), Zone::Graveyard);
+    assert!(
+        is_eliminated(&runner, P1),
+        "CR 704.5a: P1 lost before anyone got priority"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        stack_entries_from(&runner, blood),
+        1,
+        "P1's life loss triggers Exquisite Blood once"
+    );
+    assert_eq!(stack_entries_from(&runner, viper), 0);
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(poll(&runner).is_none());
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 24);
+}
+
+/// V12b. CR 800.4a: the Viper's controller concedes mid-collection; its
+/// resolving trigger ceases to exist, nothing is delivered, and priority goes
+/// to the next player in turn order still in the game (CR 117.3b + CR 800.4j).
+#[test]
+fn viper_controller_conceding_abandons_the_poll() {
+    let (mut runner, viper) = viper_attacking_with_blight_counters(3, 1);
+    let bears = object_named(&runner, "Grizzly Bears 1");
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+    assert_eq!(
+        poll(&runner).map(|carrier| carrier.current_player),
+        Some(P1)
+    );
+    assert_eq!(zone_of(&runner, bears), Zone::Battlefield);
+    assert_poll_holds_its_resolution(&runner, viper, "P1's second prompt");
+
+    concede(&mut runner, P0);
+
+    assert!(poll(&runner).is_none());
+    assert_eq!(
+        zone_of(&runner, bears),
+        Zone::Battlefield,
+        "nothing delivered"
+    );
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.life(P2), 20);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert_eq!(stack_entries_from(&runner, viper), 0);
+
+    let restored = round_trip(runner.state());
+    assert!(restored.pending_simultaneous_unless.is_none());
+    assert!(restored.resolving_stack_entry.is_none());
+}
+
+/// V12c. CR 800.4a + CR 118.12: a chosen permanent the leaver owns leaves the
+/// game with it; the pick is voided, nothing is sacrificed, and its instance
+/// still counts as paid.
+#[test]
+fn viper_pick_voided_by_a_departure_costs_no_life() {
+    let (mut scenario, viper) = viper_board(3, 0);
+    let control = scenario
+        .add_enchantment_from_oracle(P1, "Mind Control", MIND_CONTROL)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let mut runner = scenario.build();
+    let stolen = object_named(&runner, "Grizzly Bears 2");
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&control).unwrap().attached_to = Some(stolen.into());
+        state
+            .objects
+            .get_mut(&stolen)
+            .unwrap()
+            .attachments
+            .push(control);
+        state.layers_dirty.mark_full();
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&stolen].controller,
+        P1,
+        "reach guard: P1 controls P2's Bears"
+    );
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+        .expect("Viper attacks P1");
+    runner.advance_until_stack_empty();
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, stolen);
+    assert_eq!(prompted(&runner), P2, "reach guard: P2 is choosing");
+    assert_poll_holds_its_resolution(&runner, viper, "P2's prompt");
+
+    concede(&mut runner, P2);
+
+    assert_ne!(
+        zone_of(&runner, stolen),
+        Zone::Graveyard,
+        "the pick left the game with its owner and was not sacrificed"
+    );
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "the voided pick's instance costs no life"
+    );
+    assert_poll_released(&runner, P0, "after the concession");
+}
+
+/// V12d. CR 800.4f: a seat that leaves after answering is pruned with its
+/// answers and its hidden pick; the current chooser's prompt stands.
+#[test]
+fn viper_answered_seat_conceding_is_pruned() {
+    let (mut runner, viper) = viper_attacking_with_blight_counters(3, 1);
+    let card = object_named(&runner, "Filler Card 1");
+
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+    decline(&mut runner);
+    assert_eq!(prompted(&runner), P2, "reach guard: P2 is choosing");
+
+    concede(&mut runner, P1);
+
+    assert_eq!(prompted(&runner), P2, "P2's prompt stands");
+    assert_poll_holds_its_resolution(&runner, viper, "after P1 left");
+    let carrier = poll(&runner).unwrap();
+    assert!(carrier.answers.iter().all(|answer| answer.player != P1));
+    assert!(carrier.hidden_discards.is_empty());
+    decline(&mut runner);
+    decline(&mut runner);
+
+    assert_eq!(runner.life(P2), 12);
+    assert_eq!(runner.life(P0), 20);
+    assert_ne!(
+        zone_of(&runner, card),
+        Zone::Graveyard,
+        "the card left with P1"
+    );
+    assert_poll_released(&runner, P0, "after P2's last decline");
+}
+
+/// V12e. CR 704.3 + CR 704.5f: the delivery a concession completes is followed
+/// by a full state-based-action pass: Maro ("Maro's power and toughness are each
+/// equal to the number of cards in your hand.") dies with its controller's last
+/// card discarded, before anyone gets priority.
+#[test]
+fn viper_concession_delivery_checks_every_state_based_action() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(3, 0);
+    let maro = scenario.add_real_card(P1, "Maro", Zone::Battlefield, db);
+    let mut runner = viper_attacks(scenario, viper);
+    let card = object_named(&runner, "Filler Card 1");
+
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+    assert_eq!(
+        poll(&runner).map(|carrier| carrier.current_player),
+        Some(P2)
+    );
+    assert_eq!(zone_of(&runner, maro), Zone::Battlefield);
+    assert_eq!(zone_of(&runner, card), Zone::Hand);
+    assert_poll_holds_its_resolution(&runner, viper, "P2's prompt");
+
+    concede(&mut runner, P2);
+
+    assert_eq!(zone_of(&runner, card), Zone::Graveyard);
+    assert_eq!(zone_of(&runner, maro), Zone::Graveyard);
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(poll(&runner).is_none());
+}
+
+/// V12f. CR 800.4a + CR 704.5a: a concession removes Abyssal Persecutor ("You
+/// can't win the game and your opponents can't lose the game."); the action
+/// boundary's player-loss check then eliminates the 0-life chooser, whose
+/// departure completes collection and settles through that check.
+#[test]
+fn viper_player_loss_check_completing_collection_settles_the_poll() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(4, 0);
+    let blood = scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+    let persecutor = scenario
+        .add_creature_from_oracle(P1, "Abyssal Persecutor", 6, 6, ABYSSAL_PERSECUTOR)
+        .id();
+    scenario.with_life(P3, 0);
+    let mut runner = viper_attacks(scenario, viper);
+
+    decline(&mut runner);
+    decline(&mut runner);
+    assert_eq!(
+        poll(&runner).map(|carrier| carrier.current_player),
+        Some(P3)
+    );
+    assert_eq!(runner.life(P3), 0);
+    assert!(!is_eliminated(&runner, P3));
+    assert_eq!(zone_of(&runner, persecutor), Zone::Battlefield);
+    assert_poll_holds_its_resolution(&runner, viper, "P3's prompt");
+
+    concede(&mut runner, P1);
+
+    assert_eq!(runner.life(P1), 20, "P1 pays nothing");
+    assert_eq!(runner.life(P2), 16);
+    assert!(is_eliminated(&runner, P1));
+    assert!(is_eliminated(&runner, P3));
+    assert_eq!(
+        stack_entries_from(&runner, blood),
+        1,
+        "P2's loss triggers once"
+    );
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(poll(&runner).is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), 24);
+}
+
+/// V12g. CR 117.3b + CR 800.4j: on another player's turn, the departed
+/// controller's abandoned poll hands priority to the active player.
+#[test]
+fn viper_controller_conceding_on_another_turn_gives_priority_to_the_active_player() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(3, 0);
+    let ephemerate = scenario.add_real_card(P0, "Ephemerate", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P2;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let outcome = runner.cast(ephemerate).target_object(viper).resolve();
+    drop(outcome);
+
+    // CR 400.7 + CR 122.2: the returned Viper is a new object with no counters,
+    // so its enters trigger leaves it with one.
+    let carrier = poll(&runner).expect("the enters trigger opened the poll");
+    assert_eq!(carrier.instances, 1);
+    assert_eq!(carrier.current_player, P2, "APNAP from the active player");
+    assert!(runner.state().resolving_stack_entry.is_some());
+
+    concede(&mut runner, P0);
+
+    assert!(poll(&runner).is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.life(P2), 20);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+}
+
+/// V12h board: Doubling Season under P0 and Vorinclex, Monstrous Raider under
+/// P1, so the trigger's own blight counter pauses on a CR 616.1 order (×2 and
+/// half don't commute). P0 applies Doubling Season first: 1 → 2 → 1.
+fn viper_counter_placement_paused(player_count: u8) -> (GameRunner, ObjectId) {
+    let db = shared_card_db().expect("the integration fixture is present");
+    let (mut scenario, viper) = viper_board(player_count, 1);
+    scenario.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Vorinclex, Monstrous Raider", Zone::Battlefield, db);
+    let mut runner = viper_attacks_without_advancing(scenario, viper);
+
+    let index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player,
+            candidate_count,
+            candidates,
+            ..
+        } => {
+            assert_eq!(*player, P0, "CR 616.1: the affected object's controller");
+            assert_eq!(*candidate_count, 2);
+            let mut names: Vec<&str> = candidates
+                .iter()
+                .map(|candidate| candidate.source_name.as_str())
+                .collect();
+            names.sort_unstable();
+            assert_eq!(names, ["Doubling Season", "Vorinclex, Monstrous Raider"]);
+            candidates
+                .iter()
+                .position(|candidate| candidate.source_name == "Doubling Season")
+                .unwrap()
+        }
+        other => panic!("expected the CR 616.1 choice, got {other:?}"),
+    };
+    assert_eq!(
+        blight_counters(&runner, viper),
+        1,
+        "the placement is paused"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("P0 applies Doubling Season first");
+
+    assert_eq!(blight_counters(&runner, viper), 2, "CR 616.1f: 1 → 2 → 1");
+    let carrier = poll(&runner).expect("the poll is open");
+    assert_eq!(carrier.instances, 2);
+    assert_eq!(carrier.current_player, P1);
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "the counter frame retired and the continuation was taken"
+    );
+    assert_poll_holds_its_resolution(&runner, viper, "after the CR 616.1 answer");
+    (runner, viper)
+}
+
+/// V12h(a). The answer route after the trigger's own placement paused.
+#[test]
+fn viper_poll_after_a_paused_counter_placement_settles_on_the_last_answer() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    let (mut runner, _) = viper_counter_placement_paused(2);
+    decline(&mut runner);
+    decline(&mut runner);
+
+    assert_eq!(runner.life(P1), 12);
+    assert_eq!(runner.life(P0), 20);
+    assert!(runner.state().resolution_stack.is_empty());
+    assert_poll_released(&runner, P0, "after the last decline");
+}
+
+/// V12h(b). The controller-leaves route after the same pause.
+#[test]
+fn viper_poll_after_a_paused_counter_placement_is_abandoned_by_its_controller() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    let (mut runner, _) = viper_counter_placement_paused(3);
+    concede(&mut runner, P0);
+
+    assert!(poll(&runner).is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.life(P2), 20);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    round_trip(runner.state());
+}
+
+/// V12i board: P2's Grizzly Bears is controlled by P1 (the board Ray of Command
+/// leaves after resolving during P0's turn), and P1 has chosen to sacrifice
+/// and is picking. With `with_own_bears`, P1 also controls its own Bears.
+fn viper_pick_over_a_borrowed_creature(
+    with_own_bears: bool,
+) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let (mut scenario, viper) = bare_viper_board(3, 0);
+    let borrowed = scenario
+        .add_creature(P2, "Borrowed Bears", 2, 2)
+        .controlled_by(P1)
+        .id();
+    let own = with_own_bears.then(|| scenario.add_creature(P1, "Own Bears", 2, 2).id());
+    let mut runner = viper_attacks(scenario, viper);
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    match &runner.state().waiting_for {
+        WaitingFor::WardSacrificeChoice {
+            player, permanents, ..
+        } => {
+            assert_eq!(*player, P1);
+            let mut expected: Vec<ObjectId> = own.into_iter().chain([borrowed]).collect();
+            let mut offered = permanents.clone();
+            expected.sort();
+            offered.sort();
+            assert_eq!(
+                offered, expected,
+                "reach guard: the pick lists the borrowed Bears"
+            );
+        }
+        other => panic!("expected P1's sacrifice pick, got {other:?}"),
+    }
+    assert_poll_holds_its_resolution(&runner, viper, "P1's pick");
+    (runner, viper, borrowed, own)
+}
+
+/// V12i(a). CR 800.4a + CR 118.3 + CR 608.2d: the departure removes the only
+/// object of an open pick; the refreshed prompt has nothing to offer, so the
+/// instance goes unpaid and collection completes: the poll releases its
+/// resolution.
+#[test]
+fn viper_departure_emptying_an_open_pick_releases_the_poll() {
+    let (mut runner, _, borrowed, _) = viper_pick_over_a_borrowed_creature(false);
+
+    concede(&mut runner, P2);
+
+    assert_ne!(
+        zone_of(&runner, borrowed),
+        Zone::Battlefield,
+        "it left with P2"
+    );
+    assert_eq!(runner.life(P1), 16, "the instance went unpaid");
+    assert_poll_released(&runner, P0, "within the concession");
+}
+
+/// V12i(b). The departure removes one object of an open pick; the pick is
+/// republished with what remains.
+#[test]
+fn viper_departure_shrinking_an_open_pick_republishes_it() {
+    let (mut runner, _, borrowed, own) = viper_pick_over_a_borrowed_creature(true);
+    let own = own.unwrap();
+
+    concede(&mut runner, P2);
+
+    match &runner.state().waiting_for {
+        WaitingFor::WardSacrificeChoice {
+            player, permanents, ..
+        } => {
+            assert_eq!(*player, P1);
+            assert_eq!(permanents, &vec![own], "the pick lists only what remains");
+        }
+        other => panic!("expected P1's republished pick, got {other:?}"),
+    }
+    assert!(runner
+        .act(GameAction::SelectCards {
+            cards: vec![borrowed]
+        })
+        .is_err());
+    pick(&mut runner, own);
+
+    assert_eq!(zone_of(&runner, own), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20);
+    assert_poll_released(&runner, P0, "after the pick");
+}
+
+/// V14. CR 605.3a + CR 608.2g: a permanent chosen for an earlier instance can't
+/// be consumed by a mana ability at a later prompt; Ashnod's Altar is refused
+/// at both the instance-2 unless prompt and its pick.
+#[test]
+fn viper_chosen_permanent_cannot_be_consumed_by_a_mana_ability() {
+    let (mut scenario, viper) = bare_viper_board(2, 1);
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+    let altar = scenario
+        .add_artifact_from_oracle(P1, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let swamp = scenario.add_basic_land(P1, ManaColor::Black);
+    let mut runner = viper_attacks(scenario, viper);
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::UnlessPayment {
+                player: P1,
+                cost: AbilityCost::Sacrifice(_),
+                ..
+            }
+        ),
+        "reach guard: instance 2 is a single-branch sacrifice: {:?}",
+        runner.state().waiting_for
+    );
+    for stage in ["the unless prompt", "the pick"] {
+        assert!(
+            offered_mana_actions(&runner).is_empty(),
+            "{stage}: no mana action is offered"
+        );
+        let refusals = submit_refused_mana_actions(
+            &mut runner,
+            P1,
+            swamp,
+            &[bears, giant, altar],
+            vec![activate_altar(altar)],
+        );
+        if stage == "the unless prompt" {
+            assert!(
+                refusals.iter().all(names_the_manaless_payment),
+                "CR 605.3a refuses the mana action: {refusals:?}"
+            );
+            choose_branch(&mut runner, Branch::Sacrifice);
+        }
+    }
+    pick(&mut runner, giant);
+
+    assert_eq!(zone_of(&runner, bears), Zone::Graveyard);
+    assert_eq!(zone_of(&runner, giant), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20);
+}
+
+/// V18 / V18b board: Stalwart Successor ("Whenever one or more counters are put
+/// on a creature you control, if it's the first time counters have been put on
+/// that creature this turn, put a +1/+1 counter on that creature.") under P0
+/// triggers on the Viper's blight counter.
+fn viper_with_stalwart_successors(count: usize) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let db = shared_card_db().expect("the integration fixture is present");
+    let (mut scenario, viper) = viper_board(2, 0);
+    let stalwarts: Vec<ObjectId> = (0..count)
+        .map(|_| scenario.add_real_card(P0, "Stalwart Successor", Zone::Battlefield, db))
+        .collect();
+    let runner = viper_attacks_without_advancing(scenario, viper);
+    (runner, viper, stalwarts)
+}
+
+fn stalwart_triggers(runner: &GameRunner, stalwarts: &[ObjectId]) -> usize {
+    stalwarts
+        .iter()
+        .map(|stalwart| stack_entries_from(runner, *stalwart) + deferred_from(runner, *stalwart))
+        .sum()
+}
+
+/// V18. CR 603.3 + CR 117.2e: what the trigger's blight counter triggers waits
+/// in the queue while the poll collects, and is put on the stack the next time
+/// a player would receive priority.
+#[test]
+fn viper_counter_trigger_waits_for_the_poll() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    let (mut runner, viper, stalwarts) = viper_with_stalwart_successors(1);
+    let stalwart = stalwarts[0];
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::UnlessPaymentChooseCost { player: P1, .. }
+    ));
+    assert_eq!(blight_counters(&runner, viper), 1);
+    assert_eq!(
+        stalwart_triggers(&runner, &stalwarts),
+        1,
+        "reach guard: Stalwart Successor triggered on the blight counter"
+    );
+    assert_poll_holds_its_resolution(&runner, viper, "P1's prompt");
+    assert_eq!(
+        deferred_from(&runner, stalwart),
+        1,
+        "the trigger waits in the queue"
+    );
+    assert_eq!(
+        runner.state().objects[&viper]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+
+    decline(&mut runner);
+
+    assert_eq!(runner.life(P1), 16);
+    assert!(poll(&runner).is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert_eq!(
+        stack_entries_from(&runner, stalwart),
+        1,
+        "placed by the answer's pipeline"
+    );
+}
+
+/// V18b. Two of the controller's triggers raise no ordering prompt over the
+/// poll's prompt.
+#[test]
+fn viper_counter_triggers_raise_no_ordering_prompt_over_the_poll() {
+    if shared_card_db().is_none() {
+        return;
+    }
+    let (mut runner, viper, stalwarts) = viper_with_stalwart_successors(2);
+
+    assert_eq!(stalwart_triggers(&runner, &stalwarts), 2, "reach guard");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPaymentChooseCost { player: P1, .. }
+        ) && runner.state().stack.is_empty(),
+        "P1's prompt stands over an empty stack: {:?}",
+        runner.state().waiting_for
+    );
+    assert_poll_holds_its_resolution(&runner, viper, "P1's prompt");
+
+    decline(&mut runner);
+
+    assert_eq!(runner.life(P1), 16);
+    assert!(poll(&runner).is_none());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(
+        stalwarts
+            .iter()
+            .all(|stalwart| deferred_from(&runner, *stalwart) == 0),
+        "both triggers left the queue"
+    );
+}
+
+/// V19. Regression: a generic unless prompt (Hag of Ceaseless Torment, not a
+/// choose-all-then-act poll) settles its trigger as before, in the action that
+/// raises the prompt.
+#[test]
+fn hag_unless_prompt_settles_its_trigger_before_the_answer() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let hag = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Hag of Ceaseless Torment",
+            3,
+            3,
+            HAG_OF_CEASELESS_TORMENT,
+        )
+        .id();
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    scenario.with_cards_in_hand(P1, &["Filler Card"]);
+    let mut runner = scenario.build();
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+
+    match &runner.state().waiting_for {
+        WaitingFor::UnlessPaymentChooseCost {
+            player,
+            pending_effect,
+            ..
+        } => {
+            assert_eq!(*player, P1);
+            assert_eq!(pending_effect.source_id, hag, "reach guard: Hag's prompt");
+        }
+        other => panic!("expected the opponent's unless prompt, got {other:?}"),
+    }
+    assert!(poll(&runner).is_none(), "Hag's clause is not a poll");
+    assert!(
+        runner.state().resolving_stack_entry.is_none(),
+        "the trigger was retired in the action that raised the prompt"
+    );
+
+    decline(&mut runner);
+    assert_eq!(runner.life(P1), 17);
+    assert_eq!(runner.life(P0), 20);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    );
+}
+
+/// P. CR 101.4a + CR 101.4b: earlier answers are public, but a card chosen to
+/// be discarded stays unrevealed ("cards chosen to be discarded this way won't
+/// be revealed until they're discarded") except to its chooser.
+#[test]
+fn viper_hidden_discard_is_projected_only_to_its_chooser() {
+    let (mut runner, _) = viper_attacking_with_blight_counters(3, 1);
+    let bears = object_named(&runner, "Grizzly Bears 1");
+    let card = object_named(&runner, "Filler Card 1");
+
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, bears);
+    assert_eq!(prompted(&runner), P2);
+    let carrier = poll(&runner).unwrap();
+    assert!(
+        carrier
+            .hidden_discards
+            .iter()
+            .any(|(seat, pin)| *seat == P1 && pin.object_id == card),
+        "reach guard: the unfiltered poll holds P1's hidden pick"
+    );
+
+    let p2_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P2);
+    let p2_poll = p2_view.pending_simultaneous_unless.as_deref().unwrap();
+    assert!(p2_poll.hidden_discards.is_empty());
+    assert!(matches!(
+        p2_poll
+            .answers
+            .iter()
+            .map(|answer| &answer.answer)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        [
+            SimultaneousUnlessAnswer::Discard,
+            SimultaneousUnlessAnswer::Sacrifice { permanent }
+        ] if permanent.object_id == bears
+    ));
+
+    let p1_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+    assert!(p1_view
+        .pending_simultaneous_unless
+        .as_deref()
+        .unwrap()
+        .hidden_discards
+        .iter()
+        .any(|(seat, pin)| *seat == P1 && pin.object_id == card));
+}
+
+/// S. A mid-collection state round-trips through serde unchanged.
+#[test]
+fn viper_mid_collection_state_round_trips_through_serde() {
+    let (mut runner, _) = viper_attacking_with_blight_counters(3, 1);
+    let card = object_named(&runner, "Filler Card 1");
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+    assert!(poll(&runner).is_some(), "reach guard: mid-collection");
+
+    // Serde-skipped caches are rebuilt on load, so the wire form is what must
+    // round-trip, together with the poll, its prompt and its resolving entry.
+    let wire = serde_json::to_value(runner.state()).expect("the state serializes");
+    let decoded: GameState = serde_json::from_value(wire.clone()).expect("the state decodes");
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+    assert_eq!(
+        decoded.pending_simultaneous_unless,
+        runner.state().pending_simultaneous_unless
+    );
+    assert_eq!(decoded.waiting_for, runner.state().waiting_for);
+    assert_eq!(
+        decoded.resolving_stack_entry,
+        runner.state().resolving_stack_entry
+    );
+}
+
+/// S2. CR 117.2e: a save taken while the poll holds its resolution restores
+/// (the wait is not a priority wait) and the poll finishes on the restored game.
+#[test]
+fn viper_poll_restored_mid_collection_finishes() {
+    let (mut runner, viper) = viper_attacking_with_blight_counters(2, 1);
+    decline(&mut runner);
+    assert_poll_holds_its_resolution(&runner, viper, "P1's second prompt");
+
+    let restored = round_trip(runner.state());
+    assert_eq!(
+        restored.pending_simultaneous_unless,
+        runner.state().pending_simultaneous_unless
+    );
+    assert_eq!(restored.waiting_for, runner.state().waiting_for);
+    assert_eq!(
+        restored
+            .resolving_stack_entry
+            .as_ref()
+            .map(|entry| entry.id),
+        runner
+            .state()
+            .resolving_stack_entry
+            .as_ref()
+            .map(|entry| entry.id)
+    );
+
+    let mut restored = GameRunner::from_state(restored);
+    decline(&mut restored);
+    assert_eq!(restored.life(P1), 12);
+    assert_poll_released(&restored, P0, "after the restored decline");
 }
