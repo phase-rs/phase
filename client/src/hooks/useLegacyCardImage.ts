@@ -94,8 +94,8 @@ interface UseCardImageResult {
    * Discards this card's cached art, failed sources included, and resolves it
    * again, for every surface showing the card. Nothing calls it but the
    * player's tap. Absent without an oracle id. Offline, present only when this
-   * request, or another surface of the card, recorded a failed source; owner
-   * art (`useCardImage`'s owner-printing overlay) applies that rule online too.
+   * request recorded a failed source or `cardArtFailed` is set; owner art
+   * (`useCardImage`'s owner-printing overlay) applies that rule online too.
    */
   reload?(): void;
   /**
