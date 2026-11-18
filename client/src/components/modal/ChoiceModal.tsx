@@ -60,7 +60,7 @@ const LAYOUT_STYLES = {
   },
   columns: {
     dialogSize: "lg",
-    body: "grid grid-cols-2 gap-3 p-3",
+    body: "grid grid-cols-2 gap-3 p-3 lg:px-5",
     cardColumn: "flex flex-col gap-1.5",
     actionColumn: "flex flex-col gap-3",
     options: "grid grid-cols-2 gap-2",

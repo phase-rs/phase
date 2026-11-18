@@ -115,6 +115,27 @@ describe("MenuSelect", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
+  it("opens as a bottom sheet on a narrow screen when menuLayout is auto", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(max-width: 819px)",
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+
+    render(<MenuSelect label="All types" items={items} onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "All types" }));
+
+    const listbox = screen.getByRole("listbox");
+    expect(listbox.className).toContain("inset-x-2");
+    expect(listbox.className).toContain("rounded-[10px]");
+    expect(listbox.className).not.toContain("rounded-[8px]");
+    // The sheet's backdrop is a second button that closes it.
+    expect(screen.getAllByRole("button", { name: "All types" })).toHaveLength(2);
+
+    vi.unstubAllGlobals();
+  });
+
   it("uses an anchored dropdown when menuLayout is dropdown, even on mobile", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: query === "(max-width: 819px)",

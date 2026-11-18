@@ -265,6 +265,9 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
   }
 
   function expectStacked() {
+    // Reach guard: the prompt has its card, so it is stacked by the screen,
+    // not by the no-preview fallback.
+    expect(screen.getByRole("img", { name: "Rhystic Study" })).toBeInTheDocument();
     const yes = screen.getByRole("button", { name: "Yes" });
     const options = yes.parentElement as HTMLElement;
 
