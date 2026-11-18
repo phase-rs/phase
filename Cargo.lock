@@ -1988,6 +1988,7 @@ name = "phase-engine"
 version = "0.128.0"
 dependencies = [
  "assert_matches",
+ "crc32fast",
  "flate2",
  "im",
  "indexmap",
