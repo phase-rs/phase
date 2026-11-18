@@ -355,8 +355,7 @@ fn quartzwood_uses_only_matching_sources_in_its_token_stats() {
     scenario.at_phase(Phase::PreCombatMain);
     let quartzwood = add_quartzwood(&mut scenario);
     let trampler = scenario
-        .add_creature(P0, "Trampler", 3, 3)
-        .with_keyword(Keyword::Trample)
+        .add_creature_from_oracle(P0, "Argothian Swine", 3, 3, "Trample")
         .id();
     let excluded = scenario.add_creature(P0, "Nontrampler", 4, 4).id();
     let mut runner = scenario.build();
@@ -403,12 +402,10 @@ fn quartzwood_resolves_each_damaged_players_total_in_chosen_order() {
     scenario.at_phase(Phase::PreCombatMain);
     let quartzwood = add_quartzwood(&mut scenario);
     let first = scenario
-        .add_creature(P0, "Trampler P1", 3, 3)
-        .with_keyword(Keyword::Trample)
+        .add_creature_from_oracle(P0, "Argothian Swine", 3, 3, "Trample")
         .id();
     let second = scenario
-        .add_creature(P0, "Trampler P2", 2, 2)
-        .with_keyword(Keyword::Trample)
+        .add_creature_from_oracle(P0, "Satyr Rambler", 2, 1, "Trample")
         .id();
     let excluded = scenario.add_creature(P0, "Nontrampler", 3, 3).id();
     let mut runner = scenario.build();
