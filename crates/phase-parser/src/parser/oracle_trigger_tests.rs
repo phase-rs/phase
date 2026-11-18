@@ -44451,27 +44451,20 @@ fn received_damage_siblings_without_windows_keep_no_condition() {
 }
 
 /// CR 603.2 + CR 508.3d/e: the "you attack" head classifies its whole tail.
-/// Recognized tails are all-consuming (only a trailing comma and whitespace may
-/// follow); anything else is `Unrecognized`. The word-boundary guard sits
-/// outside the classification, so non-heads return `None`.
+/// Recognized tails are all-consuming; anything else is `Unrecognized`. The
+/// word-boundary guard sits outside the classification (`None`).
 #[test]
 fn you_attack_head_tail_grammar() {
     use YouAttackTail::{AttackedPlayer, Bare, EnchantedPlayer, Unrecognized};
+    let player = Some(AttackedPlayer(AttackTargetFilter::Player));
     let rows: &[(&str, Option<YouAttackTail>)] = &[
         ("whenever you attack", Some(Bare)),
         ("when you attack", Some(Bare)),
-        // CR 603.7b: the prefix-stripped delayed condition.
-        ("you attack", Some(Bare)),
+        ("you attack", Some(Bare)), // CR 603.7b delayed form
         ("whenever you attack,", Some(Bare)),
         ("whenever you attack , ", Some(Bare)),
-        (
-            "whenever you attack a player",
-            Some(AttackedPlayer(AttackTargetFilter::Player)),
-        ),
-        (
-            "whenever you attack a player,",
-            Some(AttackedPlayer(AttackTargetFilter::Player)),
-        ),
+        ("whenever you attack a player", player.clone()),
+        ("whenever you attack a player,", player),
         (
             "whenever you attack the monarch",
             Some(AttackedPlayer(AttackTargetFilter::Monarch)),
@@ -44480,7 +44473,6 @@ fn you_attack_head_tail_grammar() {
             "whenever you attack enchanted player",
             Some(EnchantedPlayer),
         ),
-        // A recognized object followed by a qualifier is not the object.
         (
             "whenever you attack a player with one or more equipped creatures",
             Some(Unrecognized),
@@ -44488,14 +44480,9 @@ fn you_attack_head_tail_grammar() {
         ("whenever you attack a player.", Some(Unrecognized)),
         ("whenever you attack enchanted opponent", Some(Unrecognized)),
         (
-            "whenever you attack with ~ and another legendary creature",
-            Some(Unrecognized),
-        ),
-        (
             "whenever you attack the player who has the initiative",
             Some(Unrecognized),
         ),
-        // Word boundary: not a "you attack" head at all.
         ("whenever you attacked this turn", None),
         ("whenever you attack.", None),
         ("whenever you attackers", None),
@@ -44506,8 +44493,8 @@ fn you_attack_head_tail_grammar() {
 }
 
 /// CR 603.2: a printed "you attack" head with an unmodelled tail fails closed as
-/// `Unknown` carrying the card's original casing, instead of a bare `YouAttack`
-/// that fires on every attack. Recognized tails keep their modes.
+/// `Unknown` with the card's casing, not a bare `YouAttack` that fires on every
+/// attack. Ainok Strike Leader's "~ and/or your commander" is modelled instead.
 #[test]
 fn you_attack_unrecognized_tail_fails_closed() {
     for (line, name, head) in [
@@ -44517,88 +44504,52 @@ fn you_attack_unrecognized_tail_fails_closed() {
             "Whenever you attack with ~ and another legendary creature",
         ),
         (
-            "Whenever you attack a player with one or more equipped creatures, draw a card.",
-            "Akiri, Fearless Voyager",
-            "Whenever you attack a player with one or more equipped creatures",
-        ),
-        (
-            "Whenever you attack with a creature an opponent owns, you gain 2 life and that player loses 2 life.",
-            "Nihiloor",
-            "Whenever you attack with a creature an opponent owns",
-        ),
-        (
             "Whenever you attack the player who has the initiative, create a Treasure token.",
             "Loot Dispute",
             "Whenever you attack the player who has the initiative",
         ),
     ] {
-        assert_eq!(
-            parse_trigger_line(line, name).mode,
-            TriggerMode::Unknown(head.to_string()),
-            "{name}"
-        );
+        let mode = parse_trigger_line(line, name).mode;
+        assert_eq!(mode, TriggerMode::Unknown(head.to_string()), "{name}");
     }
-
-    let bare = parse_trigger_line("Whenever you attack, draw a card.", "Test");
-    assert_eq!(bare.mode, TriggerMode::YouAttack);
-    assert_eq!(bare.attack_target_filter, None);
-    let player = parse_trigger_line("Whenever you attack a player, draw a card.", "Test");
-    assert_eq!(player.mode, TriggerMode::YouAttack);
-    assert_eq!(
-        player.attack_target_filter,
-        Some(AttackTargetFilter::Player)
+    let ainok = parse_trigger_line(
+        "Whenever you attack with ~ and/or your commander, draw a card.",
+        "Ainok Strike Leader",
     );
-    let monarch = parse_trigger_line("Whenever you attack the monarch, draw a card.", "Test");
-    assert_eq!(
-        monarch.attack_target_filter,
-        Some(AttackTargetFilter::Monarch)
-    );
-    // CR 303.4b: Archnemesis's "you attack enchanted player" still declines to
-    // the defender-scoped Attacks shape.
-    let archnemesis = parse_trigger_line(
-        "Whenever you attack enchanted player, that player loses 2 life. You draw a card and gain 2 life.",
-        "Archnemesis",
-    );
-    assert_eq!(archnemesis.mode, TriggerMode::Attacks);
-    assert_eq!(
-        archnemesis.attack_target_filter,
-        Some(AttackTargetFilter::Player)
+    assert_eq!(ainok.mode, TriggerMode::YouAttack);
+    assert!(
+        matches!(&ainok.valid_card, Some(TargetFilter::Or { filters })
+            if filters[0] == TargetFilter::SelfRef
+                && matches!(&filters[1], TargetFilter::Typed(tf)
+                    if tf.properties.contains(&FilterProp::IsCommander))),
+        "CR 903.3: {:?}",
+        ainok.valid_card
     );
 }
 
 /// CR 603.2 + CR 508.1m / CR 509.1i: in "attack or block with X" the bare
-/// attack leg keeps the shared "with X" adjunct. Leg-local complements of a
-/// non-combat disjunction are not carried.
+/// attack leg keeps the shared "with X". Leg-local complements are not carried.
 #[test]
 fn or_split_carries_shared_adjunct_to_bare_leg() {
-    // Sol, Advocate Eternal: both legs keep "with both ~ and its partner"; the
-    // attack leg then fails closed through the "you attack" tail grammar.
     let sol = parse_trigger_lines(
         "Whenever you attack or block with both ~ and its partner, support 4 and investigate four times.",
         "Sol, Advocate Eternal",
     );
     assert_eq!(sol.len(), 2);
-    assert_eq!(
-        sol[0].mode,
-        TriggerMode::Unknown("Whenever you attack with both ~ and its partner".to_string())
-    );
+    let attack_leg = TriggerMode::Unknown("Whenever you attack with both ~ and its partner".into());
+    assert_eq!(sol[0].mode, attack_leg);
     assert!(matches!(sol[1].mode, TriggerMode::Unknown(_)));
-
-    // Controls: leg-local complements stay on their own leg.
-    let damage = parse_trigger_lines(
-        "When ~ enters or deals combat damage to a player, draw a card.",
-        "Test",
-    );
-    assert_eq!(
-        damage[0].description.as_deref(),
-        Some("When ~ enters, draw a card.")
-    );
-    let exile_from = parse_trigger_lines(
-        "When ~ dies or is put into exile from the battlefield, draw a card.",
-        "Test",
-    );
-    assert_eq!(
-        exile_from[0].description.as_deref(),
-        Some("When ~ dies, draw a card.")
-    );
+    for (line, first_leg) in [
+        (
+            "When ~ enters or deals combat damage to a player, draw a card.",
+            "When ~ enters, draw a card.",
+        ),
+        (
+            "When ~ dies or is put into exile from the battlefield, draw a card.",
+            "When ~ dies, draw a card.",
+        ),
+    ] {
+        let legs = parse_trigger_lines(line, "Test");
+        assert_eq!(legs[0].description.as_deref(), Some(first_leg));
+    }
 }

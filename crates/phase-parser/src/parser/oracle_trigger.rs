@@ -1317,31 +1317,26 @@ fn parse_attacked_player_phrase(input: &str) -> OracleResult<'_, ()> {
 /// What follows "you attack" in a player attack-trigger head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum YouAttackTail {
-    /// CR 508.3d: nothing names an attacked object; fires once per declaration.
+    /// CR 508.3d: no attacked object; fires once per declaration.
     Bare,
-    /// CR 508.3e: "a player" / "the monarch" (see [`parse_you_attack_tail`]).
+    /// CR 508.3e: "a player" / "the monarch".
     AttackedPlayer(AttackTargetFilter),
-    /// CR 303.4b: "enchanted player" — owned by subject+event decomposition
-    /// (the Curse cycle's `Attacks` shape), so this arm declines.
+    /// CR 303.4b: "enchanted player", owned by subject+event decomposition.
     EnchantedPlayer,
-    /// CR 603.2: any other tail narrows the trigger event beyond "you attack"
-    /// (Merry, Esquire of Rohan's "with ~ and another legendary creature",
-    /// Akiri's "a player with one or more equipped creatures"). Dropping it would
-    /// fire the trigger on every attack, so the head fails closed as `Unknown`.
+    /// CR 603.2: any other tail narrows the event (Merry, Esquire of Rohan's
+    /// "with ~ and another legendary creature"); dropping it would fire on
+    /// every attack, so the head fails closed as `Unknown`.
     Unrecognized,
 }
 
-/// The end of a "you attack" head: an optional trailing comma with optional
-/// whitespace around it, then end of input. The effect is split off upstream,
-/// so nothing else may follow a recognized tail.
+/// Optional comma and whitespace, then end of input: nothing else may follow a
+/// recognized tail (the effect is split off upstream).
 fn parse_you_attack_tail_end(input: &str) -> OracleResult<'_, ()> {
     value((), (multispace0, opt(tag(",")), multispace0, eof)).parse(input)
 }
 
-/// Classify the text after "you attack" (`rest` begins at the character right
-/// after "attack"; the caller's word-boundary guard has already rejected
-/// "attacked"/"attacks"). Every recognized tail is all-consuming; anything
-/// else is [`YouAttackTail::Unrecognized`].
+/// Classify the text after "you attack". Every recognized tail is
+/// all-consuming; anything else is [`YouAttackTail::Unrecognized`].
 fn parse_you_attack_tail(rest: &str) -> YouAttackTail {
     alt((
         value(YouAttackTail::Bare, parse_you_attack_tail_end),
@@ -1358,15 +1353,11 @@ fn parse_you_attack_tail(rest: &str) -> YouAttackTail {
     .map_or(YouAttackTail::Unrecognized, |(_, tail)| tail)
 }
 
-/// CR 508.1 + CR 603.2: a player attack-trigger head, "[whenever|when] you
-/// attack<tail>", with its tail classified. Anchored, not a substring scan; the
-/// keyword is optional because `try_parse_whenever_this_turn` (CR 603.7b) emits
-/// the prefix-stripped delayed condition ("you attack", Dalkovan Encampment).
-///
-/// The word-boundary guard sits OUTSIDE the classification: "you attack" must be
-/// followed by end of input, a space or a comma, so "you attacked this turn" (a
-/// condition) and "you attacks" never reach [`YouAttackTail::Unrecognized`].
-/// `None` means this is not a "you attack" head at all.
+/// CR 508.1 + CR 603.2: "[whenever|when] you attack<tail>" with its tail
+/// classified; the keyword is optional for the delayed form emitted by
+/// `try_parse_whenever_this_turn` (CR 603.7b). The word-boundary guard sits
+/// OUTSIDE the classification, so "you attacked this turn" is `None`, never
+/// `Unrecognized`.
 fn parse_you_attack_head(lower: &str) -> Option<YouAttackTail> {
     let (rest, _) = preceded(
         opt(alt((
@@ -13243,9 +13234,7 @@ fn append_shared_object_if_bare_event(
     first.to_string()
 }
 
-/// "attack"/"attacks"/"block"/"blocks" at a word boundary: the combat
-/// declaration verbs whose "with <participants>" adjunct names the declared
-/// attackers or blockers (CR 508.1 / CR 509.1).
+/// "attack[s]" / "block[s]" at a word boundary (CR 508.1 / CR 509.1).
 fn parse_combat_declaration_verb(input: &str) -> OracleResult<'_, ()> {
     alt((
         parse_event_word("attacks"),
@@ -13256,42 +13245,32 @@ fn parse_combat_declaration_verb(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// The lowercase start of a `" with <participants>"` adjunct in the SECOND leg
-/// of a 2-way event disjunction whose first leg ENDS at a combat declaration
-/// verb (so it is bare) and whose second leg is also a combat declaration: CR
-/// 508.1m / CR 509.1i, "attack or block with X" names the declared creatures of
-/// both events, so the adjunct modifies the whole disjunction.
-///
-/// Everything else after the second leg's event head stays leg-local ("deals
-/// combat damage to a player", "is put into exile from the battlefield").
-fn shared_disjunction_adjunct<'a>(first_lower: &str, second_lower: &'a str) -> Option<&'a str> {
-    scan_preceded(first_lower, |i| {
-        all_consuming(parse_combat_declaration_verb).parse(i)
-    })?;
-    preceded(
-        parse_combat_declaration_verb,
-        peek(tag::<_, _, OracleError<'_>>(" with ")),
-    )
-    .parse(second_lower)
-    .ok()
-    .map(|(adjunct, _)| adjunct)
-}
-
-/// CR 603.2: a bare first leg ("Whenever you attack") must not lose an adjunct
-/// printed once after the second leg that modifies both events
-/// ([`shared_disjunction_adjunct`]). Sol, Advocate Eternal: "Whenever you attack
-/// or block with both ~ and its partner" -> both legs keep "with both ~ and its
-/// partner".
+/// CR 603.2 + CR 508.1m / CR 509.1i: in "attack or block with X" the "with X"
+/// printed after the second leg names the declared creatures of BOTH events,
+/// so a first leg that ends at its combat verb gets it too (Sol, Advocate
+/// Eternal: "Whenever you attack or block with both ~ and its partner"). Any
+/// other complement after the second leg stays leg-local.
 fn append_shared_adjunct_if_bare_event(
     first: &str,
     first_lower: &str,
     second_lower: &str,
     second_event: &str,
 ) -> String {
-    match shared_disjunction_adjunct(first_lower, second_lower) {
+    let first_is_bare_combat = scan_preceded(first_lower, |i| {
+        all_consuming(parse_combat_declaration_verb).parse(i)
+    })
+    .is_some();
+    let adjunct = preceded(
+        parse_combat_declaration_verb,
+        peek(tag::<_, _, OracleError<'_>>(" with ")),
+    )
+    .parse(second_lower)
+    .ok()
+    .filter(|_| first_is_bare_combat);
+    match adjunct {
         // `second_lower` and `second_event` are the same trimmed span, so the
         // adjunct's suffix length maps onto the original case.
-        Some(adjunct) => format!(
+        Some((adjunct, _)) => format!(
             "{first}{}",
             &second_event[second_event.len() - adjunct.len()..]
         ),
@@ -20068,6 +20047,9 @@ fn apply_attachment_prop(filter: TargetFilter, prop: Option<FilterProp>) -> Targ
 
 /// CR 903.3 + CR 508.1: "whenever you attack with [your] commander" — fires when
 /// the scoped player declares a commander as an attacker (Jocasta, Automaton Avenger).
+/// A leading self-reference ("with this creature and/or your commander", Ainok
+/// Strike Leader) widens the subject to `Or[SelfRef, commander]`: the trigger
+/// fires once when either or both are declared as attackers.
 fn try_parse_you_attack_with_commander(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let (after_prefix, ()) = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
@@ -20079,11 +20061,23 @@ fn try_parse_you_attack_with_commander(lower: &str) -> Option<(TriggerMode, Trig
     let (after_actor, ()) = value((), tag::<_, _, OracleError<'_>>("you attack with "))
         .parse(after_prefix)
         .ok()?;
+    let (after_self, self_leg) = opt(terminated(
+        parse_self_reference_subject,
+        tag::<_, _, OracleError<'_>>(" and/or "),
+    ))
+    .parse(after_actor)
+    .ok()?;
 
-    let (filter, rest) = parse_commander_subject_filter_prefix(after_actor)?;
+    let (filter, rest) = parse_commander_subject_filter_prefix(after_self)?;
     if !rest.trim().is_empty() {
         return None;
     }
+    let filter = match self_leg {
+        Some(()) => TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, filter],
+        },
+        None => filter,
+    };
 
     let mut def = make_base();
     def.mode = TriggerMode::YouAttack;

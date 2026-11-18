@@ -1,12 +1,16 @@
+//! CR 603.2: a "you attack" trigger head triggers only when the declaration
+//! matches its whole trigger event; the head's tail is never dropped.
+//!
 //! Sol, Advocate Eternal (#11044): "Teamwork — Whenever you attack or block
 //! with both Sol, Advocate Eternal and its partner, support 4 and investigate
-//! four times."
-//!
-//! CR 603.2: the ability triggers only when the event matches the whole
-//! trigger event. The parser used to read the attack leg as a bare "whenever
-//! you attack", so Sol attacking alone supported 4. "Its partner" needs Legendary
+//! four times." The parser used to read the attack leg as a bare "whenever you
+//! attack", so Sol attacking alone supported 4. "Its partner" needs Legendary
 //! partner (CR 702.124), which the engine does not model, so both legs fail
 //! closed as `Unknown` and never fire.
+//!
+//! Ainok Strike Leader: "Whenever you attack with this creature and/or your
+//! commander, ..." used to fire on any attack. It now fires only when Ainok or
+//! the commander is declared as an attacker.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
@@ -17,6 +21,35 @@ use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 
 const SOL: &str = "Legendary partner (You can have two commanders if this is one of them. The other one is promoted to legendary.)\nFlying, vigilance\nTeamwork — Whenever you attack or block with both Sol, Advocate Eternal and its partner, support 4 and investigate four times.";
+const AINOK_STRIKE_LEADER: &str = "Whenever you attack with this creature and/or your commander, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player.\nSacrifice this creature: Creature tokens you control gain indestructible until end of turn.";
+
+/// CR 603.2 + CR 508.1m: Ainok's trigger is on the stack after the declaration
+/// only when Ainok itself attacks (no commander on this board).
+#[test]
+fn ainok_triggers_only_when_it_attacks() {
+    for ainok_attacks in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let ainok = s
+            .add_creature_from_oracle(P0, "Ainok Strike Leader", 2, 2, AINOK_STRIKE_LEADER)
+            .id();
+        let bears = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut r = s.build();
+        r.advance_to_combat();
+        let attacker = if ainok_attacks { ainok } else { bears };
+        r.declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .expect("declare one attacker");
+        assert_eq!(
+            r.stack_names(),
+            if ainok_attacks {
+                vec!["Ainok Strike Leader".to_string()]
+            } else {
+                vec![]
+            },
+            "ainok_attacks={ainok_attacks}"
+        );
+    }
+}
 
 /// Reach guard: both Teamwork legs parse, and both fail closed.
 #[test]
