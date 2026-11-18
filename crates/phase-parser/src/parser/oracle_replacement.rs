@@ -13458,7 +13458,7 @@ fn parse_optional_token_substitution_choice(
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::CreateToken)
-            // CR 109.5 + CR 111.2: "If you would create" — "you" is this object's controller and the creator of a token is its owner, so the substitution reaches only its controller's token creations (the scope the subject combinator yields).
+            // CR 109.5 + CR 111.2: "If you would create" — "you" is this object's controller and the creator of a token is its owner, so the substitution reaches only its controller's token creations (the "you would create" tag maps to ControllerRef::You, as in every sibling).
             .token_owner_scope(owner_scope)
             .mode(ReplacementMode::Optional { decline: None })
             .execute(AbilityDefinition::new(

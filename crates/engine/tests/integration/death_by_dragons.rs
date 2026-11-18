@@ -932,7 +932,7 @@ fn death_by_dragons_declined_optional_keeps_one_shared_entry() {
 /// of The Pit and Jinnie Fay), while the engine creates the accepted
 /// substitute as a post-replacement continuation after Reflection was used on
 /// P1's batch, so it enters as a Cat.
-/// CR 400.2: the paused clause record is server authority, absent from every viewer projection.
+/// The paused clause record is server authority (it can hold hidden-zone moves, CR 400.2 + CR 800.4a), absent from every viewer projection.
 #[test]
 fn death_by_dragons_accepted_optional_completes_one_clause() {
     let mut scenario = game();
@@ -1144,8 +1144,8 @@ fn death_by_dragons_two_optional_owners_decide_in_apnap_order() {
 /// CR 616.1 + CR 614.5 (F2): P0's Halving Season and P1's Doubling Season both
 /// apply only to P1's tokens, so P1 (the affected batch owner) orders them and
 /// is offered only those two (Halving Season rulings: "apply the replacement
-/// effects one at a time, rounding down each time"; "you choose the order ...
-/// no matter who controls the sources of those effects").
+/// effects one at a time, rounding down each time"; CR 616.1: the affected
+/// player chooses the order whoever controls the sources).
 fn halving_doubling_ordered_by_affected_owner(halving_first: bool) {
     let mut scenario = game();
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
@@ -1310,7 +1310,7 @@ fn death_by_dragons_shared_halving_asks_each_owner_in_apnap_order() {
     shared_halving_orders_each_owner(false);
 }
 
-/// CR 101.4 + CR 101.4b + CR 616.1: an earlier APNAP owner's lone optional is
+/// CR 101.4 + CR 616.1: an earlier APNAP owner's lone optional is
 /// decided before a later owner orders. P1's Jinnie Fay applies only to P1's
 /// tokens; P1's Halving Season applies only to P2's (ruling: "won't change the
 /// number of tokens you create"), as does P2's Doubling Season. P1 decides
