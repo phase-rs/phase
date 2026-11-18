@@ -3945,7 +3945,7 @@ fn grants_to(effect: &Effect, filter: &TargetFilter) -> bool {
     )
 }
 
-/// CR 608.2c + CR 201.5c: across the class, a bare "it" after an instruction
+/// CR 608.2c + CR 201.5: across the class, a bare "it" after an instruction
 /// that names the source (`~` / "this creature") binds the source, not the
 /// object the trigger condition introduced (the cast spell, CR 109.2b) or the
 /// trigger subject. CR 113.7a: the source still deals the damage after it is

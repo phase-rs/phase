@@ -1,4 +1,4 @@
-//! CR 608.2c + CR 201.5c: an instruction that names the source (`~`, "this
+//! CR 608.2c + CR 201.5: an instruction that names the source (`~`, "this
 //! creature") makes it the nearest antecedent of the next instruction's bare
 //! "it". On a spell-cast trigger the condition also introduces the cast spell
 //! (CR 109.2b); that spell must not capture the pronoun, or the card's untap or
