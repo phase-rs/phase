@@ -892,7 +892,7 @@
       "title": "占卜"
     },
     "search": {
-      "instructionWithTitle": "{{title}}：{{instruction}}",
+      "instructionWithTitle": "{{title}} • {{instruction}}",
       "subtitleDistinctExact_one": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctExact_other": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctUpTo_one": "至多选择{{count}}张特性各不相同的牌",

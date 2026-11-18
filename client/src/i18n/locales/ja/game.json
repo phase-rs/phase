@@ -1593,7 +1593,7 @@
     },
     "search": {
       "title": "ライブラリーを検索",
-      "instructionWithTitle": "{{title}}：{{instruction}}",
+      "instructionWithTitle": "{{title}} • {{instruction}}",
       "subtitleExact_one": "{{count}}枚のカードを選択",
       "subtitleExact_other": "{{count}}枚のカードを選択",
       "subtitleUpTo_one": "最大{{count}}枚のカードを選択",

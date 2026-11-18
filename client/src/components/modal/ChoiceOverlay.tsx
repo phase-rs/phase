@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Children, isValidElement, useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { useHorizontalScroll } from "../../hooks/useHorizontalScroll.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
 import { PeekButton } from "./DialogShell.tsx";
 
@@ -262,6 +263,35 @@ export function ScrollableCardStrip({
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+/**
+ * The cards of a card choice, one element per card. From lg up they sit in a
+ * ScrollableCardStrip, as on every other strip prompt. Below lg the overlay
+ * fills a phone's screen, where a sideways strip leaves the cards small, so
+ * they fill the width in a grid that scrolls down instead, at a size whose
+ * rules text reads (`.card-choice-grid` in index.css). Each card gets a cell
+ * of the grid's own, which sizes it, so the cards' markup never needs a rule.
+ *
+ * Like the strip, place it in a flex column with a definite height, such as
+ * an overlay body: below lg the grid fills it and scrolls within it.
+ */
+export function ChoiceCards({ children }: { children: React.ReactNode }) {
+  const isBelowLg = useIsMobile();
+
+  if (!isBelowLg) {
+    return <ScrollableCardStrip>{children}</ScrollableCardStrip>;
+  }
+
+  return (
+    <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-1 pb-1 pt-2">
+      <div className="card-choice-grid">
+        {Children.map(children, (card) =>
+          isValidElement(card) ? <div className="card-choice-grid-cell">{card}</div> : null,
+        )}
+      </div>
     </div>
   );
 }

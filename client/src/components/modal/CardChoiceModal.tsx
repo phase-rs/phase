@@ -31,6 +31,7 @@ import type {
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import {
   CancelButton,
+  ChoiceCards,
   ChoiceHeaderConfirm,
   ChoiceOverlay,
   ConfirmButton,
@@ -706,7 +707,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
         showSort={false}
         showQuery
       />
-      <ScrollableCardStrip>
+      <ChoiceCards>
         {visibleCards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
@@ -752,7 +753,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
             </motion.button>
           );
         })}
-      </ScrollableCardStrip>
+      </ChoiceCards>
     </div>
   );
 
@@ -1489,7 +1490,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const actionLabel = declineLabel ?? orderLabel ?? countLabel;
 
   const body = (
-    <ScrollableCardStrip>
+    <ChoiceCards>
       {data.cards.map((id, index) => {
         const obj = objects[id];
         if (!obj) return null;
@@ -1535,7 +1536,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           </motion.button>
         );
       })}
-    </ScrollableCardStrip>
+    </ChoiceCards>
   );
 
   // On a short screen (a landscape phone) every line of chrome takes height

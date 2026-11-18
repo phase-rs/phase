@@ -1555,7 +1555,7 @@
     },
     "search": {
       "title": "Procurar no Grimório",
-      "instructionWithTitle": "{{title}}: {{instruction}}",
+      "instructionWithTitle": "{{title}} • {{instruction}}",
       "subtitleExact_one": "Escolha {{count}} carta",
       "subtitleExact_other": "Escolha {{count}} cartas",
       "subtitleUpTo_one": "Escolha até {{count}} carta",

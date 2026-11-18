@@ -762,11 +762,33 @@ select.select-dark option {
     container-type: size;
   }
 }
+/* Card choices on a phone. Below lg, ChoiceCards draws a choice's cards (Search
+   Library, the effect-zone prompts) in this grid instead of a strip: the overlay
+   fills the screen there, and a sideways strip leaves the cards small. The cards
+   fill the width and the grid scrolls down. Columns are at least 10rem, a width
+   at which a card's rules text still reads on a phone: most phones show two
+   columns held upright and three to five turned sideways. Each card sits in a cell
+   ChoiceCards renders, an inline-size container, so 100cqw resolves at the card
+   to its cell's width: the card fills its column and its height follows the 5:7
+   card. The cell is the grid's own element, never the card's markup. */
+.card-choice-grid {
+  display: grid;
+  grid-auto-rows: min-content;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 0.5rem;
+}
+.card-choice-grid-cell {
+  --card-w: 100cqw;
+  --card-h: calc(var(--card-w) * 7 / 5);
+  display: flex;
+  container-type: inline-size;
+}
 /* CardImage's wrapper is inline-block (w-fit); as a block it drops the line-box
    gap an inline box leaves under the card. This selects the card's markup, so it
    only sets display: a markup change brings the gap back, never a wrong size. */
 .zone-viewer-strip .inline-block,
-.card-choice-strip .inline-block {
+.card-choice-strip .inline-block,
+.card-choice-grid-cell .inline-block {
   display: block;
 }
 .zone-viewer-strip > *,
