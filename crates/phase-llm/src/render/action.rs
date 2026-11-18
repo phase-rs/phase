@@ -32,10 +32,10 @@
 //! A few fields are the engine's bookkeeping and say nothing a reader can use;
 //! the walk leaves them out ([`INTERNAL_FIELDS`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use engine::analysis::decision_template::AnnouncementSubject;
-use engine::game::combat::AttackTarget;
+use engine::game::combat::{AttackTarget, BlockRequirement, CombatRequirement};
 use engine::game::game_object::AttachTarget;
 use engine::game::mana_sources::produced_mana_for_action;
 use engine::types::ability::TargetRef;
@@ -229,6 +229,182 @@ pub fn primary_object_name(state: &GameState, action: &GameAction) -> Option<Str
 
 fn object_name(state: &GameState, id: ObjectId) -> Option<String> {
     state.objects.get(&id).map(|object| one_line(&object.name))
+}
+
+/// What the lines of one combat declaration call its players and objects.
+///
+/// A player is named by seat and an object as the board names it
+/// ([`object_label`]). Objects the declaration names that would read alike
+/// (two untapped Grizzly Bears) are numbered in the order given,
+/// `Grizzly Bears (controlled by Player 0) #2`, so one line names one of them
+/// and two lines can name both. The numbers are the declaration's own: the
+/// board does not print them, and objects that read alike are interchangeable.
+#[derive(Debug)]
+pub struct DeclarationNames<'a> {
+    state: &'a GameState,
+    viewer: PlayerId,
+    objects: HashMap<ObjectId, String>,
+}
+
+impl<'a> DeclarationNames<'a> {
+    /// The names of `objects`, each listed once, in the engine's order.
+    ///
+    /// `state` is the viewer-filtered state, as for [`describe_action`].
+    pub fn new(state: &'a GameState, viewer: PlayerId, objects: &[ObjectId]) -> Self {
+        let labels: Vec<(ObjectId, String)> = objects
+            .iter()
+            .map(|&id| (id, reference_label(state, viewer, TargetRef::Object(id))))
+            .collect();
+        let mut alike: HashMap<&str, usize> = HashMap::new();
+        for (_, label) in &labels {
+            *alike.entry(label.as_str()).or_default() += 1;
+        }
+        let mut numbered: HashMap<&str, usize> = HashMap::new();
+        let mut names = HashMap::with_capacity(labels.len());
+        for (id, label) in &labels {
+            let name = if alike[label.as_str()] > 1 {
+                let number = numbered.entry(label.as_str()).or_default();
+                *number += 1;
+                format!("{label} #{number}")
+            } else {
+                label.clone()
+            };
+            names.insert(*id, name);
+        }
+        Self {
+            state,
+            viewer,
+            objects: names,
+        }
+    }
+
+    /// CR 508.1a + CR 508.1b: one attack a declaration can hold, with the
+    /// creature and what it attacks: `Serra Angel (controlled by You) attacks
+    /// Player 1`.
+    ///
+    /// `requirement` is the engine's record of what the declaring prompt
+    /// requires of the attacker (`attacker_constraints` on
+    /// `WaitingFor::DeclareAttackers`). CR 508.1d: a requirement to attack is
+    /// stated after the pair, so the model knows a declaration that leaves the
+    /// creature home is refused:
+    /// `Bloodrock Cyclops (controlled by You) attacks Player 1; it must attack if able`.
+    pub fn attack(
+        &self,
+        (attacker, target): (ObjectId, AttackTarget),
+        requirement: Option<&CombatRequirement>,
+    ) -> String {
+        let mut line = format!(
+            "{} attacks {}",
+            self.name(TargetRef::Object(attacker)),
+            self.name(attack_target_reference(target)),
+        );
+        match requirement {
+            Some(CombatRequirement::MustAttack { defenders, .. }) => {
+                let defenders = defenders
+                    .iter()
+                    .map(|defender| attack_target_reference(*defender))
+                    .collect();
+                line.push_str("; ");
+                line.push_str(&self.requirement("attack", defenders));
+            }
+            // A creature that can't attack is never offered, and the block
+            // records say nothing about attacking.
+            Some(
+                CombatRequirement::CantAttack { .. }
+                | CombatRequirement::MustBlock { .. }
+                | CombatRequirement::CantBlock { .. },
+            )
+            | None => {}
+        }
+        line
+    }
+
+    /// CR 509.1a: one block a declaration can hold, with the blocking creature
+    /// and the attacker it blocks: `Gray Ogre (controlled by You) blocks Hill
+    /// Giant (controlled by Player 0)`.
+    ///
+    /// `requirement`, `must_be_blocked` and `minimum` are the engine's records
+    /// of the declaring prompt, on `WaitingFor::DeclareBlockers`, stated after
+    /// the pair: CR 509.1c, a requirement on the blocker to block
+    /// (`blocker_constraints`) and a requirement on the attacker to be blocked
+    /// that this block obeys (the blocker's `must_be_blocked_targets`), and CR
+    /// 509.1b + CR 702.111b, an attacker that can't be blocked except by two or
+    /// more creatures (`block_requirements`).
+    pub fn block(
+        &self,
+        (blocker, attacker): (ObjectId, ObjectId),
+        requirement: Option<&CombatRequirement>,
+        must_be_blocked: Option<&[ObjectId]>,
+        minimum: Option<&BlockRequirement>,
+    ) -> String {
+        let mut line = format!(
+            "{} blocks {}",
+            self.name(TargetRef::Object(blocker)),
+            self.name(TargetRef::Object(attacker)),
+        );
+        match requirement {
+            Some(CombatRequirement::MustBlock { attackers, .. }) => {
+                let attackers = attackers.iter().copied().map(TargetRef::Object).collect();
+                line.push_str("; ");
+                line.push_str(&self.requirement("block", attackers));
+            }
+            // A creature that can't block is never offered, and the attack
+            // records say nothing about blocking.
+            Some(
+                CombatRequirement::CantBlock { .. }
+                | CombatRequirement::MustAttack { .. }
+                | CombatRequirement::CantAttack { .. },
+            )
+            | None => {}
+        }
+        if must_be_blocked.is_some_and(|attackers| attackers.contains(&attacker)) {
+            line.push_str("; this block obeys a requirement that the attacker be blocked");
+        }
+        if let Some(minimum) = minimum {
+            line.push_str(&format!(
+                "; the attacker can't be blocked except by {} or more creatures",
+                minimum.count
+            ));
+        }
+        line
+    }
+
+    /// A player by seat, an object by its name in this declaration, or as the
+    /// board names it when the declaration does not name it.
+    fn name(&self, reference: TargetRef) -> String {
+        match reference {
+            TargetRef::Object(id) => {
+                self.objects.get(&id).cloned().unwrap_or_else(|| {
+                    reference_label(self.state, self.viewer, TargetRef::Object(id))
+                })
+            }
+            TargetRef::Player(player) => seat_label(player, self.viewer),
+        }
+    }
+
+    /// A requirement to `verb` (attack or block) if able, naming whom it
+    /// requires when it names anyone: `it must attack Player 2 if able`.
+    fn requirement(&self, verb: &str, whom: Vec<TargetRef>) -> String {
+        if whom.is_empty() {
+            return format!("it must {verb} if able");
+        }
+        let named: Vec<String> = whom
+            .into_iter()
+            .map(|reference| self.name(reference))
+            .collect();
+        format!("it must {verb} {} if able", named.join(" or "))
+    }
+}
+
+/// A player or object as the board names it: a player by seat (`You`,
+/// `Player N`), an object by [`object_label`].
+fn reference_label(state: &GameState, viewer: PlayerId, reference: TargetRef) -> String {
+    match reference {
+        TargetRef::Object(id) => {
+            object_label(state, viewer, id).unwrap_or_else(|| format!("object #{}", id.0))
+        }
+        TargetRef::Player(player) => seat_label(player, viewer),
+    }
 }
 
 /// `snake_case` / `CamelCase` -> `Title Case`, with the repository's existing
@@ -452,14 +628,9 @@ impl ActionIds<'_> {
         }
     }
 
-    /// A player or object as the board names it: a player by seat (`You`,
-    /// `Player N`), an object by [`object_label`].
+    /// A player or object as the board names it ([`reference_label`]).
     fn named(&self, reference: TargetRef) -> String {
-        match reference {
-            TargetRef::Object(id) => object_label(self.state, self.viewer, id)
-                .unwrap_or_else(|| format!("object #{}", id.0)),
-            TargetRef::Player(player) => seat_label(player, self.viewer),
-        }
+        reference_label(self.state, self.viewer, reference)
     }
 
     /// `object, amount` for each pair, with the object named.
@@ -847,10 +1018,7 @@ fn engine_target(value: &Value) -> Option<TargetRef> {
         return Some(target);
     }
     if let Ok(target) = AttackTarget::deserialize(value) {
-        return Some(match target {
-            AttackTarget::Player(player) => TargetRef::Player(player),
-            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => TargetRef::Object(id),
-        });
+        return Some(attack_target_reference(target));
     }
     if let Ok(target) = AttachTarget::deserialize(value) {
         return Some(match target {
@@ -864,6 +1032,15 @@ fn engine_target(value: &Value) -> Option<TargetRef> {
     match AnnouncementSubject::deserialize(value).ok()? {
         AnnouncementSubject::Seat(player) => Some(TargetRef::Player(player)),
         AnnouncementSubject::Object(_) => None,
+    }
+}
+
+/// What an attack is aimed at, as a player or an object: CR 508.1b lets a
+/// creature attack a player, a planeswalker or a battle.
+fn attack_target_reference(target: AttackTarget) -> TargetRef {
+    match target {
+        AttackTarget::Player(player) => TargetRef::Player(player),
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => TargetRef::Object(id),
     }
 }
 

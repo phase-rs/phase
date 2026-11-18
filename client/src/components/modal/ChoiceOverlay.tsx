@@ -118,17 +118,22 @@ export function ChoiceOverlay({
   );
 }
 
-/** Scrollable card strip wrapper with edge arrow buttons, mousewheel, and drag support. */
+/**
+ * Scrollable card strip wrapper with edge arrow buttons, mousewheel, and drag support.
+ *
+ * Below lg the frame sizes the cards from the room it has (`.card-strip-frame`
+ * in index.css): it grows to fill its parent, so place the strip in a flex
+ * column with a definite height, such as an overlay body. There the frame is a
+ * size container and so has no width of its own: the parent must stretch it
+ * across its width, as a flex column does by default. From lg up the cards
+ * keep the board size.
+ */
 export function ScrollableCardStrip({
   children,
-  className = "",
   stripClassName = "card-choice-strip",
-  innerClassName = "mx-auto flex min-h-0 flex-1 items-center gap-2 px-1 pt-2 pb-2 lg:gap-3",
 }: {
   children: React.ReactNode;
-  className?: string;
   stripClassName?: string;
-  innerClassName?: string;
 }) {
   const { t } = useTranslation("game");
   const stripRef = useHorizontalScroll<HTMLDivElement>();
@@ -167,10 +172,10 @@ export function ScrollableCardStrip({
   );
 
   return (
-    <div className={`relative ${className}`}>
+    <div className="card-strip-frame relative">
       <div
         ref={stripRef}
-        className={`${stripClassName} ${innerClassName}`}
+        className={`${stripClassName} flex min-h-0 flex-1 items-center gap-2 px-1 pt-2 pb-2 lg:gap-3`}
       >
         {children}
       </div>

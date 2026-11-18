@@ -41186,6 +41186,15 @@ pub enum ReplacementCondition {
     /// turn-based action (cleanup hand-size discard). Used by Library of Leng
     /// ("If an effect causes you to discard a card...").
     EffectCausedDiscard,
+    /// CR 614.16: Replacement applies only when a counter placement was caused
+    /// by the effect of a resolving spell or ability, or as modified by another
+    /// replacement or prevention effect — not by paying a cost or by a
+    /// turn-based action. Used by "if an effect would put one or more counters"
+    /// replacements (Doubling Season). RUNTIME-evaluated by
+    /// `evaluate_replacement_condition` against the placement's `CounterCause`
+    /// (`ProposedEvent::AddCounter` via its `CounterPlacement`, or the add
+    /// stage of `ProposedEvent::MoveCounter`).
+    EffectCausedPlacement,
     /// CR 500.7 + CR 614.10: Replacement applies only when the triggering
     /// event is an *extra* turn (granted by an effect, not a natural turn).
     /// Used by Stranglehold ("If a player would begin an extra turn...").

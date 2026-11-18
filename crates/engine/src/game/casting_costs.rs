@@ -32,6 +32,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
 use crate::types::mana::{ManaCost, ManaCostShard, ManaSupertype, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
@@ -536,6 +537,15 @@ fn declaration_offerable_reserving(
     if matches!(cost, AbilityCost::Unimplemented { .. }) {
         return Ok(false);
     }
+    // CR 601.2h: creatures this cast already holds for a deferred tap cost can't
+    // pay the declaration too. Before payment the in-hand pending carries the
+    // reservation, so the checks below run with it published.
+    let reserved_root_state = (!pending.deferred_tapped_permanents.is_empty()).then(|| {
+        let mut scratch = state.clone();
+        scratch.pending_cast = Some(Box::new(pending.clone()));
+        scratch
+    });
+    let state = reserved_root_state.as_ref().unwrap_or(state);
     // CR 601.2a + CR 609.4b + CR 611.2f: the cast is priced under the terms of
     // the graveyard grant it is announced under (Whispersteel Dagger's
     // concession), which ride its ability until it becomes the pending cast.
@@ -5025,6 +5035,62 @@ fn auto_activate_spell_mana_abilities_before_deferred_sacrifice(
     Ok(())
 }
 
+/// CR 601.2h: Pay the spell's deferred tap costs (conspire or teamwork selected
+/// before its targets) as part of paying the total cost, after the mana-ability
+/// window (CR 601.2g). Runs in both finalizers after the mana is paid and
+/// before any deferred sacrifice, so a creature tapped here can still be
+/// sacrificed for another cost (CR 601.2h: costs are paid in any order).
+///
+/// The finalizers take `state.pending_cast` before this point, and the
+/// selection is drained from `pending` before tapping, so the payment
+/// reservation (`restrictions::payment_tap_reserved`) never refuses its own
+/// commit.
+fn commit_deferred_spell_taps(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let selected = std::mem::take(&mut pending.deferred_tapped_permanents);
+    debug_assert!(
+        selected
+            .iter()
+            .flat_map(|tap| &tap.object_ids)
+            .all(|id| !super::restrictions::payment_tap_reserved(state, *id)),
+        "the payment commit must not see its own reservation"
+    );
+    for tap in selected {
+        // CR 601.2h: the selection must still pay its cost now: each creature
+        // still matches the cost's filter, untapped under the payer's control,
+        // and an aggregate total still meets its threshold (CR 208.1).
+        let still_payable = super::casting::find_tap_creatures_cost(&tap.cost).is_some_and(
+            |(requirement, filter)| {
+                let eligible = super::casting::find_eligible_tap_creatures_for_cost(
+                    state,
+                    player,
+                    pending.object_id,
+                    pending.ability.context.granting_object,
+                    &tap.cost,
+                    filter,
+                );
+                let n = tap.object_ids.len();
+                let mode = requirement.selection_mode();
+                validate_tap_creatures_selection(state, n, n, mode, &eligible, &tap.object_ids)
+                    .is_ok()
+            },
+        );
+        if !still_payable {
+            return Err(EngineError::ActionNotAllowed(
+                "The creatures selected to pay this spell's tap cost can no longer pay it"
+                    .to_string(),
+            ));
+        }
+        for id in tap.object_ids {
+            super::restrictions::tap_permanent_for_cost(state, id, events)?;
+        }
+    }
+    Ok(())
+}
 fn validate_deferred_spell_sacrifices_at_commit(
     state: &GameState,
     player: PlayerId,
@@ -5091,9 +5157,7 @@ fn pay_spell_mana_before_deferred_sacrifice(
     resume: Option<&ManaAbilityResume>,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<u32>, EngineError> {
-    if pending.deferred_sacrificed_permanents.is_empty()
-        && pending.deferred_hand_discard_cost.is_none()
-    {
+    if !pending.has_commit_time_costs() {
         return Ok(None);
     }
 
@@ -7080,6 +7144,9 @@ pub(crate) fn handle_blight_choice(
             chosen[0],
             crate::types::counter::CounterType::Minus1Minus1,
             counters,
+            // CR 614.16: paying a casting cost is neither a resolving
+            // effect nor a replacement — fail closed.
+            CounterCause::Other,
             events,
         )
     {
@@ -7187,6 +7254,25 @@ pub(crate) fn pay_tap_creatures_selection(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    validate_tap_creatures_selection(state, min_count, count, mode, legal_creatures, chosen)?;
+    // CR 701.26a + CR 508.1f: Tap each chosen creature, routed through the single
+    // authority so a "can't become tapped" creature is refused.
+    for &id in chosen {
+        crate::game::restrictions::tap_permanent_for_cost(state, id, events)?;
+    }
+    Ok(())
+}
+
+/// CR 601.2b + CR 118.3: Validate a tap-creatures selection against the cost's
+/// requirement shape and the offered creatures, without tapping anything.
+fn validate_tap_creatures_selection(
+    state: &GameState,
+    min_count: usize,
+    count: usize,
+    mode: TapCreaturesSelectionMode,
+    legal_creatures: &[ObjectId],
+    chosen: &[ObjectId],
+) -> Result<(), EngineError> {
     // CR 601.2b: Validate the chosen set against the cost's requirement shape.
     // `Fixed`/`VariableX` are the count-bounded forms (tap a count within
     // [min_count, count]); `Aggregate(a)` is the Crew/Saddle/Teamwork form (tap
@@ -7250,16 +7336,23 @@ pub(crate) fn pay_tap_creatures_selection(
         }
     }
 
-    // CR 701.26a + CR 508.1f: Tap each chosen creature, routed through the single
-    // authority so a "can't become tapped" creature is refused.
-    for &id in chosen {
-        crate::game::restrictions::tap_permanent_for_cost(state, id, events)?;
-    }
-
     Ok(())
 }
 
+/// CR 601.2b + CR 601.2h: whether a spell tap cost selected now is tapped at
+/// the payment commit rather than at selection: it was announced before the
+/// spell's targets.
+fn defers_spell_tap_cost(pending: &PendingCast) -> bool {
+    pending.deferred_target_selection && pending.activation_ability_index.is_none()
+}
+
 /// CR 118.3 + CR 701.26a: Complete the tap-creatures cost after player selection.
+///
+/// CR 601.2b + CR 601.2c + CR 601.2h: a spell tap cost chosen before the
+/// spell's targets (conspire or teamwork announced through the pre-target
+/// keyword queue) is only selected here. The creatures are held and are tapped
+/// at the payment commit (`commit_deferred_spell_taps`), after the targets and
+/// the mana-ability window.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_tap_creatures_for_spell_cost(
     state: &mut GameState,
@@ -7270,17 +7363,33 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
     mode: TapCreaturesSelectionMode,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<SpellCostPayment<'_>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pay_tap_creatures_selection(
-        state,
-        min_count,
-        count,
-        mode,
-        legal_creatures,
-        chosen,
-        events,
-    )?;
+    if defers_spell_tap_cost(&pending) {
+        let cost = paid_cost
+            .map(|payment| payment.cost.clone())
+            .ok_or_else(|| {
+                EngineError::InvalidAction("A deferred tap cost must name its cost".to_string())
+            })?;
+        validate_tap_creatures_selection(state, min_count, count, mode, legal_creatures, chosen)?;
+        pending
+            .deferred_tapped_permanents
+            .push(crate::types::game_state::DeferredSpellTap {
+                object_ids: chosen.to_vec(),
+                cost,
+            });
+    } else {
+        pay_tap_creatures_selection(
+            state,
+            min_count,
+            count,
+            mode,
+            legal_creatures,
+            chosen,
+            events,
+        )?;
+    }
     // CR 107.3a: the selected payment count defines X for this activation while
     // its ability is on the stack — but *only* for the X-sentinel shape. The
     // mode is the single authority here: `min_count == 0` is not a usable X
@@ -12932,6 +13041,13 @@ fn pay_additional_cost_with_source(
                 &cost,
                 filter,
             );
+            // CR 601.2h: creatures already selected for another of this
+            // spell's deferred tap costs are held for that payment. Before
+            // payment the in-hand pending is the reservation's carrier.
+            let eligible: Vec<ObjectId> = eligible
+                .into_iter()
+                .filter(|id| !pending.holds_tap_reservation(*id))
+                .collect();
             // CR 601.2b: The requirement shapes drive different prompts.
             // Fixed-count taps exactly `count`; the X-sentinel form (CR 107.3a)
             // taps freely within [0, eligible]; aggregate (Crew/Saddle/Teamwork)
@@ -12987,15 +13103,25 @@ fn pay_additional_cost_with_source(
                     (PayCostKind::TapCreatures { mode }, eligible.len(), 0)
                 }
             };
+            // CR 601.2h: a deferred selection keeps the cost it pays, so the
+            // payment commit can revalidate it.
+            let spell = Box::new(pending);
+            let resume = if defers_spell_tap_cost(&spell) {
+                CostResume::SpellCost {
+                    spell,
+                    cost: Box::new(cost.clone()),
+                    source: cost_source,
+                }
+            } else {
+                CostResume::Spell { spell }
+            };
             return Ok(WaitingFor::PayCost {
                 player,
                 kind,
                 choices: eligible,
                 count,
                 min_count,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending),
-                },
+                resume,
             });
         }
         AbilityCost::Reveal {
@@ -14345,6 +14471,9 @@ pub(super) struct CostLockInput {
     /// re-analyze", which is what keeps the resume from prompting forever.
     pub election: Option<CostReductionElection>,
     pub alternative_cost_election: crate::types::game_state::SpellAlternativeCostElection,
+    /// CR 601.2b + CR 601.2h: tap-cost selections made before targets, still
+    /// unpaid and held until the payment commit.
+    pub deferred_tapped_permanents: Vec<crate::types::game_state::DeferredSpellTap>,
 }
 
 impl CostLockInput {
@@ -14357,6 +14486,7 @@ impl CostLockInput {
             accepted: pending.accepted_cost_reductions.clone(),
             election: pending.cost_reduction_election.clone(),
             alternative_cost_election: pending.alternative_cost_election,
+            deferred_tapped_permanents: pending.deferred_tapped_permanents.clone(),
         }
     }
 
@@ -14372,7 +14502,46 @@ impl CostLockInput {
         pending.accepted_cost_reductions.clone_from(&self.accepted);
         pending.cost_reduction_election.clone_from(&self.election);
         pending.alternative_cost_election = self.alternative_cost_election;
+        pending
+            .deferred_tapped_permanents
+            .clone_from(&self.deferred_tapped_permanents);
     }
+}
+
+/// The payment route a spell's preparation decides (CR 601.2g-h): open the
+/// payment step (X, a tap-payment mode, manual payment, or an Auto payer that
+/// needs choices), or pay automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaymentRoute {
+    PaymentStep,
+    Automatic,
+}
+
+/// What `pay_and_push_adventure` decides under its preparation scope.
+struct PaymentPreparation {
+    convoke_mode: Option<ConvokeMode>,
+    route: PaymentRoute,
+}
+
+/// CR 601.2h: Run a payment-preparation decision with `root` (the in-hand cast,
+/// carrying its deferred tap selections) published as `state.pending_cast`, so
+/// every reader of the payment reservation (`restrictions::payment_tap_reserved`)
+/// sees it. The closure only reads the state; the previous holder is restored
+/// unconditionally when it returns, whatever it returns. Publishing a
+/// continuation-owned root and paying happen outside this scope. With no root
+/// (nothing reserved) the decision runs on the state as is.
+fn with_payment_root<T>(
+    state: &mut GameState,
+    root: Option<&PendingCast>,
+    prepare: impl FnOnce(&GameState) -> T,
+) -> T {
+    let Some(root) = root else {
+        return prepare(state);
+    };
+    let previous = state.pending_cast.replace(Box::new(root.clone()));
+    let decision = prepare(state);
+    state.pending_cast = previous;
+    decision
 }
 
 /// CR 601.2f: Locks in a spell's total cost and pays it.
@@ -14450,21 +14619,27 @@ pub(super) fn pay_and_push_with_lock(
         let has_generic =
             matches!(cost, crate::types::mana::ManaCost::Cost { generic, .. } if *generic > 0);
         if has_generic {
-            let eligible: Vec<ObjectId> = state
-                .objects
-                .values()
-                .filter(|o| {
-                    o.controller == player
-                        && o.zone == Zone::Battlefield
-                        && !o.tapped
-                        && o.card_types
-                            .core_types
-                            .contains(&crate::types::card_type::CoreType::Creature)
-                        && o.power.is_some_and(|p| p > 0)
-                        && !crate::game::restrictions::object_cant_tap(state, o.id)
-                })
-                .map(|o| o.id)
-                .collect();
+            // CR 601.2h: the scan reads the payment reservation, so a cast
+            // holding a deferred tap cost runs it with its root published.
+            let root = (!lock.deferred_tapped_permanents.is_empty()).then(|| build_pending(cost));
+            let eligible: Vec<ObjectId> = with_payment_root(state, root.as_ref(), |state| {
+                state
+                    .objects
+                    .values()
+                    .filter(|o| {
+                        o.controller == player
+                            && o.zone == Zone::Battlefield
+                            && !o.tapped
+                            && o.card_types
+                                .core_types
+                                .contains(&crate::types::card_type::CoreType::Creature)
+                            && o.power.is_some_and(|p| p > 0)
+                            && !crate::game::restrictions::object_cant_tap(state, o.id)
+                            && !crate::game::restrictions::payment_tap_reserved(state, o.id)
+                    })
+                    .map(|o| o.id)
+                    .collect()
+            });
             if !eligible.is_empty() {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.base_cost = base_cost.clone();
@@ -14502,24 +14677,18 @@ pub(super) fn pay_and_push_with_lock(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn pay_and_push_adventure(
-    state: &mut GameState,
+/// CR 601.2g-h: The payment route `pay_and_push_adventure` takes for a locked
+/// `cost`: the tap-payment mode (convoke, waterbend, improvise, delve) and
+/// whether the payment step opens. A read-only decision, run under
+/// `with_payment_root`.
+fn classify_payment_route(
+    state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-    card_id: CardId,
-    ability: ResolvedAbility,
-    cost: &crate::types::mana::ManaCost,
-    base_cost: Option<ManaCost>,
+    cost: &ManaCost,
     casting_variant: CastingVariant,
-    casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingRoute>,
-    distribute: Option<DistributionUnit>,
-    origin_zone: Zone,
     payment_mode: CastPaymentMode,
-    lock: CostLockInput,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
+) -> PaymentPreparation {
     // CR 702.51a: Convoke lets players tap creatures to reduce mana cost.
     // CR 702.126a: Improvise lets players tap artifacts to pay generic mana.
     // Check for Convoke, Waterbend, or Improvise keyword on the spell.
@@ -14548,18 +14717,10 @@ pub(super) fn pay_and_push_adventure(
     };
     let convoke_mode = convoke_mode.filter(|mode| {
         (match mode {
-            ConvokeMode::Convoke => state
+            ConvokeMode::Convoke | ConvokeMode::Waterbend | ConvokeMode::Improvise => state
                 .objects
                 .values()
-                .any(|o| o.is_convoke_eligible(player)),
-            ConvokeMode::Waterbend => state
-                .objects
-                .values()
-                .any(|o| o.is_waterbend_eligible(player)),
-            ConvokeMode::Improvise => state
-                .objects
-                .values()
-                .any(|o| o.is_improvise_eligible(player)),
+                .any(|o| super::casting::tap_payment_eligible(state, o, player, *mode)),
             ConvokeMode::Delve => has_delve_fuel(),
         }) || (has_delve && has_delve_fuel())
     });
@@ -14578,7 +14739,64 @@ pub(super) fn pay_and_push_adventure(
         && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
         && super::casting::spell_payment_manual_route(state, player, object_id, cost)
             == super::casting::ManualPaymentRoute::Feasible;
-    if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
+    let route = if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
+        PaymentRoute::PaymentStep
+    } else {
+        PaymentRoute::Automatic
+    };
+    PaymentPreparation {
+        convoke_mode,
+        route,
+    }
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn pay_and_push_adventure(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: &crate::types::mana::ManaCost,
+    base_cost: Option<ManaCost>,
+    casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    cast_timing_permission: Option<CastTimingRoute>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    payment_mode: CastPaymentMode,
+    lock: CostLockInput,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 601.2h + CR 601.2g: a cast holding a deferred tap cost decides its
+    // payment route with its own root published, so the tap-payment readers
+    // see the reservation (`with_payment_root`). The scope only decides;
+    // publication and payment happen after it has restored the previous holder.
+    let root = (!lock.deferred_tapped_permanents.is_empty()).then(|| {
+        let mut root = PendingCast::new(object_id, card_id, ability.clone(), cost.clone());
+        root.base_cost = base_cost.clone();
+        root.casting_variant = casting_variant;
+        root.casting_permission_index = casting_permission_index;
+        root.cast_timing_permission = cast_timing_permission;
+        root.distribute = distribute.clone();
+        root.origin_zone = origin_zone;
+        root.payment_mode = payment_mode;
+        lock.apply_to(&mut root);
+        root
+    });
+    let PaymentPreparation {
+        convoke_mode,
+        route,
+    } = with_payment_root(state, root.as_ref(), |state| {
+        classify_payment_route(
+            state,
+            player,
+            object_id,
+            cost,
+            casting_variant,
+            payment_mode,
+        )
+    });
+    if route == PaymentRoute::PaymentStep {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.base_cost = base_cost.clone();
         pending.casting_variant = casting_variant;
@@ -15099,6 +15317,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .cloned()
     {
         validate_deferred_spell_sacrifices_at_commit(state, player, &pending)?;
+        commit_deferred_spell_taps(state, player, &mut pending, events)?;
         let ids: Vec<_> = pending
             .deferred_sacrificed_permanents
             .iter()
@@ -19365,21 +19584,9 @@ pub(super) fn max_x_value_excluding(
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
 
     // CR 702.126a / 702.51a: tap-payment keywords (Improvise/Convoke/Waterbend)
-    // let the caster pay generic mana by tapping permanents. The eligibility
-    // predicate is spell-level (not per-object), so resolve it once here.
-    let pred: Option<fn(&super::game_object::GameObject, PlayerId) -> bool> = match tap_payment_mode
-    {
-        Some(ConvokeMode::Convoke) => {
-            Some(super::game_object::GameObject::is_convoke_eligible as _)
-        }
-        Some(ConvokeMode::Waterbend) => {
-            Some(super::game_object::GameObject::is_waterbend_eligible as _)
-        }
-        Some(ConvokeMode::Improvise) => {
-            Some(super::game_object::GameObject::is_improvise_eligible as _)
-        }
-        Some(ConvokeMode::Delve) | None => None,
-    };
+    // let the caster pay generic mana by tapping permanents. The mode is
+    // spell-level (not per-object), so resolve it once here.
+    let tap_mode = tap_payment_mode.filter(|mode| *mode != ConvokeMode::Delve);
 
     // CR 110.5 + CR 110.5c + CR 118.3: each untapped permanent is a single tap
     // unit. CR 702.126a / 702.51a: a tap-payment keyword (Improvise/Convoke/
@@ -19409,8 +19616,12 @@ pub(super) fn max_x_value_excluding(
                 spell_ctx.as_ref(),
                 object_id,
             );
-            let tap = pred
-                .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
+            let tap = tap_mode
+                .filter(|mode| {
+                    state.objects.get(&id).is_some_and(|o| {
+                        super::casting::tap_payment_eligible(state, o, player, *mode)
+                    })
+                })
                 .map_or(0, |_| 1);
             mana.max(tap)
         })
@@ -20317,7 +20528,7 @@ fn finalize_mana_payment_with_resume(
         // paid (CR 601.2h), so a non-mana additional cost such as Tinker's "sacrifice
         // an artifact" is deferred past it. Its pre-payment checks therefore run here,
         // before any mana leaves the pool, and the sacrifice itself is paid at commit.
-        let pre_payment_checks = if pending.deferred_sacrificed_permanents.is_empty() {
+        let pre_payment_checks = if !pending.has_commit_time_costs() {
             None
         } else {
             Some(finalize_cast_pre_payment_checks(
@@ -20368,6 +20579,7 @@ fn finalize_mana_payment_with_resume(
             return Ok(state.waiting_for.clone());
         }
         validate_deferred_spell_sacrifices_at_commit(state, player, &pending)?;
+        commit_deferred_spell_taps(state, player, &mut pending, events)?;
         if pending.deferred_sacrificed_permanents.is_empty()
             && pending.deferred_hand_discard_cost.is_some()
         {
@@ -20776,7 +20988,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // paid (CR 601.2h), so a non-mana additional cost such as Tinker's "sacrifice
         // an artifact" is deferred past it. Its pre-payment checks therefore run here,
         // before any mana leaves the pool, and the sacrifice itself is paid at commit.
-        let pre_payment_checks = if pending.deferred_sacrificed_permanents.is_empty() {
+        let pre_payment_checks = if !pending.has_commit_time_costs() {
             None
         } else {
             Some(finalize_cast_pre_payment_checks(
@@ -20827,6 +21039,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             return Ok(state.waiting_for.clone());
         }
         validate_deferred_spell_sacrifices_at_commit(state, player, &pending)?;
+        commit_deferred_spell_taps(state, player, &mut pending, events)?;
         if pending.deferred_sacrificed_permanents.is_empty()
             && pending.deferred_hand_discard_cost.is_some()
         {
@@ -21623,6 +21836,90 @@ mod tests {
     use super::*;
     use crate::game::scenario::P0;
     use crate::types::ability::ContinuousModification;
+
+    fn payment_root(object_id: u64, held: &[u64]) -> PendingCast {
+        let ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Tap,
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(object_id),
+            PlayerId(0),
+        );
+        let mut root = PendingCast::new(
+            ObjectId(object_id),
+            CardId(object_id),
+            ability,
+            ManaCost::zero(),
+        );
+        root.deferred_tapped_permanents = vec![crate::types::game_state::DeferredSpellTap {
+            object_ids: held.iter().copied().map(ObjectId).collect(),
+            cost: AbilityCost::Tap,
+        }];
+        root
+    }
+
+    fn published(state: &GameState) -> Option<ObjectId> {
+        state.pending_cast.as_ref().map(|pending| pending.object_id)
+    }
+
+    /// CR 601.2h (RF4-1 closure 4): the preparation scope publishes the root
+    /// for its closure only. Whatever the closure returns (a value, an `Err`,
+    /// an early `?`), the exact previous holder is back afterwards; a nested
+    /// scope returns to the wrapped root; with no root nothing is published.
+    #[test]
+    fn with_payment_root_restores_the_previous_holder_on_every_exit() {
+        for previous in [None, Some(payment_root(7, &[]))] {
+            let mut state = GameState::new_two_player(42);
+            state.pending_cast = previous.clone().map(Box::new);
+            let expected = published(&state);
+            let root = payment_root(1, &[11, 12]);
+
+            let seen = with_payment_root(&mut state, Some(&root), |state| {
+                crate::game::restrictions::payment_tap_reserved(state, ObjectId(11))
+            });
+            assert!(seen, "the closure reads the published reservation");
+            assert_eq!(published(&state), expected, "Ok restores");
+
+            let err: Result<(), EngineError> = with_payment_root(&mut state, Some(&root), |_| {
+                Err(EngineError::ActionNotAllowed("refused".to_string()))
+            });
+            assert!(err.is_err());
+            assert_eq!(published(&state), expected, "Err restores");
+
+            let early: Result<u32, EngineError> =
+                with_payment_root(&mut state, Some(&root), |state| {
+                    let value: u32 =
+                        None.ok_or_else(|| EngineError::InvalidAction("early".to_string()))?;
+                    Ok(value + u32::from(state.pending_cast.is_some()))
+                });
+            assert!(early.is_err());
+            assert_eq!(published(&state), expected, "? restores");
+
+            let inner_root = payment_root(2, &[21]);
+            let (inner, after_inner) = with_payment_root(&mut state, Some(&root), |state| {
+                let mut scratch = state.clone();
+                let inner = with_payment_root(&mut scratch, Some(&inner_root), published);
+                (inner, published(&scratch))
+            });
+            assert_eq!(
+                inner,
+                Some(ObjectId(2)),
+                "the nested scope publishes its own root"
+            );
+            assert_eq!(
+                after_inner,
+                Some(ObjectId(1)),
+                "and returns to the wrapped root"
+            );
+            assert_eq!(published(&state), expected);
+
+            let none = with_payment_root(&mut state, None, published);
+            assert_eq!(none, expected, "no root publishes nothing");
+        }
+    }
 
     fn x_mana(extra: &[ManaCostShard]) -> ManaCost {
         let mut shards = vec![ManaCostShard::X];
@@ -24271,6 +24568,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -30786,6 +31084,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -30936,6 +31235,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -31055,6 +31355,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -31164,6 +31465,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -31306,6 +31608,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

@@ -38,6 +38,9 @@ fn materialize_burden(runner: &mut GameRunner, ring: ObjectId, burden: u32) {
         ring,
         CounterType::Generic("burden".to_string()),
         burden,
+        // Burden counters arrive via the Ring's upkeep trigger: a resolving
+        // effect placement.
+        engine::types::proposed_event::CounterCause::ResolvingEffect,
         &mut events,
     );
 }

@@ -11122,3 +11122,66 @@ fn line_cutter_roll_places_visit_once_at_resolution_boundary() {
         WaitingFor::Priority { player: P0 }
     );
 }
+
+/// Adaptive Shimmerer's VERBATIM Oracle text ({5} 0/0, card-data export):
+/// "Flash\nThis creature enters with three +1/+1 counters on it."
+const ADAPTIVE_SHIMMERER_ORACLE: &str =
+    "Flash\nThis creature enters with three +1/+1 counters on it.";
+
+/// CR 614.16 second clause + the Doubling Season entering ruling (V6):
+/// Adaptive Shimmerer cast under Doubling Season enters with 6 +1/+1
+/// counters, not 3 — entering-with-counters placements are
+/// replacement-driven entry modifications (`ReplacementOrPrevention`), which
+/// the gate keeps eligible. Single candidate: no CR 616.1 prompt opens.
+/// (Doubling Season is staged via from_oracle — the live parser — so the def
+/// carries the CR 614.16 gate; the committed fixture entry predates the tag.)
+///
+/// Preservation pin: 6 both pre- and post-tag — stamping the ETB commit
+/// `Other` un-doubles it to 3 with no other row catching it. The planeswalker
+/// starting-loyalty sibling rides the same commit site and lives in
+/// `spark_double_as_enters.rs` (`spark_double_season_doubles_the_merged_loyalty`).
+#[test]
+fn adaptive_shimmerer_entering_counters_still_double_under_doubling_season() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    let shimmerer = scenario
+        .add_creature_to_hand_from_oracle(P0, "Adaptive Shimmerer", 0, 0, ADAPTIVE_SHIMMERER_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 5,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    let outcome = runner.cast(shimmerer).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the cast must settle to priority with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_settled(&runner);
+    assert_eq!(
+        outcome.zone_of(shimmerer),
+        Zone::Battlefield,
+        "reach-guard: Adaptive Shimmerer resolved onto the battlefield"
+    );
+    assert_eq!(
+        plus_counters(&runner, shimmerer),
+        6,
+        "CR 614.16: entering-with-counters stays eligible, so the 3 counters double to 6"
+    );
+}

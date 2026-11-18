@@ -2253,6 +2253,20 @@
     "Untap": "重置步骤",
     "Upkeep": "维持步骤"
   },
+  "phaseShortName": {
+    "BeginCombat": "战斗开始",
+    "Cleanup": "净化",
+    "CombatDamage": "战斗伤害",
+    "DeclareAttackers": "攻击",
+    "DeclareBlockers": "阻挡",
+    "Draw": "抓牌",
+    "End": "结束",
+    "EndCombat": "战斗结束",
+    "PostCombatMain": "主阶段2",
+    "PreCombatMain": "主阶段1",
+    "Untap": "重置",
+    "Upkeep": "维持"
+  },
   "phaseStop": {
     "beginCombatDescription": "选择攻击者之前的最后一个优先权窗口。",
     "beginCombatLabel": "战斗开始步骤",
@@ -2441,7 +2455,8 @@
     "chooseSubtitle": "选择要让哪个替代性效应生效。",
     "composesNote": "每个效应都会生效 —— 顺序会改变它们的结合方式。",
     "confirmOrder": "确认顺序",
-    "dragHint": "拖动以重新排序，或使用箭头。",
+    "dragHandleNamed": "拖动{{name}}以重新排序",
+    "dragHint": "拖动 <grip>⠿</grip> 手柄以重新排序，或使用箭头。",
     "eyebrow": "结算顺序",
     "moveDownNamed": "将{{name}}后移",
     "moveUpNamed": "将{{name}}前移",
