@@ -6876,38 +6876,55 @@ fn resolve_ref(
             counters,
             target,
         } => {
-            // CR 400.7: "on ~" names the source as the object it is now; a counter
-            // put on an earlier incarnation (before a zone change) was put on a
-            // different object. Population recipients keep reading every record;
-            // a legacy record without a stamp keeps the object-id-only match.
-            let self_incarnation = matches!(target, TargetFilter::SelfRef)
-                .then(|| {
-                    trigger_source
-                        .as_ref()
-                        .map(|source| source.identity.reference.incarnation)
-                        .or_else(|| state.objects.get(&source_id).map(|o| o.incarnation))
-                })
-                .flatten();
+            // CR 400.7 + CR 608.2h: "on ~" names the ability's source: the exact
+            // object it triggered from, even after that object has left (a triggered
+            // ability exists independently of its source, CR 113.7a). A counter put
+            // on another incarnation was put on a different object. The record is
+            // history, so it is matched by identity, not against a live source.
+            // Population recipients keep reading every record; a legacy record
+            // without a stamp keeps the object-id-only match.
+            let self_identity = matches!(target, TargetFilter::SelfRef).then(|| {
+                trigger_source.as_ref().map_or_else(
+                    || {
+                        (
+                            source_id,
+                            state.objects.get(&source_id).map(|o| o.incarnation),
+                        )
+                    },
+                    |source| {
+                        let identity = source.identity.reference;
+                        (identity.object_id, Some(identity.incarnation))
+                    },
+                )
+            });
             u32_to_i32_saturating(
                 state
                     .counter_added_this_turn
                     .iter()
                     .filter(|record| {
-                        self_incarnation.is_none_or(|current| {
-                            record.incarnation.is_none_or(|stamp| stamp == current)
-                        }) && count_scope_actor_matches(
-                            state,
-                            actor,
-                            ctx.clone(),
-                            controller,
-                            record.actor,
-                        ) && counters.matches(&record.counter_type)
-                            && matches_target_filter_on_counter_added_record(
+                        let recipient = match self_identity {
+                            Some((id, incarnation)) => {
+                                record.object_id == id
+                                    && incarnation.is_none_or(|current| {
+                                        record.incarnation.is_none_or(|stamp| stamp == current)
+                                    })
+                            }
+                            None => matches_target_filter_on_counter_added_record(
                                 state,
                                 record,
                                 target,
                                 &filter_ctx,
+                            ),
+                        };
+                        recipient
+                            && count_scope_actor_matches(
+                                state,
+                                actor,
+                                ctx.clone(),
+                                controller,
+                                record.actor,
                             )
+                            && counters.matches(&record.counter_type)
                     })
                     .fold(0, |total: u32, record| total.saturating_add(record.count)),
             )

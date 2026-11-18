@@ -14,6 +14,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const WAKKA: &str = "Reach, trample\nWhenever Wakka deals combat damage to a player, destroy up to one target artifact that player controls and put a +1/+1 counter on Wakka.\nBlitzball Captain — At the beginning of your end step, if a counter was put on Wakka this turn, put a +1/+1 counter on each other creature you control.";
 /// Scar ({B/R} instant).
@@ -85,8 +86,8 @@ fn scar(b: &mut Board, target: ObjectId) {
 }
 
 /// Advance to P0's end step (declaring no attackers if combat has not been
-/// declared yet), resolve what triggers there, and check the step settled.
-fn end_step(runner: &mut GameRunner) {
+/// declared yet) and return how many Blitzball Captain triggers are on the stack.
+fn reach_end_step(runner: &mut GameRunner) -> usize {
     runner.advance_to_end_step();
     if matches!(
         runner.state().waiting_for,
@@ -96,6 +97,15 @@ fn end_step(runner: &mut GameRunner) {
         runner.advance_to_end_step();
     }
     assert_eq!(runner.state().phase, Phase::End, "reach guard: end step");
+    runner
+        .stack_names()
+        .iter()
+        .filter(|name| *name == "Wakka, Devoted Guardian")
+        .count()
+}
+
+/// Resolve what is on the stack and check the step settled.
+fn settle(runner: &mut GameRunner) {
     runner.advance_until_stack_empty();
     assert!(
         runner.state().stack.is_empty()
@@ -103,6 +113,14 @@ fn end_step(runner: &mut GameRunner) {
         "the end step settled, got {}",
         runner.waiting_for_kind()
     );
+}
+
+/// Reach P0's end step, resolve its triggers, and return how many Blitzball
+/// Captain triggers went on the stack.
+fn end_step(runner: &mut GameRunner) -> usize {
+    let triggered = reach_end_step(runner);
+    settle(runner);
+    triggered
 }
 
 /// CR 603.4: Wakka connects, its own trigger puts a +1/+1 counter on it, and at
@@ -121,7 +139,7 @@ fn wakka_counter_from_combat_rewards_each_other_creature() {
         1,
         "reach guard: the combat-damage trigger put a counter on Wakka"
     );
-    end_step(&mut b.runner);
+    assert_eq!(end_step(&mut b.runner), 1, "Blitzball Captain triggered");
     assert_eq!(counters(&b.runner, b.bears, CounterType::Plus1Plus1), 1);
     assert_eq!(
         counters(&b.runner, b.wakka, CounterType::Plus1Plus1),
@@ -132,7 +150,9 @@ fn wakka_counter_from_combat_rewards_each_other_creature() {
 
 /// CR 122.1 + CR 603.4: "a counter" is any kind of counter from any source. A
 /// -1/-1 counter Scar puts on Wakka satisfies it; one on the Bears, or none at
-/// all, does not. The Wakka case is this test's positive control.
+/// all, does not. Whether Blitzball Captain triggers is asserted directly, since a
+/// wrong +1/+1 counter on the Bears would cancel with Scar's -1/-1 counter
+/// (CR 704.5q). The Wakka case is this test's positive control.
 #[test]
 fn wakka_condition_reads_any_counter_on_wakka_only() {
     for (case, expected) in [("none", 0), ("bears", 0), ("wakka", 1)] {
@@ -143,7 +163,11 @@ fn wakka_condition_reads_any_counter_on_wakka_only() {
             "wakka" => scar(&mut b, wakka),
             _ => {}
         }
-        end_step(&mut b.runner);
+        assert_eq!(
+            end_step(&mut b.runner),
+            expected as usize,
+            "{case}: triggered"
+        );
         assert_eq!(
             counters(&b.runner, bears, CounterType::Plus1Plus1),
             expected,
@@ -172,6 +196,37 @@ fn wakka_blinked_after_its_counter_does_nothing() {
         0,
         "reach guard: the new Wakka has no counter"
     );
-    end_step(&mut b.runner);
+    assert_eq!(
+        end_step(&mut b.runner),
+        0,
+        "Blitzball Captain does not trigger"
+    );
     assert_eq!(counters(&b.runner, b.bears, CounterType::Plus1Plus1), 0);
+}
+
+/// CR 113.7a + CR 603.4: Wakka is blinked in response to its end-step trigger.
+/// The ability's source is still the Wakka a counter was put on, so the
+/// condition holds as the trigger resolves and the Bears get a counter.
+#[test]
+fn wakka_blinked_in_response_to_its_trigger_still_rewards() {
+    let mut b = board();
+    let (wakka, bears, cloudshift) = (b.wakka, b.bears, b.cloudshift);
+    scar(&mut b, wakka);
+    assert_eq!(
+        reach_end_step(&mut b.runner),
+        1,
+        "Blitzball Captain triggered"
+    );
+    let before = b.runner.state().objects[&wakka].incarnation;
+    b.runner.cast(cloudshift).target_object(wakka).resolve();
+    let returned = &b.runner.state().objects[&wakka];
+    assert!(
+        returned.incarnation != before && returned.zone == Zone::Battlefield,
+        "reach guard: Cloudshift returned Wakka as a new object"
+    );
+    settle(&mut b.runner);
+    assert_eq!(counters(&b.runner, bears, CounterType::Plus1Plus1), 1);
+    // CR 400.7: the returned Wakka is a new object, not the ability's source,
+    // so it is one of the "other" creatures.
+    assert_eq!(counters(&b.runner, wakka, CounterType::Plus1Plus1), 1);
 }
