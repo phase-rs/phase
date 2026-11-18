@@ -1841,6 +1841,7 @@ fn parse_if_all_revealed_cards_type_conditional(text: &str) -> Option<(AbilityCo
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(TargetFilter::Typed(TypedFilter::new(type_filter))),
                     caused_by: None,
+                    destination: None,
                 },
             },
             comparator: Comparator::EQ,
@@ -3263,34 +3264,43 @@ pub(super) fn strip_property_conditional(
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
-    // CR 608.2c + CR 608.2k + CR 208.1: "its power" binds the ability SOURCE for
-    // a player/phase-subject trigger (Amalia, Lily Bowen), or the clause-local
-    // object (CostPaidObject) for a target/entering-referent clause (Tribute,
-    // Ent's Fury). A player/phase subject ("you", "a player", any) has no
-    // clause-local object for "its" to bind, so the anaphor resolves to the
-    // ability source (CR 113.7a LKI); a target/typed-object subject supplies the
-    // referent the untargeted "its" reads (CR 608.2k).
-    let scope = match ctx.subject {
-        Some(TargetFilter::Controller) | Some(TargetFilter::Player) | Some(TargetFilter::Any) => {
-            ObjectScope::Source
-        }
-        _ => ObjectScope::CostPaidObject,
-    };
-
-    for (property, qty_ref) in &[
-        ("power", QuantityRef::Power { scope }),
-        ("toughness", QuantityRef::Toughness { scope }),
-    ] {
+    for (property, stat) in [("power", PtStat::Power), ("toughness", PtStat::Toughness)] {
         let pattern = format!(" if its {property} is ");
         if let Some((before, after)) = tp.rsplit_around(&pattern) {
             let after = after.lower.trim_end_matches('.');
 
             if let Some((comparator, value)) = parse_comparison_suffix(after) {
+                // CR 115.1 + CR 608.2c + CR 208.1: When the gated instruction
+                // declares one object target, "its" refers to that target
+                // (Ent's Fury). Otherwise preserve the existing source vs.
+                // cost/trigger referent rule below (Amalia, Lily Bowen,
+                // Tribute to the World Tree). Parse the instruction without its
+                // condition on a throwaway context; a multi-target or
+                // non-object instruction is not enough evidence to bind the
+                // anaphor to the first target slot.
+                let has_single_object_target = effect_target_filter(before.original, ctx)
+                    .is_some_and(|filter| {
+                        !filter.is_context_ref()
+                            && super::lower::target_filter_is_single_object_target(&filter)
+                    });
+                let scope = if has_single_object_target {
+                    ObjectScope::Target
+                } else {
+                    match ctx.subject {
+                        Some(TargetFilter::Controller)
+                        | Some(TargetFilter::Player)
+                        | Some(TargetFilter::Any) => ObjectScope::Source,
+                        _ => ObjectScope::CostPaidObject,
+                    }
+                };
+                let qty = match stat {
+                    PtStat::Power => QuantityRef::Power { scope },
+                    PtStat::Toughness => QuantityRef::Toughness { scope },
+                    PtStat::TotalPowerToughness => return (None, text.to_string()),
+                };
                 return (
                     Some(AbilityCondition::QuantityCheck {
-                        lhs: QuantityExpr::Ref {
-                            qty: qty_ref.clone(),
-                        },
+                        lhs: QuantityExpr::Ref { qty },
                         comparator,
                         rhs: QuantityExpr::Fixed { value },
                     }),
@@ -6086,6 +6096,7 @@ pub(crate) fn parse_phase_name_set(
         ),
         value(vec![Phase::PreCombatMain], tag("precombat main phase")),
         value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
+        value(vec![Phase::Untap], tag("untap step")),
         value(
             vec![Phase::Upkeep],
             alt((tag("upkeep step"), tag("upkeep"))),
@@ -6970,6 +6981,42 @@ fn opponent_poison_at_least_as_quantity_check(count: u32) -> AbilityCondition {
     }
 }
 
+/// CR 122.1f + CR 109.5: Bridge `StaticCondition::PlayerIsPoisoned` to a
+/// `QuantityCheck` on the specific player's poison counter total (>= 1).
+/// The player scope carries the subject axis. Only scopes supported by
+/// `CountScope` (Controller, Opponents, All, ScopedPlayer, Owner,
+/// SourceChosenPlayer) are bridged; trigger-specific scopes (DefendingPlayer,
+/// Target, etc.) return `None` since they don't appear in static abilities.
+fn ability_condition_from_poisoned_player(player: &PlayerScope) -> Option<AbilityCondition> {
+    use crate::types::ability::QuantityRef;
+    use crate::types::player::PlayerCounterKind;
+
+    let scope = match player {
+        PlayerScope::Controller => CountScope::Controller,
+        PlayerScope::Opponent { aggregate: _ } => CountScope::Opponents,
+        PlayerScope::ScopedPlayer => CountScope::ScopedPlayer,
+        PlayerScope::AllPlayers { .. } => CountScope::All,
+        // Trigger-specific scopes not supported in static abilities
+        PlayerScope::DefendingPlayer
+        | PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::ParentObjectTarget { .. }
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => return None,
+    };
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Poison,
+                scope,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 /// Bridge a `StaticCondition` (from the nom condition parser) to an
 /// `AbilityCondition`. Returns `None` for variants that have no
 /// effect-resolution equivalent — the caller falls through to the next strategy.
@@ -7059,6 +7106,14 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::IsRingBearer => Some(AbilityCondition::IsRingBearer),
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(opponent_poison_at_least_as_quantity_check(*count))
+        }
+        // CR 122.1f + CR 109.5: "player is poisoned" — bridge to a quantity
+        // check on the player's poison counters. Mirrors the trigger-side
+        // `TriggerCondition::IsPoisoned` with the same subject scope axis.
+        // Only scopes supported by `CountScope` are bridged; trigger-specific
+        // scopes (DefendingPlayer, Target, etc.) return `None`.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            ability_condition_from_poisoned_player(player)
         }
         StaticCondition::DayNightIs { state } => {
             Some(AbilityCondition::DayNightIs { state: *state })
@@ -9499,6 +9554,24 @@ fn parse_objects_share_quality_reference<'a>(
 }
 
 fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
+    // CR 706.2 + CR 608.2c: "the roll" a die-roll ability's body names is the
+    // roll it is resolving for — the triggering DieRolled event's result, which
+    // EventContextAmount reads (extract_amount_from_event); "If the roll was N
+    // or higher" gates the instruction it heads.
+    if let Ok((_, n)) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the roll was "),
+        terminated(nom_primitives::parse_number, tag(" or higher")),
+    ))
+    .parse(lower)
+    {
+        return Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        });
+    }
     let rest = tag::<_, _, OracleError<'_>>("the result is ")
         .parse(lower)
         .ok()
@@ -15039,9 +15112,10 @@ mod tests {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
+                            window: crate::types::ability::TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::GE,
@@ -17581,6 +17655,52 @@ mod tests {
                 destination: Some(Zone::Battlefield),
             }),
             None
+        );
+    }
+
+    /// CR 706.2 + CR 608.2c: "If the roll was N or higher" (Monoxa, Midway
+    /// Manager) reads the triggering die roll's result through the event-context
+    /// amount, `EventContextAmount >= N`, both as the building block and through
+    /// the production condition dispatcher. The grammar is exactly "the roll was
+    /// N or higher": a bare number or a trailing word stays unparsed, and the
+    /// "the result is" arm keeps its own reading.
+    #[test]
+    fn the_roll_was_n_or_higher_reads_the_triggering_roll() {
+        let at_least = |value: i32| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher"),
+            Some(at_least(4))
+        );
+        assert_eq!(
+            parse_die_result_condition("the roll was 5 or higher"),
+            Some(at_least(5))
+        );
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "the roll was 4 or higher",
+                &mut ParseContext::default()
+            ),
+            Some(at_least(4)),
+            "the production dispatcher reaches the arm"
+        );
+        assert_eq!(parse_die_result_condition("the roll was 4"), None);
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher than"),
+            None
+        );
+        assert_eq!(
+            parse_die_result_condition("the result is 3 or less"),
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+                channel: DamageChannel::Total,
+            })
         );
     }
 }

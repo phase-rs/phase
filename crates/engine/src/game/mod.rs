@@ -155,6 +155,7 @@ pub mod planechase;
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
+pub(crate) mod pre_entry_view;
 pub(crate) mod precast_copy_shortcut;
 pub use precast_copy_shortcut::normalize_untrusted_restore;
 pub use precast_copy_shortcut::rekey_after_trusted_restore;
@@ -268,6 +269,11 @@ pub use bracket_explanation::{
 // this exposes exactly those functions from it. The governing rule annotations
 // live on the function definitions in `casting_costs.rs`, not on this
 // visibility re-export.
+#[cfg(feature = "test-support")]
+pub use casting_costs::{
+    alternative_mana_payable_with_nothing_held, oracle_alternative_reservation_verdict,
+    ReservationVerdict, RESERVATION_PROBE_BUDGET,
+};
 pub use casting_costs::{extract_mana_leg, extract_x_mana_cost, max_x_value};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,

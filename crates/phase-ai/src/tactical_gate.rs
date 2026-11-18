@@ -168,6 +168,7 @@ pub fn gate_candidates(
             candidate,
             payment_successor: None,
             payment_step: None,
+            payment_trace: None,
         })
         .collect();
     gate_prepared_candidates(state, decision, prepared, ai_player, config, context)
@@ -552,10 +553,11 @@ fn cast_has_relevant_payoff(
         .get(&caster)
         .map_or(0, |spells| spells.len());
 
-    // CR 502.2a: Day/Night counts the active TEAM's spells. The day/night
-    // transition reducer currently keys this on `active_player`, so do not
-    // treat any shared-team boundary as proven until that separate authority
-    // becomes team-aware.
+    // CR 502.2a + CR 731.2a + CR 731.2b: with shared team turns, Day/Night reads the most
+    // spells any one member of the active team cast (`day_night::record_previous_turn`).
+    // Whether this cast moves that across a threshold depends on the caster's team and the
+    // teammates' own counts, which this narrow check does not model, so a cast by a player
+    // with a teammate is never treated as proven unchanged.
     let caster_has_teammate = !engine::game::players::teammates(state, caster).is_empty();
     if state.day_night.is_some() && caster_has_teammate {
         return true;
@@ -2252,6 +2254,7 @@ mod tests {
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use engine::types::ability::TurnWindow;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AdditionalCost, BounceSelection, CardTypeSetSource,
         CastPermissionConstraint, CastingPermission, CastingRestriction, Comparator, CountScope,
@@ -2346,9 +2349,10 @@ mod tests {
 
     fn spells_cast_this_turn() -> QuantityExpr {
         QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         }
     }
@@ -2990,7 +2994,7 @@ mod tests {
 
             assert!(
                 cast_has_relevant_payoff(&state, PlayerId(1), None),
-                "a nonactive teammate's {day_night:?} boundary is retained until the transition authority is team-aware"
+                "a nonactive teammate's {day_night:?} boundary is retained: this check does not model the team's counts"
             );
 
             state.day_night = None;
@@ -3119,9 +3123,10 @@ mod tests {
     fn zero_cast_dynamic_object_option_and_permission_consumers_are_paired() {
         let (mut state, congregate) = funded_zero_congregate_state();
         let history = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         let option_spell = create_object(
@@ -3733,9 +3738,10 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     target: TargetFilter::Controller,
@@ -3762,9 +3768,10 @@ mod tests {
     fn spell_count_after_this_cast() -> QuantityExpr {
         QuantityExpr::Difference {
             left: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
             right: Box::new(QuantityExpr::Fixed { value: 1 }),
@@ -4265,9 +4272,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -4421,9 +4429,10 @@ mod tests {
             .push(CastingRestriction::RequiresCondition {
                 condition: Some(ParsedCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -4586,9 +4595,10 @@ mod tests {
 
         let hook = add_battlefield_trigger(state, 91_004, TriggerMode::Attacks);
         let cast_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         {
@@ -4844,9 +4854,10 @@ mod tests {
         state.priority_player = P0;
         state.waiting_for = WaitingFor::Priority { player: P0 };
         let spell_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery))),
+                window: TurnWindow::ThisTurn,
             },
         };
         let object = state
@@ -5440,7 +5451,7 @@ mod tests {
         let mut static_definition = StaticDefinition::new(StaticMode::CantBeBlocked);
         static_definition.condition = Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: Some(TargetFilter::Or {
                         filters: vec![
@@ -5448,6 +5459,7 @@ mod tests {
                             TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                         ],
                     }),
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -5509,9 +5521,10 @@ mod tests {
                 .condition(
                     engine::types::ability::ReplacementCondition::OnlyIfQuantity {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: None,
+                                window: TurnWindow::ThisTurn,
                             },
                         },
                         comparator: Comparator::GE,
@@ -5575,9 +5588,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::DealDamage {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -5618,7 +5632,7 @@ mod tests {
                 shards: vec![ManaCostShard::Blue],
             },
             spell_filter: None,
-            dynamic_count: Some(QuantityRef::SpellsCastThisTurn {
+            dynamic_count: Some(QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Or {
                     filters: vec![
@@ -5626,6 +5640,7 @@ mod tests {
                         TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                     ],
                 }),
+                window: TurnWindow::ThisTurn,
             }),
             reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         })
@@ -6938,9 +6953,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         for amount in [nested_filter_x, spell_ledger] {

@@ -2654,6 +2654,7 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::card_name(),
@@ -2676,6 +2677,7 @@ mod tests {
         let mut state = build_commander_state(&db, &payload, DUEL_SEATS, 42);
         state.all_card_names = Vec::new().into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::card_name(),

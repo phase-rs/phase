@@ -322,6 +322,11 @@ fn static_condition_to_restriction_condition(
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(ParsedCondition::OpponentPoisonAtLeast { count })
         }
+        // CR 122.1f + CR 109.5: "player is poisoned" — no `ParsedCondition`
+        // variant exists for this player-scoped poison check. The trigger-side
+        // bridge handles it via `TriggerCondition::IsPoisoned`, but the
+        // restriction surface (cast/activation gates) has no equivalent.
+        | StaticCondition::PlayerIsPoisoned { .. } => None,
         // CR 122.1: source-counter activation gate — "Activate only if it has no time
         // counters on it" (Temple of Cyclical Time) and the counter-threshold restriction
         // class generally. Adopted from #5677 (the L02 condition lane), which solved this
@@ -1604,15 +1609,16 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { .. }),
+                                window: crate::types::ability::TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {}
-            other => panic!("expected filtered SpellsCastThisTurn >= 3, got {other:?}"),
+            other => panic!("expected filtered SpellsCast >= 3, got {other:?}"),
         }
     }
 

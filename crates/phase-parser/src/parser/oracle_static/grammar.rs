@@ -10,6 +10,7 @@ use crate::parser::oracle_effect::parse_effect_chain_with_context_ability_root;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
+use crate::types::ability::TurnWindow;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair, terminated};
@@ -839,7 +840,15 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // ("can't attack, block, or transform" — Bound by Moonsilver class). Must
     // precede continuous-grant parsing, which would otherwise return an empty vec
     // and let the line fall through to a SelfRef combat lock on the Aura source.
-    if let Some(modes) = parse_restriction_modes(pred_lower.trim().trim_end_matches('.')) {
+    // CR 611.3a: targeting prohibitions retain their condition and companion
+    // grants through the shared suffix/composition path below.
+    if let Some(modes) =
+        parse_restriction_modes(pred_lower.trim().trim_end_matches('.')).filter(|modes| {
+            !modes
+                .iter()
+                .any(|mode| matches!(mode, StaticMode::CantBeTargeted { .. }))
+        })
+    {
         return modes
             .into_iter()
             .map(|mode| {
@@ -1111,6 +1120,42 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // instead of a condition the defending player is never prompted to
         // satisfy.
         let mut def = StaticDefinition::new(StaticMode::CantBeBlocked)
+            .affected(affected.clone())
+            .description(description.to_string());
+        if let Some(condition) = &suffix_condition {
+            attach_gated_condition(&mut def, condition.clone(), &gap_text);
+        }
+        let companion_condition = def.condition.clone();
+        return with_keyword_companion(
+            def,
+            body_tp.original,
+            &affected,
+            description,
+            companion_condition.as_ref(),
+        );
+    }
+
+    // --- "can't be the target of ..." with a source-kind / quality qualifier ---
+    // CR 115.1: not expressible by `CantBeTargeted { who }`; fail closed.
+    if crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(body_lower) {
+        return vec![super::evasion::source_qualified_cant_be_targeted_gap(
+            affected,
+            description,
+        )];
+    }
+
+    // --- "can't be the target of spells or abilities [your opponents control]" ---
+    // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(body_lower) {
+        let who = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::statics::ProhibitionScope::AllPlayers
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::statics::ProhibitionScope::Opponents
+            }
+        };
+        let mut def = StaticDefinition::new(StaticMode::CantBeTargeted { who })
             .affected(affected.clone())
             .description(description.to_string());
         if let Some(condition) = &suffix_condition {
@@ -2353,7 +2398,7 @@ pub(crate) enum NthQualifiedSpell {
     /// A representable Nth-spell subject: the qualifying spell filter, the timing
     /// window over which the ordinal is measured, and the 1-based ordinal `N`
     /// ("first" → 1, "second" → 2, …). The gate is
-    /// `SpellsCastThisTurn(filter) == N - 1` (see [`nth_qualified_spell_condition`]).
+    /// `SpellsCast(filter) == N - 1` (see [`nth_qualified_spell_condition`]).
     Supported {
         filter: TargetFilter,
         timing: NthEventTimingKind,
@@ -2375,7 +2420,7 @@ pub(crate) enum NthQualifiedSpell {
 /// ordinal — not just the first — is covered (Highspire Bell-Ringer, Uthros
 /// Psionicist, Monk Class, Raging Battle Mouse, and Alisaie Leveilleur all print
 /// "the second spell you cast each turn costs …"). The ordinal threads into
-/// [`nth_qualified_spell_condition`] as the `SpellsCastThisTurn == N - 1` gate.
+/// [`nth_qualified_spell_condition`] as the `SpellsCast == N - 1` gate.
 fn parse_spell_ordinal_prefix(subject: &str) -> Option<(u32, &str)> {
     preceded(
         tag::<_, _, OracleError<'_>>("the "),
@@ -2642,7 +2687,7 @@ fn split_first_spell_timing(text: &str) -> Option<(NthEventTimingKind, &str)> {
 
 /// CR 601.2f + CR 107.3: Build the "the <ordinal> qualified spell <timing>" gate.
 /// The 1-based `ordinal` (`"first"` → 1, `"second"` → 2, …) lowers to
-/// `SpellsCastThisTurn(filter) == ordinal - 1`: the reduction applies precisely
+/// `SpellsCast(filter) == ordinal - 1`: the reduction applies precisely
 /// while exactly `ordinal - 1` matching spells have already been cast this turn,
 /// so the spell now being cast is the Nth (the currently-casting spell is not yet
 /// counted, matching the merged `first == 0` behavior). The timing axis adds a
@@ -2655,9 +2700,10 @@ pub(crate) fn nth_qualified_spell_condition(
 ) -> StaticCondition {
     let nth_this_turn = StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(filter.clone()),
+                window: TurnWindow::ThisTurn,
             },
         },
         comparator: Comparator::EQ,

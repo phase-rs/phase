@@ -495,6 +495,15 @@ impl PolicyRegistry {
         )
     }
 
+    /// Every default policy plus `extra`: a production registry with one
+    /// test-only policy added.
+    #[cfg(test)]
+    pub(crate) fn default_with_for_tests(extra: Box<dyn TacticalPolicy>) -> Self {
+        let mut policies = Self::default().policies;
+        policies.push(extra);
+        Self::from_policies(policies)
+    }
+
     /// Return a process-wide shared `PolicyRegistry`, constructed once on first
     /// access. Policies are stateless (`TacticalPolicy: Send + Sync`, no
     /// interior mutability by construction), so a single instance safely

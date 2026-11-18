@@ -225,6 +225,11 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
+    } else if matches!(attachment_filter, TargetFilter::TriggeringSource)
+        && attachment_referent_departed(state, ability, attachment_filter)
+    {
+        // CR 400.7: the event's object is the attachment only as the incarnation the event named.
+        Vec::new()
     } else {
         resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
             .into_iter()
@@ -322,6 +327,16 @@ fn resolve_bound_attachment_operation(
     let attachment_ids =
         resolve_attachment_ids(state, ability, attachment_filter, &mut target_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7 + CR 608.2b: a referent that became a new object or an
+        // illegal target is not attached, and the instruction still resolved.
+        if attachment_referent_departed(state, ability, attachment_filter) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id,
+                subject: None,
+            });
+            return Ok(AttachResolutionOutcome::Completed);
+        }
         return Err(EffectError::MissingParam(
             "No attachment for Attach".to_string(),
         ));
@@ -514,16 +529,7 @@ pub(crate) fn deliver_attach(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let host_of = |state: &GameState| state.objects.get(&attachment_id)?.attached_to;
-    let already_on_host = host_of(state) == Some(AttachTarget::Object(target_id));
-    if let Some(old_target) = attach_to(state, attachment_id, target_id) {
-        events.push(GameEvent::Unattached {
-            attachment_id,
-            old_target,
-        });
-    }
-    // CR 701.3b: a refused or same-host attach did nothing, so it carries no subject.
-    let attached = !already_on_host && host_of(state) == Some(AttachTarget::Object(target_id));
+    let attached = attach_to_with_events(state, attachment_id, target_id, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
@@ -947,6 +953,10 @@ fn prompt_described_host_choice(
     let mut no_slots = std::iter::empty();
     let attachment_ids = resolve_attachment_ids(state, ability, attachment_filter, &mut no_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7: the executor resolves a departed referent as a no-op.
+        if attachment_referent_departed(state, ability, attachment_filter) {
+            return Ok(AttachPromptOutcome::Execute);
+        }
         return Ok(AttachPromptOutcome::Completed);
     }
     // CR 115.1d + CR 608.2d: the host candidates are the BATTLEFIELD objects
@@ -1810,6 +1820,49 @@ fn resolve_parent_target_attachment_from_trigger(state: &GameState) -> Option<Ob
     })
 }
 
+/// CR 400.7 + CR 608.2b: whether an attachment operand that resolved to nothing names a
+/// specific object that has since become a new object or an illegal target. An operand
+/// naming no specific object (a scan, or a granter never stamped) has not departed.
+fn attachment_referent_departed(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    let trigger_source = ability
+        .trigger_source
+        .as_ref()
+        .map(|s| s.identity.reference);
+    let referent = match filter {
+        TargetFilter::SelfRef => trigger_source.or_else(|| ability.source_ref(state)),
+        TargetFilter::OriginalSource => trigger_source,
+        TargetFilter::GrantingObject { bound } => bound.or(ability.context.granting_object),
+        // CR 400.7: the incarnation the firing event recorded for its object.
+        TargetFilter::TriggeringSource => {
+            match crate::game::targeting::resolve_event_context_target(
+                state,
+                filter,
+                ability.source_id,
+            ) {
+                Some(TargetRef::Object(id)) => {
+                    state.current_trigger_event.as_ref().and_then(|event| {
+                        crate::game::targeting::event_context_incarnation(filter, event, id)
+                    })
+                }
+                _ => None,
+            }
+        }
+        // The live slot read already dropped it: a declared object departed or became illegal.
+        TargetFilter::ParentTargetSlot { index } => {
+            return matches!(
+                crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index),
+                Some(TargetRef::Object(_))
+            );
+        }
+        _ => None,
+    };
+    referent.is_some_and(|referent| !referent.is_current(state))
+}
+
 fn resolve_object_filter<'a>(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -2041,43 +2094,63 @@ pub(crate) fn can_attach_to_player_with_authority(
     }
 }
 
-/// CR 701.3b: [`attach_to`] that reports whether the attachment actually moved
-/// onto `target_id`. Same-host re-attaches (a no-op under CR 701.3b) and
-/// rejected attaches return `false`, so "becomes attached" events (CR 603.2e)
-/// are emitted only for a genuine transition.
-pub(crate) fn attach_to_reporting_change(
-    state: &mut GameState,
-    attachment_id: ObjectId,
-    target_id: ObjectId,
-) -> bool {
-    let host = Some(AttachTarget::Object(target_id));
-    let host_of = |state: &GameState| {
-        state
-            .objects
-            .get(&attachment_id)
-            .and_then(|o| o.attached_to)
-    };
-    let was_attached = host_of(state) == host;
-    attach_to(state, attachment_id, target_id);
-    !was_attached && host_of(state) == host
-}
-
-/// Player-host sibling of [`attach_to_reporting_change`].
-pub(crate) fn attach_to_player_reporting_change(
-    state: &mut GameState,
+/// CR 702.5a + CR 303.4: does the attachment's own enchant restriction admit
+/// `target_player`, per the supplied authority?
+///
+/// An Aura that enchants a player must carry an `Enchant` restriction, and the
+/// player must satisfy every one it carries (CR 702.5c); one that carries none
+/// has no stated player
+/// restriction and so cannot be attached to a player at all. The restriction is
+/// read from the authority's keywords, so a token's intrinsic `Enchant` has to
+/// be part of its materialized characteristics (see
+/// `token::intrinsic_enchant_keywords_from_token_statics`) before this is asked.
+fn enchant_restriction_admits_player(
+    state: &GameState,
     attachment_id: ObjectId,
     target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
 ) -> bool {
-    let host = Some(AttachTarget::Player(target_player));
-    let host_of = |state: &GameState| {
-        state
-            .objects
-            .get(&attachment_id)
-            .and_then(|o| o.attached_to)
+    let attachment = match authority {
+        AttachmentAuthority::Stored => state.objects.get(&attachment_id),
+        AttachmentAuthority::Projected(projection) => Some(projection),
     };
-    let was_attached = host_of(state) == host;
-    attach_to_player(state, attachment_id, target_player);
-    !was_attached && host_of(state) == host
+    let Some(attachment) = attachment else {
+        return true;
+    };
+    // CR 702.5c: every enchant instance applies; with none, the Aura states no
+    // player restriction and cannot enchant a player at all.
+    let mut restrictions = crate::game::keywords::enchant_restrictions(attachment).peekable();
+    if restrictions.peek().is_none() {
+        return false;
+    }
+    restrictions.all(|enchant_filter| {
+        crate::game::filter::player_matches_target_filter_in_state(
+            state,
+            enchant_filter,
+            target_player,
+            Some(attachment.controller),
+            Some(attachment_id),
+        )
+    })
+}
+
+/// CR 303.4 + CR 303.4i + CR 702.5a + CR 702.16c: may the attachment, per the
+/// supplied authority, legally enchant `target_player`?
+///
+/// The single legality authority for a player host: an Aura (CR 303.4), a live
+/// host (CR 303.4c) not protected from it (CR 702.16c), and one its enchant
+/// restriction admits (CR 702.5a). Both the CR 303.4i entry decision for an
+/// Aura token and the attachment action ask exactly this, so the two can never
+/// disagree about one host.
+pub(crate) fn can_enchant_player_with_authority(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+) -> bool {
+    authority_is_aura(state, attachment_id, authority)
+        && can_attach_to_player_with_authority(state, attachment_id, target_player, authority)
+        && enchant_restriction_admits_player(state, attachment_id, target_player, authority)
 }
 
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
@@ -2089,6 +2162,153 @@ pub fn attach_to(
     target_id: ObjectId,
 ) -> Option<TargetRef> {
     attach_to_with_authority(state, attachment_id, target_id, AttachmentAuthority::Stored)
+}
+
+/// CR 701.3a + CR 701.3b + CR 603.2e: Attach `attachment_id` to `target_id` judged against `authority`,
+/// recording `GameEvent::Unattached` (if moving from a prior host) and `GameEvent::Attached` into `events`.
+/// Returns `true` only on a successful transition to a new host (a same-host re-attach or illegal attach does nothing).
+pub(crate) fn attach_to_with_authority_and_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    authority: AttachmentAuthority<'_>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let attachment_object = state.objects.get(&attachment_id);
+    let prior_host = attachment_object
+        .and_then(|obj| obj.attached_to)
+        .map(target_ref_from_attach_target);
+    // CR 701.3b: Attaching to the object or player it is already attached to does nothing.
+    if prior_host == Some(TargetRef::Object(target_id)) {
+        return false;
+    }
+    if !can_attach_to_object_with_authority(state, attachment_id, target_id, authority) {
+        return false;
+    }
+    match authority {
+        AttachmentAuthority::Stored => {
+            if !crate::game::sba::is_valid_attachment_target(state, attachment_id, target_id) {
+                return false;
+            }
+        }
+        AttachmentAuthority::Projected(projection) => {
+            // CR 702.5c: the host must match every enchant instance.
+            let ctx =
+                FilterContext::from_source_with_controller(attachment_id, projection.controller);
+            if !crate::game::keywords::enchant_restrictions(projection)
+                .all(|enchant_filter| matches_target_filter(state, target_id, enchant_filter, &ctx))
+            {
+                return false;
+            }
+        }
+    }
+    let old_target = attach_to_with_authority(state, attachment_id, target_id, authority);
+    if let Some(old_target) = old_target {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        });
+    }
+    events.push(GameEvent::Attached {
+        attachment_id,
+        target: TargetRef::Object(target_id),
+    });
+    true
+}
+
+/// CR 701.3a + CR 701.3b + CR 603.2e: Attach `attachment_id` to `target_player` judged against `authority`,
+/// recording `GameEvent::Unattached` (if moving from a prior host) and `GameEvent::Attached` into `events`.
+/// Returns `true` only on a successful transition to a new host (a same-player re-attach or illegal attach does nothing).
+pub(crate) fn attach_to_player_with_authority_and_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let attachment_object = state.objects.get(&attachment_id);
+    let prior_host = attachment_object
+        .and_then(|obj| obj.attached_to)
+        .map(target_ref_from_attach_target);
+    // CR 701.3b: Attaching to the object or player it is already attached to does nothing.
+    if prior_host == Some(TargetRef::Player(target_player)) {
+        return false;
+    }
+    if !can_enchant_player_with_authority(state, attachment_id, target_player, authority) {
+        return false;
+    }
+    let old_target =
+        attach_to_player_with_authority(state, attachment_id, target_player, authority);
+    if let Some(old_target) = old_target {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        });
+    }
+    events.push(GameEvent::Attached {
+        attachment_id,
+        target: TargetRef::Player(target_player),
+    });
+    true
+}
+
+/// CR 701.3a + CR 701.3b + CR 603.2e: Attach `attachment_id` to `target` (object or player) judged against `authority`,
+/// recording `GameEvent::Unattached` and `GameEvent::Attached` into `events`.
+pub(crate) fn attach_target_with_authority_and_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target: &TargetRef,
+    authority: AttachmentAuthority<'_>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    match target {
+        TargetRef::Object(target_id) => {
+            attach_to_with_authority_and_events(state, attachment_id, *target_id, authority, events)
+        }
+        TargetRef::Player(target_player) => attach_to_player_with_authority_and_events(
+            state,
+            attachment_id,
+            *target_player,
+            authority,
+            events,
+        ),
+    }
+}
+
+/// CR 701.3a + CR 603.2e: Attach `attachment_id` to `target_id` and record
+/// `GameEvent::Attached` (and `GameEvent::Unattached` if moving from a prior host)
+/// into `events`. Returns `true` if the object became attached to the new target.
+pub fn attach_to_with_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    attach_to_with_authority_and_events(
+        state,
+        attachment_id,
+        target_id,
+        AttachmentAuthority::Stored,
+        events,
+    )
+}
+
+/// CR 701.3a + CR 603.2e: Attach `attachment_id` to `target_player` and record
+/// `GameEvent::Attached` (and `GameEvent::Unattached` if moving from a prior host)
+/// into `events`. Returns `true` if the object became attached to the player.
+pub fn attach_to_player_with_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    attach_to_player_with_authority_and_events(
+        state,
+        attachment_id,
+        target_player,
+        AttachmentAuthority::Stored,
+        events,
+    )
 }
 
 /// CR 614.12 + CR 701.3a: [`attach_to`] whose CR 701.3b legality gate reads the

@@ -1,11 +1,43 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use engine::database::card_data_provenance::CardDataProvenance;
 use engine::database::CardDatabase;
 use engine::game::coverage::{
     analyze_coverage, audit_resolver_features, audit_silent_drops, build_warning_drilldown,
 };
+use engine::parser::oracle_ir::trace::sha256_bytes;
+
+fn read_card_data_provenance(
+    data_root: &Path,
+    card_data_bytes: &[u8],
+) -> Result<CardDataProvenance, String> {
+    let path = data_root.join("card-data.provenance.json");
+    let provenance = CardDataProvenance::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "CARD_DATA_PROVENANCE_MISSING: {} was not found",
+                path.display()
+            )
+        } else {
+            format!(
+                "CARD_DATA_PROVENANCE_MISMATCH: failed to read {}: {error}",
+                path.display()
+            )
+        }
+    })?;
+    let actual_card_data_sha256 = sha256_bytes(card_data_bytes);
+    if !provenance.hashes_are_well_formed()
+        || provenance.card_data_sha256 != actual_card_data_sha256
+    {
+        return Err(format!(
+            "CARD_DATA_PROVENANCE_MISMATCH: {} does not describe the exact card-data.json bytes",
+            path.display()
+        ));
+    }
+    Ok(provenance)
+}
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1), io::stdout().lock()) {
@@ -67,9 +99,16 @@ fn run(args: impl Iterator<Item = String>, mut output: impl Write) -> Result<(),
         return Err("Usage: coverage-report <data-root> (or set PHASE_CARDS_PATH)".to_string());
     };
 
-    // Load via CardDatabase::from_export() using the pre-processed card-data.json
+    // Hash and deserialize the same pre-processed card-data.json bytes.
     let export_path = path.join("card-data.json");
-    let db = CardDatabase::from_export(&export_path).map_err(|error| {
+    let card_data_bytes = std::fs::read(&export_path).map_err(|error| {
+        format!(
+            "could not load card database from {}: {error}",
+            export_path.display()
+        )
+    })?;
+    let provenance = read_card_data_provenance(&path, &card_data_bytes)?;
+    let db = CardDatabase::from_export_reader(card_data_bytes.as_slice()).map_err(|error| {
         format!(
             "could not load card database from {}: {error}",
             export_path.display()
@@ -105,6 +144,13 @@ fn run(args: impl Iterator<Item = String>, mut output: impl Write) -> Result<(),
     );
 
     let mut summary = analyze_coverage(&db);
+    // Keep the artifact self-describing. The regression comparator uses face
+    // support/gap/parser fields; set/rarity/rulings sidecars only enrich
+    // metadata and set rollups, so AtomicCards is the corpus identity here.
+    // The hash comes from oracle-gen's provenance sidecar, which records the
+    // exact selected source bytes rather than guessing from a nearby default
+    // path file.
+    summary.source_corpus_hash = Some(provenance.source_corpus_sha256);
 
     // Populate per-category diagnostic counts for JSON output (D-08).
     {
@@ -431,9 +477,21 @@ mod tests {
 
     const CARD_DATA: &str = include_str!("../../tests/fixtures/runtime_card_export_fixture.json");
 
+    fn source_corpus_sha256() -> String {
+        "a".repeat(64)
+    }
+
+    /// A data root whose provenance sidecar describes the exact export bytes,
+    /// as `oracle-gen --provenance-out` writes it.
     fn data_root(card_data: &str) -> TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("card-data.json"), card_data).unwrap();
+        CardDataProvenance {
+            source_corpus_sha256: source_corpus_sha256(),
+            card_data_sha256: sha256_bytes(card_data.as_bytes()),
+        }
+        .write_atomic(&dir.path().join("card-data.provenance.json"))
+        .unwrap();
         dir
     }
 
@@ -472,6 +530,35 @@ mod tests {
 
         let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert!(report["total_cards"].as_u64().unwrap() > 0);
+        assert_eq!(report["source_corpus_hash"], source_corpus_sha256());
         assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn missing_or_mismatched_provenance_returns_error_without_rendering_a_report() {
+        let missing = data_root(CARD_DATA);
+        std::fs::remove_file(missing.path().join("card-data.provenance.json")).unwrap();
+        let mismatched = data_root(CARD_DATA);
+        CardDataProvenance {
+            source_corpus_sha256: source_corpus_sha256(),
+            card_data_sha256: "b".repeat(64),
+        }
+        .write_atomic(&mismatched.path().join("card-data.provenance.json"))
+        .unwrap();
+
+        for (dir, code) in [
+            (&missing, "CARD_DATA_PROVENANCE_MISSING"),
+            (&mismatched, "CARD_DATA_PROVENANCE_MISMATCH"),
+        ] {
+            let mut output = Vec::new();
+            let error = run(
+                [dir.path().to_string_lossy().into_owned()].into_iter(),
+                &mut output,
+            )
+            .unwrap_err();
+
+            assert!(error.starts_with(code), "expected {code}, got {error}");
+            assert!(output.is_empty(), "{code} must not emit a report");
+        }
     }
 }

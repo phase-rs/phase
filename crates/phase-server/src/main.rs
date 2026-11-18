@@ -1611,6 +1611,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => None,
@@ -1839,6 +1840,7 @@ fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         // Rotation is authorized by the presented credential exactly as the
@@ -5900,6 +5902,17 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             outcome: outcome.clone(),
             request_id: *request_id,
         },
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id,
+        } => L::SubmitTournamentDeck {
+            code: code.clone(),
+            player_token: player_token.clone(),
+            deck: deck.clone(),
+            request_id: *request_id,
+        },
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -8790,6 +8803,7 @@ fn operation_failed_message(
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => None,
@@ -13492,6 +13506,7 @@ async fn handle_client_message(
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => {
@@ -21843,21 +21858,22 @@ mod mode_gate_tests {
             ClientMessage::GetTournament {
                 code: "TOUR01".into(),
             },
-            // Deliberately CORRELATED, and the only fixture here that is.
+            // Deliberately CORRELATED.
             // `skip_serializing_if = "Option::is_none"` means a `None`
             // correlator emits no key at all, so under an all-`None` table a
             // projection that FORWARDED the field and one that DISCARDED it
             // serialize to byte-identical strings — and
             // `tournament_variants_survive_the_canonical_lobby_roundtrip`, whose
             // whole job is to catch a dropped field, would pass either way.
-            // A real `Some(..)` is what makes that instrument fire.
+            // A real `Some(..)` makes this comparison detect a dropped id.
             ClientMessage::StartTournamentRound {
                 code: "TOUR01".into(),
                 organizer_token: "org-tok".into(),
                 request_id: Some(TournamentRequestId(7)),
             },
-            // The remaining three stay uncorrelated, so the same pass also
-            // proves a pre-correlation frame still round-trips unchanged.
+            // The existing report, drop, and end frames retain `None` as the
+            // omitted-field control. Submission below has its own correlated
+            // fixture so this comparison detects a dropped id for that arm.
             ClientMessage::ReportMatchResult {
                 code: "TOUR01".into(),
                 pairing_id: 7,
@@ -21869,6 +21885,15 @@ mod mode_gate_tests {
                         .collect(),
                 },
                 request_id: None,
+            },
+            ClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "player-tok".into(),
+                deck: server_core::protocol::DeckData {
+                    main_deck: vec!["Island".into(), "Forest".into()],
+                    ..Default::default()
+                },
+                request_id: Some(TournamentRequestId(8)),
             },
             ClientMessage::DropFromTournament {
                 code: "TOUR01".into(),
@@ -21894,11 +21919,13 @@ mod mode_gate_tests {
             player_key: "key-a".into(),
             display_name: "Alice".into(),
             dropped: false,
+            deck_submitted: false,
         };
         let bob = PlayerSummary {
             player_key: "key-b".into(),
             display_name: "Bob".into(),
             dropped: true,
+            deck_submitted: true,
         };
         TournamentView {
             summary: TournamentSummary {
@@ -21983,7 +22010,7 @@ mod mode_gate_tests {
     #[test]
     fn tournament_variants_survive_the_canonical_lobby_roundtrip() {
         let frames = tournament_client_frames();
-        assert_eq!(frames.len(), 8, "every new client variant is covered");
+        assert_eq!(frames.len(), 9, "every new client variant is covered");
 
         for msg in &frames {
             let projected = to_lobby_client_message(msg).unwrap_or_else(|| {
@@ -22248,20 +22275,20 @@ mod handshake_tests {
             }
             other => panic!("expected the strict refusal, got {other:?}"),
         }
-        // The strict format-config rules start at lobby version 23 (the
-        // broker's fixed `MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES`), so
-        // the legacy boundary is pinned rather than derived from the current
-        // version, which moves with every lobby bump.
-        match create(23).as_slice() {
+        // The boundary is pinned to the broker's own gate constant, never to the
+        // current tip, so later lobby protocol bumps cannot move this control.
+        use lobby_broker::broker::MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES as FIRST_STRICT;
+        let last_legacy = FIRST_STRICT - 1;
+        assert!(matches!(
+            create(last_legacy).first(),
+            Some(Outbound::ToSelf(LobbyServerMessage::GameCreated { .. }))
+        ));
+        match create(FIRST_STRICT).as_slice() {
             [Outbound::ToSelf(LobbyServerMessage::Error { message, .. })] => {
                 assert!(message.contains("commander_damage_threshold"), "{message}");
             }
-            other => panic!("expected the strict refusal at version 23, got {other:?}"),
+            other => panic!("expected the strict refusal at the boundary, got {other:?}"),
         }
-        assert!(matches!(
-            create(22).first(),
-            Some(Outbound::ToSelf(LobbyServerMessage::GameCreated { .. }))
-        ));
     }
 
     #[test]

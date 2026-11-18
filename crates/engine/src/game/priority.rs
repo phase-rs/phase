@@ -105,13 +105,14 @@ pub(crate) fn handle_priority_pass_with_limit(
                 return deferred_transition_outcome(state);
             }
             // CR 510.4: The combat damage step's turn-based action runs in two
-            // sub-steps when a first-strike/double-strike creature is present. If
-            // the first-strike sub-step paused on a CR 603.3b trigger-ordering
-            // prompt (combat_damage.rs), `resolve_combat_damage` returned before
-            // the MANDATORY second (regular) sub-step ran (`regular_damage_done ==
-            // false`). Those ordered triggers have now resolved and all players
-            // passed with an empty stack, but combat damage is INCOMPLETE — re-enter
-            // the combat-damage turn-based action (auto_advance re-calls
+            // sub-steps when a first-strike/double-strike creature is present, and
+            // each ends with a CR 510.3 priority window. After the first-strike
+            // sub-step `resolve_combat_damage` returns (`regular_damage_done ==
+            // false`) whatever filled that window: a CR 603.3b trigger-ordering
+            // prompt, a trigger on the stack, or nothing. Once the stack is empty
+            // and all players have passed (CR 117.4), combat damage is INCOMPLETE —
+            // the MANDATORY second (regular) sub-step has not run. Re-enter the
+            // combat-damage turn-based action (auto_advance re-calls
             // resolve_combat_damage, which runs only the regular sub-step) instead
             // of advancing to end of combat (which would silently skip the regular
             // damage, violating CR 510.4). `regular_damage_done` is set true before
@@ -261,7 +262,7 @@ pub(crate) fn handle_priority_pass_with_limit(
 /// holder's seat is the controller, so the live `priority_player` must be
 /// compared against that mapped submitter, never against the seat itself.
 ///
-/// CR 732.2a-c: a shortened pre-cast shortcut proposal (CR 732.2a-b) obliges the
+/// CR 732.2a-c: a shortened shortcut proposal (CR 732.2a-b), on either route, obliges the
 /// player who now has priority to "make a different game choice than what was
 /// originally proposed" (CR 732.2c). The runtime models that obligation as a
 /// divergence latch, and a bare pass can never discharge it.
@@ -275,7 +276,7 @@ pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(),
     }
     if precast_copy_shortcut::blocks_pass(state, player) {
         return Err(EngineError::ActionNotAllowed(
-            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+            "A shortened shortcut requires a different meaningful action before passing"
                 .to_string(),
         ));
     }
@@ -442,7 +443,8 @@ fn resolution_can_remove_activatable_mana_source(
     if !chain_has_battlefield_departure(root) {
         return false;
     }
-    let sources: Vec<ObjectId> = mana_sources::activatable_mana_actions_for_player(state, player)
+    let explicit = super::mana_abilities::ManaActivationPurpose::Explicit;
+    let sources: Vec<ObjectId> = mana_sources::mana_actions_for_player(state, player, explicit)
         .iter()
         .filter_map(GameAction::source_object)
         .collect();
@@ -1150,7 +1152,7 @@ mod tests {
             Err(EngineError::NotYourPriority)
         ));
 
-        // (c) CR 732.2c: a shortened pre-cast shortcut obliges its owner to make
+        // (c) CR 732.2c: a shortened shortcut obliges its owner to make
         // a different game choice; a bare pass can never discharge it.
         let mut latched = setup();
         latched.precast_shortcut_runtime.must_diverge = Some(PlayerId(0));
@@ -1160,7 +1162,7 @@ mod tests {
             panic!("a latched divergence obligation must reject a bare pass");
         };
         assert!(
-            message.contains("shortened pre-cast shortcut"),
+            message.contains("shortened shortcut"),
             "the reducer's exact message must be preserved by the extraction, got {message:?}"
         );
     }

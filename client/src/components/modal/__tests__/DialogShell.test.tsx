@@ -93,4 +93,100 @@ describe("DialogShell", () => {
     );
     expect(screen.getByText("Confirm")).toBeInTheDocument();
   });
+
+  // Issue #11000: a prompt taller than the screen was cut off at the top and
+  // the bottom, with nothing to scroll. happy-dom does no layout, so these pin
+  // the structure that keeps every dialog usable at any height: a card capped
+  // at the visible viewport, a pinned header and `footer` slot, and one
+  // scrolling body between them.
+  describe("a dialog taller than the screen", () => {
+    function renderTallDialog() {
+      render(
+        <DialogShell
+          title="Choose two modes"
+          onClose={vi.fn()}
+          footer={<button type="button">Confirm</button>}
+        >
+          <ul>
+            {Array.from({ length: 60 }, (_, index) => (
+              <li key={index}>{`Row ${index}`}</li>
+            ))}
+          </ul>
+        </DialogShell>,
+      );
+
+      const heading = screen.getByRole("heading", { name: "Choose two modes" });
+      const header = heading.parentElement as HTMLElement;
+      const card = header.parentElement as HTMLElement;
+      const body = screen.getByRole("list").parentElement as HTMLElement;
+      const confirm = screen.getByRole("button", { name: "Confirm" });
+      const footer = confirm.parentElement as HTMLElement;
+      const close = screen.getByRole("button", { name: "Close" });
+      return { heading, header, card, body, confirm, footer, close };
+    }
+
+    it("caps the card at the dynamic viewport, less the overlay padding and safe areas", () => {
+      const { card } = renderTallDialog();
+
+      expect(card).toHaveClass(
+        "flex",
+        "flex-col",
+        "max-h-[calc(100dvh_-_1rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))]",
+        "lg:max-h-[calc(100dvh_-_3rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))]",
+      );
+      // `100vh` is the largest viewport, so a card capped by it runs under the
+      // mobile URL bar.
+      expect(card.className).not.toContain("100vh");
+    });
+
+    it("scrolls only the body, between a pinned header and a pinned footer", () => {
+      const { heading, header, card, body, confirm, footer, close } = renderTallDialog();
+
+      expect(Array.from(card.children)).toEqual([header, close, body, footer]);
+      expect(header).toHaveClass("shrink-0");
+      expect(footer).toHaveClass("shrink-0");
+      expect(body).toHaveClass("flex-1", "overflow-y-auto", "overflow-x-hidden");
+      // An absolutely positioned child (ReplacementModal's per-row `sr-only`
+      // labels) must resolve against the body, or it stretches the card's
+      // scroll range and the pinned header and footer scroll away with it.
+      expect(body).toHaveClass("relative");
+
+      expect(body).toContainElement(screen.getByText("Row 59"));
+      expect(body).not.toContainElement(heading);
+      expect(body).not.toContainElement(confirm);
+      expect(body).not.toContainElement(close);
+    });
+
+    it("scrolls the whole card when the header and footer leave the body less than one row", () => {
+      const { card, body } = renderTallDialog();
+
+      // The body stops shrinking at one tap target, and past that the card
+      // scrolls the column, footer included.
+      expect(body).toHaveClass("min-h-11");
+      expect(card).toHaveClass("overflow-y-auto", "overflow-x-hidden", "overscroll-contain");
+      // Chromium 144+ applies `overscroll-contain` even to a container with
+      // nothing to scroll, so on the body it would keep a swipe from reaching
+      // the card.
+      expect(body).not.toHaveClass("overscroll-contain");
+    });
+
+    it("keeps the header as the drag handle", () => {
+      const { header } = renderTallDialog();
+
+      expect(header).toHaveClass("cursor-grab", "touch-none");
+    });
+
+    it("centres the card with auto margins, so an oversized card starts at the top", () => {
+      renderTallDialog();
+
+      const wrapper = screen.getByRole("dialog", { name: "Choose two modes" });
+      const overlay = wrapper.parentElement as HTMLElement;
+
+      // Reach guard: the negative assertion below is about the fixed overlay.
+      expect(overlay).toHaveClass("fixed", "inset-0");
+      expect(wrapper).toHaveClass("m-auto");
+      // `items-center` centres an oversized card past both edges of the screen.
+      expect(overlay).not.toHaveClass("items-center");
+    });
+  });
 });

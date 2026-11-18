@@ -22,7 +22,10 @@
 //! the parser does not model MUST stay a loud gap (no silent mis-parse).
 
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityDefinition, CostReduction, Effect, QuantityExpr};
+use engine::types::ability::{
+    AbilityDefinition, Comparator, CostReduction, Effect, ParsedCondition, PlayerScope,
+    QuantityExpr, QuantityRef,
+};
 
 /// Walk an ability and its chained `sub_ability` nodes, returning the first
 /// `CostReduction` found at any level (cost reduction is extracted onto the
@@ -203,6 +206,66 @@ This ability costs {3} less to activate if there are five or more mana values am
         !has_surviving_cost_reduction_gap(&ability),
         "{card}: no Unimplemented 'less to activate' node should survive"
     );
+}
+
+/// CR 103.2a: Whtz, the Bibliophile's "This ability costs {3} less to
+/// activate if you had 200 or more cards in your starting deck" — the shared
+/// restriction-condition grammar reads the latched
+/// `Player::starting_deck_size` snapshot (`StartingDeckSize{Controller} >=
+/// Fixed(200)`); the cost-reduction if-tail reuses it with no new evaluator
+/// arm. The size sentence on line 1 is consumed as deck-construction
+/// metadata, so the whole verbatim text parses with no warnings.
+#[test]
+fn whtz_bibliophile_discount_reads_latched_starting_deck() {
+    let card = "Whtz, the Bibliophile";
+    let oracle = "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.";
+    let parsed = parse_oracle_text(
+        oracle,
+        card,
+        &["Rulebreaker".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{card}: verbatim text must parse warning-free, got {:?}",
+        parsed.parse_warnings
+    );
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| find_cost_reduction(a).is_some())
+        .unwrap_or_else(|| panic!("{card}: no activated ability captured a cost reduction"));
+    let reduction = find_cost_reduction(ability).unwrap();
+    assert_flat_conditional(reduction, 3, card);
+    assert_eq!(
+        reduction.condition,
+        Some(ParsedCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::StartingDeckSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 200 },
+        }),
+        "{card}: the discount must gate on the latched starting-deck count"
+    );
+    assert!(
+        !has_surviving_cost_reduction_gap(ability),
+        "{card}: no Unimplemented 'less to activate' node should survive"
+    );
+}
+
+/// Coverage honesty: the latch is past-tense ("had") by rule — a
+/// present-tense "you have 200 or more cards in your starting deck" has no
+/// live-library reading that preserves the snapshot semantics, so it must
+/// stay a loud gap (no captured condition).
+#[test]
+fn whtz_present_tense_starting_deck_stays_gapped() {
+    let card = "Whtz, the Bibliophile";
+    let oracle = "{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you have 200 or more cards in your starting deck.";
+    assert_cost_reduction_stays_gapped(oracle, card);
 }
 
 #[test]

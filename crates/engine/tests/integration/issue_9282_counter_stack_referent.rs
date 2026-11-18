@@ -1217,7 +1217,7 @@ fn each_ward_trigger_counters_a_kicked_spells_cast_trigger() {
     for _ in 0..16 {
         let result = match &runner.state().waiting_for {
             WaitingFor::OptionalCostChoice { .. } => {
-                runner.act(GameAction::DecideOptionalCost { pay: true })
+                runner.act(GameAction::DecideOptionalCost { index: 0 })
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
                 runner.act(GameAction::ChooseTarget {

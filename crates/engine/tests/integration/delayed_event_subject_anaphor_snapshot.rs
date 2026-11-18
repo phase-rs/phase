@@ -1228,13 +1228,13 @@ fn a_delayed_exclusion_expires_when_its_referent_blinks() {
 
 const ALL_RECUR: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
     strict: true,
-    ring_walk: true,
-    settlement: true,
+    recorded_period: true,
+    mandatory_replay: true,
 };
 const NONE_RECUR: LoopEntryPointVerdicts = LoopEntryPointVerdicts {
     strict: false,
-    ring_walk: false,
-    settlement: false,
+    recorded_period: false,
+    mandatory_replay: false,
 };
 
 /// Every keyed pin (CR 603.7c) `ability`'s chain holds on `object`.

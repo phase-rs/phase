@@ -63,6 +63,7 @@ pub(crate) fn complete_discard_to_graveyard(
     // it through the pipeline so `Moved` redirects (Rest in Peace class) get
     // their consult. A plain discard previously moved raw and never saw them.
     let proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from: Zone::Hand,
         to: Zone::Graveyard,
@@ -97,8 +98,6 @@ pub(crate) fn complete_discard_to_graveyard(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                // Discard delivers to the graveyard — no library placement.
-                None,
                 events,
             );
         }
@@ -441,7 +440,6 @@ pub fn resolve(
                                 None,
                                 false,
                                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                                None,
                                 events,
                             );
                             if discard_frame.is_none() {
@@ -1265,7 +1263,6 @@ fn route_discard(
                     None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                    None,
                     events,
                 );
                 if discard_frame.is_none() {
@@ -1802,13 +1799,13 @@ mod tests {
             .as_mut()
             .expect("test grandchild exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         direct_child
             .else_ability
             .as_mut()
             .expect("test else branch exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         let continuation = PendingContinuation::new(Box::new(direct_child), &state);
         state.park_ability_continuation(continuation);
 

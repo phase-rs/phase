@@ -110,8 +110,10 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     }
   }
 
-  // Genuinely still resolving art — pulse until the async lookup settles.
-  if (!renderCardBack && isLoading) {
+  // Genuinely still resolving art: pulse until the async lookup settles. A
+  // card re-resolving its art (a reload of the same card elsewhere, a printings
+  // fetch) keeps showing its last good image, which the hook hands back as `src`.
+  if (!renderCardBack && isLoading && !src) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">

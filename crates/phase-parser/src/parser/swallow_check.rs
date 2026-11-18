@@ -38,6 +38,7 @@ use super::oracle_target::{
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
     CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
@@ -2386,7 +2387,7 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
             parsed.additional_cost,
             Some(crate::types::ability::AdditionalCost::Optional { .. }
                 | crate::types::ability::AdditionalCost::Kicker { .. }
-                | crate::types::ability::AdditionalCost::Choice(_, _))
+                | crate::types::ability::AdditionalCost::Choice(_))
         )
         // CR 117.6 + 117.9 + 702.8 + 715.3a: Every variant of
         // `SpellCastingOption` is an opt-in player choice — alternative
@@ -5817,9 +5818,15 @@ fn detect_duration_this_turn(
     if evidence.any_quantity_ref(|x| {
         matches!(
             x,
-            QuantityRef::LifeLostThisTurn { .. }
-                | QuantityRef::SpellsCastThisTurn { .. }
-                | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            // CR 500: only the this-turn window reads "this turn"; a last-turn
+            // payload (`window: LastTurn`) is not evidence of a this-turn duration.
+            QuantityRef::LifeLost {
+                window: TurnWindow::ThisTurn,
+                ..
+            } | QuantityRef::SpellsCast {
+                window: TurnWindow::ThisTurn,
+                ..
+            } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
                 | QuantityRef::EnteredThisTurn { .. }
                 | QuantityRef::SacrificedThisTurn { .. }
                 | QuantityRef::CrimesCommittedThisTurn
@@ -6690,9 +6697,11 @@ fn pairing_subject_of(word: CombatRelationSubjectWord) -> CombatRelationSubject 
             CombatRelationSubject::Source
         }
         CombatRelationSubjectWord::TargetCreature => CombatRelationSubject::ParentTarget,
-        // The pairing grammar never produces the demonstrative; the arm keeps the
-        // match exhaustive.
-        CombatRelationSubjectWord::Demonstrative => CombatRelationSubject::AnaphoricTarget,
+        // The pairing grammar never produces either demonstrative ("that
+        // creature", "one of those creatures"); the arm keeps the match exhaustive.
+        CombatRelationSubjectWord::Demonstrative | CombatRelationSubjectWord::OneOfThose => {
+            CombatRelationSubject::AnaphoricTarget
+        }
     }
 }
 
@@ -7233,24 +7242,1006 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// `DynamicQty` reports the rejected operand.
     #[test]
     fn dynamic_qty_swallow_carries_the_rejected_operand() {
-        // Chong and Lily, Nomads (second mode, standalone). The operand
-        // is spanned by the marker's own `OperandSpan` and bounded by its own
-        // `end_bounds`; a hand-rolled split would produce a different string.
+        // Phyresis Outbreak. The operand is spanned by the marker's own
+        // `OperandSpan` and bounded by its own `end_bounds`; a hand-rolled split
+        // would produce a different string.
         let parsed = parse_named(
-            "Whenever one or more Bards you control attack, creatures you control get \
-             +1/+0 until end of turn for each lore counter among Sagas you control.",
-            "Chong and Lily, Nomads",
-            &["Creature"],
+            "Each opponent gets a poison counter. Then each creature your opponents control \
+             gets -1/-1 until end of turn for each poison counter its controller has.",
+            "Phyresis Outbreak",
+            &["Sorcery"],
         );
         let warning = only_swallow(&parsed, "DynamicQty");
 
         assert_eq!(
             warning.gap(),
             Some(&ClauseGap::Quantity {
-                operand: "lore counter among sagas you control".to_string()
+                operand: "poison counter its controller has".to_string()
             }),
             "full warning: {warning:?}"
         );
+    }
+
+    /// Blue, Loyal Raptor: a kinds census over a named object that no census
+    /// arm reads leaves the whole line an explicit unimplemented replacement
+    /// structure. It is never absorbed as a source counter count, a supported
+    /// replacement, or a counter named "kind of".
+    #[test]
+    fn unread_kinds_census_over_a_named_object_stays_an_explicit_gap() {
+        let parsed = parse_named(
+            "Partner with Owen Grady, Raptor Trainer (When this creature enters, target              player may put Owen into their hand from their library, then shuffle.)
+For              each kind of counter on Blue, Loyal Raptor, each other Dinosaur you control              enters with a counter of that kind on it.",
+            "Blue, Loyal Raptor",
+            &["Creature"],
+        );
+        assert!(parsed.replacements.is_empty(), "{parsed:#?}");
+        assert!(parsed.statics.is_empty(), "{parsed:#?}");
+        assert!(
+            matches!(
+                parsed.abilities.as_slice(),
+                [only] if matches!(
+                    only.effect.as_ref(),
+                    Effect::Unimplemented { name, .. } if name == "replacement_structure"
+                )
+            ),
+            "{parsed:#?}"
+        );
+    }
+
+    /// CR 122.1: a counter-kind census over a single object ("kind(s) of
+    /// counter(s) on ~") has no census arm, so every surface form stays honest
+    /// through an explicit unsupported clause instead of being absorbed as a count of a
+    /// counter named "kind of". No printed card names a "kind" counter; these
+    /// lines are synthetic because no printed card currently reaches the route.
+    #[test]
+    fn counter_kind_census_on_one_object_is_never_a_named_counter_count() {
+        let parse_creature = |text: &str| parse_named(text, "Test Card", &["Creature"]);
+        // A counter name serializes as a bare JSON string value; the census
+        // phrase itself only ever appears inside a longer description string.
+        fn names_kind(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::String(s) => matches!(s.as_str(), "kind of" | "kinds of"),
+                serde_json::Value::Array(items) => items.iter().any(names_kind),
+                serde_json::Value::Object(fields) => fields.values().any(names_kind),
+                _ => false,
+            }
+        }
+        let names_kind_counter = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            names_kind(&serde_json::to_value(&parsed.abilities).unwrap())
+                || names_kind(&serde_json::to_value(&parsed.statics).unwrap())
+        };
+
+        for text in [
+            "{T}: Draw a card for each kind of counter on Test Card.",
+            "{T}: You gain life equal to the number of kinds of counters on Test Card.",
+        ] {
+            let parsed = parse_creature(text);
+            assert!(
+                any_ability_has_unimplemented(&parsed),
+                "{text:?}: the unread census must remain explicitly unsupported: {parsed:#?}"
+            );
+            assert!(!names_kind_counter(&parsed), "{text:?}: {parsed:#?}");
+        }
+
+        let static_census = parse_creature(
+            "As long as there are two or more kinds of counters on Test Card, it has flying.",
+        );
+        assert!(
+            matches!(
+                static_census.statics.as_slice(),
+                [StaticDefinition {
+                    mode: StaticMode::Continuous,
+                    affected: Some(TargetFilter::SelfRef),
+                    condition: Some(StaticCondition::Unrecognized { text }),
+                    modifications,
+                    ..
+                // allow-noncombinator: Test assertion pins diagnostic text, not parser dispatch.
+                }] if text == "there are two or more kinds of counters on ~"
+                    && matches!(modifications.as_slice(), [ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying
+                    }])
+            ),
+            "the static census must preserve its exact unsupported condition: {static_census:#?}"
+        );
+        assert!(!names_kind_counter(&static_census), "{static_census:#?}");
+        // The coverage verdict for this static (the engine-side authority) is
+        // pinned in the integration test
+        // `static_counter_kind_census_on_one_object_is_an_unsupported_condition`.
+
+        let control = parse_creature(
+            "{T}: You gain life equal to the number of +1/+1 counters on Test Card.",
+        );
+        assert!(!any_ability_has_unimplemented(&control), "{control:#?}");
+        assert!(
+            matches!(
+                control.abilities[0].effect.as_ref(),
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            counter_type: Some(CounterType::Plus1Plus1),
+                            ..
+                        }
+                    },
+                    ..
+                }
+            ),
+            "reach guard: a real counter name must keep its counter quantity: {control:#?}"
+        );
+    }
+
+    /// Every `DistinctCounterKindsAmong` census filter anywhere in the parse
+    /// (abilities, triggers, statics, replacements), as serialized JSON.
+    fn kinds_census_filters(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+    ) -> Vec<serde_json::Value> {
+        fn walk(value: &serde_json::Value, found: &mut Vec<serde_json::Value>) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    if fields.get("type").and_then(serde_json::Value::as_str)
+                        == Some("DistinctCounterKindsAmong")
+                    {
+                        found.push(fields["filter"].clone());
+                    }
+                    fields.values().for_each(|v| walk(v, found));
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        walk(&serde_json::to_value(parsed).unwrap(), &mut found);
+        found
+    }
+
+    /// The name of every `Effect::Unimplemented` anywhere in the parse.
+    fn unimplemented_names(parsed: &crate::parser::oracle::ParsedAbilities) -> Vec<String> {
+        fn walk(value: &serde_json::Value, found: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    if fields.get("type").and_then(serde_json::Value::as_str)
+                        == Some("Unimplemented")
+                    {
+                        if let Some(name) = fields.get("name").and_then(serde_json::Value::as_str) {
+                            found.push(name.to_string());
+                        }
+                    }
+                    fields.values().for_each(|v| walk(v, found));
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        walk(&serde_json::to_value(parsed).unwrap(), &mut found);
+        found
+    }
+
+    /// Asserts the line reads no counter-kind census at all and carries the
+    /// named explicit gap — never a dropped "for each" (a bare `Draw { 1 }`),
+    /// which the `DynamicQty` detector cannot see once any `QuantityRef` sits
+    /// in the unit.
+    fn assert_kinds_census_gap(text: &str, types: &[&str], gap: &str) {
+        let parsed = parse_named(text, "Synthetic Census", types);
+        assert_eq!(
+            kinds_census_filters(&parsed),
+            Vec::<serde_json::Value>::new(),
+            "{text:?}: no census may be read"
+        );
+        assert!(
+            unimplemented_names(&parsed).iter().any(|name| name == gap),
+            "{text:?}: expected an Unimplemented {gap:?}, got {:?}",
+            unimplemented_names(&parsed)
+        );
+    }
+
+    /// CR 608.2k: when "it" names an earlier instruction's target, the kinds
+    /// census has no faithful reading, so the clause is an explicit gap —
+    /// never a census of the source's own kinds, and never a bare draw.
+    #[test]
+    fn kinds_census_pronoun_after_a_targeted_instruction_is_unimplemented() {
+        for (text, types) in [
+            (
+                "Whenever this creature attacks, put a +1/+1 counter on target creature, then \
+                 draw a card for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Put a +1/+1 counter on target creature. Draw a card for each kind of counter \
+                 on it.",
+                &["Sorcery"][..],
+            ),
+        ] {
+            assert_kinds_census_gap(text, types, "counter_kinds_pronoun_antecedent");
+        }
+    }
+
+    /// Whether any object anywhere in the parse carries `"type": ty` (an
+    /// effect, cost, or quantity variant name).
+    fn parse_has_type(parsed: &crate::parser::oracle::ParsedAbilities, ty: &str) -> bool {
+        fn walk(value: &serde_json::Value, ty: &str) -> bool {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.get("type").and_then(serde_json::Value::as_str) == Some(ty)
+                        || fields.values().any(|v| walk(v, ty))
+                }
+                serde_json::Value::Array(items) => items.iter().any(|v| walk(v, ty)),
+                _ => false,
+            }
+        }
+        walk(&serde_json::to_value(parsed).unwrap(), ty)
+    }
+
+    /// CR 608.2c + CR 608.2k: the census of "it" is read only as the FIRST
+    /// instruction of the ability — any earlier instruction (a search, a
+    /// reveal and move, a discard, a draw) may introduce the object the
+    /// pronoun names, so a later census is an explicit gap. The earlier
+    /// instruction itself still parses (reach guard), and a census that IS
+    /// first keeps its reading while a second census after it does not.
+    #[test]
+    fn kinds_census_pronoun_after_any_earlier_instruction_is_unimplemented() {
+        for (text, earlier) in [
+            (
+                "When this creature enters, search your library for a creature card, reveal \
+                 it, put it into your hand, then shuffle. You gain 1 life for each kind of \
+                 counter on it.",
+                "SearchLibrary",
+            ),
+            (
+                "Whenever this creature attacks, reveal the top card of your library and put \
+                 it into your hand. You gain 1 life for each kind of counter on it.",
+                "RevealTop",
+            ),
+            (
+                "When this creature enters, discard a card, then draw a card for each kind of \
+                 counter on it.",
+                "Discard",
+            ),
+            (
+                "Whenever this creature attacks, draw a card, then you gain 1 life for each \
+                 kind of counter on it.",
+                "Draw",
+            ),
+            (
+                "When this creature dies, you may pay {1}. If you do, draw a card for each \
+                 kind of counter on it.",
+                "PayCost",
+            ),
+        ] {
+            assert_kinds_census_gap(text, &["Creature"], "counter_kinds_pronoun_antecedent");
+            let parsed = parse_named(text, "Synthetic Census", &["Creature"]);
+            assert!(
+                parse_has_type(&parsed, earlier),
+                "{text:?}: reach guard — the earlier {earlier} instruction parsed"
+            );
+        }
+
+        // The first census reads the ability's own object; the second sentence's
+        // census follows an instruction and is a gap.
+        let parsed = parse_named(
+            "When this creature dies, draw a card for each kind of counter on it. You gain 1 \
+             life for each kind of counter on it.",
+            "Synthetic Census",
+            &["Creature"],
+        );
+        assert_eq!(
+            kinds_census_filters(&parsed),
+            vec![serde_json::to_value(TargetFilter::SelfRef).unwrap()],
+        );
+        assert_eq!(
+            unimplemented_names(&parsed),
+            vec!["counter_kinds_pronoun_antecedent".to_string()],
+        );
+    }
+
+    /// CR 608.2k + CR 109.5: the census of "it" is read only for an instruction
+    /// whose recipient is the ability's controller ("you", stated or implicit).
+    /// A player named through an object (a target's or blocked creature's
+    /// controller or owner), a targeted or event player, a peeled player scope
+    /// ("each player", "each opponent", "starting with you, each player"), and a
+    /// non-controller "may" actor are all explicit gaps — never a census whose
+    /// recipient silently became "you" or an object-derived player.
+    #[test]
+    fn kinds_census_pronoun_for_a_non_controller_recipient_is_unimplemented() {
+        for text in [
+            "Whenever this creature attacks, target creature's controller loses 1 life for \
+             each kind of counter on it.",
+            "Whenever this creature attacks, the controller of target creature draws a card \
+             for each kind of counter on it.",
+            "Whenever this creature blocks a creature, that creature's controller loses 1 life \
+             for each kind of counter on it.",
+            "Whenever this creature attacks, target artifact's owner mills a card for each kind \
+             of counter on it.",
+            "When this creature dies, target permanent's controller gains 1 life for each kind \
+             of counter on it.",
+            "Whenever this creature becomes blocked by a creature, that creature's controller \
+             loses 1 life for each kind of counter on it.",
+            "Whenever this creature attacks, defending player loses 1 life for each kind of \
+             counter on it.",
+            "Whenever this creature attacks, target opponent loses 1 life for each kind of \
+             counter on it.",
+            "Whenever this creature attacks, target player draws a card for each kind of \
+             counter on it.",
+            "Whenever this creature deals combat damage to a player, that player mills a card \
+             for each kind of counter on it.",
+            "Whenever this creature deals combat damage to a player, they draw a card for each \
+             kind of counter on it.",
+            "When this creature dies, its controller draws a card for each kind of counter on \
+             it.",
+            "When this creature dies, its owner draws a card for each kind of counter on it.",
+            "Whenever this creature attacks, each player draws a card for each kind of counter \
+             on it.",
+            "Whenever this creature attacks, each opponent gains 1 life for each kind of \
+             counter on it.",
+            "When this creature enters, each opponent loses 1 life for each kind of counter on \
+             it, then you gain 1 life for each kind of counter on it.",
+            "When this creature enters, starting with you, each player draws a card for each \
+             kind of counter on it.",
+            "Whenever this creature attacks, an opponent may draw a card for each kind of \
+             counter on it.",
+            "Whenever this creature attacks, each opponent may draw a card for each kind of \
+             counter on it.",
+        ] {
+            assert_kinds_census_gap(text, &["Creature"], "counter_kinds_pronoun_antecedent");
+        }
+    }
+
+    /// CR 608.2k + CR 608.2h: the counter-kind census of "it" is read only for
+    /// the ability's own object. Every other antecedent — a pumped or damaged
+    /// target, a mass-pump recipient, a cost-paid object, a typed or attached
+    /// trigger subject, a cast spell, a created token, a host-less Aura — and
+    /// every per-object iteration is an explicit gap.
+    #[test]
+    fn kinds_census_pronoun_without_a_self_antecedent_is_unimplemented() {
+        const ANTECEDENT: &str = "counter_kinds_pronoun_antecedent";
+        const ITERATION: &str = "counter_kinds_pronoun_iteration";
+        for (text, types, gap) in [
+            // Object recipients: the pronoun names the pumped/damaged object.
+            (
+                "Target creature gets +1/+1 until end of turn for each kind of counter on it.",
+                &["Instant"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Test Card deals 1 damage to target creature for each kind of counter on it.",
+                &["Instant"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Whenever this creature attacks, target creature you control gets +1/+0 until \
+                 end of turn for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Whenever a creature you control attacks, target creature gets +1/+1 until end \
+                 of turn for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Whenever a creature you control becomes blocked, it gets +1/+1 until end of \
+                 turn for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Each creature you control gets +1/+1 until end of turn for each kind of \
+                 counter on it.",
+                &["Instant"][..],
+                ANTECEDENT,
+            ),
+            // A pump conjoined with a keyword grant reaches the granted-continuous
+            // route, whose static-only placeholder would read the SOURCE's kinds.
+            (
+                "Target creature gets +1/+1 for each kind of counter on it and gains trample \
+                 until end of turn.",
+                &["Instant"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Creatures you control get +1/+1 for each kind of counter on them and gain \
+                 trample until end of turn.",
+                &["Instant"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Target creature you control gets +1/+1 for each kind of counter on it until \
+                 end of turn and gains trample.",
+                &["Instant"][..],
+                ANTECEDENT,
+            ),
+            // Cost-paid objects: not a triggered ability's own object.
+            (
+                "{T}, Sacrifice another creature: Draw a card for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "{T}, Exile a creature card from your graveyard: Draw a card for each kind of \
+                 counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            // Per-object iterations: "it" is each iterated creature.
+            (
+                "At the beginning of your upkeep, for each creature you control, draw a card \
+                 for each kind of counter on it.",
+                &["Creature"][..],
+                ITERATION,
+            ),
+            (
+                "Whenever this creature attacks, for each creature you control, draw a card \
+                 for each kind of counter on it.",
+                &["Creature"][..],
+                ITERATION,
+            ),
+            // Trigger antecedents other than the ability's own object.
+            (
+                "Whenever a creature you control becomes the target of a spell an opponent \
+                 controls, draw a card for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Whenever a creature you control deals combat damage to a player, draw a card \
+                 for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Whenever another creature you control dies, draw a card for each kind of \
+                 counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Whenever you cast a creature spell, draw a card for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Whenever equipped creature deals combat damage to a player, draw a card for \
+                 each kind of counter on it.",
+                &["Artifact"][..],
+                ANTECEDENT,
+            ),
+            (
+                "Enchant creature\nAt the beginning of your upkeep, draw a card for each kind \
+                 of counter on it.",
+                &["Enchantment"][..],
+                ANTECEDENT,
+            ),
+            // A created token is the nearer antecedent.
+            (
+                "When this creature enters, create a 1/1 white Soldier creature token. Draw a \
+                 card for each kind of counter on it.",
+                &["Creature"][..],
+                ANTECEDENT,
+            ),
+        ] {
+            assert_kinds_census_gap(text, types, gap);
+        }
+    }
+
+    /// CR 603.7 + CR 122.2 + CR 608.2h: a census inside the body of a delayed
+    /// triggered ability is read when that ability resolves, by which time a
+    /// source that left the battlefield is a new object with no counters and its
+    /// last-known information is gone — so the census of "it" has no faithful
+    /// reading there and the clause is an explicit gap, whether the delay is a
+    /// leading or a trailing phrase. The `CreateDelayedTrigger` wrapper itself
+    /// still parses (reach guard).
+    #[test]
+    fn kinds_census_pronoun_in_a_delayed_trigger_body_is_unimplemented() {
+        for text in [
+            "When this creature dies, at the beginning of the next end step, draw a card for \
+             each kind of counter on it.",
+            "When this creature leaves the battlefield, at the beginning of the next end step, \
+             draw a card for each kind of counter on it.",
+            "When this creature is exiled, at the beginning of the next end step, draw a card \
+             for each kind of counter on it.",
+            "When this creature dies, at the beginning of your next upkeep, draw a card for \
+             each kind of counter on it.",
+            "When this creature dies, draw a card for each kind of counter on it at the \
+             beginning of the next end step.",
+            "When this creature dies, you gain 1 life for each kind of counter on it at the \
+             beginning of your next upkeep.",
+            // The source stays on the battlefield here, but the delayed body is
+            // still not the enclosing trigger's own resolution; it fails closed.
+            "When this creature enters, at the beginning of the next end step, draw a card for \
+             each kind of counter on it.",
+        ] {
+            assert_kinds_census_gap(text, &["Creature"], "counter_kinds_pronoun_antecedent");
+            let parsed = parse_named(text, "Synthetic Census", &["Creature"]);
+            assert!(
+                parse_has_type(&parsed, "CreateDelayedTrigger"),
+                "{text:?}: reach guard — the delayed trigger itself parsed"
+            );
+        }
+    }
+
+    /// CR 603.1 + CR 608.2k + CR 109.1: when a self trigger's condition also
+    /// names a second object, "it" could be either object, so the census gets
+    /// no reading and the clause is an explicit gap. That holds whether the
+    /// second object is recorded in a typed event slot ("blocks a creature",
+    /// "becomes the target of a spell", "attacks a planeswalker") or only in the
+    /// condition's text ("fights a creature", "crews a Vehicle", "deals damage
+    /// to a token"). The same events naming no second object keep their reading
+    /// (`kinds_census_pronoun_of_the_abilitys_own_object_is_read`).
+    #[test]
+    fn kinds_census_pronoun_in_a_trigger_naming_a_second_object_is_unimplemented() {
+        for (text, types) in [
+            // The second object is recorded in a typed event slot.
+            (
+                "Whenever this creature blocks a creature, draw a card for each kind of counter \
+                 on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature becomes blocked by a creature, draw a card for each kind \
+                 of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this Equipment becomes attached to a creature, draw a card for each \
+                 kind of counter on it.",
+                &["Artifact"][..],
+            ),
+            (
+                "Whenever this creature deals combat damage to a creature, draw a card for each \
+                 kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature deals combat damage to a player or planeswalker, draw a \
+                 card for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature becomes the target of a spell, draw a card for each kind \
+                 of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature becomes the target of an ability, draw a card for each \
+                 kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature attacks a planeswalker, draw a card for each kind of \
+                 counter on it.",
+                &["Creature"][..],
+            ),
+            // The second object is named only in the condition's text.
+            (
+                "Whenever this creature fights a creature, draw a card for each kind of counter \
+                 on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature crews a Vehicle, draw a card for each kind of counter on \
+                 it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature becomes blocked by two or more creatures, draw a card \
+                 for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature is dealt damage by a creature, draw a card for each kind \
+                 of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature deals damage to a token, draw a card for each kind of \
+                 counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature is dealt damage by a source an opponent controls, draw a \
+                 card for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+        ] {
+            assert_kinds_census_gap(text, types, "counter_kinds_pronoun_antecedent");
+        }
+    }
+
+    /// CR 118.12a + CR 608.2k: a combat tax whose census pronoun names each
+    /// affected creature (not the source permanent) gets no census reading;
+    /// the line stays an honest `DynamicQty` swallow naming the operand.
+    #[test]
+    fn kinds_census_pronoun_on_a_non_self_combat_tax_is_an_honest_swallow() {
+        for (text, types) in [
+            (
+                "Each creature with one or more counters on it can't attack you unless its \
+                 controller pays {1} for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Enchant creature\nEnchanted creature can't attack unless its controller pays \
+                 {1} for each kind of counter on it.",
+                &["Enchantment"][..],
+            ),
+        ] {
+            let parsed = parse_named(text, "Synthetic Census", types);
+            assert_eq!(
+                kinds_census_filters(&parsed),
+                Vec::<serde_json::Value>::new(),
+                "{text:?}"
+            );
+            // Reach guard: the swallow detector ran and named the dropped tail.
+            assert!(
+                has_swallowed_detector(&parsed, "DynamicQty"),
+                "{text:?}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 608.2k + CR 608.2h: when the antecedent is positively the ability's
+    /// own object, the census reads that object (`SelfRef`): a self-referential
+    /// trigger (including Blitzball Stadium's granted one, verbatim), a self
+    /// dies trigger, a player-recipient life gain, and a self combat tax. The
+    /// non-pronoun census keeps its typed reading, and "double the number of
+    /// each kind of counter on it" is not the census grammar at all.
+    #[test]
+    fn kinds_census_pronoun_of_the_abilitys_own_object_is_read() {
+        let self_ref = serde_json::to_value(TargetFilter::SelfRef).unwrap();
+        for (text, types) in [
+            (
+                "Whenever this creature deals combat damage to a player, draw a card for each \
+                 kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "When this creature dies, draw a card for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature attacks, you gain 1 life for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            // Events whose condition names no object besides the source: a
+            // player participant, or no second participant at all.
+            (
+                "Whenever this creature attacks a player, draw a card for each kind of counter \
+                 on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature deals combat damage to an opponent, draw a card for each \
+                 kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature blocks, draw a card for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature becomes blocked, draw a card for each kind of counter on \
+                 it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature is dealt damage, draw a card for each kind of counter on \
+                 it.",
+                &["Creature"][..],
+            ),
+            (
+                "Test Card can't attack or block unless you pay {1} for each kind of counter \
+                 on it.",
+                &["Creature"][..],
+            ),
+            (
+                "When this artifact enters, support X. (Put a +1/+1 counter on each of up to X \
+                 target creatures.)\nGo for the Goal! — {3}, {T}: Until end of turn, target \
+                 creature gains \"Whenever this creature deals combat damage to a player, draw \
+                 a card for each kind of counter on it\" and it can't be blocked this turn.",
+                &["Artifact"][..],
+            ),
+            // The controller as the recipient, stated or implicit, across the
+            // player-recipient numeric instructions; a census that is the first
+            // instruction keeps its reading whatever follows it.
+            (
+                "Whenever this creature attacks, you lose 1 life for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "Whenever this creature attacks, scry 1 for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "When this creature dies, surveil 1 for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "When this creature dies, mill a card for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "When this creature dies, you may draw a card for each kind of counter on it.",
+                &["Creature"][..],
+            ),
+            (
+                "When this creature dies, draw a card for each kind of counter on it, then put \
+                 a +1/+1 counter on target creature.",
+                &["Creature"][..],
+            ),
+        ] {
+            let parsed = parse_named(text, "Test Card", types);
+            assert_eq!(
+                kinds_census_filters(&parsed),
+                vec![self_ref.clone()],
+                "{text:?}"
+            );
+            assert_eq!(
+                unimplemented_names(&parsed),
+                Vec::<String>::new(),
+                "{text:?}"
+            );
+        }
+
+        let typed = parse_named(
+            "Target creature gets +1/+1 until end of turn for each kind of counter on \
+             permanents you control.",
+            "Test Card",
+            &["Instant"],
+        );
+        // One census per pumped stat (power and toughness).
+        let permanents_you_control = serde_json::to_value(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::permanent()
+                .controller(crate::types::ability::ControllerRef::You),
+        ))
+        .unwrap();
+        assert_eq!(
+            kinds_census_filters(&typed),
+            vec![permanents_you_control.clone(), permanents_you_control],
+        );
+        assert_eq!(unimplemented_names(&typed), Vec::<String>::new());
+
+        let doubling = parse_named(
+            "Whenever a modified creature you control attacks, double the number of each kind \
+             of counter on it.",
+            "Test Card",
+            &["Creature"],
+        );
+        assert_eq!(unimplemented_names(&doubling), Vec::<String>::new());
+    }
+
+    /// CR 608.2k + CR 611.3a: in a continuous static, the census pronoun names
+    /// the static's subject only when it agrees with the subject's number (its
+    /// verb agreement): "Each creature … gets … on it", "Creatures … get … on
+    /// them", "Enchanted/Equipped creature gets … on it", "This creature gets …
+    /// on it" read — per recipient, or the source for a self static. A singular
+    /// "it" after a plural subject ("Other creatures you control get … on it")
+    /// names some other object, and a plural "them" after a singular subject
+    /// names no affected object: no census is read, and the dropped operand
+    /// stays an honest `DynamicQty` swallow.
+    #[test]
+    fn kinds_census_pronoun_in_a_static_must_agree_with_its_subject() {
+        let per_recipient = serde_json::to_value(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::permanent().properties(vec![
+                crate::types::ability::FilterProp::Not {
+                    prop: Box::new(crate::types::ability::FilterProp::Another),
+                },
+            ]),
+        ))
+        .unwrap();
+        let self_ref = serde_json::to_value(TargetFilter::SelfRef).unwrap();
+        for (text, filter) in [
+            (
+                "Each creature you control gets +1/+1 for each kind of counter on it.",
+                &per_recipient,
+            ),
+            (
+                "Each other creature you control gets +1/+1 for each kind of counter on it.",
+                &per_recipient,
+            ),
+            (
+                "Creatures you control get +1/+1 for each kind of counter on them.",
+                &per_recipient,
+            ),
+            (
+                "Equipped creature gets +1/+1 for each kind of counter on it.",
+                &per_recipient,
+            ),
+            (
+                "Creatures you control get +1/+1 for each kind of counter on them and +1/+0 for \
+                 each kind of counter on them.",
+                &per_recipient,
+            ),
+            (
+                "This creature gets +1/+1 for each kind of counter on it.",
+                &self_ref,
+            ),
+        ] {
+            let parsed = parse_named(text, "Test Card", &["Creature"]);
+            let found = kinds_census_filters(&parsed);
+            assert!(
+                !found.is_empty() && found.iter().all(|f| f == filter),
+                "{text:?}: {found:?}"
+            );
+        }
+        for text in [
+            "Other creatures you control get +1/+1 for each kind of counter on it.",
+            "Creatures you control get +1/+1 for each kind of counter on it.",
+            "Other creatures you control get +1/+1 for each kind of counter on it and have \
+             trample.",
+            "Creatures you control get +1/+1 for each kind of counter on it and +1/+0 for each \
+             kind of counter on it.",
+            "Each creature you control gets +1/+1 for each kind of counter on them.",
+            "This creature gets +1/+1 for each kind of counter on them.",
+            "Enchanted creature gets +1/+1 for each kind of counter on them.",
+        ] {
+            let parsed = parse_named(text, "Test Card", &["Creature"]);
+            assert_eq!(
+                kinds_census_filters(&parsed),
+                Vec::<serde_json::Value>::new(),
+                "{text:?}"
+            );
+            // Reach guard: the static parsed and the swallow audit named the
+            // dropped census operand.
+            assert!(!parsed.statics.is_empty(), "{text:?}");
+            assert!(
+                has_swallowed_detector(&parsed, "DynamicQty"),
+                "{text:?}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// The census multiplies a fixed base only. A dynamic base ("that much
+    /// life", "X life", "life equal to its power", "that many cards") has no
+    /// product with a second dynamic quantity, so the clause is an explicit gap
+    /// rather than the bare base with the "for each" dropped.
+    #[test]
+    fn kinds_census_pronoun_on_a_dynamic_base_is_unimplemented() {
+        for text in [
+            "Whenever this creature deals combat damage to a player, you gain that much life \
+             for each kind of counter on it.",
+            "When this creature dies, you gain life equal to its power for each kind of \
+             counter on it.",
+            "When this creature enters, you lose X life for each kind of counter on it.",
+            "Whenever this creature deals combat damage to a player, draw that many cards for \
+             each kind of counter on it.",
+        ] {
+            assert_kinds_census_gap(text, &["Creature"], "counter_kinds_pronoun_antecedent");
+        }
+    }
+
+    /// Chong and Lily, Nomads (second mode, standalone): the counter census
+    /// over Sagas parses, so the line carries no `DynamicQty` swallow.
+    #[test]
+    fn dynamic_qty_counter_census_operand_is_represented() {
+        let parsed = parse_named(
+            "Whenever one or more Bards you control attack, creatures you control get \
+             +1/+0 until end of turn for each lore counter among Sagas you control.",
+            "Chong and Lily, Nomads",
+            &["Creature"],
+        );
+        // Reach guard: the line parsed without an unimplemented effect, so the
+        // swallow audit ran.
+        assert_eq!(parsed.triggers.len(), 1, "{parsed:#?}");
+        assert!(!any_ability_has_unimplemented(&parsed), "{parsed:#?}");
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "{:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// The enters-with replacement's Ulasht line, with the per-each conjunct
+    /// count read off its `PutCounter`.
+    fn enters_with_count(parsed: &crate::parser::oracle::ParsedAbilities) -> QuantityExpr {
+        let execute = parsed.replacements[0]
+            .execute
+            .as_deref()
+            .expect("enters-with execute");
+        match execute.effect.as_ref() {
+            Effect::PutCounter { count, .. } => count.clone(),
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1c: a mixed-kind conjunct declines the whole per-each tail,
+    /// so the line surfaces as a `DynamicQty` swallow rather than reporting the
+    /// base single counter as supported.
+    #[test]
+    fn enters_with_mixed_kind_for_each_conjunct_is_a_swallow() {
+        // Reach guard: the same-kind conjunct (Ulasht, verbatim) is represented.
+        let ulasht = parse_named(
+            "Ulasht enters with a +1/+1 counter on it for each other red creature you control \
+             and a +1/+1 counter on it for each other green creature you control.\n\
+             {1}, Remove a +1/+1 counter from Ulasht: Choose one —\n\
+             • Ulasht deals 1 damage to target creature.\n\
+             • Create a 1/1 green Saproling creature token.",
+            "Ulasht, the Hate Seed",
+            &["Creature"],
+        );
+        assert!(matches!(
+            enters_with_count(&ulasht),
+            QuantityExpr::Sum { .. }
+        ));
+        assert!(
+            !has_swallowed_detector(&ulasht, "DynamicQty"),
+            "{:?}",
+            ulasht.parse_warnings
+        );
+
+        let mixed = parse_named(
+            "This creature enters with a +1/+1 counter on it for each other red creature you \
+             control and a -1/-1 counter on it for each other green creature you control.",
+            "Mixed Hellion",
+            &["Creature"],
+        );
+        assert!(
+            has_swallowed_detector(&mixed, "DynamicQty"),
+            "{:?}",
+            mixed.parse_warnings
+        );
+    }
+
+    /// An enters-with per-each clause whose operand has no quantity reading
+    /// (a cost-paid object's counters) is surfaced, not silently counted as one.
+    #[test]
+    fn enters_with_unparsed_for_each_operand_is_a_swallow() {
+        // Reach guard: a parseable per-each operand is a bare Ref with no swallow.
+        let parseable = parse_named(
+            "This creature enters with a +1/+1 counter on it for each other green creature \
+             you control.",
+            "Green Hellion",
+            &["Creature"],
+        );
+        assert!(matches!(
+            enters_with_count(&parseable),
+            QuantityExpr::Ref { .. }
+        ));
+        assert!(!has_swallowed_detector(&parseable, "DynamicQty"));
+
+        let unparsed = parse_named(
+            "This creature enters with a +1/+1 counter on it for each +1/+1 counter on the \
+             sacrificed creature.",
+            "Sacrifice Hellion",
+            &["Creature"],
+        );
+        // Reach guard: the enters-with replacement itself parsed.
+        assert!(!unparsed.replacements.is_empty(), "{unparsed:#?}");
+        // The swallow names the dropped operand, not some other clause.
+        assert_eq!(
+            only_swallow(&unparsed, "DynamicQty").gap(),
+            Some(&ClauseGap::Quantity {
+                operand: "+1/+1 counter on the sacrificed creature".to_string()
+            }),
+        );
+    }
+
+    /// An activated self cost rider whose operand has no quantity reading
+    /// installs no discount and is surfaced.
+    #[test]
+    fn activated_cost_rider_with_unparsed_operand_is_unimplemented() {
+        // Reach guard: Deepwood Denizen (verbatim) installs its discount.
+        let deepwood = parse_named(
+            "{5}{G}, {T}: Draw a card. This ability costs {1} less to activate for each +1/+1 \
+             counter on creatures you control.",
+            "Deepwood Denizen",
+            &["Creature"],
+        );
+        assert!(
+            deepwood.abilities[0].cost_reduction.is_some(),
+            "{deepwood:#?}"
+        );
+
+        let unparsed = parse_named(
+            "{5}{G}, {T}: Draw a card. This ability costs {1} less to activate for each +1/+1 \
+             counter on the sacrificed creature.",
+            "Sacrifice Denizen",
+            &["Creature"],
+        );
+        assert!(unparsed.abilities[0].cost_reduction.is_none());
+        // The rider sentence has no cost-reduction reading, so it falls to an
+        // unimplemented effect: the line stays honestly unsupported.
+        assert!(any_ability_has_unimplemented(&unparsed), "{unparsed:#?}");
     }
 
     /// `Replacement_Instead` reports the ANTECEDENT, connector-stripped and
@@ -9702,7 +10693,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// CR 305.2a + CR 603.4: Spider-Man 2099's end-step trigger has "this turn"
     /// in its intervening-if condition ("if you've played a land or cast a spell
     /// this turn from anywhere other than your hand"). Both arms of the disjunction
-    /// are turn-history quantities (`LandsPlayedThisTurn` / `SpellsCastThisTurn`)
+    /// are turn-history quantities (`LandsPlayedThisTurn` / `SpellsCast`)
     /// — not forward-looking durations — so `detect_duration_this_turn` must not
     /// fire even after the casting restriction parses cleanly (no Unimplemented
     /// shield).
@@ -16010,10 +17001,13 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
     }
 
-    /// CR 603.7a: Triton Tactics' deferred body keeps both of its actions under
-    /// "at this turn's next end of combat" — the bare "and it doesn't untap …"
-    /// must not split out of the delayed trigger and run at resolution. The body
-    /// itself stays a reported gap.
+    /// CR 603.7a + CR 608.2c + CR 608.2i: Triton Tactics' deferred body keeps both
+    /// of its actions under "at this turn's next end of combat" — the bare "and it
+    /// doesn't untap …" must not split out of the delayed trigger and run at
+    /// resolution. "One of those creatures" binds the spell's announced targets
+    /// (`AnaphoricTarget`), so the payload taps exactly the creatures one of them
+    /// was declared to block this turn, and "it" names each creature that payload
+    /// tapped (`affected: ParentTarget`), not the spell.
     #[test]
     fn triton_tactics_delayed_body_keeps_its_second_action() {
         let triton = parse_named(
@@ -16046,19 +17040,143 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             delayed_def.sub_ability
         );
         assert!(
+            !any_ability_has_unimplemented(&triton),
+            "Triton Tactics parses with no unimplemented node: {:?}",
+            triton.abilities
+        );
+        let wanted = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::AnaphoricTarget,
+        };
+        assert!(
             matches!(
                 &*payload.effect,
-                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(typed),
+                    scope: crate::types::ability::EffectScope::All,
+                    state: crate::types::ability::TapStateChange::Tap,
+                } if typed.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
+                    && typed.properties.contains(&wanted)
             ),
-            "the deferred body stays a reported gap: {payload:?}"
+            "the payload taps each creature one of the targets was declared to block this turn: {payload:?}"
         );
+        let cant_untap = payload
+            .sub_ability
+            .as_deref()
+            .expect("the payload keeps its second action");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            ..
+        } = &*cant_untap.effect
+        else {
+            panic!("expected the CantUntap grant, got {:?}", cant_untap.effect);
+        };
+        assert_eq!(*target, None, "{cant_untap:?}");
+        assert_eq!(static_abilities.len(), 1, "{static_abilities:?}");
+        assert_eq!(static_abilities[0].mode, StaticMode::CantUntap);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget),
+            "\"it\" names each creature the payload tapped, not the spell"
+        );
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilNextStepOf {
+                step: crate::types::phase::Phase::Untap,
+                player: crate::types::ability::PlayerScope::Controller,
+            }),
+            "{cant_untap:?}"
+        );
+        assert!(
+            cant_untap.sub_ability.is_none(),
+            "{:?}",
+            cant_untap.sub_ability
+        );
+    }
+
+    /// CR 608.2c + CR 601.2c: "one of those creatures" in a history clause binds
+    /// only when the creature targets an earlier instruction announced are the
+    /// NEAREST antecedent. With no announced targets (a mass untap alone), or with
+    /// a nearer mass operand between the announcement and the clause, the word
+    /// names no announced set and the instruction fails closed as `Unimplemented
+    /// { block_history_partner }`. No printed card has the two synthetic shapes;
+    /// Triton Tactics is the nearest printed card, and its verbatim text binding
+    /// the same word through the same grammar is the reach guard.
+    #[test]
+    fn plural_history_partner_binds_only_the_nearest_announced_targets() {
+        let unbound = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            UnitEvidence::of(parsed).any_effect(|effect| {
+                matches!(
+                    effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                )
+            })
+        };
+        let binds_announced_targets = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            parse_has_history_relation(
+                parsed,
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisTurn,
+                CombatRelationSubject::AnaphoricTarget,
+            )
+        };
+
+        // Reach guard: the printed card binds the word.
+        let triton = parse_named(
+            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
+            "Triton Tactics",
+            &["Instant"],
+        );
+        assert!(
+            binds_announced_targets(&triton),
+            "Triton Tactics: {:?}",
+            triton.abilities
+        );
+        assert!(!unbound(&triton), "Triton Tactics: {:?}", triton.abilities);
+
+        for (label, text) in [
+            (
+                "no announced creature target",
+                "Untap all creatures you control. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn.",
+            ),
+            (
+                "a nearer mass operand",
+                "Up to two target creatures each get +0/+3 until end of turn. Untap all creatures you control. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn.",
+            ),
+        ] {
+            let parsed = parse_named(text, "Test Card", &["Instant"]);
+            assert!(
+                UnitEvidence::of(&parsed).any_effect(|effect| matches!(
+                    effect,
+                    Effect::CreateDelayedTrigger { condition, .. }
+                        if *condition == this_turns_next_end_of_combat()
+                )),
+                "{label}: reach guard — the delayed ability parses; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                unbound(&parsed),
+                "{label}: the instruction must fail closed; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                !binds_announced_targets(&parsed),
+                "{label}: no population may carry the announced-target relation; {:?}",
+                parsed.abilities
+            );
+        }
     }
 
     /// CR 608.2c + CR 608.2i + CR 115.1a: a history clause whose partner no
     /// subject word covers fails its instruction closed as `Unimplemented {
     /// block_history_partner }`, and the clause owns its window, so no spurious
     /// duration appears. On a mass instruction no widened mass effect is left
-    /// behind (Triton Tactics, Glyph of Reincarnation); on a single target no
+    /// behind (Glyph of Reincarnation); on a single target no
     /// targeted effect is left behind with the restriction dropped — for a
     /// partner that is an indefinite filter phrase (Time to Reflect, You Cannot
     /// Pass!) and for any other unbound partner alike. A unary clause is no
@@ -16074,31 +17192,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 ) && def.duration.is_none()
             })
         };
-        let triton = parse_named(
-            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
-            "Triton Tactics",
-            &["Instant"],
-        );
-        assert!(unbound(&triton), "Triton Tactics: {:?}", triton.abilities);
-        assert!(
-            !UnitEvidence::of(&triton).any_effect(|effect| matches!(
-                effect,
-                Effect::SetTapState {
-                    scope: crate::types::ability::EffectScope::All,
-                    ..
-                }
-            )),
-            "Triton Tactics: no widened tap may remain"
-        );
-        assert!(
-            UnitEvidence::of(&triton).any_effect(|effect| matches!(
-                effect,
-                Effect::CreateDelayedTrigger { condition, .. }
-                    if *condition == this_turns_next_end_of_combat()
-            )),
-            "Triton Tactics: reach guard — the delayed ability keeps its turn-bound condition"
-        );
-
         let reincarnation = parse_named(
             "Cast this spell only after combat.\nDestroy all creatures that were blocked by target Wall this turn. They can't be regenerated. For each creature that died this way, put a creature card from the graveyard of the player who controlled that creature the last time it became blocked by that Wall onto the battlefield under its owner's control.",
             "Glyph of Reincarnation",
@@ -16411,35 +17504,23 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 509.1g + CR 509.1h: a pairing clause whose bare "it" has no `SelfRef`
     /// antecedent (Vortex Elemental's compound "this creature and each creature
-    /// blocking or blocked by it"; Steadfast Armasaur's activated "target
-    /// creature blocking or blocked by it") is left unconsumed and REPORTED. The
-    /// detector firing proves the unit was not skipped as unimplemented; the
-    /// negative (no pairing filter) is paired with it.
+    /// blocking or blocked by it") is left unconsumed and REPORTED. The detector
+    /// firing proves the unit was not skipped as unimplemented; the negative (no
+    /// pairing filter) is paired with it.
     #[test]
     fn combat_pairing_relation_detector_reports_an_unbound_clause() {
-        for (name, keywords, text) in [
-            (
-                "Vortex Elemental",
-                &[][..],
-                "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.",
-            ),
-            (
-                "Steadfast Armasaur",
-                &["Vigilance"][..],
-                "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.",
-            ),
-        ] {
-            let parsed = parse_card(name, keywords, &["Creature"], text);
-            assert!(
-                has_swallowed_detector(&parsed, "CombatPairingRelation"),
-                "{name}: the unbound clause must be reported; warnings = {:?}",
-                parsed.parse_warnings
-            );
-            assert!(
-                !parse_has_pairing_filter(&parsed),
-                "{name}: an unbound pronoun must not produce a pairing filter"
-            );
-        }
+        let name = "Vortex Elemental";
+        let text = "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.";
+        let parsed = parse_card(name, &[], &["Creature"], text);
+        assert!(
+            has_swallowed_detector(&parsed, "CombatPairingRelation"),
+            "{name}: the unbound clause must be reported; warnings = {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !parse_has_pairing_filter(&parsed),
+            "{name}: an unbound pronoun must not produce a pairing filter"
+        );
     }
 
     /// The detector is silent when the clause is represented — the newly parsed
@@ -16469,6 +17550,12 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 &["Defender", "Reach"][..],
                 &["Creature"][..],
                 "Defender; reach (This creature can block creatures with flying.)\nYou may choose not to untap this creature during your untap step.\n{T}: Tap target creature with flying blocked by this creature. That creature doesn't untap during its controller's untap step for as long as this creature remains tapped.",
+            ),
+            (
+                "Steadfast Armasaur",
+                &["Vigilance"][..],
+                &["Creature"][..],
+                "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.",
             ),
             (
                 "Kjeldoran Frostbeast",

@@ -5,10 +5,11 @@ use engine::game::restrictions::{
     ability_confined_to_sorcery_timing, spell_confined_to_sorcery_timing,
 };
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration,
-    Effect, EffectScope, PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue,
-    QuantityExpr, ResolvedAbility, StaticDefinition, SubAbilityLink, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceAssignmentSide, ContinuousModification,
+    ControllerRef, Duration, Effect, EffectScope, PerpetualGrantModification,
+    PerpetualModification, PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, StaticDefinition,
+    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition,
+    TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -120,12 +121,22 @@ fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
 ///
 /// Every other `Quantity` shape counts up from a non-negative game quantity, and
 /// a `Fixed` modifier carries its own sign.
-fn pt_value_is_non_negative(value: &PtValue) -> bool {
+pub(crate) fn pt_value_is_non_negative(value: &PtValue) -> bool {
     match value {
         PtValue::Fixed(v) => *v >= 0,
         PtValue::Variable(name) => !name.starts_with('-'),
-        PtValue::Quantity(QuantityExpr::Multiply { factor, .. }) => *factor >= 0,
-        PtValue::Quantity(_) => true,
+        PtValue::Quantity(quantity) => quantity_is_non_negative(quantity),
+    }
+}
+
+/// Whether a signed P/T quantity is non-negative: a negative-multiplier
+/// `Multiply` negates, and every other shape counts up from a non-negative
+/// game quantity. Shared by `Pump` values and static dynamic P/T
+/// modifications ("enchanted creature gets -X/-X, where X is ...").
+pub(crate) fn quantity_is_non_negative(quantity: &QuantityExpr) -> bool {
+    match quantity {
+        QuantityExpr::Multiply { factor, .. } => *factor >= 0,
+        _ => true,
     }
 }
 
@@ -502,6 +513,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Amass { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::ApplySticker { .. }
         | Effect::AssembleContraptionOnSprocket { .. }
         | Effect::AssembleContraptions { .. }
@@ -1187,6 +1199,11 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
 
         // A tracked set narrowed by an inner filter — the narrowing decides.
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_domain(filter),
+
+        TargetFilter::ChoiceAssignment { side } => match side {
+            ChoiceAssignmentSide::Objects => FilterDomain::SOME_OBJECT,
+            ChoiceAssignmentSide::PlayerForObject => FilterDomain::SOME_PLAYER,
+        },
 
         TargetFilter::Typed(typed) => {
             // Repo invariant (not a CR rule): `type_filters` is a CONJUNCTION,
@@ -1901,7 +1918,7 @@ pub(crate) fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
         // Beneficial: enhances the enchanted permanent
         StaticMode::CantBeBlocked
         | StaticMode::CantBeBlockedExceptBy { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCountered
         | StaticMode::CantBeCopied
         | StaticMode::Protection

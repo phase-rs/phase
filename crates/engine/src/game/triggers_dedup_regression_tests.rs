@@ -4238,6 +4238,7 @@ fn delayed_tail_context(source_id: ObjectId) -> PendingTriggerContext {
             "Delayed tail",
         ),
         DelayedInstallIdentity::LegacyDelayed,
+        Vec::new(),
     )
 }
 

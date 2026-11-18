@@ -11,7 +11,17 @@ use crate::game::deck_loading::DeckList;
 /// Version 4 records the CR 103.1 game-one choice as an ordinary
 /// `ChooseStartingPlayer` action; versions 2 and 3 predate it, and their
 /// contest winner took the first turn.
-pub const REPLAY_FORMAT_VERSION: u32 = 4;
+/// Version 5 gives the active player priority between the first-strike and the
+/// regular combat damage step even with an empty stack (CR 510.3 + CR 510.4).
+/// Versions 2 through 4 recorded such a combat, when the first step left the
+/// stack empty, as one action that dealt both steps; `ReplayPlayer` rejects a pre-5 recording that reaches that window
+/// (see `COMBAT_DAMAGE_WINDOW_FORMAT_VERSION`) instead of replaying it into a
+/// different combat state.
+pub const REPLAY_FORMAT_VERSION: u32 = 5;
+
+/// First format version recorded with the CR 510.3 priority window between the
+/// two combat damage steps of a first-strike or double-strike combat.
+pub const COMBAT_DAMAGE_WINDOW_FORMAT_VERSION: u32 = 5;
 
 /// Everything needed to reconstruct a game's starting state, deterministically,
 /// from scratch. Mirrors the inputs `initialize_game` already accepts at the
