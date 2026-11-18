@@ -3656,7 +3656,7 @@ fn collect_matching_triggers_from_context(
     )
 }
 
-/// CR 303.4b + CR 603.10a + CR 603.10f: Collect an off-battlefield observer's
+/// CR 303.4b + CR 603.10a: Collect an off-battlefield observer's
 /// triggers with its last-known `attached_to` temporarily restored.
 ///
 /// `sever_battlefield_attachment_graph_on_exit` clears the live field when the
@@ -3733,8 +3733,8 @@ fn collect_observer_triggers_under_lki_attachment(
 /// per-turn departure ledger rather than from `state.objects` (which no longer
 /// holds it at all).
 ///
-/// WHY THE LEDGER AND NOT THE EVENT BATCH. The sibling CR 603.10a / CR 603.10f
-/// arms below search `events` because each is *keyed on* a `ZoneChanged` in the
+/// WHY THE LEDGER AND NOT THE EVENT BATCH. The sibling CR 603.10a
+/// co-departure arm below searches `events` because it is *keyed on* a `ZoneChanged` in the
 /// batch by construction. `CreatureExploited` is not: CR 702.110b emits it when
 /// the exploit ability RESOLVES, while the exploiter's own departure was
 /// recorded in an earlier action's batch by the CR 704.3 state-based-action
@@ -8492,8 +8492,8 @@ fn collect_pending_triggers_with_collection(
                 // exist is still an observer. Its object is gone from
                 // `state.objects`, but its ZoneChangeRecord owns its identity and
                 // trigger entries (CR 608.2h), which is what
-                // `collect_observer_triggers_under_lki_attachment` reads below —
-                // exactly as the CR 603.10f arm does. Only an observer still ON the
+                // `collect_observer_triggers_under_lki_attachment` reads below.
+                // Only an observer still ON the
                 // battlefield is excluded here (the live scan covers it).
                 //
                 // CR 400.7f is the rule that ENTITLES this arm to find the
@@ -8589,8 +8589,7 @@ fn collect_pending_triggers_with_collection(
                         co_departed_observer_record(state, observer_id, *moved_id)
                             .and_then(|record| record.attached_to)
                     });
-                // The save/mutate/collect/restore discipline lives in one place
-                // and is shared with the CR 603.10f player-loss arm below.
+                // The save/mutate/collect/restore discipline lives in one place.
                 let matched_triggers = collect_observer_triggers_under_lki_attachment(
                     state,
                     observer_id,
@@ -8598,113 +8597,6 @@ fn collect_pending_triggers_with_collection(
                     event,
                     events,
                     &observer_source_context,
-                    &mut batched_this_pass,
-                    &mut registered_this_event,
-                    &active_suppress_triggers,
-                    collection,
-                    // CR 603.10a: an LKI observer existed on the battlefield before the event.
-                    TriggerSourceVisit::Observer {
-                        exists_from: TriggerObservationTime::ImmediatelyBefore,
-                    },
-                );
-                for matched in matched_triggers {
-                    if !session.record_match(state, &matched, event) {
-                        continue;
-                    }
-                    if matched.batched {
-                        batched_this_pass.insert((observer_id, matched.trig_idx));
-                    }
-                    registered_this_event.insert((observer_id, matched.trig_idx));
-                    pending.push(PendingTriggerContext::batched(
-                        matched.pending,
-                        matched.trigger_events,
-                        matched.causes,
-                    ));
-                }
-            }
-        }
-
-        // CR 603.10f: "Abilities that trigger when a player loses the game look
-        // back in time." CR 704.3 runs state-based actions in one pass, and
-        // within that pass CR 104.3b eliminates the player before the CR 704.5m
-        // sweep puts an Aura attached to that now-illegal player into its
-        // owner's graveyard — all before triggers are collected. Per CR 400.7
-        // the Aura is a new object with no memory of the battlefield, so the
-        // empty-`trigger_zones` battlefield gate would reject it. CR 603.10f is
-        // the rule that says it triggers anyway; the departure record
-        // (CR 608.2h last-known information) is the authority for what it was
-        // attached to.
-        //
-        // Admission is a POSITIVE IDENTITY match on `record.attached_to`, not an
-        // inference from simultaneity: the CR 704.5m sweep does not call
-        // `mark_simultaneous_departures`, so `record.co_departed` can be empty
-        // on this path, and when it is non-empty it names unrelated permanents
-        // that died in the same pass. Only the recorded attachment identifies
-        // the observer as having been attached to THIS losing player.
-        if let GameEvent::PlayerLost { player_id, .. } = event {
-            for observer_event in events {
-                let GameEvent::ZoneChanged {
-                    object_id: observer_id,
-                    record,
-                    ..
-                } = observer_event
-                else {
-                    continue;
-                };
-                // CR 303.4b: only a permanent attached to the player who just
-                // lost. CR 301.5 restricts Equipment hosts to creatures, so
-                // `AttachTarget::Player` excludes the CR 704.5n Equipment case
-                // by construction.
-                if record.attached_to
-                    != Some(crate::game::game_object::AttachTarget::Player(*player_id))
-                {
-                    continue;
-                }
-                // The live battlefield scan already covers observers still on
-                // the battlefield; this arm only admits objects it excluded, so
-                // skip ONLY an object that is both present AND still on the
-                // battlefield.
-                //
-                // CR 704.5d: an ABSENT object must fall through to admission. A
-                // token Aura is swept to its owner's graveyard by CR 704.5m and
-                // then ceases to exist in the SAME state-based-action pass,
-                // before triggers are collected — so `state.objects` no longer
-                // holds it at all. Treating absence as "off the battlefield" is
-                // what CR 603.10f requires: the departure record (CR 608.2h last
-                // known information) remains the authority for what the observer
-                // was attached to, and it outlives the object itself.
-                //
-                // That rationale now lives in `zones::battlefield_residency`, the
-                // shared authority this guard delegates to: `Remained` is exactly
-                // "present AND still on the battlefield", so `!has_departed()` is
-                // the same predicate this arm has always used.
-                if !super::zones::battlefield_residency(state, *observer_id).has_departed() {
-                    continue;
-                }
-                // CR 400.7 + CR 608.2h: the record's own source context — not a
-                // later same-id object — owns the source identity.
-                let source_context =
-                    match crate::types::game_state::battlefield_departure_trigger_source_context(
-                        observer_event,
-                    ) {
-                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
-                            context,
-                        ) => context,
-                        // Fail closed on absent/malformed provenance, exactly as
-                        // the co-departure arm does.
-                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent
-                        | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
-                            continue
-                        }
-                    };
-                let observer_id = *observer_id;
-                let matched_triggers = collect_observer_triggers_under_lki_attachment(
-                    state,
-                    observer_id,
-                    record.attached_to,
-                    event,
-                    events,
-                    source_context,
                     &mut batched_this_pass,
                     &mut registered_this_event,
                     &active_suppress_triggers,
@@ -8874,8 +8766,8 @@ fn collect_pending_triggers_with_collection(
         // skipped before any context is resolved.
         //
         // Runs after every other per-object arm for this event, so the
-        // registrations they made (the CR 603.10f player-loss arm, the
-        // off-zone scan, look-back control-change watchers) are seen below
+        // registrations they made (the off-zone scan, look-back control-change
+        // watchers) are seen below
         // and the same printed trigger never fires twice for one event.
         for (ordinal, observer) in departure_window.iter().enumerate() {
             let departure = &observer.departure;
@@ -12028,12 +11920,17 @@ impl ImmediatelyBeforeObservers {
 /// trigger look back on: an object leaving the game with its owner
 /// (CR 603.10a: leaves-the-battlefield abilities are the only ones that see it),
 /// an Aura or Equipment becoming unattached from it (CR 603.10c), and a
-/// permanent phasing out (CR 603.10b). Everything else, such as the monarch or
-/// the initiative changing hands, is checked immediately after it.
+/// permanent phasing out (CR 603.10b), and the player losing the game
+/// (CR 603.10f): a loss observer the loser owned triggers although it leaves
+/// the game with them (CR 800.4a), and one the loser controlled triggers under
+/// them (CR 603.3a) and is retired (CR 800.4d). Everything else, such as the
+/// monarch or the initiative changing hands, is checked immediately after it.
 fn departure_event_looks_back(event: &GameEvent) -> bool {
     match event {
         GameEvent::ZoneChanged { record, .. } => record.departure.left_game(),
-        GameEvent::Unattached { .. } | GameEvent::PermanentPhasedOut { .. } => true,
+        GameEvent::Unattached { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PlayerLost { .. } => true,
         _ => false,
     }
 }
@@ -12058,7 +11955,8 @@ fn simultaneous_event_looks_back(event: &GameEvent) -> bool {
 ///
 /// `looked_back` names the observers latched before `events[event_start..split]`
 /// happened; that prefix's look-back events (objects leaving the game and
-/// becoming unattached, CR 603.10a + CR 603.10c) are matched against them,
+/// becoming unattached, and players losing the game, CR 603.10a + CR 603.10c +
+/// CR 603.10f) are matched against them,
 /// every other event against the live game. `events[split..batch_end]` is the
 /// rest of the same simultaneous event (CR 704.3: the state-based actions
 /// performed with the departure): its leaves-the-battlefield events look back
