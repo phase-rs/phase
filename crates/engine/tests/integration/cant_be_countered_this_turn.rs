@@ -736,16 +736,32 @@ fn domri_does_not_protect_an_uncast_creature_spell_copy() {
     assert_complete(&runner);
 }
 
+/// The three pre-existing protection routes that this change must preserve.
+#[derive(Clone, Copy, Debug)]
+enum ProtectionRoute {
+    /// "This spell can't be countered." (Carnage Tyrant)
+    Intrinsic,
+    /// A permanent's static grant (Allosaurus Shepherd).
+    Permanent,
+    /// A next-spell modifier (Insist).
+    NextSpell,
+}
+
 #[test]
 fn existing_intrinsic_permanent_and_next_spell_protections_still_work() {
-    for route in ["intrinsic", "permanent", "next"] {
+    for route in [
+        ProtectionRoute::Intrinsic,
+        ProtectionRoute::Permanent,
+        ProtectionRoute::NextSpell,
+    ] {
         let mut scenario = matrix_scenario();
         let protection = match route {
-            "permanent" => {
+            ProtectionRoute::Intrinsic => None,
+            ProtectionRoute::Permanent => {
                 scenario.add_creature_from_oracle(P0, "Allosaurus Shepherd", 1, 1, SHEPHERD);
                 None
             }
-            "next" => Some(spell(
+            ProtectionRoute::NextSpell => Some(spell(
                 &mut scenario,
                 P0,
                 "Insist",
@@ -753,18 +769,16 @@ fn existing_intrinsic_permanent_and_next_spell_protections_still_work() {
                 0,
                 vec![ManaCostShard::Green],
             )),
-            _ => None,
         };
-        let creature = if route == "intrinsic" {
-            scenario
+        let creature = match route {
+            ProtectionRoute::Intrinsic => scenario
                 .add_creature_to_hand_from_oracle(P0, "Carnage Tyrant", 7, 6, TYRANT)
                 .with_mana_cost(ManaCost::Cost {
                     generic: 4,
                     shards: vec![ManaCostShard::Green, ManaCostShard::Green],
                 })
-                .id()
-        } else {
-            bears(&mut scenario, P0)
+                .id(),
+            ProtectionRoute::Permanent | ProtectionRoute::NextSpell => bears(&mut scenario, P0),
         };
         let counter = counterspell(&mut scenario);
         let mut runner = scenario.build();
