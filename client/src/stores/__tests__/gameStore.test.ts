@@ -415,7 +415,7 @@ describe("gameStore", () => {
       exportPersistenceState: vi.fn().mockResolvedValue(JSON.stringify(envelope)),
     });
     // Model a real engine: `restoreState` actually rewinds it, so the read that
-    // follows returns the restored state. `undo` commits the snapshot's own
+    // follows returns the restored state. `undoLastAction` commits the snapshot's own
     // post-restore state (post-restore, the engine is the source of truth and
     // both halves of the pair must come from it), so a mock whose reads ignored
     // `restoreState` would be lying about the engine.

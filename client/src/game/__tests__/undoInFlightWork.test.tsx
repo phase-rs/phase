@@ -410,6 +410,11 @@ describe("work in flight when Undo is pressed", () => {
     expect(useGameStore.getState().gameState).toEqual(AFTER_SECOND_PASS);
     expect(useAppNotificationStore.getState().notification?.description).toBe("restore failed");
     expect(useGameStore.getState().pendingUndoId).toBeNull();
+    // Nothing was undone, so the history is not rewound: the first pass keeps
+    // its line and its checkpoint. The abandoned second pass never committed
+    // its own, and they are lost.
+    expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the first time"]);
+    expect(useGameStore.getState().stateHistory).toHaveLength(1);
 
     await vi.runAllTimersAsync();
     await secondPass;
