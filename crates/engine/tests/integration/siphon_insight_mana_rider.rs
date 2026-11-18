@@ -656,6 +656,7 @@ fn colorless_requirement_case(
             assert_eq!(
                 derive_views(runner.state(), Some(P0)).pending_payment_remaining,
                 Some(expected_remaining),
+                "{}",
                 if creature {
                     "the first two black pips pay generic mana before the third pays {C}"
                 } else {
