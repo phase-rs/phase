@@ -7,7 +7,8 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{
-    all_consuming, cond, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, cond, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+    verify,
 };
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -41,8 +42,8 @@ use super::oracle_nom::prevention::{
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    controller_phrase_among, parse_self_reference, parse_type_filter_word, parse_type_phrase,
-    ControllerPhrase,
+    controller_phrase_among, parse_controller_suffix, parse_self_reference, parse_type_filter_word,
+    parse_type_phrase, ControllerPhrase,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
@@ -145,6 +146,12 @@ fn parse_replacement_line_inner(
     // Routes that consult `enters_with_fails_closed` record the line as the
     // `enters_with_clause` gap. An arm that reads every sentence of such a line
     // must dispatch above this gate.
+    // CR 614.1c + CR 603.6d + CR 706.4: "As ~ enters, roll <dice>. ~ enters
+    // with <counters> equal to the result." reads both sentences, so it
+    // dispatches above the gate below (Neverwinter Hydra, Hammer Jammer).
+    if let Some(Ok(def)) = as_enters_roll_enters_with_outcome(&norm_lower) {
+        return Some(def.description(text.to_string()));
+    }
     if is_line_owned_enters_with_clause(&norm_lower) {
         return None;
     }
@@ -4775,6 +4782,122 @@ impl EntersWithGap {
     }
 }
 
+/// CR 614.1c + CR 706.1: is this parsed "As ~ enters, <body>" body a bare
+/// die-roll instruction the as-enters roll composition can carry? A results
+/// table (CR 706.3) is out of class; a roll modifier is part of the roll
+/// (CR 706.2). Every gating or choice-bearing field must be empty, as in
+/// [`as_enters_one_shot_is_admissible`], and the roll must be the whole body.
+fn is_as_enters_roll_prefix(def: &AbilityDefinition) -> bool {
+    let bare_roll = match &*def.effect {
+        Effect::RollDie { results, .. } => results.is_empty(),
+        _ => false,
+    };
+    bare_roll && def.sub_ability.is_none() && is_mandatory_unconditional_node(def)
+}
+
+/// CR 614.1c + CR 706.1: split a two-sentence "As ~ enters, roll <dice>.
+/// <enters-with sentence>" line into its parsed roll and its second sentence
+/// (a subslice of `norm_lower`). `None` for any other shape: a quoted span, a
+/// unit count other than two, no as-enters frame, no entry verb in the second
+/// sentence, or a first-sentence body that is not a bare die roll.
+fn split_as_enters_roll_prefix(norm_lower: &str) -> Option<(AbilityDefinition, &str)> {
+    if nom_primitives::strip_double_quoted_spans(norm_lower) != norm_lower {
+        return None;
+    }
+    let units = alphanumeric_sentence_units(norm_lower);
+    let [frame_unit, enters_with_unit] = units.as_slice() else {
+        return None;
+    };
+    let (body, ()) = parse_as_self_enters_frame(frame_unit).ok()?;
+    nom_primitives::scan_at_word_boundaries(enters_with_unit, parse_entry_verb_with)?;
+    // Punctuation cleanup on the pre-tokenized body (drop the sentence terminator).
+    let body = body.trim().trim_end_matches('.').trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut roll = parse_effect_chain(body, AbilityKind::Spell);
+    if !is_as_enters_roll_prefix(&roll) {
+        return None;
+    }
+    // CR 107.3m: the X of an as-enters roll is the X paid for the spell that
+    // became the permanent.
+    if let Effect::RollDie { count, .. } = &mut *roll.effect {
+        rewrite_variable_x_to_cost_x_paid(count);
+    }
+    Some((roll, enters_with_unit))
+}
+
+/// Is this execute node a modification of how the entering permanent itself
+/// enters (CR 614.1c: counters, CR 122.6; tapped, CR 614.1d)? Allowlist: any
+/// other effect is not an event modifier of this permanent.
+fn is_self_entry_modifier(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            ..
+        } | Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
+/// CR 614.1c + CR 603.6d + CR 706.4 + CR 122.6: the single composition
+/// authority for "As ~ enters, roll <dice>. ~ enters with <counters> equal to
+/// the result / the total of those results." The roll happens as part of the
+/// entry event and the counters it determines are given as the permanent
+/// enters, so one `Moved` replacement carries both: the roll heads the execute
+/// chain and the enters-with sentence's self modifiers follow it.
+///
+/// `None` when the line is not this shape. `Some(Ok(def))` when the second
+/// sentence is an ungated, self-only enters-with replacement whose execute is
+/// self entry modifiers only. Otherwise `Some(Err(..))` with the line's
+/// [`classify_multi_sentence`] verdict, so a line this composition does not
+/// claim keeps exactly the verdict it had without it.
+fn as_enters_roll_enters_with_outcome(
+    norm_lower: &str,
+) -> Option<Result<ReplacementDefinition, EntersWithDecline>> {
+    let (roll, sentence) = split_as_enters_roll_prefix(norm_lower)?;
+    let claimed = enters_with_counters_outcome(sentence, sentence)
+        .ok()
+        .and_then(|mut inner| {
+            // CR 614.12: the frame's "this creature" names only this permanent.
+            let self_only = matches!(inner.event, ReplacementEvent::Moved)
+                && inner.valid_card == Some(TargetFilter::SelfRef);
+            // A gate on the counter sentence would also gate the roll.
+            let ungated = inner.condition.is_none();
+            let execute = inner.execute.take()?;
+            (self_only && ungated && chain_is_self_entry_modifiers(&execute)).then(|| {
+                inner.execute = Some(Box::new(roll.sub_ability(*execute)));
+                inner
+            })
+        });
+    Some(claimed.ok_or_else(|| classify_multi_sentence(&alphanumeric_sentence_units(norm_lower))))
+}
+
+/// Every node of `execute` (through `sub_ability`) is a self entry modifier.
+fn chain_is_self_entry_modifiers(execute: &AbilityDefinition) -> bool {
+    let mut node = Some(execute);
+    while let Some(def) = node {
+        if !is_self_entry_modifier(&def.effect) {
+            return false;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    true
+}
+
+/// The sentence units of `text` that carry a word: punctuation-only fragments
+/// are not sentences. Shared by the multi-sentence enters-with classifier and
+/// the as-enters roll composition so the two read the same units.
+fn alphanumeric_sentence_units(text: &str) -> Vec<&str> {
+    nom_primitives::split_sentence_units(text)
+        .into_iter()
+        .filter(|unit| unit.chars().any(char::is_alphanumeric))
+        .collect()
+}
+
 /// CR 614.1c + CR 608.2c: the multi-sentence step of
 /// [`enters_with_counters_outcome`]. One replacement carries one enters-with
 /// sentence, so a line of several sentences is classified, never claimed
@@ -4782,17 +4905,21 @@ impl EntersWithGap {
 /// ("… and with \"Pay 3 life: Regenerate this creature.\"") does not split the
 /// line, and punctuation-only fragments are not sentences.
 ///
-/// `None` when the line has no entry verb followed by "with " or is a single
-/// sentence; otherwise the line's [`classify_multi_sentence`] verdict. Shared
+/// `None` when the line has no entry verb followed by "with ", is a single
+/// sentence, or is an as-enters roll line the composition claims
+/// ([`as_enters_roll_enters_with_outcome`]); otherwise the composition's
+/// decline or the line's [`classify_multi_sentence`] verdict. Shared
 /// by the enters-with arm and the replacement dispatcher's gate
 /// ([`is_line_owned_enters_with_clause`]) so the two cannot drift.
 fn multi_sentence_enters_with_decline(norm_lower: &str) -> Option<EntersWithDecline> {
     nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with)?;
+    match as_enters_roll_enters_with_outcome(norm_lower) {
+        Some(Ok(_)) => return None,
+        Some(Err(decline)) => return Some(decline),
+        None => {}
+    }
     let masked = nom_primitives::strip_double_quoted_spans(norm_lower);
-    let units: Vec<&str> = nom_primitives::split_sentence_units(&masked)
-        .into_iter()
-        .filter(|unit| unit.chars().any(char::is_alphanumeric))
-        .collect();
+    let units = alphanumeric_sentence_units(&masked);
     (units.len() > 1).then(|| classify_multi_sentence(&units))
 }
 
@@ -4824,6 +4951,13 @@ fn enters_with_counters_outcome(
     // CR 614.1c: no entry verb followed by "with " anywhere — not this shape.
     if nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with).is_none() {
         return Err(EntersWithDecline::NotThisShape);
+    }
+
+    // CR 614.1c + CR 603.6d + CR 706.4: an "As ~ enters, roll <dice>." frame
+    // followed by its enters-with sentence is one replacement; the composition
+    // authority owns both its claim and its decline.
+    if let Some(outcome) = as_enters_roll_enters_with_outcome(norm_lower) {
+        return outcome.map(|def| def.description(original_text.to_string()));
     }
 
     // CR 614.1c + CR 608.2c: one replacement carries one enters-with sentence;
@@ -7874,6 +8008,7 @@ fn replacement_condition_from_static(
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
@@ -14213,8 +14348,16 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
         .quantity_modification(modification)
         .description(original_text.to_string());
-    if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
+    if let Some((valid_card, anchor)) = parse_counter_replacement_valid_card(lower) {
         def = def.valid_card(valid_card);
+        // CR 614.16: effect-worded doublers ("if an effect would put ...",
+        // Doubling Season) apply only to effect-caused placements; bare
+        // wordings ("counters would be put on ...", Constrictor) stay
+        // cause-blind. The gate arm reads the placement's `CounterCause` at
+        // runtime.
+        if matches!(anchor, CounterScopeAnchor::EffectWorded) {
+            def = def.condition(ReplacementCondition::EffectCausedPlacement);
+        }
     }
     // CR 614.1a: Vorinclex/Halving Season count doublers-and-halvers scope by the
     // player *putting* the counters (the actor), per the official Vorinclex ruling
@@ -14247,8 +14390,18 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     Some(def)
 }
 
-fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
-    let (_, (), after_anchor) =
+/// CR 614.16: which counter-replacement scope wording the anchor matched —
+/// the effect-worded branch ("an effect would put ...", Doubling Season)
+/// stamps `ReplacementCondition::EffectCausedPlacement` on the def, the bare
+/// branch ("counters would be put on ...", Constrictor) leaves it untagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CounterScopeAnchor {
+    EffectWorded,
+    Bare,
+}
+
+fn parse_counter_replacement_valid_card(lower: &str) -> Option<(TargetFilter, CounterScopeAnchor)> {
+    let (_, anchor, after_anchor) =
         nom_primitives::scan_preceded(lower, parse_counter_replacement_scope_anchor)?;
     let (filter, rest) = parse_type_phrase_folding(after_anchor);
     if !is_counter_replacement_object_scope(&filter)
@@ -14256,7 +14409,7 @@ fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
     {
         return None;
     }
-    Some(filter)
+    Some((filter, anchor))
 }
 
 fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
@@ -14270,16 +14423,22 @@ fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
     }
 }
 
-fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
+fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, CounterScopeAnchor> {
+    alt((
+        value(
+            CounterScopeAnchor::Bare,
             tag::<_, _, OracleError<'_>>("counters would be put on "),
-            tag("counter would be put on "),
+        ),
+        value(CounterScopeAnchor::Bare, tag("counter would be put on ")),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put one or more counters on "),
+        ),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put a counter on "),
-        )),
-    )
+        ),
+    ))
     .parse(input)
 }
 
@@ -14354,9 +14513,13 @@ fn parse_global_object_counter_prohibition(
 }
 
 /// CR 614.17 + CR 614.6 + CR 122.1: Parse inverted type-scoped counter
-/// prohibitions such as "Creatures can't have counters put on them." Lowers to
-/// the same `AddCounter` + `Prevent` replacement as Solemnity's object-counter
-/// line, scoped to a single permanent type on the battlefield.
+/// prohibitions such as "Creatures can't have counters put on them." (bare),
+/// "Creatures you control can't have -1/-1 counters put on them." (Darksteel
+/// Angel; Melira, Sylvok Outcast), and "Creatures your opponents control
+/// can't have +1/+1 counters put on them." (Blightbeetle). Lowers to the same
+/// `AddCounter` + `Prevent` replacement as Solemnity's object-counter line,
+/// scoped to the named population on the battlefield and — when the text
+/// names a counter type — to that type via `counter_match`.
 fn parse_inverted_typed_counter_prohibition(
     lower: &str,
     original_text: &str,
@@ -14366,32 +14529,67 @@ fn parse_inverted_typed_counter_prohibition(
     // put on them") rather than the object ("Counters can't be put on
     // creatures"). Same replacement class, so it reuses the shared type-list
     // combinators and covers every permanent type (and comma/or-separated
-    // lists) in one arm.
+    // lists) in one arm. Two optional axes compose inside it: a controller
+    // qualifier on the subject and a counter-type restriction on the
+    // prohibition.
     let mut combinator = all_consuming(terminated(
-        terminated(
+        (
             separated_list1(
                 parse_counter_prohibition_type_separator,
                 parse_counter_prohibition_type,
             ),
-            tag::<_, _, OracleError<'_>>(" can't have counters put on them"),
+            // Optional controller qualifier. `opt` never fails and never
+            // partially consumes, so the bare form falls through to
+            // " can't have …" unchanged.
+            opt(preceded(
+                tag(" "),
+                verify(parse_controller_suffix, |controller| {
+                    matches!(controller, ControllerRef::You | ControllerRef::Opponent)
+                }),
+            )),
+            tag::<_, _, OracleError<'_>>(" can't have "),
+            // Optional counter type. An `alt` (typed arm first), not `opt` +
+            // tag: nom sequences do not backtrack into a succeeded `opt`, so
+            // if the type parser ever consumed "counters" as a `Generic`
+            // token the bare form would fail closed. Separate arms retry the
+            // bare form from the start.
+            alt((
+                map(
+                    terminated(
+                        terminated(nom_primitives::parse_counter_type_typed, tag(" ")),
+                        tag("counters put on them"),
+                    ),
+                    Some,
+                ),
+                value(None, tag("counters put on them")),
+            )),
         ),
         opt(tag(".")),
     ));
-    let (_rest, type_filters) = combinator.parse(lower.trim()).ok()?;
+    let (_, (type_filters, controller, _, counter_type)) = combinator.parse(lower.trim()).ok()?;
     let type_filter = match type_filters.as_slice() {
         [single] => single.clone(),
         _ => TypeFilter::AnyOf(type_filters),
     };
+    let typed = match controller {
+        Some(ctrl) => TypedFilter::new(type_filter).controller(ctrl),
+        None => TypedFilter::new(type_filter),
+    };
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .valid_card(attach_zone_to_filter(
-                TargetFilter::Typed(TypedFilter::new(type_filter)),
-                Zone::Battlefield,
-            ))
-            .quantity_modification(QuantityModification::Prevent)
-            .description(original_text.to_string()),
-    )
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .valid_card(attach_zone_to_filter(
+            TargetFilter::Typed(typed),
+            Zone::Battlefield,
+        ))
+        .quantity_modification(QuantityModification::Prevent)
+        .description(original_text.to_string());
+    // CR 122.1 + CR 614.1a: a named counter type restricts the replacement to
+    // that type; the counter-agnostic wording leaves `counter_match` unset
+    // (any-counter behavior, as before).
+    if let Some(ct) = counter_type {
+        def = def.counter_match(CounterMatch::OfType(ct));
+    }
+    Some(def)
 }
 
 fn parse_counter_prohibition_type_separator(input: &str) -> OracleResult<'_, &str> {
@@ -28853,6 +29051,60 @@ mod tests {
         // CR 122.1a + CR 614.1a: Doubling Season's modern wording uses "those
         // counters" — counter-agnostic, so no `counter_match` is set.
         assert_eq!(def.counter_match, None);
+        // CR 614.16 (V8): the effect-worded branch stamps the eligibility
+        // gate — combat wither, costs, and turn-based actions stay undoubled.
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::EffectCausedPlacement)
+            ),
+            "Doubling Season's counter clause must carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_bare_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Winding Constrictor's bare "counters would be put
+        // on" wording carries no "effect" restriction, so the def stays
+        // untagged and keeps doubling combat wither.
+        let def = parse_replacement_line(
+            "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.",
+            "Winding Constrictor",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.condition, None,
+            "bare-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_actor_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Vorinclex's actor-worded "if you would put"
+        // wording carries no "effect" restriction, so the def stays untagged
+        // and keeps doubling loyalty costs and lore counters.
+        let def = parse_replacement_line(
+            "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(
+            def.condition, None,
+            "actor-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
     }
 
     #[test]
@@ -29105,6 +29357,111 @@ mod tests {
                 ),
                 "{oracle_type} must scope to {expected:?} on the battlefield"
             );
+        }
+    }
+
+    #[test]
+    fn controlled_population_counter_type_prohibition_parses() {
+        // CR 614.6 + CR 122.1 + CR 614.17: "Creatures you control can't have
+        // -1/-1 counters put on them." (Darksteel Angel; Melira, Sylvok
+        // Outcast) and "Creatures your opponents control can't have +1/+1
+        // counters put on them." (Blightbeetle) lower to the AddCounter+Prevent
+        // replacement scoped to that controller's creatures on the
+        // battlefield, matching only the named counter type.
+        for (text, controller, counter_type) in [
+            (
+                "Creatures you control can't have -1/-1 counters put on them.",
+                ControllerRef::You,
+                CounterType::Minus1Minus1,
+            ),
+            (
+                "Creatures your opponents control can't have +1/+1 counters put on them.",
+                ControllerRef::Opponent,
+                CounterType::Plus1Plus1,
+            ),
+        ] {
+            let def =
+                parse_replacement_line(text, "T").unwrap_or_else(|| panic!("{text:?} must parse"));
+            assert_eq!(def.event, ReplacementEvent::AddCounter);
+            assert_eq!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent)
+            );
+            assert!(
+                matches!(
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.type_filters == vec![TypeFilter::Creature]
+                            && tf.controller == Some(controller)
+                            && tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::InZone { zone: Zone::Battlefield }
+                            ))
+                ),
+                "{text:?} must scope to its controller's creatures on the battlefield"
+            );
+            assert_eq!(
+                def.counter_match,
+                Some(CounterMatch::OfType(counter_type)),
+                "{text:?} must match only its named counter type"
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_population_prohibition_rejects_unattested_shapes() {
+        // Positive reach-guard: the attested shape parses. Without it, an arm
+        // that rejects everything would pass these negatives vacuously.
+        parse_replacement_line(
+            "Creatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+        )
+        .expect("attested prohibition must parse (reach-guard)");
+        // No printed card quantifies the population ("All creatures …") or
+        // uses "placed on" in this shape (MTGJSON census 5.3.0+20261116) —
+        // the arm stays tight to the class.
+        for text in [
+            "All creatures you control can't have -1/-1 counters put on them.",
+            "Creatures you control can't have -1/-1 counters placed on them.",
+        ] {
+            assert!(
+                parse_replacement_line(text, "T").is_none(),
+                "{text:?} must not parse (no printed card exhibits it)"
+            );
+        }
+    }
+
+    #[test]
+    fn darksteel_angel_full_oracle_routes_counter_line_to_replacement() {
+        use crate::types::ability::Effect;
+
+        // CR 614.17 + CR 122.1: the full Darksteel Angel oracle routes line 3
+        // through priority 8 to the counter-prohibition arm: one AddCounter
+        // Prevent replacement, and no Unimplemented gap on the counters line.
+        let parsed = parse_oracle_text(
+            "Flying, indestructible\nYou can't lose the game and your opponents can't win the game.\nCreatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+            &["Flying".to_string(), "Indestructible".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Angel".to_string()],
+        );
+        assert!(
+            parsed.replacements.iter().any(|d| {
+                d.event == ReplacementEvent::AddCounter
+                    && d.quantity_modification == Some(QuantityModification::Prevent)
+            }),
+            "line 3 must lower to an AddCounter Prevent replacement; replacements = {:?}",
+            parsed.replacements
+        );
+        for ability in &parsed.abilities {
+            if let Effect::Unimplemented { description, .. } = ability.effect.as_ref() {
+                let text = description.as_deref().unwrap_or("");
+                assert!(
+                    // allow-noncombinator: string assertion in a test, not parsing dispatch.
+                    !text.to_lowercase().contains("counter"),
+                    "no Unimplemented gap may remain on the counters line: {text:?}"
+                );
+            }
         }
     }
 
@@ -34183,6 +34540,100 @@ mod tests {
             "{:?}",
             packleader.abilities
         );
+    }
+
+    fn roll_norm(line: &str) -> String {
+        replace_self_refs(&strip_reminder_text(line), "Roll Witness").to_lowercase()
+    }
+
+    /// R2/R3 helper rows. CR 614.1c + CR 603.6d + CR 706.4: the composition
+    /// claims an ungated self-only roll line, and the dispatcher gate then no
+    /// longer owns it; every line it declines keeps `Clause` and stays
+    /// line-owned. The gated, distributive and non-modifier lines reach the new
+    /// composition check (`split_as_enters_roll_prefix` admits them, and their
+    /// enters-with sentence parses alone), so their gap is that check's, not an
+    /// upstream decline.
+    #[test]
+    fn as_enters_roll_composition_claims_and_declines() {
+        for line in [
+            "As this creature enters, roll X d6. It enters with a number of +1/+1 counters on it equal to the total of those results.",
+            "As this creature enters, roll a six-sided die. This creature enters with a number of funk counters on it equal to the result.",
+        ] {
+            let norm = roll_norm(line);
+            assert!(
+                matches!(as_enters_roll_enters_with_outcome(&norm), Some(Ok(_))),
+                "{norm}"
+            );
+            assert!(!is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(multi_sentence_enters_with_decline(&norm), None, "{norm}");
+        }
+        // `(line, admitted by the split, reaches the composition's own check)`.
+        for (line, admitted, reaches_check) in [
+            // A gate the enters-with reader carries as a condition: the
+            // composition's ungated check declines it.
+            (
+                "As this creature enters, roll a six-sided die. If this creature was kicked, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A gate the enters-with reader itself declines.
+            (
+                "As this creature enters, roll a six-sided die. If you cast it, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                false,
+            ),
+            // A distributive subject: not this permanent (CR 614.12).
+            (
+                "As this creature enters, roll a six-sided die. Each other creature you control enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A non-modifier node (the keyword grant) in the execute.
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with flying and with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result. This creature enters with a number of charge counters on it equal to the result.",
+                false,
+                false,
+            ),
+        ] {
+            let norm = roll_norm(line);
+            assert!(is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(
+                as_enters_roll_enters_with_outcome(&norm).map(Result::err),
+                admitted.then_some(Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))),
+                "{norm}"
+            );
+            let split = split_as_enters_roll_prefix(&norm);
+            assert_eq!(split.is_some(), admitted, "{norm}");
+            if let Some((_, sentence)) = split {
+                assert_eq!(
+                    enters_with_counters_outcome(sentence, sentence).is_ok(),
+                    reaches_check,
+                    "reach guard, the enters-with sentence parses alone: {sentence}"
+                );
+            }
+        }
+        // A results table is out of class (CR 706.3): the roll prefix declines.
+        let mut table_roll = parse_effect_chain("roll a d20", AbilityKind::Spell);
+        assert!(is_as_enters_roll_prefix(&table_roll));
+        if let Effect::RollDie { results, .. } = &mut *table_roll.effect {
+            results.push(crate::types::ability::DieResultBranch {
+                min: 1,
+                max: 20,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+            });
+        }
+        assert!(!is_as_enters_roll_prefix(&table_roll));
     }
 
     /// CR 614.1c: the typed decline separates "my shape, gate fails closed" and

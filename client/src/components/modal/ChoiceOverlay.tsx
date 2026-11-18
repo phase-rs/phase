@@ -158,11 +158,12 @@ export function ChoiceOverlay({
 /**
  * Scrollable card strip wrapper with edge arrow buttons, mousewheel, and drag support.
  *
- * The frame sizes the cards from the room it has (`.card-strip-frame` in
- * index.css): below lg it grows to fill its parent, so place the strip in a
- * flex column with a definite height, such as an overlay body. The frame is a
+ * Below lg the frame sizes the cards from the room it has (`.card-strip-frame`
+ * in index.css): it grows to fill its parent, so place the strip in a flex
+ * column with a definite height, such as an overlay body. There the frame is a
  * size container and so has no width of its own: the parent must stretch it
- * across its width, as a flex column does by default.
+ * across its width, as a flex column does by default. From lg up the cards
+ * keep the board size.
  */
 export function ScrollableCardStrip({
   children,

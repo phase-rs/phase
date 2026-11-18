@@ -1,7 +1,9 @@
 use crate::game::filter;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::evaluate_condition;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::{
+    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
+};
 use crate::types::ability::{
     quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
     EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
@@ -1303,6 +1305,18 @@ pub(crate) fn snapshot_transient_modifications(
     ability: &ResolvedAbility,
     modifications: &[ContinuousModification],
 ) -> Vec<ContinuousModification> {
+    // The one object this effect was applied to, when that is the effect's only
+    // target. A recipient-relative quantity read against it is the quantity the
+    // effect gives that object (CR 608.2h).
+    let single_target = ability
+        .targets
+        .iter()
+        .find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .filter(|_| ability.targets.len() == 1);
+
     modifications
         .iter()
         .map(|modification| match modification {
@@ -1332,6 +1346,70 @@ pub(crate) fn snapshot_transient_modifications(
             {
                 ContinuousModification::SetToughness {
                     value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            // CR 608.2h: an effect that requires information from the game (such
+            // as the number of creatures on the battlefield) determines that
+            // answer only once, when the effect is applied. A recipient-relative
+            // dynamic P/T quantity ("+1/+1 for each OTHER attacking creature",
+            // Paladin Class level 3) is counted against the single object the
+            // effect targets here, at resolution, and fixed for the rest of the
+            // duration: a later change to the counted set does not move the
+            // bonus. This function is reached only by transient, resolution-
+            // created effects (CR 611.2d), so a printed static ability's dynamic
+            // P/T stays live and is recomputed per recipient in `game/layers.rs`.
+            // CR 608.2h
+            ContinuousModification::AddDynamicPower { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::AddPower {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    // No single object recipient: leave the payload dynamic so
+                    // the live per-recipient resolution still applies.
+                    None => modification.clone(),
+                }
+            }
+            // CR 608.2h
+            ContinuousModification::AddDynamicToughness { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::AddToughness {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    None => modification.clone(),
+                }
+            }
+            // CR 608.2h
+            ContinuousModification::SetPowerDynamic { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::SetPower {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    None => modification.clone(),
+                }
+            }
+            // CR 608.2h
+            ContinuousModification::SetToughnessDynamic { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::SetToughness {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    None => modification.clone(),
                 }
             }
             // CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
@@ -4935,6 +5013,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 6,
                 result: Some(4),
+                pre_entry_source: None,
             },
             GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
@@ -4959,6 +5038,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result: Some(4),
+            pre_entry_source: None,
         }];
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {

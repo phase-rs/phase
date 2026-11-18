@@ -555,6 +555,7 @@ pub(crate) fn eliminate_players(
                         trigger_event: None,
                         effect_description: None,
                         remaining: Vec::new(),
+                        affected_object: None,
                         repeat: None,
                     };
                     state.pending_player_scope_unless_payment = Some(pending);
@@ -591,6 +592,10 @@ pub(crate) fn eliminate_players(
     // left (CR 800.4d) and the drain puts the rest on the stack together. CR 104.1:
     // once the game is over, nothing triggered goes on the stack.
     if departure_triggers == DepartureTriggers::CollectedByDeparture && game_over_winner.is_none() {
+        // CR 800.4a + CR 603.2: the control changes this departure's layer
+        // passes derived (a "for as long as" control duration that ended with
+        // its departed source) are part of what it collects.
+        super::layers::publish_layer_control_changes(state, events);
         super::triggers::collect_unclaimed_triggers_into_deferred(
             state,
             events,
@@ -2694,6 +2699,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.pending_discard_batch = None;
     state.pending_single_discard = None;
     state.pending_damage_post_loss = None;
+    state.pending_damage_post_counter = None;
     state.pending_exile_from_top_until = None;
     state.pending_scoped_library_search = None;
     state.pending_library_search_delivery = None;
@@ -2821,13 +2827,16 @@ mod tests {
         PendingReplacement, PendingSpellResolution, PendingZoneChangeDelivery, PromptSourceBinding,
         ResolutionSourceRelatch, ScheduledTurnControl, StackEntry, StackEntryKind,
     };
+    use crate::types::identifiers::ExtraTurnId;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
         ObjectIncarnationRef, TriggerFiring,
     };
     use crate::types::mana::ManaCost;
     use crate::types::match_config::MatchType;
-    use crate::types::proposed_event::{CounterPlacement, DrawEventStage, ProposedEvent};
+    use crate::types::proposed_event::{
+        CounterCause, CounterPlacement, DrawEventStage, ProposedEvent,
+    };
     use crate::types::replacements::ReplacementEvent;
 
     fn setup_two_player() -> GameState {
@@ -2961,6 +2970,7 @@ mod tests {
     ) -> crate::types::game_state::PendingBatchDeliveries {
         let mut logical_zone_change_group = crate::types::game_state::LogicalZoneChangeGroup::new(
             crate::types::identifiers::LogicalZoneChangeGroupId(1),
+            Vec::new(),
             Vec::new(),
         );
         logical_zone_change_group
@@ -3120,7 +3130,12 @@ mod tests {
             "Surviving batch member".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -3283,7 +3298,12 @@ mod tests {
             "Surviving batch tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -3363,7 +3383,9 @@ mod tests {
             .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
             .cloned()
             .expect("the earlier member's departure is recorded");
-        let mut owner_group = state.allocate_logical_zone_change_group(&[original]);
+        let mut owner_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[original], Zone::Graveyard),
+        );
         owner_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("owner group latches");
@@ -3371,7 +3393,9 @@ mod tests {
             .append_delivery_events(std::slice::from_ref(&collected))
             .expect("owner retains its collected occurrence");
         let owner_group_id = owner_group.logical_group_id;
-        let mut child_group = state.allocate_logical_zone_change_group(&[original]);
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[original], Zone::Graveyard),
+        );
         child_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("child group latches");
@@ -3467,13 +3491,19 @@ mod tests {
             "Surviving original tail".to_string(),
             Zone::Battlefield,
         );
-        let mut parent_group =
-            state.allocate_logical_zone_change_group(&[leaving, leaving_tail, surviving]);
+        let mut parent_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, leaving_tail, surviving],
+                Zone::Graveyard,
+            ),
+        );
         parent_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parent group latches");
         let parent_group_id = parent_group.logical_group_id;
-        let mut child_group = state.allocate_logical_zone_change_group(&[leaving]);
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[leaving], Zone::Graveyard),
+        );
         child_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("child group latches");
@@ -3640,7 +3670,12 @@ mod tests {
             "Surviving change-zone tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked iteration has its pre-delivery authority");
@@ -4460,6 +4495,7 @@ mod tests {
         state.extra_turns = vec![ExtraTurn {
             player: PlayerId(2),
             anchor: PlayerId(2),
+            id: ExtraTurnId(1),
         }];
         let queued_before = state.extra_turns.clone();
         let mut events = Vec::new();
@@ -4889,6 +4925,7 @@ mod tests {
                     actor: PlayerId(2),
                     object_id: o,
                     counter_type: CounterType::Plus1Plus1,
+                    cause: CounterCause::Other,
                 },
                 count: 1,
                 applied: HashSet::new(),

@@ -37449,6 +37449,42 @@ fn they_may_after_combat_damage_to_player_binds_to_triggering_player() {
     assert!(execute.optional, "\"they may draw\" must be optional");
 }
 
+/// Septic Rats: "Whenever this creature attacks, if defending player is
+/// poisoned, it gets +1/+1 until end of turn." CR 122.1f defines "poisoned" as
+/// having one or more poison counters; CR 508.5 makes the defending player the
+/// player the attacking creature is attacking. Before the fix the guard stayed
+/// in the effect text, so the pump was gated by nothing and never applied.
+#[test]
+fn septic_rats_defending_player_poisoned_gates_the_pump() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks, if defending player is poisoned, it gets +1/+1 until end of turn.",
+        "Septic Rats",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::IsPoisoned {
+            player: PlayerScope::DefendingPlayer,
+        }),
+        "the guard must hoist as a defending-player poison intervening-if, got {:?}",
+        def.condition
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(
+            *execute.effect,
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::SelfRef,
+            }
+        ),
+        "expected the source to get +1/+1, got {:?}",
+        execute.effect
+    );
+    assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+}
+
 /// Siege Dragon: "Whenever this creature attacks, if defending player
 /// controls no Walls, it deals 2 damage to each creature without flying
 /// that player controls." A before/after parse-diff audit of every printed

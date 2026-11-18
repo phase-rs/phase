@@ -20,8 +20,8 @@ use super::counter::{CounterMatch, CounterType};
 use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
 use super::game_state_kinds::{DistributionUnit, RetargetScope, TargetSelectionConstraint};
 use super::identifiers::{
-    EpicEffectId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, ReplacementContinuationId,
-    TrackedSetId,
+    EpicEffectId, ExtraPhaseId, ExtraTurnId, ObjectId, ObjectIncarnationRef,
+    ReplacementContinuationId, TrackedSetId,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
@@ -6433,6 +6433,17 @@ pub enum DelayedTriggerCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<ExtraPhaseId>,
     },
+    /// CR 603.7a + CR 500.7: "at the beginning of that turn's end step" — names
+    /// the extra turn the preceding instruction of the same resolution granted,
+    /// and fires when its step `phase` begins during that turn, never during
+    /// another turn of the same player. The parser emits `turn: None` (the
+    /// anaphor); `effects::delayed_trigger::resolve` binds it to the granted
+    /// turn's `ExtraTurnId`, or creates no trigger if no turn was granted.
+    AtBeginningOfGrantedTurn {
+        phase: Phase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<ExtraTurnId>,
+    },
     /// "when [object] leaves the battlefield"
     WhenLeavesPlay {
         object_id: super::identifiers::ObjectId,
@@ -8674,6 +8685,10 @@ pub enum TargetFilter {
     /// `ScopedPlayer`'s sentinel role for "each player's library". It never survives into
     /// a finished `AbilityDefinition`: `lift_distributive_exile_top_scope` rewrites it to
     /// `Controller` and stamps `AbilityDefinition.player_scope = Some(PlayerFilter::Opponent)`.
+    ///
+    /// THIRD ROLE (CR 118.12a): as `UnlessPayModifier.payer` it is the "unless any opponent
+    /// pays ..." poll (Sword-Point Diplomacy) — each opponent in APNAP order, the first to
+    /// pay prevents the effect, mirroring `AllPlayers` for "any player pays".
     Opponent,
     SelfRef,
     /// CR 201.5a: The specific object that GRANTED the ability this filter lives
@@ -17989,6 +18004,24 @@ pub enum StaticCondition {
     OpponentPoisonAtLeast {
         count: u32,
     },
+    /// CR 122.1f + CR 109.5: True when `player` has one or more poison counters
+    /// (CR 122.1f defines "poisoned"). `player` is the CR 109.5 subject axis:
+    /// - `PlayerScope::Controller` ← "you are poisoned"
+    /// - `PlayerScope::Opponent` ← "an opponent is poisoned"
+    /// - `PlayerScope::DefendingPlayer` ← "defending player is poisoned"
+    ///   (CR 508.5 names the player the attacking creature is attacking)
+    /// - `PlayerScope::ScopedPlayer` ← "that player is poisoned" (anaphor)
+    ///
+    /// Mirrors `StaticCondition::IsMonarch` and `TriggerCondition::IsPoisoned`
+    /// in axis parameterization. An unresolvable scope makes the condition
+    /// UNANSWERABLE at evaluation time.
+    PlayerIsPoisoned {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 118.12a + CR 508.1d + CR 509.1c: "unless [player] pays [cost]" — an optional cost
     /// condition attached to a combat restriction (attack tax / block tax).
     ///
@@ -18273,6 +18306,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -18388,6 +18422,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
             | StaticCondition::DuringOpponentsTurn
@@ -18624,6 +18659,7 @@ impl StaticCondition {
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -18746,6 +18782,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -40444,6 +40481,22 @@ pub enum TriggerCondition {
         )]
         player: PlayerScope,
     },
+    /// CR 122.1f + CR 508.5 + CR 603.4: "if defending player is poisoned" —
+    /// true when `player` has one or more poison counters. CR 122.1f DEFINES
+    /// "poisoned": a player with one or more poison counters. CR 508.5 names the
+    /// player an attacking creature is attacking, so the printed "defending
+    /// player" on an attack trigger is [`PlayerScope::DefendingPlayer`].
+    ///
+    /// Checked at fire time and again as the ability resolves (CR 603.4),
+    /// mirroring `IsMonarch`. The poison read is the TEAM total (CR 810.10a),
+    /// exactly as `QuantityRef::TargetControllerCounter`'s poison arm reads it
+    /// for "its controller is poisoned" (Corrupted Resolve).
+    ///
+    /// An unresolvable scope makes the condition UNANSWERABLE, not false:
+    /// `triggers::check_trigger_condition_with_source` rejects the whole
+    /// condition at its entry boundary so `Not` cannot invert a missing anchor
+    /// into a firing trigger.
+    IsPoisoned { player: PlayerScope },
     /// Digital-only Alchemy (no CR entry): "if you have a boon" is true when
     /// `player` holds at least one unconsumed one-time boon (a
     /// `DelayedTriggerKind::Boon` entry they control). Checked at fire time
@@ -40777,6 +40830,7 @@ impl TriggerCondition {
     pub fn evaluation_anchor(&self) -> Option<TriggerConditionAnchor<'_>> {
         match self {
             TriggerCondition::IsMonarch { player } => Some(TriggerConditionAnchor::Player(player)),
+            TriggerCondition::IsPoisoned { player } => Some(TriggerConditionAnchor::Player(player)),
             TriggerCondition::AddedManaWithThisAbilityThisTurn => {
                 Some(TriggerConditionAnchor::OwnTriggerDefinition)
             }
@@ -41049,6 +41103,15 @@ pub enum ReplacementCondition {
     /// turn-based action (cleanup hand-size discard). Used by Library of Leng
     /// ("If an effect causes you to discard a card...").
     EffectCausedDiscard,
+    /// CR 614.16: Replacement applies only when a counter placement was caused
+    /// by the effect of a resolving spell or ability, or as modified by another
+    /// replacement or prevention effect — not by paying a cost or by a
+    /// turn-based action. Used by "if an effect would put one or more counters"
+    /// replacements (Doubling Season). RUNTIME-evaluated by
+    /// `evaluate_replacement_condition` against the placement's `CounterCause`
+    /// (`ProposedEvent::AddCounter` via its `CounterPlacement`, or the add
+    /// stage of `ProposedEvent::MoveCounter`).
+    EffectCausedPlacement,
     /// CR 500.7 + CR 614.10: Replacement applies only when the triggering
     /// event is an *extra* turn (granted by an effect, not a natural turn).
     /// Used by Stranglehold ("If a player would begin an extra turn...").

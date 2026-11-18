@@ -8303,10 +8303,11 @@ fn tap_land_for_mana_labels_a_choice_among_exiled_colors_land() {
 // ---------------------------------------------------------------------------
 // Sibling coverage: `ActivateManaSource`.
 //
-// The two mana surfaces now share `push_produced_mana_surfaces`, each passing
-// its own reducer's resolver. The tests above pin the `TapLandForMana` arm; this
-// one pins the `ActivateManaSource` arm so the shared helper cannot be changed
-// to satisfy one caller while silently dropping the other's labels.
+// The two mana surfaces now share `mana_sources::produced_mana_for_action`,
+// which pairs each with its own reducer's resolver. The tests above pin the
+// `TapLandForMana` arm; this one pins the `ActivateManaSource` arm so the shared
+// helper cannot be changed to satisfy one caller while silently dropping the
+// other's labels.
 //
 // `ActivateManaSource` is only ever projected from the
 // `WaitingFor::ManaSourceSelection` arm of `direct_choice_projection` — no

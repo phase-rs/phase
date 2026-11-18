@@ -161,6 +161,7 @@
     "flip": "Girar",
     "report": "Informar de un problema",
     "reported": "Informado ✓",
+    "reportNotSent": "No enviado",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
@@ -1813,6 +1814,10 @@
       "title": "Ordenar las copias",
       "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
     },
+    "memberOrder": {
+      "title": "Ordena las cartas",
+      "subtitle": "Elige qué carta se procesa a continuación"
+    },
     "collectEvidence": {
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
@@ -2559,7 +2564,7 @@
     "appliedLast": "Aplicado el último: este prevalece",
     "resultLabel": "Resultado: {{outcome}}",
     "confirmOrder": "Confirmar orden",
-    "dragHint": "Arrastra para reordenar o usa las flechas.",
+    "dragHint": "Arrastra desde el tirador <grip>⠿</grip> para reordenar o usa las flechas.",
     "chooseSubtitle": "Elige qué efecto de reemplazo aplicar.",
     "candidateFallback": "Efecto de reemplazo {{number}}",
     "orderSubtitleComposing": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para fijar el orden en que se aplican: todos se aplican, así que el orden cambia el resultado (CR 616.1).",
@@ -2568,6 +2573,7 @@
     "composesNote": "Todos los efectos se aplican: el orden cambia cómo se combinan.",
     "moveUpNamed": "Mover {{name}} antes",
     "moveDownNamed": "Mover {{name}} después",
+    "dragHandleNamed": "Arrastra {{name}} para reordenar",
     "positionAnnounce": "Posición {{position}} de {{total}}"
   },
   "retargetChoice": {
@@ -2693,6 +2699,20 @@
     "EndCombat": "Fin del combate",
     "PostCombatMain": "Fase principal 2",
     "End": "Paso final",
+    "Cleanup": "Limpieza"
+  },
+  "phaseShortName": {
+    "Untap": "Enderezar",
+    "Upkeep": "Mantenimiento",
+    "Draw": "Robar",
+    "PreCombatMain": "Principal 1",
+    "BeginCombat": "Combate",
+    "DeclareAttackers": "Atacantes",
+    "DeclareBlockers": "Bloqueadores",
+    "CombatDamage": "Daño",
+    "EndCombat": "Fin combate",
+    "PostCombatMain": "Principal 2",
+    "End": "Final",
     "Cleanup": "Limpieza"
   },
   "counterMoveDistribution": {

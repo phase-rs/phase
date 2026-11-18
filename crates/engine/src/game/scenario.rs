@@ -947,6 +947,39 @@ impl GameScenario {
         builder
     }
 
+    /// Add an enchantment card to hand with abilities parsed from Oracle text.
+    ///
+    /// Mirrors `add_artifact_to_hand_from_oracle` for enchantments (CR 303.1).
+    /// Subtypes (e.g. Aura, CR 303.4) are the caller's concern — chain
+    /// `.with_subtypes(..)` on the returned builder.
+    pub fn add_enchantment_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        // CR 208.3: a noncreature object not on the battlefield has power or
+        // toughness only if it has a power and toughness printed on it.
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add an instant or sorcery to a player's hand without Oracle text.
     ///
     /// Use `is_instant: true` for instants, `false` for sorceries.
@@ -2159,7 +2192,7 @@ impl GameRunner {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
-            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
+            WaitingFor::MemberOrderChoice { .. } => "MemberOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",

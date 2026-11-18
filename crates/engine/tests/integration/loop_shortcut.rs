@@ -4209,9 +4209,10 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // 139 ⇒ 140 is ADJUDICATED: DigRestSplitChoice carries no DecisionTemplate;
     // its hidden card identities are filtered by the Dig visibility path.
     // 140 ⇒ 141 is ADJUDICATED: CR 405.3's copy-batch order added
-    // `SpellCopyOrderChoice { player, source_id, choices }`. Its body holds no
-    // `DecisionTemplate`, and its choices are spells on the stack, which are
-    // public, so neither the carrier vec nor the redaction loop changes.
+    // `MemberOrderChoice { player, source_id, choices, purpose }`. Its body
+    // holds no `DecisionTemplate`, and its choices are public either way (spells
+    // on the stack, or the members of a revealed/repeated population), so
+    // neither the carrier vec nor the redaction loop changes.
     // 141 ⇒ 142 is ADJUDICATED: `ManaAbilityManaPayment { player, pending_mana_ability }`
     // holds no `DecisionTemplate`, so neither the carrier vec nor the redaction loop changes.
     // 142 ⇒ 143 is ADJUDICATED: the one-time-boon token-host choice (CR 608.2d,

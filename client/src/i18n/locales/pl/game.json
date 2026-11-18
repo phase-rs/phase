@@ -161,6 +161,7 @@
     "flip": "Odwróć",
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
+    "reportNotSent": "Nie wysłano",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -1813,6 +1814,10 @@
       "title": "Ustal kolejność kopii",
       "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
     },
+    "memberOrder": {
+      "title": "Ustal kolejność kart",
+      "subtitle": "Wybierz kartę, która zostanie rozpatrzona jako następna"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
@@ -2559,7 +2564,7 @@
     "appliedLast": "Zastosowany ostatni — ten zadziała",
     "resultLabel": "Wynik: {{outcome}}",
     "confirmOrder": "Potwierdź kolejność",
-    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "dragHint": "Przeciągnij uchwyt <grip>⠿</grip>, aby zmienić kolejność, lub użyj strzałek.",
     "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
     "candidateFallback": "Efekt zastępujący {{number}}",
     "orderSubtitleComposing": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustawić kolejność ich zastosowania — każdy zostanie zastosowany, więc kolejność zmienia wynik (CR 616.1).",
@@ -2568,6 +2573,7 @@
     "composesNote": "Każdy efekt zostaje zastosowany — kolejność zmienia sposób ich połączenia.",
     "moveUpNamed": "Przenieś {{name}} wcześniej",
     "moveDownNamed": "Przenieś {{name}} później",
+    "dragHandleNamed": "Przeciągnij {{name}}, aby zmienić kolejność",
     "positionAnnounce": "Pozycja {{position}} z {{total}}"
   },
   "retargetChoice": {
@@ -2693,6 +2699,20 @@
     "EndCombat": "Koniec walki",
     "PostCombatMain": "Główna faza 2",
     "End": "Krok końcowy",
+    "Cleanup": "Sprzątanie"
+  },
+  "phaseShortName": {
+    "Untap": "Odwracanie",
+    "Upkeep": "Utrzymanie",
+    "Draw": "Dobieranie",
+    "PreCombatMain": "Główna 1",
+    "BeginCombat": "Walka",
+    "DeclareAttackers": "Atakujący",
+    "DeclareBlockers": "Blokujący",
+    "CombatDamage": "Obrażenia",
+    "EndCombat": "Koniec walki",
+    "PostCombatMain": "Główna 2",
+    "End": "Koniec",
     "Cleanup": "Sprzątanie"
   },
   "counterMoveDistribution": {

@@ -6701,6 +6701,9 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 109.5 + CR 122.1f: a player-state predicate; like the monarch
+        // arm it is not holder-bound by this permission path.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -20969,12 +20972,14 @@ fn continue_with_prepared(
             );
         }
 
-        // CR 702.56a: Replicate is a repeatable optional additional cost, so it
-        // must be declared before targets are chosen just like Casualty.
-        if let Some(replicate_cost) =
-            casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+        // CR 702.56a + CR 601.2b: Replicate is a repeatable optional additional
+        // cost, declared before targets through the keyword queue just like
+        // Casualty, so every instance is announced once (CR 702.56b) and the
+        // authority does not offer it again after the targets.
+        if casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+            .is_some()
         {
-            return casting_costs::begin_optional_cost_before_targets(
+            return casting_costs::begin_keyword_queue_before_targets(
                 state,
                 player,
                 prepared.object_id,
@@ -20982,8 +20987,6 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
-                replicate_cost,
-                SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.casting_permission_index,
                 prepared.cast_timing_permission,
@@ -23660,7 +23663,7 @@ fn can_pay_with_tap_payment_mode(
             // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
             let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
-                if obj.is_improvise_eligible(player) {
+                if tap_payment_eligible(state, obj, player, ConvokeMode::Improvise) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
                         crate::types::mana::ManaType::Colorless,
                         object_id,
@@ -23672,7 +23675,7 @@ fn can_pay_with_tap_payment_mode(
         ConvokeMode::Waterbend => {
             let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
-                if obj.is_waterbend_eligible(player) {
+                if tap_payment_eligible(state, obj, player, ConvokeMode::Waterbend) {
                     pool.add(crate::types::mana::ManaUnit::new(
                         crate::types::mana::ManaType::Colorless,
                         object_id,
@@ -23689,7 +23692,7 @@ fn can_pay_with_tap_payment_mode(
                 .objects
                 .iter()
                 .filter_map(|(_, obj)| {
-                    if !obj.is_convoke_eligible(player) {
+                    if !tap_payment_eligible(state, obj, player, ConvokeMode::Convoke) {
                         return None;
                     }
                     let mut choices = vec![crate::types::mana::ManaType::Colorless];
@@ -25434,7 +25437,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+    let (spent_units, life_payments) = mana_payment::select_mana_payment_with_life_budget(
         &player_data.mana_pool,
         cost,
         Some(&hand_demand),
@@ -25443,6 +25446,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         phyrexian_choices,
         permissions.life_colors,
         &pins,
+        Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = state.mana_payment_recipient(source_id, player);
@@ -26146,7 +26150,7 @@ fn pay_non_cast_mana_cost(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+    let (spent_units, life_payments) = mana_payment::select_mana_payment_with_life_budget(
         &player_data.mana_pool,
         cost,
         None,
@@ -26156,6 +26160,7 @@ fn pay_non_cast_mana_cost(
         permissions.life_colors,
         // CR 118.3a: non-cast mana costs (effects/special actions) are not pinnable.
         &[],
+        Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = source_id
@@ -26322,7 +26327,7 @@ fn auto_tap_and_pay_cost_excluding(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+    let (spent_units, life_payments) = mana_payment::select_mana_payment_with_life_budget(
         &player_data.mana_pool,
         cost,
         Some(&combined_demand),
@@ -26331,6 +26336,7 @@ fn auto_tap_and_pay_cost_excluding(
         phyrexian_choices,
         permissions.life_colors,
         &pins,
+        Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = state.mana_payment_recipient(source_id, player);
@@ -27972,6 +27978,28 @@ pub(crate) fn find_eligible_remove_counter_for_cost_targets(
             })
         })
         .collect()
+}
+
+/// CR 702.51a + CR 702.126a + CR 701.67a + CR 601.2h: whether `obj` can be
+/// tapped to pay the in-flight spell's mana through `mode` (convoke, improvise,
+/// waterbend). The single tap-payment eligibility seam: the object's own shape
+/// check plus the payment reservation, so a permanent held for the spell's
+/// deferred tap cost (`restrictions::payment_tap_reserved`) is neither counted
+/// toward affordability nor offered nor accepted. Delve exiles graveyard cards
+/// rather than tapping, so it is never tap-eligible.
+pub(crate) fn tap_payment_eligible(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    mode: ConvokeMode,
+) -> bool {
+    let shape = match mode {
+        ConvokeMode::Convoke => obj.is_convoke_eligible(player),
+        ConvokeMode::Waterbend => obj.is_waterbend_eligible(player),
+        ConvokeMode::Improvise => obj.is_improvise_eligible(player),
+        ConvokeMode::Delve => false,
+    };
+    shape && !super::restrictions::payment_tap_reserved(state, obj.id)
 }
 
 pub(super) fn find_eligible_tap_creatures_for_cost(

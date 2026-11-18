@@ -732,39 +732,34 @@ select.select-dark option {
   --art-crop-h: calc(var(--art-crop-w) * 0.75);
 }
 
-/* Horizontal card strips (card choices, zone viewers) size their cards from the
-   room their frame has. ScrollableCardStrip always renders the frame, which sets
-   the --card-w/--card-h pair every CardImage state reads (art, loading pulse,
-   text fallback, card back). Never size strip cards with a selector on the
-   card's element or role: it goes dead silently when that markup changes.
+/* Horizontal card strips (card choices, zone viewers). Never size strip cards
+   with a selector on the card's element or role: it goes dead silently when
+   that markup changes. Strip cards read the --card-w/--card-h pair every
+   CardImage state reads (art, loading pulse, text fallback, card back).
 
-   The frame is a size container, so 100cqh resolves at each card to the frame's
-   height. A card takes that height less the strip's chrome, is never wider than
-   the frame nor taller than 560px, and its width follows the 5:7 card.
+   From lg up the overlay takes its height from its content, and the cards keep
+   the board size .card-scale-reset gives them, which testing confirmed reads
+   well on desktop. No sizing rule here applies there.
 
-   Below lg the overlay fills the screen, so the frame grows into the overlay
-   body. Its min-height is the floor: where the body is very short (a landscape
-   phone around 320px tall, with a filter, slot bar or two-button footer taking
-   room) the cards stop shrinking and the body overflows instead. */
-.card-strip-frame {
-  /* The strip's 1rem of vertical padding, its scrollbar (up to 18px) and some room for the hover lift. */
-  --card-strip-chrome-h: 2.75rem;
-  --card-h: min(100cqh - var(--card-strip-chrome-h), (100cqw - 2rem) * 7 / 5, 560px);
-  --card-w: calc(var(--card-h) * 5 / 7);
-  display: flex;
-  flex: 1 1 0%;
-  flex-direction: column;
-  min-height: 9rem;
-  container-type: size;
-}
-/* From lg up the overlay takes its height from its content, so there is no
-   height to fill. The frame asks for a share of the viewport instead, which
-   gives the cards clamp(240px, 64vh, 560px), and shrinks with them when the
-   overlay reaches its max height rather than overflowing it. */
-@media (width >= 64rem) {
+   Below lg the overlay fills the screen, and board-size cards are too small to
+   read on a phone. There the frame ScrollableCardStrip renders grows into the
+   overlay body and is a size container, so 100cqh resolves at each card to the
+   frame's height. A card takes that height less the strip's chrome, is never
+   wider than the frame nor taller than 560px, and its width follows the 5:7
+   card. The frame's min-height is the floor: where the body is very short (a
+   landscape phone around 320px tall, with a filter, slot bar or two-button
+   footer taking room) the cards stop shrinking and the body overflows instead. */
+@media (width < 64rem) {
   .card-strip-frame {
-    flex: 0 1 auto;
-    height: calc(clamp(240px, 64vh, 560px) + var(--card-strip-chrome-h));
+    /* The strip's 1rem of vertical padding, its scrollbar (up to 18px) and some room for the hover lift. */
+    --card-strip-chrome-h: 2.75rem;
+    --card-h: min(100cqh - var(--card-strip-chrome-h), (100cqw - 2rem) * 7 / 5, 560px);
+    --card-w: calc(var(--card-h) * 5 / 7);
+    display: flex;
+    flex: 1 1 0%;
+    flex-direction: column;
+    min-height: 9rem;
+    container-type: size;
   }
 }
 /* CardImage's wrapper is inline-block (w-fit); as a block it drops the line-box

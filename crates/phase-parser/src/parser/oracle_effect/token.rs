@@ -1740,8 +1740,12 @@ fn known_named_token_identity(
     ))
 }
 
-/// CR 111.4 + CR 111.1: Resolve a named token's `(display name, type strings)`
-/// from the predefined-token registry (`known-tokens.toml`). The type string
+/// CR 111.4 + CR 111.1 + CR 111.11: Resolve a named token's `(name, type strings)`
+/// from the predefined-token registry (`known-tokens.toml`). The returned name
+/// is the Oracle descriptor trimmed of surrounding whitespace — the CR 111.11
+/// card name the effect named — not the catalog `display_name` (which carries
+/// MTGJSON's trailing `" Token"` suffix on some rows, e.g. `"Gingerbrute Token"`).
+/// Types still come from the catalog body. The type string
 /// list follows the parser convention used by [`parse_token_identity`]: core
 /// types first (in catalog order), then subtypes. Returns `None` for names not
 /// present in the catalog, leaving the token unparsed (Unimplemented) as before.
@@ -1759,7 +1763,7 @@ fn known_registry_token_identity(
     for subtype in &body.subtypes {
         push_unique_string(&mut types, subtype);
     }
-    Some((body.display_name.clone(), types))
+    Some((descriptor.trim().to_string(), types))
 }
 
 /// CR 303.7: Role tokens are predefined Enchantment -- Aura Role tokens with
@@ -4307,6 +4311,57 @@ mod tests {
         assert_eq!(power, PtValue::Fixed(2));
         assert_eq!(toughness, PtValue::Fixed(2));
         assert_eq!(colors, vec![ManaColor::White]);
+    }
+
+    /// CR 111.4 + CR 111.1 + CR 111.11 (F1): a registry-defined named token
+    /// whose catalog display name carries MTGJSON's trailing " Token" suffix
+    /// ("Gingerbrute Token") still parses to the bare Oracle descriptor
+    /// ("Gingerbrute") — the CR 111.11 card name the effect named — while
+    /// types, P/T, and keywords keep filling from the catalog body.
+    #[test]
+    fn registry_named_token_with_suffixed_display_name_keeps_oracle_name() {
+        use crate::types::keywords::Keyword;
+
+        let text = "Create a Gingerbrute token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Ginger, Queen of Sweets".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("suffixed-display-name registry token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            keywords,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        // THE DISCRIMINATOR. Reverting the F1 parser edit returns the catalog
+        // display name ("Gingerbrute Token") and this fails.
+        assert_eq!(name, "Gingerbrute");
+        // Reach-guards: the catalog body still flows through, proving the
+        // registry lookup fired rather than a bare-name fallback.
+        assert!(
+            types.contains(&"Creature".to_string())
+                && types.iter().any(|token_type| token_type == "Food")
+                && types.iter().any(|token_type| token_type == "Golem"),
+            "catalog core type + subtypes must flow through, got {types:?}"
+        );
+        assert_eq!(power, PtValue::Fixed(1));
+        assert_eq!(toughness, PtValue::Fixed(1));
+        assert!(
+            colors.is_empty(),
+            "Gingerbrute is colorless, got {colors:?}"
+        );
+        assert!(
+            keywords.contains(&Keyword::Haste),
+            "catalog haste must flow through, got {keywords:?}"
+        );
     }
 
     #[test]

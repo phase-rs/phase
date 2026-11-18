@@ -37,7 +37,7 @@ use crate::types::TriggerMode;
 
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::mana_abilities;
-use super::mana_abilities::ManaPayabilityMode;
+use super::mana_abilities::{ManaActivationPurpose, ManaPayabilityMode};
 use super::mana_payment;
 use super::restrictions;
 use super::triggers::trigger_source_context_for_latch;
@@ -45,13 +45,35 @@ use super::turn_control;
 
 pub use crate::types::mana::ManaSourcePenalty;
 
+/// The producer's potential colors, independently of a unit's chosen type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceColorCapability {
+    OneOrFewer,
+    TwoOrMore,
+}
+
+impl From<bool> for SourceColorCapability {
+    fn from(could_produce_two_or_more_colors: bool) -> Self {
+        match could_produce_two_or_more_colors {
+            false => Self::OneOrFewer,
+            true => Self::TwoOrMore,
+        }
+    }
+}
+
 /// One concrete mana unit a currently legal land-mana selection would produce.
 ///
 /// This is a read-only projection, not a `ManaUnit`: no pool identity, source
 /// bookkeeping, or spend grants exist until the activation resolves.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LiveManaOutputUnit {
+pub struct LiveManaOutputUnit {
     pub mana_type: ManaType,
+    /// CR 106.3 + CR 106.7: retain the actual producer's potential colors,
+    /// independently of the color selected for this unit.
+    pub source_color_capability: SourceColorCapability,
+    /// CR 106.3 + CR 107.4h: the producing ability, including an Aura trigger,
+    /// supplies the snow provenance of its own units.
+    pub supertype: Option<crate::types::mana::ManaSupertype>,
     pub restrictions: Vec<ManaRestriction>,
 }
 
@@ -168,7 +190,8 @@ pub(in crate::game) fn priority_mana_announcements(
 ) -> PriorityManaAnnouncements {
     let mut land_taps = Vec::new();
     let mut nonland_activations = Vec::new();
-    for selection in activatable_mana_source_selections(state, principal.semantic_holder()) {
+    let holder = principal.semantic_holder();
+    for selection in mana_source_selections(state, holder, ManaActivationPurpose::Explicit) {
         match priority_mana_route(state, &selection) {
             Some(PriorityManaRoute::LandTap) => {
                 land_taps.push(PriorityLandManaAnnouncement::new(selection));
@@ -310,7 +333,7 @@ pub struct ManaSourceOption {
     pub ability_index: Option<usize>,
     /// Indexing/representative color for this row.
     /// For normal sources this is the exact mana type produced.
-    /// For filter-land combination rows (`atomic_combination.is_some()`),
+    /// For multi-mana rows (`atomic_combination.is_some()`),
     /// this mirrors the first color of the combination and is used only for
     /// shard-matching lookup; the full mana production is driven by
     /// `atomic_combination`.
@@ -348,6 +371,19 @@ pub struct ManaSourceOption {
 }
 
 impl ManaSourceOption {
+    pub(super) fn selected_taps_for_mana(&self) -> Vec<TapsForManaSelection> {
+        self.taps_for_mana_overrides
+            .iter()
+            .map(
+                |(definition_ref, production_override)| TapsForManaSelection {
+                    source: definition_ref.source,
+                    occurrence: definition_ref.occurrence.clone(),
+                    production_override: production_override.clone(),
+                },
+            )
+            .collect()
+    }
+
     pub fn semantic_selection(&self, state: &GameState) -> Option<ManaSourceSelection> {
         let source = state.objects.get(&self.object_id)?;
         Some(ManaSourceSelection {
@@ -358,17 +394,7 @@ impl ManaSourceOption {
             atomic_combination: self.atomic_combination.clone(),
             restrictions: self.restrictions.clone(),
             penalty: self.penalty,
-            taps_for_mana: self
-                .taps_for_mana_overrides
-                .iter()
-                .map(
-                    |(definition_ref, production_override)| TapsForManaSelection {
-                        source: definition_ref.source,
-                        occurrence: definition_ref.occurrence.clone(),
-                        production_override: production_override.clone(),
-                    },
-                )
-                .collect(),
+            taps_for_mana: self.selected_taps_for_mana(),
         })
     }
 }
@@ -380,8 +406,18 @@ pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
 /// Complete primitive actions for mana sources the player can currently activate.
 /// Shared by human interaction authority and AI enumeration so legality cannot drift.
 pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) -> Vec<GameAction> {
+    mana_actions_for_player(state, player, ManaActivationPurpose::Planning)
+}
+
+/// [`activatable_mana_actions_for_player`] for `purpose`: the player's own
+/// offers are `Explicit`, automatic and AI enumeration `Planning`.
+pub fn mana_actions_for_player(
+    state: &GameState,
+    player: PlayerId,
+    purpose: ManaActivationPurpose,
+) -> Vec<GameAction> {
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
+    let mana_activation_gates = mana_abilities::ManaActivationGates::compute_for(state, purpose);
     let mut actions = Vec::new();
     for &object_id in &state.battlefield {
         let Some(object) = state.objects.get(&object_id) else {
@@ -538,8 +574,17 @@ pub fn activatable_mana_source_selections(
     state: &GameState,
     player: PlayerId,
 ) -> Vec<ManaSourceSelection> {
+    mana_source_selections(state, player, ManaActivationPurpose::Planning)
+}
+
+/// [`activatable_mana_source_selections`] for `purpose`.
+pub(crate) fn mana_source_selections(
+    state: &GameState,
+    player: PlayerId,
+    purpose: ManaActivationPurpose,
+) -> Vec<ManaSourceSelection> {
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let gates = mana_abilities::ManaActivationGates::compute_for(state, purpose);
     let mut selections = Vec::new();
 
     for &object_id in &state.battlefield {
@@ -612,14 +657,40 @@ fn current_mana_source_options(
         let penalty = object_mana_ability_penalty(state, object_id, ability);
         let source_could_produce_two_or_more_colors =
             source_could_produce_two_or_more_colors(state, object_id, player);
-        for row in emit_source_rows(
+        let mut rows = emit_source_rows(
             state,
             player,
             object_id,
             ability_index,
             ability,
             ManaPayabilityMode::Current,
-        ) {
+        );
+        // CR 106.5 + CR 605.2: an undefined type produces no mana, but does
+        // not prohibit a ready activation. This Current-only marker carries
+        // the existing deferred capability and never enters automatic funding.
+        if rows.is_empty() {
+            if let Effect::Mana {
+                produced,
+                restrictions,
+                ..
+            } = &*ability.effect
+            {
+                if single_color_production_count(produced).is_some()
+                    && mana_options_from_production(state, player, object_id, produced).is_empty()
+                {
+                    rows.push(SourceRow {
+                        mana_type: ManaType::Colorless,
+                        atomic_combination: None,
+                        restrictions: super::effects::mana::resolve_restrictions(
+                            restrictions,
+                            state,
+                            object_id,
+                        ),
+                    });
+                }
+            }
+        }
+        for row in rows {
             let option = ManaSourceOption {
                 object_id,
                 ability_index: Some(ability_index),
@@ -693,6 +764,7 @@ fn manual_selection_for_option(
         // resolver ask for its color. The colorless marker is intentionally
         // inert while `output` is deferred and canonicalizes all planner rows.
         selection.mana_type = ManaType::Colorless;
+        selection.atomic_combination = None;
         selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
     }
     Some(selection)
@@ -707,14 +779,15 @@ pub(crate) fn live_mana_source_option_for_selection(
     player: PlayerId,
     selection: &ManaSourceSelection,
 ) -> Result<ManaSourceOption, EngineError> {
-    if !activatable_mana_source_selections(state, player).contains(selection) {
+    if !mana_source_selections(state, player, ManaActivationPurpose::Explicit).contains(selection) {
         return Err(EngineError::ActionNotAllowed(
             "Mana source selection is stale or no longer legal".to_string(),
         ));
     }
 
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let gates =
+        mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit);
     let object_id = selection.source.object_id;
     let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
     let mut matches = options
@@ -744,7 +817,8 @@ pub(crate) fn live_land_mana_option_for_selection(
 ) -> Result<ManaSourceOption, EngineError> {
     let object_id = selection.source.object_id;
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let gates =
+        mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit);
     let mut matches = activatable_land_mana_options_indexed_gated(
         state,
         object_id,
@@ -775,20 +849,97 @@ pub(crate) fn live_land_mana_option_for_selection(
 /// CR 605.1b + CR 605.3b: Coupled `TapsForMana` triggered mana abilities are
 /// distinct immediate resolutions. Their own live effects and restrictions are
 /// appended after the base activated ability's output.
+#[derive(Clone)]
+pub(crate) struct LiveManaOutputGroups {
+    pub base: Vec<LiveManaOutputUnit>,
+    pub triggers: Vec<(TriggerDefinitionRef, Vec<LiveManaOutputUnit>)>,
+}
+
+pub(crate) fn live_mana_output_groups_for_option(
+    state: &GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+) -> LiveManaOutputGroups {
+    LiveManaOutputGroups {
+        base: live_base_mana_output(state, player, option),
+        triggers: option
+            .taps_for_mana_overrides
+            .iter()
+            .map(|(trigger_ref, value)| {
+                (
+                    trigger_ref.clone(),
+                    live_taps_for_mana_output(state, trigger_ref, value),
+                )
+            })
+            .collect(),
+    }
+}
+
 pub(crate) fn live_mana_output_for_option(
     state: &GameState,
     player: PlayerId,
     option: &ManaSourceOption,
 ) -> Vec<LiveManaOutputUnit> {
-    let mut output = live_base_mana_output(state, player, option);
-    for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
-        output.extend(live_taps_for_mana_output(
-            state,
-            trigger_ref,
-            production_override,
-        ));
+    let groups = live_mana_output_groups_for_option(state, player, option);
+    groups
+        .base
+        .into_iter()
+        .chain(groups.triggers.into_iter().flat_map(|(_, units)| units))
+        .collect()
+}
+
+/// How a mana action's own reducer revalidates its frozen selection.
+type SelectionResolver =
+    fn(&GameState, PlayerId, &ManaSourceSelection) -> Result<ManaSourceOption, EngineError>;
+
+/// CR 106.3 + CR 605.3a: The exact mana a mana action would produce if taken
+/// now, read without mutating game state.
+///
+/// The two public mana actions carry deliberately different selection forms,
+/// so each is resolved through the authority its own reducer uses:
+///
+/// - `TapLandForMana` is minted by `activatable_mana_actions_for_player` from
+///   `ManaSourceOption::semantic_selection`, one *concrete* row per producible
+///   color, and is executed by `handle_tap_land_for_mana` via
+///   `live_land_mana_option_for_selection`.
+/// - `ActivateManaSource` is minted from `activatable_mana_source_selections`,
+///   whose `manual_selection_for_option` intentionally collapses a flexible
+///   source to `Colorless` + `DeferredColorChoice` so the ordinary mana-choice
+///   resolver asks for the color, and is executed by
+///   `activate_mana_source_selection` via `live_mana_source_option_for_selection`.
+///
+/// Resolving one through the other's authority can never match a flexible
+/// source, which silently produced an unlabelled action (issue #6944: City of
+/// Brass), so each action stays paired with its own reducer's resolver.
+///
+/// `None` for any other action; for a stale or no-longer-legal selection,
+/// matching the reducer's own refusal to activate it; and for a deferred color
+/// choice, whose output the post-cost mana-choice resolver decides (CR 106.1a +
+/// CR 106.1b: no type is selected yet).
+pub fn produced_mana_for_action(
+    state: &GameState,
+    action: &GameAction,
+) -> Option<Vec<LiveManaOutputUnit>> {
+    let (selection, resolve) = match action {
+        GameAction::TapLandForMana { selection } => (
+            selection,
+            live_land_mana_option_for_selection as SelectionResolver,
+        ),
+        GameAction::ActivateManaSource { selection } => (
+            selection,
+            live_mana_source_option_for_selection as SelectionResolver,
+        ),
+        _ => return None,
+    };
+    let player = state.objects.get(&selection.source.object_id)?.controller;
+    let option = resolve(state, player, selection).ok()?;
+    if matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice { .. }
+    ) {
+        return None;
     }
-    output
+    Some(live_mana_output_for_option(state, player, &option))
 }
 
 fn live_base_mana_output(
@@ -796,9 +947,16 @@ fn live_base_mana_output(
     player: PlayerId,
     option: &ManaSourceOption,
 ) -> Vec<LiveManaOutputUnit> {
+    // CR 106.3 + CR 106.7: the activated ability's source is the object,
+    // not a canonical row widened with another producer's Aura output.
+    let source_could_produce_two_or_more_colors =
+        source_could_produce_two_or_more_colors(state, option.object_id, player);
     let Some(ability_index) = option.ability_index else {
         return vec![LiveManaOutputUnit {
             mana_type: option.mana_type,
+            source_color_capability: source_could_produce_two_or_more_colors.into(),
+            supertype: source_is_snow(state, option.object_id)
+                .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: option.restrictions.clone(),
         }];
     };
@@ -828,6 +986,7 @@ fn live_base_mana_output(
         restrictions,
         production_override.as_ref(),
         option.object_id,
+        source_could_produce_two_or_more_colors.into(),
     )
 }
 
@@ -863,6 +1022,14 @@ fn live_taps_for_mana_output(
     else {
         return Vec::new();
     };
+    // CR 106.3 + CR 113.7: the trigger supplies its own producer quality.
+    // CR 106.7: inspect its original production before a color choice narrows it.
+    let source_could_produce_two_or_more_colors = mana_production_could_produce_two_or_more_colors(
+        state,
+        ability.controller,
+        ability.source_id,
+        produced,
+    );
     live_mana_output_units(
         state,
         &ability,
@@ -870,6 +1037,7 @@ fn live_taps_for_mana_output(
         restrictions,
         Some(production_override),
         ability.source_id,
+        source_could_produce_two_or_more_colors.into(),
     )
 }
 
@@ -950,8 +1118,16 @@ fn live_mana_output_units(
     restrictions: &[ManaSpendRestriction],
     production_override: Option<&ProductionOverride>,
     restriction_source_id: ObjectId,
+    source_color_capability: SourceColorCapability,
 ) -> Vec<LiveManaOutputUnit> {
     let mana_types = match production_override {
+        Some(ProductionOverride::SingleColor(color))
+            if matches!(produced, ManaProduction::TriggerEventManaType) =>
+        {
+            // CR 106.12a + CR 608.2d: the selected echo repeats exactly one
+            // actual base-produced type, independently of the base quantity.
+            vec![*color]
+        }
         Some(ProductionOverride::SingleColor(color)) => {
             // Match activation's override semantics: resolve the production
             // count through the effect, then replace every produced unit's
@@ -986,6 +1162,9 @@ fn live_mana_output_units(
         .into_iter()
         .map(|mana_type| LiveManaOutputUnit {
             mana_type,
+            source_color_capability,
+            supertype: source_is_snow(state, restriction_source_id)
+                .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: restrictions.clone(),
         })
         .collect()
@@ -1032,7 +1211,7 @@ pub(crate) fn preflight_tap_land_action(
         waiting_player,
         selection.source.object_id,
         &taps_for_mana_trigger_sources(state),
-        &mana_abilities::ManaActivationGates::compute(state),
+        &mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit),
     )
     .into_iter()
     .filter(|candidate| candidate == action)
@@ -1082,12 +1261,6 @@ pub(crate) fn activate_mana_source_option_with_output(
     events: &mut Vec<GameEvent>,
     resume: ManaAbilityResume,
 ) -> Result<WaitingFor, EngineError> {
-    for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
-        state
-            .pending_taps_for_mana_overrides
-            .insert(trigger_ref.clone(), production_override.clone());
-    }
-
     let waiting_for = if let Some(ability_index) = option.ability_index {
         let ability = state
             .objects
@@ -1105,7 +1278,7 @@ pub(crate) fn activate_mana_source_option_with_output(
             }
             ManaSourceOutput::DeferredColorChoice { .. } => None,
         };
-        mana_abilities::activate_mana_ability(
+        mana_abilities::activate_mana_ability_with_selected_taps(
             state,
             option.object_id,
             player,
@@ -1114,8 +1287,12 @@ pub(crate) fn activate_mana_source_option_with_output(
             events,
             resume,
             production_override,
+            option.selected_taps_for_mana(),
         )?
     } else {
+        state
+            .pending_taps_for_mana_overrides
+            .extend(option.taps_for_mana_overrides.iter().cloned());
         let tapped = super::object_state::resolve_and_apply_object_edit(
             state,
             option.object_id,
@@ -1176,6 +1353,23 @@ pub(crate) fn activate_mana_source_option_with_output(
         record_undoable_mana_tap(state, player, option.object_id, events);
     }
     Ok(waiting_for)
+}
+
+/// CR 605.3b + CR 605.4a: compose actual activation with immediate
+/// settlement of only its newly emitted prefix, preserving a real pause.
+pub(crate) fn activate_mana_source_option_with_output_and_settle(
+    state: &mut GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+    output: ManaSourceOutput,
+    events: &mut Vec<GameEvent>,
+    resume: ManaAbilityResume,
+) -> Result<WaitingFor, EngineError> {
+    let start = events.len();
+    let waiting =
+        activate_mana_source_option_with_output(state, player, option, output, events, resume)?;
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, start);
+    Ok(waiting)
 }
 
 /// CR 605.3b: the single authority for offering an undo of a mana tap
@@ -2285,14 +2479,32 @@ pub(crate) fn auto_tap_mana_options_gated(
     {
         return Vec::new();
     }
-    scan_mana_abilities(
+    let options = scan_mana_abilities(
         state,
         obj,
         object_id,
         controller,
         ManaPayabilityMode::Planning,
         gates,
-    )
+    );
+    if options.is_empty() {
+        return options;
+    }
+    // The land sweep already carries its shared source list. Nonland rows
+    // reuse the existing post-layer mode index rather than adding a full
+    // battlefield scan per ordinary scalar source. Restored/unbuilt states
+    // retain the authoritative scan fallback.
+    let sources = match state.trigger_index.readiness {
+        crate::types::game_state::DerivedIndexReadiness::Built => state
+            .trigger_index
+            .by_key
+            .get(&crate::types::triggers::TriggerEventKey::TapsForMana)
+            .map_or_else(Vec::new, |sources| sources.iter().copied().collect()),
+        crate::types::game_state::DerivedIndexReadiness::Unbuilt => {
+            taps_for_mana_trigger_sources(state)
+        }
+    };
+    with_taps_for_mana_echo_options(state, controller, options, &sources)
 }
 
 /// CR 107.1b + CR 601.2f: Maximum *net* mana a single battlefield object can
@@ -3143,6 +3355,30 @@ struct ProfileApplication {
     output: u32,
 }
 
+/// CR 106.3 + CR 608.2c: add mana as instructed; for these counted outputs,
+/// one chosen type applies to every unit, unlike an "any combination" effect.
+/// Keep row sizing and replay on the same class.
+pub(crate) fn single_color_production_count(produced: &ManaProduction) -> Option<&QuantityExpr> {
+    match produced {
+        ManaProduction::AnyOneColor { count, .. }
+        | ManaProduction::AnyOneColorAmongPermanents { count, .. }
+        | ManaProduction::OpponentLandColors { count }
+        | ManaProduction::AnyTypeProduceableBy { count, .. }
+        | ManaProduction::AnyInCommandersColorIdentity { count, .. } => Some(count),
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Colorless { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::AnyCombination { .. }
+        | ManaProduction::ChosenColor { .. }
+        | ManaProduction::NotedType { .. }
+        | ManaProduction::AnyCombinationOfObjectColors { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::TriggerEventManaType => None,
+    }
+}
+
 fn resolved_production_count(
     produced: &ManaProduction,
     state: &GameState,
@@ -3895,13 +4131,19 @@ fn land_mana_options(
     //
     // `taps_for_mana_overrides` carries the per-aura choice so the auto-tap
     // resolver can thread the correct `ProductionOverride` into the triggered
-    // mana ability at resolution time. `atomic_combination` includes the full
-    // output (land + aura) for planner coverage checks; `production_override_for_option`
+    // mana ability at resolution time. `atomic_combination` includes one choice
+    // marker per Aura, not its produced quantity; live grouped output supplies
+    // the planner's complete units. `production_override_for_option`
     // caps it to the land's own portion when dispatching the land's own ability.
-    let aura_bonus = match aura_sources {
-        Some(sources) => taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources),
-        None => taps_for_mana_aura_bonus(state, object_id, controller),
+    let local_sources;
+    let sources = match aura_sources {
+        Some(sources) => sources,
+        None => {
+            local_sources = taps_for_mana_trigger_sources(state);
+            &local_sources
+        }
     };
+    let aura_bonus = taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources);
     for (trigger_ref, aura_choices) in aura_bonus {
         // aura_choices: [ManaType; N] where N=1 for Fixed, N=5 for any-color.
         // Cross-product: replace each option with N options (one per choice).
@@ -3943,7 +4185,177 @@ fn land_mana_options(
         options.dedup();
     }
 
+    with_taps_for_mana_echo_options(state, controller, options, sources)
+}
+
+/// CR 106.3 + CR 106.12a + CR 608.2d: each firing echo chooses one of the
+/// base ability's actual types. As in the aggregate bonus preview, deduplicate
+/// reachable output multisets after each firing, before materializing rows.
+/// Each retained row carries an executable first witness for every occurrence.
+fn with_taps_for_mana_echo_options(
+    state: &GameState,
+    controller: PlayerId,
+    options: Vec<ManaSourceOption>,
+    sources: &[ObjectId],
+) -> Vec<ManaSourceOption> {
+    let Some(first) = options.first() else {
+        return options;
+    };
+    let tapped_id = first.object_id;
+    let echoes: Vec<_> = sources
+        .iter()
+        .filter_map(|source| state.objects.get(source))
+        .filter(|source| source.zone == Zone::Battlefield)
+        .flat_map(|source| firing_taps_for_mana_triggers(state, source, tapped_id, controller))
+        .filter(|(_, trigger)| is_repeated_type_mana_trigger(trigger))
+        .map(|(definition, _)| definition)
+        .collect();
+    if echoes.is_empty() {
+        return options;
+    }
     options
+        .into_iter()
+        .flat_map(|option| {
+            // CR 106.12: a tapless sacrifice is not tapping a source for mana.
+            if option.ability_index.is_some_and(|index| {
+                !has_tap_component(&state.objects[&tapped_id].abilities[index].cost)
+            }) {
+                return vec![option];
+            }
+            let mut types: Vec<_> = live_base_mana_output(state, controller, &option)
+                .into_iter()
+                .map(|unit| unit.mana_type)
+                .collect();
+            types.sort();
+            types.dedup();
+            // CR 106.12a: zero output cannot earn a tap-for-mana bonus.
+            if types.is_empty() {
+                return vec![option];
+            }
+            // CR 106.3 + CR 106.6 + CR 107.4h: interchangeable outputs must
+            // share every live payment property, not merely their mana type.
+            // Source identities remain in the witness, including restrictions
+            // that resolve relative to a particular producing source.
+            let mut classes: Vec<Vec<LiveManaOutputUnit>> = Vec::new();
+            let mut rows = vec![(Vec::<(usize, usize)>::new(), option)];
+            #[cfg(any(test, feature = "test-support"))]
+            let mut work = (0, 0);
+            for definition in &echoes {
+                let choices: Vec<_> = types
+                    .iter()
+                    .map(|&mana_type| {
+                        let output = live_taps_for_mana_output(
+                            state,
+                            definition,
+                            &ProductionOverride::SingleColor(mana_type),
+                        );
+                        let ordinal = classes
+                            .iter()
+                            .position(|class| *class == output)
+                            .unwrap_or_else(|| {
+                                classes.push(output);
+                                classes.len() - 1
+                            });
+                        (mana_type, ordinal)
+                    })
+                    .collect();
+                let mut seen = std::collections::HashSet::new();
+                let mut next = Vec::new();
+                for (counts, row) in rows {
+                    for &(mana_type, ordinal) in &choices {
+                        #[cfg(any(test, feature = "test-support"))]
+                        record_echo_option_work(&mut work, EchoOptionWork::Alternative);
+                        let mut counts = counts.clone();
+                        match counts.binary_search_by_key(&ordinal, |&(class, _)| class) {
+                            Ok(index) => counts[index].1 += 1,
+                            Err(index) => counts.insert(index, (ordinal, 1)),
+                        }
+                        if !seen.insert(counts.clone()) {
+                            continue;
+                        }
+                        #[cfg(any(test, feature = "test-support"))]
+                        record_echo_option_work(&mut work, EchoOptionWork::Materialization);
+                        let mut selected = row.clone();
+                        selected
+                            .atomic_combination
+                            .get_or_insert_with(|| vec![row.mana_type])
+                            .push(mana_type);
+                        selected.taps_for_mana_overrides.push((
+                            definition.clone(),
+                            ProductionOverride::SingleColor(mana_type),
+                        ));
+                        next.push((counts, selected));
+                    }
+                }
+                // `seen` is membership-only: preserve deterministic first
+                // witness order, rather than a hash-table iteration preference.
+                rows = next;
+            }
+            rows.into_iter().map(|(_, row)| row).collect()
+        })
+        .collect()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+struct EchoOptionWorkState {
+    limits: (usize, usize),
+    maxima: (usize, usize),
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static ECHO_OPTION_WORK: std::cell::Cell<Option<EchoOptionWorkState>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Observe actual alternative visits and row materializations per source
+/// expansion, failing before an obsolete Cartesian product can grow large.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_echo_option_work_limit<T>(
+    limits: (usize, usize),
+    action: impl FnOnce() -> T,
+) -> (T, (usize, usize)) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ECHO_OPTION_WORK.set(None);
+        }
+    }
+    assert!(ECHO_OPTION_WORK
+        .replace(Some(EchoOptionWorkState {
+            limits,
+            maxima: (0, 0),
+        }))
+        .is_none());
+    let _reset = Reset;
+    let result = action();
+    let observer = ECHO_OPTION_WORK.get().expect("active echo work observer");
+    (result, observer.maxima)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+enum EchoOptionWork {
+    Alternative,
+    Materialization,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_echo_option_work(work: &mut (usize, usize), event: EchoOptionWork) {
+    match event {
+        EchoOptionWork::Alternative => work.0 += 1,
+        EchoOptionWork::Materialization => work.1 += 1,
+    }
+    if let Some(EchoOptionWorkState { limits, maxima }) = ECHO_OPTION_WORK.get() {
+        assert!(
+            work.0 <= limits.0 && work.1 <= limits.1,
+            "actual echo option expansion exceeded bound: {work:?} > {limits:?}"
+        );
+        ECHO_OPTION_WORK.set(Some(EchoOptionWorkState {
+            limits,
+            maxima: (maxima.0.max(work.0), maxima.1.max(work.1)),
+        }));
+    }
 }
 
 /// CR 605.1a + CR 605.3a: Predicate for "this is an activated mana ability
@@ -4131,6 +4543,18 @@ fn emit_source_rows(
         ManaProduction::AnyOneColor { .. }
             if super::effects::mana::any_one_color_count_reads_choice(produced) =>
         {
+            // CR 605.2: zero devotion does not remove the printed activation.
+            // Only planning needs a color that would currently produce mana.
+            if payability_mode == ManaPayabilityMode::Current {
+                return mana_options_from_production(state, controller, object_id, produced)
+                    .into_iter()
+                    .map(|mana_type| SourceRow {
+                        mana_type,
+                        atomic_combination: None,
+                        restrictions: concrete_restrictions.clone(),
+                    })
+                    .collect();
+            }
             let resolved =
                 super::ability_utils::build_resolved_from_def(ability, object_id, controller);
             super::effects::mana::any_one_color_outputs(state, produced, &resolved)
@@ -4138,6 +4562,37 @@ fn emit_source_rows(
                 .map(|(mana_type, _)| SourceRow {
                     mana_type,
                     atomic_combination: None,
+                    restrictions: concrete_restrictions.clone(),
+                })
+                .collect()
+        }
+        // CR 106.3 + CR 605.3b: one activation adds the entire same-color
+        // bundle. CR 107.3a: unannounced X is not a known zero; preserve its
+        // capability rows until the activation's amount choice is made.
+        produced
+            if single_color_production_count(produced).is_some_and(|count| !count.contains_x()) =>
+        {
+            // Reuse the live label's sizing authority: a paid-object amount
+            // needs its candidate bound, and an "instead" condition can
+            // replace the base output before its amount is evaluated.
+            let resolved =
+                resolved_mana_ability_for_live_output(state, object_id, controller, ability);
+            let count = match &resolved.effect {
+                Effect::Mana { produced, .. } => {
+                    resolved_production_count(produced, state, &resolved) as usize
+                }
+                _ => 0,
+            };
+            // CR 605.2: a legal explicit activation may add zero mana; it
+            // still pays its costs, but cannot fund an automatic payment.
+            if count == 0 && payability_mode == ManaPayabilityMode::Planning {
+                return Vec::new();
+            }
+            mana_options_from_production(state, controller, object_id, produced)
+                .into_iter()
+                .map(|mana_type| SourceRow {
+                    mana_type,
+                    atomic_combination: (count > 1).then(|| vec![mana_type; count]),
                     restrictions: concrete_restrictions.clone(),
                 })
                 .collect()
@@ -4616,6 +5071,18 @@ fn firing_taps_for_mana_triggers<'a>(
         .collect()
 }
 
+fn is_repeated_type_mana_trigger(trigger: &TriggerDefinition) -> bool {
+    trigger.execute.as_deref().is_some_and(|execute| {
+        matches!(
+            &*execute.effect,
+            Effect::Mana {
+                produced: ManaProduction::TriggerEventManaType,
+                ..
+            }
+        )
+    })
+}
+
 /// CR 605.4a + CR 106.12a: mana a triggered mana ability adds, one unit per
 /// firing, when `tapped_id` is tapped for mana by `controller` and the added
 /// mana repeats the type that tap produced (Kinnan, Bonder Prodigy;
@@ -4631,17 +5098,7 @@ pub(crate) fn taps_for_mana_repeated_type_bonus(
         .into_iter()
         .filter_map(|source_id| state.objects.get(&source_id))
         .flat_map(|obj| firing_taps_for_mana_triggers(state, obj, tapped_id, controller))
-        .filter(|(_, trigger)| {
-            trigger.execute.as_deref().is_some_and(|execute| {
-                matches!(
-                    &*execute.effect,
-                    Effect::Mana {
-                        produced: ManaProduction::TriggerEventManaType,
-                        ..
-                    }
-                )
-            })
-        })
+        .filter(|(_, trigger)| is_repeated_type_mana_trigger(trigger))
         .count() as u32
 }
 
@@ -4887,6 +5344,30 @@ mod tests {
         QuantityExpr, SacrificeCost,
     };
     use crate::types::identifiers::CardId;
+
+    /// CR 106.12a + CR 608.2d: fail at the actual expansion site before an
+    /// obsolete ordered-choice product can allocate millions of source rows.
+    #[test]
+    fn echo_option_expansion_bounds_equivalent_firings_before_row_clones() {
+        use crate::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        for _ in 0..24 {
+            scenario.add_enchantment_from_oracle(P0, "Mirari's Wake",
+                "Creatures you control get +1/+1.\nWhenever you tap a land for mana, add one mana of any type that land produced.");
+        }
+        let chamber = scenario.add_land_from_oracle(P0, "Simic Growth Chamber",
+            "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.").id();
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&chamber).unwrap().tapped = false;
+        let (rows, work) = with_echo_option_work_limit((600, 324), || {
+            activatable_land_mana_options(runner.state(), chamber, P0)
+        });
+        assert_eq!(rows.len(), 25);
+        assert!(rows
+            .iter()
+            .all(|row| row.taps_for_mana_overrides.len() == 24));
+        assert_eq!(work, (600, 324), "the observer must visit the real sites");
+    }
 
     /// CR 106.1 + CR 601.2g: Twenty identical Nyx Lotus profiles (G3/U1)
     /// against ten {U} shards reach each (object, residual) subproblem by many
@@ -7253,6 +7734,116 @@ mod tests {
                 BoundActivationCost::Cost(Box::new(AbilityCost::Tap))
             )]
         );
+    }
+
+    /// CR 605.4a: settle the wrapper's new activation prefix exactly once;
+    /// an earlier completed activation's public events remain unchanged.
+    #[test]
+    fn mana_source_option_wrapper_settles_completed_prefix_once() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::parse_mtgjson_mana_cost;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let first = scenario
+            .add_land_from_oracle(P0, "Forest", "({T}: Add {G}.)")
+            .with_subtypes(vec!["Forest"])
+            .id();
+        let second = scenario
+            .add_land_from_oracle(P0, "Forest", "({T}: Add {G}.)")
+            .with_subtypes(vec!["Forest"])
+            .id();
+        let auras: Vec<_> = (0..2).map(|_| scenario.add_enchantment_from_oracle(P0, "Fertile Ground",
+            "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.")
+            .with_subtypes(vec!["Aura"]).with_mana_cost(parse_mtgjson_mana_cost("{1}{G}")).id()).collect();
+        let mut runner = scenario.build();
+        crate::game::effects::attach::attach_to(runner.state_mut(), auras[0], first);
+        crate::game::effects::attach::attach_to(runner.state_mut(), auras[1], second);
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&auras[1]].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&auras[1]].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(second))
+        );
+        let action = activatable_mana_actions_for_player(runner.state(), P0).into_iter()
+            .find(|action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == first
+                && selection.taps_for_mana.iter().any(|selected|
+                    selected.production_override == ProductionOverride::SingleColor(ManaType::Green))))
+            .expect("the initial real activation offers selected G");
+        let mut events = runner.act(action).unwrap().events;
+        let mut state = runner.state().clone();
+        assert!(state.objects[&first].tapped);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
+        assert!(state.pending_taps_for_mana_overrides.is_empty());
+        let prefix = events.clone();
+        let pool = state.players[0].mana_pool.clone();
+        assert_eq!(state.objects[&auras[1]].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&auras[1]].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(second))
+        );
+        assert!(
+            activatable_land_mana_options(&state, second, P0)
+                .iter()
+                .any(|option| option.ability_index.is_some() && option.mana_type == ManaType::Green),
+            "the attachment layer flush materializes an indexed Forest mana ability"
+        );
+        // Restore the legacy subtype-only helper input after attachment: no
+        // indexed ability, and no public-action claim for this helper-domain leg.
+        Arc::make_mut(&mut state.objects.get_mut(&second).unwrap().abilities).clear();
+        assert!(
+            state.objects[&second].abilities.is_empty(),
+            "the legacy helper-domain leg has no indexed mana ability"
+        );
+        let option = activatable_land_mana_options(&state, second, P0)
+            .into_iter()
+            .find(|option| {
+                option.ability_index.is_none()
+                    && option
+                        .taps_for_mana_overrides
+                        .iter()
+                        .any(|(reference, value)| {
+                            reference.source.object_id == auras[1]
+                                && *value == ProductionOverride::SingleColor(ManaType::Blue)
+                        })
+            })
+            .expect("the fresh legacy option carries its own nondefault color");
+        let waiting = activate_mana_source_option_with_output_and_settle(
+            &mut state,
+            P0,
+            &option,
+            ManaSourceOutput::Concrete(ManaType::Green),
+            &mut events,
+            ManaAbilityResume::Priority,
+        )
+        .unwrap();
+        assert!(matches!(waiting, WaitingFor::Priority { player: P0 }));
+        assert!(state.objects[&second].tapped);
+        assert_eq!(&events[..prefix.len()], prefix.as_slice());
+        assert_eq!(pool.total(), 2);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 3);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        for (source, color) in [(second, ManaType::Green), (auras[1], ManaType::Blue)] {
+            assert_eq!(
+                events[prefix.len()..]
+                    .iter()
+                    .filter(|event| matches!(event,
+                GameEvent::ManaAdded { source_id, mana_type, .. }
+                    if *source_id == source && *mana_type == color))
+                    .count(),
+                1
+            );
+        }
+        assert!(state.pending_taps_for_mana_overrides.is_empty());
+        let completed_pool = state.players[0].mana_pool.clone();
+        let completed_events = events.clone();
+        for _ in 0..2 {
+            super::super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, 0);
+            assert_eq!(state.players[0].mana_pool, completed_pool);
+            assert_eq!(events, completed_events);
+            assert!(state.pending_taps_for_mana_overrides.is_empty());
+            assert!(state.stack.is_empty());
+        }
     }
 
     #[test]

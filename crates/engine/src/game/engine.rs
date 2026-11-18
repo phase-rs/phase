@@ -1826,11 +1826,19 @@ fn apply_action_boundary_core(
             // triggers. A token realization and an owed final part on the same action
             // share one pass.
             let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+            // CR 603.3 + CR 603.6d: a direct-return handler (`handle_tribute_choice`) that
+            // settled an as-enters continuation runs no pipeline of its own, so the parked
+            // entry is released by this convergence pass, the action's first, ahead of its
+            // SBA check.
+            let settled_entry_continuation_is_parked =
+                matches!(result.waiting_for, WaitingFor::Priority { .. })
+                    && !state.deferred_entry_events.is_empty();
             if ((resumed_parked_root || reconciled_unless_payment)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
                 || settled_entry_batch
                 || owed_spell_final_part_is_due
+                || settled_entry_continuation_is_parked
             {
                 if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
                     if committed_departure.is_some() {
@@ -2622,7 +2630,7 @@ fn reject_or_publish_departure(
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
     mark_public_state_from_events(state, &result.events);
-    finalize_rules_state(state);
+    finalize_action_rules_state(state, &mut result.events);
     super::un_actions::refresh_menu(state);
     result.waiting_for = state.waiting_for.clone();
     if matches!(mode, PublicFinalizeMode::Immediate) {
@@ -2653,6 +2661,43 @@ fn finish_action_boundary(
     mode: PublicFinalizeMode,
 ) -> Result<ActionResult, EngineError> {
     finish_action_boundary_with_lifecycle(state, raw, mode, false).map(|(result, _)| result)
+}
+
+/// The action-return finalizer of the public reducer-action funnel and the
+/// restored-session runner: [`finalize_rules_state`], then settlement of every
+/// control change a full layer evaluation derived that no drain has published
+/// yet (the finalizer's own pass, or a pass after the action's last drain).
+///
+/// CR 603.2: "Whenever a game event or game state matches a triggered
+/// ability's trigger event, that ability automatically triggers." CR 603.3:
+/// "Once an ability has triggered, its controller puts it on the stack … the
+/// next time a player would receive priority." So each change is published
+/// into the action's events and the abilities it triggers are collected into
+/// the deferred-trigger queue under the batch the current wait parks; the open
+/// prompt is not touched, and the abilities reach the stack when a player
+/// would next receive priority.
+fn finalize_action_rules_state(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    finalize_rules_state(state);
+    let start = events.len();
+    if super::layers::publish_layer_control_changes(state, events) > 0 {
+        let origin = engine_priority::parked_batch_origin(&state.waiting_for);
+        super::triggers::collect_parked_triggers_into_deferred_observing(
+            state,
+            &events[start..],
+            origin,
+            None,
+        );
+        super::triggers::collect_parked_delayed_triggers_into_deferred(
+            state,
+            &events[start..],
+            origin,
+        );
+        mark_public_state_from_events(state, &events[start..]);
+    }
+    debug_assert!(
+        state.layer_control_changes.is_empty() && state.announced_control_changes.is_empty(),
+        "layer-derived and announced control changes must be settled at the action boundary"
+    );
 }
 
 fn finish_action_boundary_with_lifecycle(
@@ -2801,7 +2846,7 @@ fn finish_action_boundary_with_lifecycle(
     {
         state.revealed_cards.clear();
     }
-    finalize_rules_state(state);
+    finalize_action_rules_state(state, &mut result.events);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
     // A carrier writes only hand order (CR 402.3) or stores `same_position` compares.
@@ -4019,7 +4064,14 @@ pub(crate) fn pinned_decisions_to_points(
                 let mut tappable: Vec<crate::types::identifiers::ObjectId> = state
                     .objects
                     .values()
-                    .filter(|o| o.is_convoke_eligible(controller))
+                    .filter(|o| {
+                        super::casting::tap_payment_eligible(
+                            state,
+                            o,
+                            controller,
+                            ConvokeMode::Convoke,
+                        )
+                    })
                     .map(|o| o.id)
                     .collect();
                 tappable.sort_by_key(|id| id.0);
@@ -8851,9 +8903,16 @@ pub(super) fn resume_pending_continuation_if_priority(
         // creation the substitute replaced is still resolving), so no player may
         // receive priority: pass again. The repeat follows the whole pass, so that
         // pass's entry commits land first (CR 614.12a).
+        // CR 608.2c: a retired as-enters dispatch can also expose the zone-move
+        // owner above the spell's parked tail. Finish that move before returning
+        // priority, so its later instructions resume in this same action.
         let exposes_resolving_owner = matches!(
             state.resolution_stack.last(),
-            Some(ResolutionFrame::CopyToken(_) | ResolutionFrame::PostReplacement(_))
+            Some(
+                ResolutionFrame::CopyToken(_)
+                    | ResolutionFrame::PostReplacement(_)
+                    | ResolutionFrame::ChangeZone(_)
+            )
         );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
@@ -9879,7 +9938,7 @@ pub(crate) fn resume_stack_resolution_session_runner(
         super::mana_payment::refill_infinite_mana(state);
         remember_public_reveals(state, &result.events, journal_start);
         mark_public_state_from_events(state, &result.events);
-        finalize_rules_state(state);
+        finalize_action_rules_state(state, &mut result.events);
         result.waiting_for = state.waiting_for.clone();
         finalize_display_state(state);
         result.log_entries =
@@ -13427,6 +13486,7 @@ fn apply_non_priority_pass_action(
                             *mode,
                             choices,
                             &chosen,
+                            paid_cost,
                             &mut events,
                         )?
                     }
@@ -15024,9 +15084,9 @@ fn apply_non_priority_pass_action(
                 .get(&object_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
             let is_eligible = match mode {
-                ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
-                ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
-                ConvokeMode::Improvise => obj.is_improvise_eligible(*player),
+                mode @ (ConvokeMode::Convoke | ConvokeMode::Waterbend | ConvokeMode::Improvise) => {
+                    super::casting::tap_payment_eligible(state, obj, *player, mode)
+                }
                 // CR 702.66a: delve has a dedicated handler arm below (exile, not tap).
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
@@ -18357,11 +18417,14 @@ fn park_land_played_for_deferred_entry(
     object_id: ObjectId,
     origin_zone: Zone,
 ) {
-    state.deferred_entry_events.push(GameEvent::LandPlayed {
-        object_id,
-        player_id: player,
-        from_zone: origin_zone,
-    });
+    crate::game::engine_replacement::park_pending_entry(
+        state,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: player,
+            from_zone: origin_zone,
+        },
+    );
 }
 
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {

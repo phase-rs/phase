@@ -705,7 +705,7 @@ describe("SandboxLifeCorrection", () => {
   it("does not run Z undo inside the boundary and preserves the global shortcut outside", async () => {
     const harness = makeHarness();
     const undo = vi.fn().mockResolvedValue(undefined);
-    const history = [harness.initialState];
+    const history = [{ state: harness.initialState, logSeq: 0 }];
     act(() => useGameStore.setState({ stateHistory: history, undo }));
     const user = userEvent.setup();
     render(

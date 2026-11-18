@@ -46,8 +46,8 @@ use crate::types::format::ZoneScope;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, ContinuationXAnnouncement,
     CreatedTokenSeatsHandoff, DayNight, DiscardBatchCursor, GameState, LKISnapshot,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation, PendingCostMoveResume,
-    PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, MemberOrderPurpose, PendingContinuation,
+    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
     PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
@@ -1798,6 +1798,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             // CR 615.5: a resumed continuation completes its own paused
             // resident drain only after it has not raised another choice.
             state.finish_active_paused_post_replacement_dispatch();
+            crate::game::engine_replacement::finish_spell_resolution_exposed_by_retired_drain(
+                state, events,
+            );
             // CR 608.2c: retiring a nested dispatch can expose the outer
             // dispatch's own later instructions as the active continuation;
             // they are the next written instructions, so run them now.
@@ -2140,6 +2143,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::CipherEncode(_) => {
             crate::game::cipher::arm_parked_encode_offer(state, events);
         }
+        // CR 508.4: an entrant put onto the battlefield attacking whose
+        // as-enters continuation paused, with no logical owner to seat it, joins
+        // combat here, once the entry's whole child stack has retired.
+        ResolutionFrame::EntryAttackSeat(_) => {
+            crate::game::zone_pipeline::resume_entry_attack_seat(state);
+        }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state, events),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
@@ -2274,7 +2283,10 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // A permanent spell's entry is resumed only by the exact parked
             // replacement action. This frame remains its parent while any
             // replacement-produced child work resolves; Priority does not
-            // authorize a synthetic entry completion.
+            // authorize a synthetic entry completion. The exception is a
+            // retiring drain that exposes it:
+            // `finish_spell_resolution_exposed_by_retired_drain`, called from the
+            // PostReplacement arm below and from `drain_pending_continuation`.
         }
         ResolutionFrame::PostReplacement(drains) => {
             let retired_paused_dispatch = matches!(
@@ -2326,6 +2338,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             {
                 counters::drain_pending_counter_additions(state, events);
             }
+            crate::game::engine_replacement::finish_spell_resolution_exposed_by_retired_drain(
+                state, events,
+            );
             // CR 608.2c + CR 614.12a + CR 615.5: Retiring a paused replacement
             // dispatch, or removing an exhausted frame after a nested child
             // already retired its dispatch, can expose the next ordinary
@@ -2788,6 +2803,30 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
             ) {
+                // CR 508.4: the paused member's entry has completed, so an owed
+                // attacking seat is taken and the entrant seated before its entry
+                // is collected. With several legal attack targets the frame stays
+                // exactly as read for the answer, whose resume finds the seat
+                // already taken.
+                let owed_seat = crate::game::engine_replacement::take_owed_entry_attack_seat(
+                    state,
+                    &paused_current.delivery_events,
+                );
+                if let Some(player) =
+                    crate::game::zone_pipeline::seat_owed_entry_attacker(state, owed_seat)
+                {
+                    crate::game::replacement::park_waiting_for(state, player);
+                    return;
+                }
+                // CR 603.6d + CR 603.2c: this owner resumes only after the paused
+                // member's as-enters continuation completed, so its parked entry
+                // is collected here, once, against the realized entrant: custody
+                // takes the park (and runs its delayed half), then the owner's
+                // segment collects the ordinary half.
+                crate::game::engine_replacement::take_entry_continuation_custody(
+                    state,
+                    &paused_current.delivery_events,
+                );
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment_for(
                     state,
                     &mut logical_zone_change_group,
@@ -2795,6 +2834,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     collector,
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
+            } else {
+                // An `AlreadyCounted` member paused its move itself
+                // (`NeedsAuraAttachmentChoice`) before it was on the battlefield,
+                // so no as-enters continuation can have parked its entry.
+                debug_assert!(paused_current.delivery_events.iter().all(|event| {
+                    !crate::game::engine_replacement::entry_event_is_parked(state, event)
+                }));
             }
             logical_zone_change_group
                 .record_delivery_completion(
@@ -2830,6 +2876,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // members moved in this resume join the logical co-departed group and
         // their observer triggers are collected with earlier pause segments.
         let events_before_drain = events.len();
+        let mut entrants =
+            crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
         // CR 603.6a + CR 614.12: each member applies the entry modifications
         // resolved before the event's first member moved; never recompute
         // against the partly-moved board.
@@ -2888,6 +2936,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             );
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
                 state,
+                &mut entrants,
                 &ctx,
                 member,
                 owner,
@@ -3144,7 +3193,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             iterated_counter_kinds,
             next_iteration,
             total_iterations,
-            copy_order_fixed,
+            order_fixed,
         } = pending;
         // CR 608.2c + CR 608.2d (E1′): a per-object player choice — members
         // snapshotted and the repeated process the choice alone. The
@@ -3164,13 +3213,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if game_has_ended(state) {
                 return;
             }
-            if open_spell_copy_order_choice(
-                state,
-                &ability,
-                &tracked_members,
-                iteration,
-                copy_order_fixed,
-            ) {
+            if open_member_order_choice(state, &ability, &tracked_members, iteration, order_fixed) {
                 let boundary = state.resolution_stack.capture_child_boundary();
                 park_repeat_for_after_current_iteration(
                     state,
@@ -3180,7 +3223,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         iterated_counter_kinds: iterated_counter_kinds.clone(),
                         next_iteration: iteration,
                         total_iterations,
-                        copy_order_fixed,
+                        order_fixed,
                     },
                     boundary,
                 );
@@ -3229,6 +3272,13 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // that the depth==0 prelude in `resolve_ability_chain` would
             // otherwise reset. The resumed iteration is logically continuing the
             // outer chain, not starting a fresh top-level resolution.
+            let mut sibling_tail_deferred = iter_effective.clone();
+            strip_sibling_tail_before_last_member(
+                &mut sibling_tail_deferred,
+                iteration,
+                total_iterations,
+            );
+            let iter_effective = &sibling_tail_deferred;
             let progress =
                 match with_iteration_return_result_occurrence(state, iter_effective, |state| {
                     resolve_ability_chain_step(state, iter_effective, events, 1)
@@ -3252,7 +3302,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
                             next_iteration: next,
                             total_iterations,
-                            copy_order_fixed,
+                            order_fixed,
                         },
                         stack_depth_before_iteration,
                     );
@@ -3331,46 +3381,73 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
     }
 }
 
-/// CR 405.3 + CR 707.10: before `iteration` of a batch copy loop runs, let the
-/// copies' controller pick which spell supplies the next copy, while two or
-/// more spells still have copies to make. Returns whether it asked.
-fn open_spell_copy_order_choice(
+/// CR 608.2f + CR 405.3 + CR 707.10: before `iteration` of a member-driven loop
+/// runs, let the loop's controller pick which member is processed next, while
+/// two or more members remain. Covers a batch of spell copies (the chosen spell
+/// supplies the next copy) and an instruction loop that pauses for player input
+/// (Sword-Point Diplomacy's per-card unless payment, whose ruling states "You
+/// choose the order to perform this process for the cards"). Returns whether it
+/// asked.
+fn open_member_order_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     tracked_members: &[crate::types::identifiers::ObjectId],
     iteration: usize,
-    copy_order_fixed: Option<usize>,
+    order_fixed: Option<usize>,
 ) -> bool {
-    match copy_order_fixed {
-        Some(fixed) if iteration >= fixed => {}
-        _ => return false,
+    let Some(fixed_through) = order_fixed else {
+        return false;
+    };
+    if iteration < fixed_through {
+        return false;
     }
     let mut choices: Vec<crate::types::identifiers::ObjectId> = Vec::new();
-    for &spell in tracked_members.get(iteration..).unwrap_or_default() {
-        if !choices.contains(&spell) {
-            choices.push(spell);
+    for &member in tracked_members.get(iteration..).unwrap_or_default() {
+        if !choices.contains(&member) {
+            choices.push(member);
         }
     }
     if choices.len() < 2 {
         return false;
     }
-    let mut bound = ability.clone();
-    rebind_member_driven_parent_target(&mut bound, choices[0]);
-    state.waiting_for = WaitingFor::SpellCopyOrderChoice {
-        player: copy_spell::resolve_copy_controller(state, &bound),
+    let purpose = member_order_purpose(ability);
+    let player = match purpose {
+        MemberOrderPurpose::SpellCopies => {
+            let mut bound = ability.clone();
+            rebind_member_driven_parent_target(&mut bound, choices[0]);
+            copy_spell::resolve_copy_controller(state, &bound)
+        }
+        // CR 608.2f: the controller of the spell or ability performing the
+        // repeated instruction chooses the order those instructions run in.
+        MemberOrderPurpose::InstructionLoop => ability.controller,
+    };
+    state.waiting_for = WaitingFor::MemberOrderChoice {
+        player,
         source_id: ability.source_id,
         choices,
+        purpose,
     };
     true
 }
 
-/// CR 405.3 + CR 707.10: the answer to `WaitingFor::SpellCopyOrderChoice` —
-/// move `spell`'s next copy to the front of the active batch loop's remaining
-/// copies and fix the order through it. Returns false when `spell` has no copy
-/// left to make there.
-pub(crate) fn order_next_spell_copy(
+/// CR 608.2f: the process a member-driven loop repeats is read from its head
+/// effect. A batch loop repeats `CopySpell` once per member; any other head is
+/// an instruction loop whose iterations pause for player input.
+fn member_order_purpose(ability: &ResolvedAbility) -> MemberOrderPurpose {
+    if matches!(ability.effect, Effect::CopySpell { .. }) {
+        MemberOrderPurpose::SpellCopies
+    } else {
+        MemberOrderPurpose::InstructionLoop
+    }
+}
+
+/// CR 608.2f + CR 405.3: the answer to `WaitingFor::MemberOrderChoice` — move
+/// the chosen member to the front of the active loop's remaining members and
+/// fix the order through it, so no later iteration re-asks about it. Returns
+/// false when `member` has no iteration left to run there.
+pub(crate) fn order_next_member(
     state: &mut GameState,
-    spell: crate::types::identifiers::ObjectId,
+    member: crate::types::identifiers::ObjectId,
 ) -> bool {
     let Some(frame) = state.active_repeat_for_mut() else {
         return false;
@@ -3379,13 +3456,13 @@ pub(crate) fn order_next_spell_copy(
     let Some(position) = frame
         .tracked_members
         .get(next..)
-        .and_then(|rest| rest.iter().position(|member| *member == spell))
+        .and_then(|rest| rest.iter().position(|candidate| *candidate == member))
         .map(|offset| next + offset)
     else {
         return false;
     };
     frame.tracked_members[next..=position].rotate_right(1);
-    frame.copy_order_fixed = Some(next + 1);
+    frame.order_fixed = Some(next + 1);
     true
 }
 
@@ -5779,7 +5856,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::BeholdChoice { .. }
             // CR 608.2c: riders run after the choice.
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
     )
 }
 
@@ -5805,7 +5882,9 @@ fn spell_cast_in_flight(state: &GameState) -> Option<ObjectId> {
 /// CR 603.6a). Nothing is observed while an entry may still be in progress — a resolution
 /// choice or a parked replacement is pending (CR 614.12a), so `next` is parked and its resume
 /// is its own boundary — or while `entry_observation_deferred` holds (CR 611.2e / CR 303.4f /
-/// CR 603.6a + CR 101.4).
+/// CR 603.6a + CR 101.4). An entrant whose own as-enters continuation is running or paused is
+/// parked in `deferred_entry_events` (CR 603.6d + CR 614.1c) and skipped by
+/// `settle_battlefield_entry_observations`; the other entries of the same buffer still settle.
 fn settle_entries_before_instruction(
     state: &mut GameState,
     events: &[GameEvent],
@@ -6420,7 +6499,8 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
         | ResolutionFrame::LifeTotalAssignment(_)
         | ResolutionFrame::SpellResolution(_)
         | ResolutionFrame::MutateMerge(_)
-        | ResolutionFrame::CipherEncode(_) => false,
+        | ResolutionFrame::CipherEncode(_)
+        | ResolutionFrame::EntryAttackSeat(_) => false,
     }
 }
 
@@ -11627,6 +11707,7 @@ fn delayed_trigger_condition_reads_filter_population(
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => false,
     }
 }
@@ -11682,6 +11763,9 @@ fn static_condition_reads_filter_population(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: a player-counter predicate carries no filter or counted
+        // population, like the monarch arm above.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -12145,6 +12229,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -12254,6 +12339,7 @@ fn replacement_condition_reads_filter_population(
         | ReplacementCondition::SourceTappedState { .. }
         | ReplacementCondition::EventSourceControlledBy { .. }
         | ReplacementCondition::EffectCausedDiscard
+        | ReplacementCondition::EffectCausedPlacement
         | ReplacementCondition::OnlyExtraTurn
         | ReplacementCondition::TokenSubtypeMatches { .. }
         | ReplacementCondition::TokenCoreTypeMatches { .. }
@@ -15536,24 +15622,31 @@ fn resolve_legacy_effect(
             choose_counter_adjustment::resolve(state, ability, events)
         }
         Effect::Unimplemented { name, .. } => {
-            // Log warning and return Ok (no-op) for unimplemented effects
-            eprintln!("Warning: Unimplemented effect: {}", name);
-            // Diagnostics: record the source card so the telemetry `game_summary`
-            // surface can report which cards hit an unimplemented effect this game.
-            // Oracle id when available; object name fallback covers tokens/emblems
-            // (`printed_ref == None`).
-            if let Some(obj) = state.objects.get(&ability.source_id) {
-                let id = obj
-                    .printed_ref
-                    .as_ref()
-                    .map(|p| p.oracle_id.clone())
-                    .unwrap_or_else(|| obj.name.clone());
-                state.unimplemented_oracle_ids.insert(id);
-            }
+            // A no-op for unimplemented effects, recorded as unsupported.
+            record_runtime_unimplemented(state, ability.source_id, name);
             Ok(())
         }
     }?;
     Ok(None)
+}
+
+/// The game's one runtime "unsupported" record: log `name` and record
+/// `source_id`'s card in `unimplemented_oracle_ids`, so the telemetry
+/// `game_summary` surface can report which cards hit an unsupported behaviour
+/// this game. Oracle id when available; the object's name covers tokens and
+/// emblems (`printed_ref == None`). Used by the `Effect::Unimplemented`
+/// resolver arm and by any engine route that meets a card behaviour it cannot
+/// run, so the outcome is reported rather than silently skipped.
+pub(crate) fn record_runtime_unimplemented(state: &mut GameState, source_id: ObjectId, name: &str) {
+    eprintln!("Warning: Unimplemented effect: {}", name);
+    if let Some(obj) = state.objects.get(&source_id) {
+        let id = obj
+            .printed_ref
+            .as_ref()
+            .map(|p| p.oracle_id.clone())
+            .unwrap_or_else(|| obj.name.clone());
+        state.unimplemented_oracle_ids.insert(id);
+    }
 }
 
 /// Returns true if the given effect has a handler in the engine.
@@ -16308,6 +16401,17 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         ..
     } = effect
     {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
+    // CR 608.2c: `AddTargetReplacement` carries its recipient in `target`, which
+    // `Effect::target_filter()` deliberately hides (exposing it would announce a
+    // phantom target slot). A `TrackedSet`-bound rider ("a creature dealt damage
+    // this way would die this turn, exile it instead"; Anger of the Gods, and the
+    // plural "those Auras would leave the battlefield, exile them instead") still
+    // consumes the producer's published set, so the producer must publish it.
+    if let Effect::AddTargetReplacement { target, .. } = effect {
         if filter_references_tracked_set(target) {
             return true;
         }
@@ -19153,6 +19257,47 @@ pub(crate) fn bind_detached_continuation_to_parent(
     inherit_missing_parent_referent(continuation, parent);
 }
 
+/// CR 608.2c: pin the `TrackedSetId(0)` ("latest set") sentinel of the independent
+/// sibling tail of a per-member unless-payment loop to the set the loop iterates.
+/// Each member's payment pause re-enters the chain at depth 0, which forgets the
+/// chain set, and each declined member's move then publishes a fresh set — so an
+/// unpinned "the rest" would read the last-moved card's set instead of the
+/// revealed cards.
+fn pin_member_loop_tail_to_set(ability: &mut ResolvedAbility, set_id: TrackedSetId) {
+    let Some(sub) = ability.sub_ability.as_deref_mut() else {
+        return;
+    };
+    if sub.sub_link != SubAbilityLink::SequentialSibling {
+        return;
+    }
+    if let Effect::ChangeZoneAll { target, .. } = &mut sub.effect {
+        // Single authority for rewriting the tracked-set sentinel inside a
+        // filter (recursing And/Or/Not), shared with the delayed-trigger binder.
+        target.rebind_tracked_set_sentinel(set_id);
+    }
+}
+
+/// CR 608.2c + CR 118.12a: a per-member unless-payment loop repeats only the
+/// instruction that carries the payment. An independent following sentence
+/// (`SubAbilityLink::SequentialSibling` — Sword-Point Diplomacy's "Then exile the
+/// rest.") reads the outcome of EVERY member, so it runs once, after the final
+/// member's payment decision, rather than after each member's.
+fn strip_sibling_tail_before_last_member(
+    ability: &mut ResolvedAbility,
+    iteration: usize,
+    total_iterations: usize,
+) {
+    if ability.unless_pay.is_some()
+        && iteration + 1 < total_iterations
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+    {
+        ability.sub_ability = None;
+    }
+}
+
 /// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
 /// target on its immediate looping child, so each iteration must replace the
 /// complete object list with its one current member while retaining independent
@@ -19297,6 +19442,21 @@ fn has_member_driven_repeat(ability: &ResolvedAbility) -> bool {
             qty: QuantityRef::ObjectCount { .. },
         })
     ) && effect_iterates_over_parent_target(&ability.effect)
+        || has_tracked_set_unless_member_loop(ability)
+}
+
+/// CR 118.12a + CR 608.2c: a per-member unless payment over the chain's tracked
+/// set ("for each of those cards, put that card into your hand unless any
+/// opponent pays 3 life" — Sword-Point Diplomacy) asks its payer(s) once per
+/// member, so each iteration must bind its own member before the payment gate.
+fn has_tracked_set_unless_member_loop(ability: &ResolvedAbility) -> bool {
+    matches!(
+        ability.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        })
+    ) && ability.unless_pay.is_some()
+        && effect_refs_parent_target(&ability.effect)
 }
 
 pub(crate) fn has_member_driven_repeat_after_hydration(
@@ -20524,7 +20684,7 @@ fn drive_repeat_for_outermost(
                         iterated_counter_kinds: Vec::new(),
                         next_iteration,
                         total_iterations: base_iterations,
-                        copy_order_fixed: None,
+                        order_fixed: None,
                     },
                     stack_depth_before_iteration,
                 );
@@ -24980,6 +25140,9 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // CR 603.7a + CR 608.2c: "that combat" names a phase this resolution's
     // own instructions added, never one an earlier resolution added.
     state.last_added_phase_ids.clear();
+    // CR 603.7a + CR 608.2c: likewise "that turn" names a turn this
+    // resolution's own instructions granted.
+    state.last_granted_extra_turn_ids.clear();
     // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
     // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
     // alongside `last_zone_changed_ids` so cross-resolution leakage is
@@ -27464,10 +27627,13 @@ fn resolve_chain_body(
                 }
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
-                }) if effect_refs_parent_target(&effective.effect) || per_object => state
-                    .chain_tracked_set_id
-                    .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-                    .unwrap_or_default(),
+                }) if effect_refs_parent_target(&effective.effect) || per_object => {
+                    member_driven = has_tracked_set_unless_member_loop(effective);
+                    state
+                        .chain_tracked_set_id
+                        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                        .unwrap_or_default()
+                }
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount { filter },
                 }) if effect_iterates_over_parent_target(&effective.effect) || per_object => {
@@ -27496,6 +27662,19 @@ fn resolve_chain_body(
                     }
                 }
                 _ => Vec::new(),
+            };
+
+            // CR 608.2c: a per-member unless loop's independent tail reads the
+            // loop's own set, whichever later publication shadows "the latest".
+            let pinned_tail;
+            let effective = match state.chain_tracked_set_id {
+                Some(set_id) if member_driven && effective.unless_pay.is_some() => {
+                    let mut pinned = effective.clone();
+                    pin_member_loop_tail_to_set(&mut pinned, set_id);
+                    pinned_tail = pinned;
+                    &pinned_tail
+                }
+                Some(_) | None => effective,
             };
 
             // CR 122.1 + CR 608.2c: A `repeat_for: DistinctCounterKindsAmong`
@@ -27611,21 +27790,26 @@ fn resolve_chain_body(
                     // through resolve_ability_chain so its individual bound
                     // target reaches the payment gate before the effect resolves.
                     || ((member_driven || kind_driven) && effective.unless_pay.is_some()));
-            // CR 405.3 + CR 707.10: a batch of copies of several spells is
-            // ordered by its controller, one copy at a time.
-            let copy_order_fixed = per_member_copy_counts.then_some(0);
+            // CR 608.2f + CR 405.3 + CR 707.10: a loop whose iterations pause
+            // for player input is ordered by its controller, one member at a
+            // time — a batch of copies of several spells, and a per-member
+            // unless-payment instruction loop (Sword-Point Diplomacy's ruling:
+            // "You choose the order to perform this process for the cards").
+            let order_fixed = (per_member_copy_counts
+                || has_tracked_set_unless_member_loop(effective))
+            .then_some(0);
             while iteration < iterations {
                 // CR 104.1: a prior iteration ended the game; the counted loop
                 // must not resolve its effect again.
                 if game_has_ended(state) {
                     break;
                 }
-                if open_spell_copy_order_choice(
+                if open_member_order_choice(
                     state,
                     effective,
                     &iter_tracked_members,
                     iteration,
-                    copy_order_fixed,
+                    order_fixed,
                 ) {
                     let mut resume_ability = effective.clone();
                     resume_ability.repeat_for = None;
@@ -27640,7 +27824,7 @@ fn resolve_chain_body(
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
                             next_iteration: iteration,
                             total_iterations: iterations,
-                            copy_order_fixed,
+                            order_fixed,
                         },
                         boundary,
                     );
@@ -27707,6 +27891,13 @@ fn resolve_chain_body(
                 if repeated_full_chain {
                     let mut full_chain_iteration = iter_effective.clone();
                     full_chain_iteration.repeat_for = None;
+                    if member_driven {
+                        strip_sibling_tail_before_last_member(
+                            &mut full_chain_iteration,
+                            iteration,
+                            iterations,
+                        );
+                    }
                     full_chain_iteration.copy_count_status =
                         crate::types::ability::CopyCountStatus::Finalized;
                     progress = with_iteration_return_result_occurrence(
@@ -27858,7 +28049,7 @@ fn resolve_chain_body(
                                 iterated_counter_kinds: iterated_counter_kinds.clone(),
                                 next_iteration,
                                 total_iterations: iterations,
-                                copy_order_fixed,
+                                order_fixed,
                             },
                             stack_depth_before_iteration,
                         );
@@ -29311,6 +29502,13 @@ fn resolve_chain_body(
                 ability.effect,
                 Effect::RollDie { .. } | Effect::GiftDelivery { .. }
             ) || sub_clone.reads_return_result.is_some()
+                || matches!(
+                    ability.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                )
                 || state
                     .resolution_stack
                     .copy_token_at_child_boundary(child_stack_start)
@@ -29322,8 +29520,10 @@ fn resolve_chain_body(
                 // so insert it outside the whole child stack, at the boundary captured
                 // before resolving the producer. A named-result reader needs this because
                 // a replacement post-effect may have parked a continuation beneath the
-                // producer's batch frame; a copy-token producer parks its own batch owner
-                // at that boundary; a die roll parks its DieRoll frame, and a gift delivery
+                // producer's batch frame; a battlefield move must finish its entry
+                // replacements before its later instructions (Flash's payment);
+                // a copy-token producer parks its own batch owner at that boundary;
+                // a die roll parks its DieRoll frame, and a gift delivery
                 // (`gift_delivery::resolve`) its own completion, at the boundary captured
                 // before the producer, so the rest of the chain is inserted outside both.
                 // CR 608.2c + CR 616.1g: a damage instruction reaches here only when it
@@ -30673,6 +30873,13 @@ fn unless_payment_prompt(
 ) -> WaitingFor {
     let mut pending = ability.clone();
     pending.unless_pay = None;
+    // CR 118.12a + CR 608.2c: surface the object the gated effect acts on. A
+    // member-driven loop rebinds each iteration's member into the first object
+    // slot, so every per-card prompt names its own card.
+    let affected_object = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(*id),
+        _ => None,
+    });
     // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
     // sub-cost choice first; the chosen single cost re-enters
     // `WaitingFor::UnlessPayment` via
@@ -30694,6 +30901,7 @@ fn unless_payment_prompt(
                     trigger_event: state.current_trigger_event.clone(),
                     effect_description: ability.description.clone(),
                     remaining: remaining_payers.to_vec(),
+                    affected_object,
                     repeat,
                 }
             } else {
@@ -30705,6 +30913,7 @@ fn unless_payment_prompt(
                     effect_description: ability.description.clone(),
                     remaining_choices: vec![],
                     chosen: vec![],
+                    affected_object,
                 }
             }
         }
@@ -30746,6 +30955,7 @@ fn unless_payment_prompt(
                 effect_description: ability.description.clone(),
                 remaining_choices: queue,
                 chosen: vec![],
+                affected_object,
             }
         }
         cost => WaitingFor::UnlessPayment {
@@ -30755,6 +30965,7 @@ fn unless_payment_prompt(
             trigger_event: state.current_trigger_event.clone(),
             effect_description: ability.description.clone(),
             remaining: remaining_payers.to_vec(),
+            affected_object,
             repeat,
         },
     }
@@ -32900,6 +33111,12 @@ fn resolve_unless_payers(
 ) -> Vec<crate::types::player::PlayerId> {
     match payer {
         TargetFilter::AllPlayers => crate::game::players::apnap_order(state),
+        // CR 118.12a + CR 101.4: "unless any opponent pays ..." polls each
+        // opponent of the ability's controller in APNAP order.
+        TargetFilter::Opponent => crate::game::players::apnap_order(state)
+            .into_iter()
+            .filter(|&player| crate::game::players::is_opponent(state, ability.controller, player))
+            .collect(),
         _ => resolve_unless_payer(state, ability, payer)
             .into_iter()
             .collect(),
@@ -33435,6 +33652,7 @@ mod tests {
                                     player_id: P0,
                                     sides: 1,
                                     result: Some(1),
+                                    ..
                                 }
                             )), "{site}, links={links}: the die must publish before its branch");
                             let body_gain = if site == "detached-tail" { 2 } else { 0 };
@@ -33850,6 +34068,46 @@ mod tests {
             .iter()
             .any(|event| matches!(event, GameEvent::DieRolled { .. })));
         assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed fixture: no printed card resumes a continuation whose die
+    /// instruction rolls zero dice. Hydradoodle and Neverwinter Hydra entering
+    /// with X = 0 (CR 107.3m) are the nearest printed anchors. CR 706.1 +
+    /// CR 706.4 + CR 608.2c: the zero-dice instruction's result is a determined
+    /// 0, published like every instruction result, so the continuation drain
+    /// keeps it instead of restoring the caller's earlier scalar.
+    #[test]
+    fn continuation_drain_preserves_a_zero_dice_results_zero() {
+        let (mut state, source, ambient) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 0 },
+            sides: 6,
+            modifier: None,
+            results: vec![],
+        });
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::RollDie,
+                    source_id,
+                    ..
+                } if *source_id == source
+            )),
+            "reach: the zero-dice instruction resolved"
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DieRolled { .. })));
+        assert_eq!(state.die_result_this_resolution, Some(0));
+        assert_eq!(state.die_result_publication, Some(Some(0)));
         assert_eq!(state.current_trigger_event, Some(ambient.clone()));
         assert_eq!(state.current_trigger_events, vec![ambient]);
         assert_eq!(state.current_trigger_match_count, Some(17));
@@ -53743,7 +54001,7 @@ mod tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 2,
-            copy_order_fixed: None,
+            order_fixed: None,
         };
 
         // An owned repeat template on top.
@@ -53886,7 +54144,7 @@ mod tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 3,
-            copy_order_fixed: None,
+            order_fixed: None,
         });
 
         let mut events = Vec::new();
@@ -70405,6 +70663,48 @@ mod tests {
             &tap_all().sub_ability(each_source(wolf))
         ));
     }
+
+    /// CR 608.2c: a `TrackedSet`-bound `AddTargetReplacement` consumes the set the
+    /// preceding damage instruction published, so the producer must publish it;
+    /// the identical rider bound to `Any` consumes nothing.
+    #[test]
+    fn add_target_replacement_tracked_set_requires_damage_publication() {
+        let damage_all = || {
+            ResolvedAbility::new(
+                Effect::DamageAll {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    player_filter: None,
+                    damage_source: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let rider = |target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(
+                        ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .valid_card(TargetFilter::SelfRef),
+                    ),
+                    target,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        assert!(next_sub_needs_tracked_set(&damage_all().sub_ability(
+            rider(TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            })
+        )));
+        assert!(!next_sub_needs_tracked_set(
+            &damage_all().sub_ability(rider(TargetFilter::Any))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -70715,7 +71015,7 @@ mod entry_observation_settlement_tests {
             iterated_counter_kinds: Vec::new(),
             next_iteration: 1,
             total_iterations: 2,
-            copy_order_fixed: None,
+            order_fixed: None,
         };
         let mut state = GameState::new_two_player(3);
         state
@@ -71028,7 +71328,10 @@ mod entry_observation_settlement_tests {
                     record.co_departed.push(ObjectId(999));
                 }
             }
-            state.deferred_entry_events = vec![parked_event];
+            state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+                parked_event,
+                None,
+            )];
             state.waiting_for = WaitingFor::CopyTargetChoice {
                 player: PlayerId(0),
                 source_id: parked,
@@ -71048,6 +71351,42 @@ mod entry_observation_settlement_tests {
                 "only the unparked entry (perturb={perturb})"
             );
         }
+    }
+
+    /// U4-T1. CR 603.6d + CR 614.1c: parking is per entrant. At a boundary
+    /// with no resolution choice and no parked replacement (an inline as-enters
+    /// continuation), the entrant whose own continuation is running is parked
+    /// by its ledger key and skipped; the other entry of the same buffer still
+    /// settles.
+    #[test]
+    fn boundary_skips_only_the_parked_as_enters_entrant() {
+        let completed = node(return_to_battlefield());
+        let next = node(put_counter());
+        let mut state = GameState::new_two_player(3);
+        let (_, mut events) = entered(&mut state, 1);
+        let (other, more) = entered(&mut state, 2);
+        events.extend(more);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_replacement.is_none());
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            events[0].clone(),
+            None,
+        )];
+        settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
+        let observed: Vec<ObjectId> = state
+            .battlefield_entry_observations
+            .values()
+            .map(|row| row.identity.reference.object_id)
+            .collect();
+        assert_eq!(observed, vec![other], "only the unparked entrant");
+
+        // Positive pair: with nothing parked, both entrants are observed.
+        let mut state = GameState::new_two_player(3);
+        let (_, mut events) = entered(&mut state, 1);
+        let (_, more) = entered(&mut state, 2);
+        events.extend(more);
+        settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
+        assert_eq!(state.battlefield_entry_observations.len(), 2);
     }
 
     /// S-b: the resume call (`completed = None`) settles a completed entry before a resumed
@@ -72548,7 +72887,7 @@ mod resolution_progress_contract_tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 3,
-            copy_order_fixed: None,
+            order_fixed: None,
         });
         let mut events = Vec::new();
         drain_active_repeat_for(&mut state, &mut events);
@@ -73882,8 +74221,10 @@ mod library_reorder_iteration_carrier_tests {
         let incarnations = [state.objects[&a].incarnation, state.objects[&b].incarnation];
 
         let reorder = LibraryReorderOperation::begin(&state, &[b, a]);
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[b, a]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[b, a], Zone::Library),
+        );
         state.push_change_zone_iteration(PendingChangeZoneIteration {
             library_reorder: Some(reorder),
             logical_zone_change_group,

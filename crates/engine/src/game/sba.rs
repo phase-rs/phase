@@ -247,6 +247,15 @@ fn run_state_based_action_iterations(
         }
     }
 
+    // CR 117.5 + CR 704.3 + CR 603.2: inside a post-action pass, control changes
+    // derived before this check (an SBA earlier in the loop put an Aura into a
+    // graveyard, CR 704.5m) are published into the batch the pass collects
+    // before priority. Other callers do not scan this buffer, so their changes
+    // stay queued for the next scanned drain or the action-return drain.
+    if departures == DepartureTriggers::PlacedByPass {
+        layers::publish_layer_control_changes(state, events);
+    }
+
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
         let iteration_events_start = events.len();
