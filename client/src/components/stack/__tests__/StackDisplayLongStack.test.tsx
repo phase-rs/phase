@@ -367,7 +367,7 @@ describe("StackDisplay with a stack taller than its room", () => {
     });
 
     it("holds a short stack up so it ends above the action rail", () => {
-      // Centred, the 273px panel would end at 304.2px, inside the gap above
+      // Centred, the 273px panel would end at 304.2px, 4.2px past the top of
       // the rail at 300px. It moves up to end at 292px instead, at full height.
       seed(SHORT_STACK);
       render(board());
@@ -376,14 +376,14 @@ describe("StackDisplay with a stack taller than its room", () => {
       expect(panelTop()).toBe(RAIL_TOP - RAIL_GAP - SHORT_PANEL_HEIGHT);
     });
 
-    // At 844x700 the two-entry panel centres at 164.5px, and its header (38px
-    // with the border) ends at 202.5px. A rail starting the 8px gap or more
-    // below that is under the panel; one starting higher, which Flex Layout
-    // can move it to, sits beside or above the header and leaves the panel be.
+    // At 844x700 the two-entry panel centres at 164.5px. A rail starting at
+    // or below that top is under the panel, which moves up to end above it; a
+    // rail starting higher, which Flex Layout can move it to, leaves the panel
+    // be.
     it.each([
       ["100px, above the panel", 100, 164.5, SHORT_PANEL_HEIGHT],
-      ["210px, beside its header", 210, 164.5, SHORT_PANEL_HEIGHT],
-      ["211px, below its header", 211, VIEWPORT_INSET, 211 - RAIL_GAP - VIEWPORT_INSET],
+      ["164px, just above the panel's top", 164, 164.5, SHORT_PANEL_HEIGHT],
+      ["165px, just below the panel's top", 165, VIEWPORT_INSET, 165 - RAIL_GAP - VIEWPORT_INSET],
     ] as const)("with a rail starting at %s, places a short panel accordingly", (_case, railTop, top, height) => {
       setViewport(VIEWPORT_WIDTH, 700);
       railTopPx = railTop;
@@ -394,8 +394,41 @@ describe("StackDisplay with a stack taller than its room", () => {
       expect(panelHeight()).toBe(height);
     });
 
+    // The deep panel's 38px header (inside its border) needs a rail starting
+    // at least 12px + 38px + the 8px gap = 58px down. A rail at 57px cannot be
+    // cleared, so the inset bounds the panel.
+    it.each([
+      ["58px, leaving room for the header", 58, HEADER_HEIGHT + BORDER_HEIGHT],
+      ["57px, too near the top to clear", 57, DEEP_INSET_HEIGHT],
+    ] as const)("with a rail starting at %s, sizes a deep panel accordingly", (_case, railTop, height) => {
+      railTopPx = railTop;
+      seed(DEEP_STACK);
+      render(board());
+
+      expect(panelTop()).toBe(VIEWPORT_INSET);
+      expect(panelHeight()).toBe(height);
+    });
+
+    it("runs a right-docked panel down to the bottom inset beside a rail wholly to its left", () => {
+      railSpan = { left: 12, right: 300 };
+      seed(DEEP_STACK);
+      render(board());
+
+      expect(panelHeight()).toBe(DEEP_INSET_HEIGHT);
+    });
+
+    it("ends a deep panel at the bottom inset above a rail dragged lower than it", () => {
+      // The rail starts at 388px, so the gap above it ends at 380px, below the
+      // inset at 378px.
+      railTopPx = 388;
+      seed(DEEP_STACK);
+      render(board());
+
+      expect(panelTop() + panelHeight()).toBe(VIEWPORT_HEIGHT - VIEWPORT_INSET);
+    });
+
     it("ends a deep panel pushed down by a targeting prompt above the action rail", () => {
-      // The panel starts 8px under the prompt's bottom edge (#11024), which
+      // The panel starts 8px under the prompt's bottom edge (#11004), which
       // leaves it 292px - 72px = 220px.
       useTargetingPromptStore.setState({ topPx: 4, bottomPx: 64 });
       seed(DEEP_STACK);
@@ -432,6 +465,9 @@ describe("StackDisplay with a stack taller than its room", () => {
       // does not render for it, so only the rail's own observer sees it.
       const railObservers = observersOf(railElement());
       expect(railObservers).toHaveLength(1);
+      // The end is 150px. A browser that rounds a fractional scroll position
+      // can leave the player half a pixel short of it.
+      pileScroller().scrollTop = 149.5;
       railTopPx = RAIL_TOP;
       act(() => railObservers[0].callback([], {} as ResizeObserver));
 

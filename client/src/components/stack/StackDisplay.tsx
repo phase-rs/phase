@@ -176,9 +176,7 @@ interface StackPileScrollerProps {
  */
 function StackPileScroller({ nextToResolveId, pileHeight, scrollEnd, children }: StackPileScrollerProps) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const shownRef = useRef<{ nextToResolveId: ObjectId | undefined; pileHeight: number; scrollEnd: number } | null>(
-    null,
-  );
+  const shownRef = useRef<Pick<StackPileScrollerProps, "nextToResolveId" | "pileHeight" | "scrollEnd"> | null>(null);
 
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
@@ -353,34 +351,35 @@ export function StackDisplay({
   // Collapse slides the panel out toward its docked edge: right dock → positive
   // x (off the right), left dock → negative x (off the left).
   const collapsedX = dockedLeft ? -collapsedOffset : collapsedOffset;
-  // Resolve the fractional anchor to an explicit pixel top. The panel centres
-  // on `topFraction`, held up so its bottom keeps to a bottom limit. The top
-  // inset is a floor that wins over both: when the pile is taller than the
-  // room (deep stacks / short windows) the held-up top edge would slide above
-  // y=0 and clip the header controls, so the panel pins at the floor (header
-  // stays visible) and its height is capped below instead.
+  // Resolve the fractional anchor to an explicit pixel top above a bottom
+  // limit. The panel centres on `topFraction`, held up so its bottom keeps to
+  // the limit. The top inset is a floor that wins over both: when the pile is
+  // taller than the room (deep stacks / short windows) the held-up top edge
+  // would slide above y=0 and clip the header controls, so the panel pins at
+  // the floor (header stays visible) and its height is capped below instead.
   const centredTopPx = viewport.height * topFraction - fullPanelHeight / 2;
-  const viewportBottomLimitPx = viewport.height - VERTICAL_VIEWPORT_INSET;
-  const railFreeTopPx = Math.max(
-    VERTICAL_VIEWPORT_INSET,
-    Math.min(centredTopPx, viewportBottomLimitPx - fullPanelHeight),
-  );
+  const topAbove = (bottomLimitPx: number) =>
+    Math.max(VERTICAL_VIEWPORT_INSET, Math.min(centredTopPx, bottomLimitPx - fullPanelHeight));
   // The bottom limit is the window's bottom inset, or the gap above the top of
   // an action rail under the panel, which holds Resolve and Resolve All on a
   // layer below it (#11119). A rail overlapping the panel sideways is under it
-  // when it starts below the header of the panel as the inset alone places
-  // it; one beside or above that header (Flex Layout can move the rail there)
-  // leaves the panel as it is. As for the prompt check below, a Flex Layout
-  // drag of the panel itself still applies on top of the result.
-  const railBottomLimitPx = actionRailTopPx === null ? null : actionRailTopPx - ACTION_RAIL_GAP;
-  const panelBottomLimitPx =
-    railBottomLimitPx !== null && railBottomLimitPx >= railFreeTopPx + MIN_PANEL_HEIGHT
-      ? Math.min(viewportBottomLimitPx, railBottomLimitPx)
-      : viewportBottomLimitPx;
-  const viewportTopPx = Math.max(
-    VERTICAL_VIEWPORT_INSET,
-    Math.min(centredTopPx, panelBottomLimitPx - fullPanelHeight),
-  );
+  // when it starts at or below the top of the panel as the inset alone places
+  // it, and low enough that the panel's header, inside its border, fits
+  // between the top inset and the gap above the rail. A rail starting higher,
+  // which Flex Layout can move it to, leaves the panel as it is. As for the
+  // prompt check below, a Flex Layout drag of the panel itself still applies
+  // on top of the result.
+  const viewportBottomLimitPx = viewport.height - VERTICAL_VIEWPORT_INSET;
+  const railBottomLimitPx =
+    actionRailTopPx !== null &&
+    actionRailTopPx >= topAbove(viewportBottomLimitPx) &&
+    actionRailTopPx - ACTION_RAIL_GAP >= VERTICAL_VIEWPORT_INSET + MIN_PANEL_HEIGHT
+      ? actionRailTopPx - ACTION_RAIL_GAP
+      : null;
+  const panelBottomLimitPx = railBottomLimitPx === null
+    ? viewportBottomLimitPx
+    : Math.min(viewportBottomLimitPx, railBottomLimitPx);
+  const viewportTopPx = topAbove(panelBottomLimitPx);
   // A targeting prompt renders on a layer above this panel
   // (`GAME_Z_LAYER.dialogHost`) and stays there, so the panel keeps its header
   // clear of the prompt instead (#11004). Covered, the header's controls can be
