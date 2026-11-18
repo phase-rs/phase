@@ -64,7 +64,6 @@ export function TriggerOrderModal() {
       title={t("triggerOrder.title")}
       subtitle={t("triggerOrder.subtitle")}
       size="md"
-      scrollable
       footer={
         <button
           type="button"

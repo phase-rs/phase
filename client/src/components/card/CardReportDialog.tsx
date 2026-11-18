@@ -349,7 +349,7 @@ function CardReportRow({
     supported,
     total,
   };
-  const { sent, report } = useCardReport(context);
+  const { status, report } = useCardReport(context);
 
   // Tiny art icon; hovering it (or long-pressing on touch) opens the full
   // preview. Shared across the row's three states, like `info`.
@@ -401,7 +401,7 @@ function CardReportRow({
   );
 
   // Already reported this session — the dedup key is spent, so lock the row.
-  if (sent) {
+  if (status === "sent") {
     return (
       <li className="flex items-center gap-3 rounded-[10px] border border-emerald-400/25 bg-emerald-400/[0.06] px-3 py-2">
         {thumb}
@@ -458,7 +458,13 @@ function CardReportRow({
       >
         {thumb}
         {info}
-        {loaded && total > 0 && (
+        {status === "notSent" ? (
+          // The last confirmed report was dropped by telemetry: say so, and
+          // keep the row tappable so the player can try again.
+          <span className="shrink-0 text-[11px] font-medium text-amber-300">
+            {t("preview.reportNotSent")}
+          </span>
+        ) : loaded && total > 0 && (
           <span
             className={`shrink-0 text-[11px] font-medium tabular-nums ${
               allSupported ? "text-emerald-400" : "text-amber-400"

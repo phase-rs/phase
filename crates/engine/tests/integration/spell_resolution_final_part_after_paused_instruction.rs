@@ -3786,6 +3786,7 @@ fn markerless_rest(rest: TerminalRest, core_type: CoreType, zone: Zone) -> (Game
                 event_target: None,
                 event_amount: None,
                 controller: None,
+                parked_entrants: Vec::new(),
             },
             ResidentDrainPolicy::Replace,
         );

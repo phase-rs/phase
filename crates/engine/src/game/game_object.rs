@@ -755,7 +755,7 @@ impl CastOrigin {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
     pub card_id: CardId,
@@ -1962,10 +1962,10 @@ pub struct GameObject {
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
-/// (types/game_state.rs). `GameObject` deliberately
-/// does NOT derive `PartialEq` (constant-depth loop detection must omit `timestamp`
-/// / `incarnation`), so the row comparator is hand-rolled and needs this no-`..`
-/// destructure: adding a field breaks the build until it is classified into a
+/// (types/game_state.rs). Exact `PartialEq` also compares timestamps and
+/// incarnations for scratch-cache reuse. Constant-depth loop detection must
+/// omit those axes, so its row comparator remains hand-rolled and needs this
+/// no-`..` destructure: adding a field breaks the build until it is classified into a
 /// bucket (compared / omitted-safe-by-write-site / immutable / projected). Fail-
 /// closed — a new per-object accumulator cannot silently escape the partition.
 #[cfg(test)]

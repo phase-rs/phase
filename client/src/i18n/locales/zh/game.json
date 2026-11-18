@@ -2386,6 +2386,7 @@
     "parse": "解析",
     "ptDeltaFrom": "来自{{source}}的{{delta}}",
     "report": "报告问题",
+    "reportNotSent": "未发送",
     "reported": "已报告 ✓",
     "rulingCount_one": "{{count}}条规则释疑",
     "rulingCount_other": "{{count}}条规则释疑",
