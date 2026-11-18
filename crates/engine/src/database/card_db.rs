@@ -207,6 +207,9 @@ impl PartialEq for FaceIndex {
     }
 }
 
+#[cfg(feature = "test-support")]
+mod fixture_cache;
+
 #[derive(Default)]
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
@@ -1245,7 +1248,7 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
 
-    fn test_face(name: &str) -> CardFace {
+    pub(super) fn test_face(name: &str) -> CardFace {
         CardFace {
             name: name.to_string(),
             mana_cost: ManaCost::NoCost,
@@ -1298,7 +1301,8 @@ mod tests {
     }
 
     #[test]
-    fn lazy_fixture_load_is_observably_identical_to_the_eager_load() {
+    fn lazy_and_cached_fixture_loads_are_observably_identical_to_the_eager_load() {
+        use super::fixture_cache::{self, Key};
         use crate::database::search::CardSearchQuery;
         use crate::test_support::{assert_same_database, fixture_path, load_fixture};
         use flate2::read::GzDecoder;
@@ -1308,18 +1312,31 @@ mod tests {
         )))
         .unwrap();
         let lazy = load_fixture(&fixture_path());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture-cache");
+        let key = Key {
+            fixture_hash: 1,
+            binary_len: 2,
+            binary_mtime_ns: 3,
+        };
+        fixture_cache::write(&path, key, &lazy).expect("the lazy load is cacheable");
+        let cached = fixture_cache::read(&path, key).expect("the written cache is served");
 
-        for (key, slot) in &lazy.face_index.0 {
-            let FaceSlot::Raw(raw) = slot else {
-                panic!("{key} was typed at load");
-            };
-            let face = eager.face_index.get(key).unwrap();
-            assert_eq!(raw.name, face.name, "{key}");
-            assert_eq!(raw.card_type, face.card_type, "{key}");
-            assert_eq!(raw.scryfall_oracle_id, face.scryfall_oracle_id, "{key}");
+        for db in [&lazy, &cached] {
+            for (key, slot) in &db.face_index.0 {
+                let FaceSlot::Raw(raw) = slot else {
+                    panic!("{key} was typed at load");
+                };
+                let face = eager.face_index.get(key).unwrap();
+                assert_eq!(raw.name, face.name, "{key}");
+                assert_eq!(raw.card_type, face.card_type, "{key}");
+                assert_eq!(raw.scryfall_oracle_id, face.scryfall_oracle_id, "{key}");
+            }
+            assert_eq!(db.card_names(), eager.card_names());
         }
-        assert_eq!(lazy.card_names(), eager.card_names());
+        assert_eq!(cached.face_index.typed_face_count(), 0);
         assert_same_database(&eager, &lazy);
+        assert_same_database(&eager, &cached);
 
         let walk = |db: &CardDatabase| {
             let faces: std::collections::BTreeMap<String, serde_json::Value> = db

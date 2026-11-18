@@ -27,6 +27,15 @@ pub(crate) fn load_fixture(path: &Path) -> CardDatabase {
         .expect("integration fixture should load")
 }
 
+fn load_fixture_cached(path: &Path) -> CardDatabase {
+    let file = File::open(path).expect("integration fixture should open");
+    let reader = BufReader::new(file);
+    CardDatabase::from_compressed_export_cached(reader, |gz| {
+        std::io::read_to_string(GzDecoder::new(gz))
+    })
+    .expect("integration fixture should load")
+}
+
 fn export_path() -> PathBuf {
     // allow-full-card-db: FORGE_TEST_FULL_DB escape hatch only; default loads the committed fixture
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json")
@@ -176,7 +185,7 @@ pub(crate) fn shared_card_db() -> &'static CardDatabase {
         let db = if std::env::var_os("FORGE_TEST_FULL_DB").is_none() {
             let fixture = fixture_path();
             if fixture.exists() {
-                load_fixture(&fixture)
+                load_fixture_cached(&fixture)
             } else {
                 CardDatabase::from_export(&export_path()).expect("card-data export should load")
             }
