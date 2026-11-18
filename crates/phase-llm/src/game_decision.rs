@@ -46,8 +46,9 @@ pub struct GameDecisionRequest {
     /// misapplied.
     pub fingerprint: String,
     /// How many options the chat prompt numbers. For a combat declaration
-    /// these are its pairs; a System One question is asked over the frame's
-    /// options, the engine's candidates.
+    /// these are the empty declaration, when the engine accepts it, followed
+    /// by its pairs; a System One question is asked over the frame's options,
+    /// the engine's candidates.
     pub option_count: usize,
     /// The parts of this decision a message-thread continue is rendered from.
     update: ThreadUpdateParts,
@@ -236,6 +237,14 @@ impl DecisionOptions {
         self.declaration
             .as_ref()
             .map_or(self.candidates.as_slice(), ComposedDeclaration::lines)
+    }
+
+    /// Whether the decision leaves one answer, so it is not put to a model.
+    fn is_forced(&self, contract: &AiDecisionContract) -> bool {
+        match &self.declaration {
+            Some(declaration) => declaration.is_forced(&contract.candidates),
+            None => self.candidates.len() < 2,
+        }
     }
 
     /// How a chat model answers [`Self::chat_lines`], stated outside the data
@@ -537,13 +546,13 @@ pub fn build_game_decision_prompt(
     // nothing; the caller takes it through the heuristic path instead, which
     // `UnsupportedDecision` already means and does not count as a failure.
     //
-    // The count is of the options the chat prompt numbers. For a combat
-    // declaration those are its pairs, not the engine's candidates: the
-    // candidates sample the legal declarations, and one candidate can leave
-    // another legal declaration unsampled (a block beside one a requirement
-    // forces). A System One provider, asked over the candidates, refuses a
-    // question with fewer than two itself (`wire::system_one_request`).
-    if options.chat_lines().len() < 2 {
+    // A combat declaration is judged by its composed options, not by the
+    // engine's candidates alone, which sample the legal declarations and can
+    // leave one unsampled (a block beside one a requirement forces); see
+    // `ComposedDeclaration::is_forced`. A System One provider, asked over the
+    // candidates, refuses a question with fewer than two itself
+    // (`wire::system_one_request`).
+    if options.is_forced(contract) {
         return Err(LlmError::UnsupportedDecision {
             detail: "only one legal option; there is nothing to decide".to_string(),
         });

@@ -13,14 +13,17 @@
 //! declaration lists, read from the prompt the engine raised
 //! (`valid_attack_targets_by_attacker`, `valid_block_targets`), as one numbered
 //! option, and it answers with every pair it declares. Each line names its
-//! creatures as the board does, numbering any that would read alike, and says
-//! what the prompt requires of them. Whether those pairs make a legal
+//! creatures as the board does, numbering any that would read alike, and
+//! states the prompt's records of what it requires of them: a requirement to
+//! attack or block, a requirement to be blocked that the block obeys, and a
+//! minimum number of blockers. Whether those pairs make a legal
 //! declaration is the engine's call, made by its completion authority
 //! ([`complete_attacker_proposal`], [`complete_blocker_proposal`]) under the
 //! posture the engine's own candidates are completed under, which refuses any
 //! cost to attack or block: a declaration it would change is refused, never
 //! replaced by one the model did not choose. A pair that carries such a cost is
-//! therefore not offered.
+//! therefore not offered, nor a block of an attacker that fewer creatures can
+//! block than its minimum.
 //!
 //! A System One provider (Jev) answers by ranking options and cannot name a
 //! set of them, so it keeps choosing one of the engine's candidates
@@ -28,6 +31,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use engine::ai_support::CandidateAction;
 use engine::game::combat::{
     complete_attacker_proposal, complete_blocker_proposal, compute_attack_tax, compute_block_tax,
     validate_attack_declaration, validate_blockers_for_player, AttackTarget, BlockRequirement,
@@ -92,6 +96,25 @@ impl ComposedDeclaration {
     /// The numbered options, as the prompt shows them.
     pub(crate) fn lines(&self) -> &[String] {
         &self.lines
+    }
+
+    /// Whether the options leave the model one answer, so the declaration is
+    /// a forced move rather than a decision.
+    ///
+    /// They do when there is one line, and when the engine's candidates hold
+    /// one declaration and every line is one of its pairs: every candidate,
+    /// each single pair among them, completed to that declaration, so no
+    /// other answer the lines can give is legal. More lines than that leave a
+    /// choice the candidates may not sample: a creature joining a block a
+    /// requirement forces is never a candidate of its own.
+    pub(crate) fn is_forced(&self, candidates: &[CandidateAction]) -> bool {
+        if self.lines.len() < 2 {
+            return true;
+        }
+        let [only] = candidates else {
+            return false;
+        };
+        self.nothing.is_none() && self.pairs.all_in(&only.action)
     }
 
     /// The engine-authored instruction stated outside the data block: the
@@ -164,6 +187,9 @@ enum DeclarationPairs {
         blocks: Vec<(ObjectId, ObjectId)>,
         /// CR 509.1c: what the prompt requires of each blocker.
         requirements: HashMap<ObjectId, CombatRequirement>,
+        /// CR 509.1c: per blocker, the attackers whose requirement to be
+        /// blocked its block would obey.
+        must_be_blocked: HashMap<ObjectId, Vec<ObjectId>>,
         /// CR 509.1b + CR 702.111b: the attackers that can't be blocked
         /// except by two or more creatures, and how many.
         minimums: HashMap<ObjectId, BlockRequirement>,
@@ -219,9 +245,10 @@ impl DeclarationPairs {
                 valid_block_targets,
                 block_requirements,
                 blocker_constraints,
+                must_be_blocked_targets,
                 ..
             } if *player == owner => {
-                let blocks = valid_blocker_ids
+                let blocks: Vec<(ObjectId, ObjectId)> = valid_blocker_ids
                     .iter()
                     .flat_map(move |&blocker| {
                         valid_block_targets
@@ -234,10 +261,26 @@ impl DeclarationPairs {
                     // cost to block.
                     .filter(|&pair| compute_block_tax(state, &[pair]).is_none())
                     .collect();
+                // CR 509.1b + CR 702.111b: an attacker that can't be blocked
+                // except by more creatures than can block it can't be blocked
+                // at all, so no line offers a block of it.
+                let mut able: HashMap<ObjectId, u32> = HashMap::new();
+                for (_, attacker) in &blocks {
+                    *able.entry(*attacker).or_default() += 1;
+                }
+                let blocks = blocks
+                    .into_iter()
+                    .filter(|(_, attacker)| {
+                        block_requirements
+                            .get(attacker)
+                            .is_none_or(|minimum| able[attacker] >= minimum.count)
+                    })
+                    .collect();
                 Some(Self::Blocks {
                     defender: *player,
                     blocks,
                     requirements: blocker_constraints.clone(),
+                    must_be_blocked: must_be_blocked_targets.clone(),
                     minimums: block_requirements.clone(),
                 })
             }
@@ -249,6 +292,22 @@ impl DeclarationPairs {
         match self {
             Self::Attacks { attacks, .. } => attacks.len(),
             Self::Blocks { blocks, .. } => blocks.len(),
+        }
+    }
+
+    /// Whether every pair is one `action` declares.
+    fn all_in(&self, action: &GameAction) -> bool {
+        match (self, action) {
+            (
+                Self::Attacks { attacks, .. },
+                GameAction::DeclareAttackers {
+                    attacks: declared, ..
+                },
+            ) => attacks.iter().all(|pair| declared.contains(pair)),
+            (Self::Blocks { blocks, .. }, GameAction::DeclareBlockers { assignments }) => {
+                blocks.iter().all(|pair| assignments.contains(pair))
+            }
+            _ => false,
         }
     }
 
@@ -275,11 +334,19 @@ impl DeclarationPairs {
             Self::Blocks {
                 blocks,
                 requirements,
+                must_be_blocked,
                 minimums,
                 ..
             } => blocks
                 .iter()
-                .map(|&pair| names.block(pair, requirements.get(&pair.0), minimums.get(&pair.1)))
+                .map(|&(blocker, attacker)| {
+                    names.block(
+                        (blocker, attacker),
+                        requirements.get(&blocker),
+                        must_be_blocked.get(&blocker).map(Vec::as_slice),
+                        minimums.get(&attacker),
+                    )
+                })
                 .collect(),
         }
     }
@@ -404,6 +471,19 @@ mod tests {
     const NEEDS_TWO_BLOCKERS: &str = "the attacker can't be blocked except by 2 or more creatures";
     const GHOSTLY_PRISON: &str = "Creatures can't attack you unless their controller pays {2} \
          for each creature they control that's attacking you.";
+    const JUGGERNAUT: &str =
+        "This creature attacks each combat if able.\nThis creature can't be blocked by Walls.";
+    const ARCHANGEL_OF_TITHES: &str = "Flying\nAs long as this creature is untapped, creatures \
+         can't attack you or planeswalkers you control unless their controller pays {1} for each \
+         of those creatures.\nAs long as this creature is attacking, creatures can't block unless \
+         their controller pays {1} for each of those creatures.";
+    const GIANT_SPIDER: &str = "Reach (This creature can block creatures with flying.)";
+    const OCHRAN_ASSASSIN: &str = "Deathtouch\nAll creatures able to block this creature do so.";
+    const TANGLE_ANGLER: &str = "Infect (This creature deals damage to creatures in the form of \
+         -1/-1 counters and to players in the form of poison counters.)\n{G}: Target creature \
+         blocks this creature this turn if able.";
+    const JACE_BELEREN: &str = "+2: Each player draws a card.\n\u{2212}1: Target player draws a \
+         card.\n\u{2212}10: Target player mills twenty cards.";
 
     /// Pass priority until the engine waits on a combat declaration.
     fn pass_to_declaration(runner: &mut GameRunner) {
@@ -554,6 +634,27 @@ mod tests {
         }
     }
 
+    /// Whether `seat`'s decision is taken as a forced move, not put to a model.
+    fn is_forced_move(runner: &GameRunner, seat: PlayerId) -> bool {
+        let contract = AiDecisionContract::issue(runner.state(), seat);
+        matches!(
+            build_game_decision_prompt(runner.state(), &contract, AiDifficulty::Medium, None, &[]),
+            Err(LlmError::UnsupportedDecision { .. })
+        )
+    }
+
+    /// The attackers each blocker on the pending prompt can block.
+    fn valid_block_targets(runner: &GameRunner) -> HashMap<ObjectId, Vec<ObjectId>> {
+        let WaitingFor::DeclareBlockers {
+            valid_block_targets,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("the engine asks for blockers");
+        };
+        valid_block_targets.clone()
+    }
+
     /// Issue #10992: a seat could attack with one creature or with all of
     /// them. Two of three, keeping one home, is now a declaration it makes.
     #[test]
@@ -671,9 +772,10 @@ mod tests {
         assert_eq!(blockers_of(&runner, bears), vec![ogre]);
     }
 
-    /// CR 509.1a: each blocking creature chooses one attacker to block, so
-    /// several can choose the same one. Neither of the seat's creatures kills
-    /// the Craw Wurm alone; together they deal 5 to its 4 toughness.
+    /// CR 509.1a: the defending player chooses one attacker for each blocking
+    /// creature, so several can be assigned the same attacker. Neither of the
+    /// seat's creatures kills the Craw Wurm alone; together they deal 5 to its
+    /// 4 toughness.
     #[test]
     fn a_seat_double_blocks_an_attacker_without_evasion() {
         let mut scenario = GameScenario::new();
@@ -815,8 +917,9 @@ mod tests {
         assert!(detail.starts_with("option 0 declares nothing"), "{detail}");
     }
 
-    /// CR 508.1a: a creature is declared as an attacker once, so naming it at
-    /// two players is refused.
+    /// CR 508.1a + CR 508.1b: a creature is declared as an attacker once,
+    /// attacking one player, planeswalker or battle, so naming it at two
+    /// players is refused.
     #[test]
     fn one_creature_attacking_two_players_is_refused() {
         let mut scenario = GameScenario::new_n_player(3, 42);
@@ -1080,6 +1183,226 @@ mod tests {
         let mut both = blockers.to_vec();
         both.sort_unstable();
         assert_eq!(blocking, both, "by different Gray Ogres");
+    }
+
+    /// CR 508.1d: two creatures that each attack each combat if able leave
+    /// one legal declaration, both attacking, which the lines are exactly. It
+    /// is taken as a forced move, as it was when only the engine's candidates
+    /// were offered.
+    #[test]
+    fn two_creatures_that_must_attack_are_a_forced_move() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(P0, "Bloodrock Cyclops", 3, 3, BLOODROCK_CYCLOPS);
+        scenario
+            .add_creature(P0, "Juggernaut", 5, 3)
+            .as_artifact_creature()
+            .from_oracle_text(JUGGERNAUT);
+        let mut runner = scenario.build();
+        pass_to_declaration(&mut runner);
+
+        // Reach guard: the two attacks are two pairs, so a count of lines
+        // alone would put the declaration to the model.
+        let contract = AiDecisionContract::issue(runner.state(), P0);
+        assert_eq!(contract.candidates.len(), 1, "{:?}", contract.candidates);
+        let declaration = ComposedDeclaration::pending(runner.state(), runner.state(), P0)
+            .expect("a declaration");
+        assert_eq!(declaration.lines().len(), 2, "{:?}", declaration.lines());
+
+        assert!(is_forced_move(&runner, P0));
+    }
+
+    /// CR 509.1b + CR 702.111b: a menace attacker with only one creature able
+    /// to block it can't be blocked, so no line offers that block, and with
+    /// nothing else to declare the seat takes no blockers as a forced move.
+    #[test]
+    fn a_menace_attacker_only_one_creature_can_block_is_not_offered() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let brute = scenario
+            .add_creature(P0, "Boggart Brute", 3, 2)
+            .from_oracle_text_with_keywords(&["Menace"], BOGGART_BRUTE)
+            .id();
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let mut runner = scenario.build();
+        attack_player_one(&mut runner, &[brute]);
+
+        // Reach guard: the engine's prompt lists the block.
+        assert_eq!(valid_block_targets(&runner)[&bears], vec![brute]);
+        assert!(is_forced_move(&runner, P1));
+    }
+
+    /// CR 509.1c + CR 509.1d: while Archangel of Tithes attacks, blocking
+    /// costs mana. The block is completed refusing that cost, so it is not
+    /// offered, and with nothing else to declare the seat takes no blockers
+    /// as a forced move.
+    #[test]
+    fn a_block_that_carries_a_cost_is_not_offered() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let archangel = scenario
+            .add_creature(P0, "Archangel of Tithes", 3, 5)
+            .from_oracle_text_with_keywords(&["Flying"], ARCHANGEL_OF_TITHES)
+            .id();
+        let spider = scenario
+            .add_creature(P1, "Giant Spider", 2, 4)
+            .from_oracle_text_with_keywords(&["Reach"], GIANT_SPIDER)
+            .id();
+        let mut runner = scenario.build();
+        attack_player_one(&mut runner, &[archangel]);
+
+        // Reach guard: the engine's prompt lists the block, and it is taxed.
+        assert_eq!(valid_block_targets(&runner)[&spider], vec![archangel]);
+        assert!(compute_block_tax(runner.state(), &[(spider, archangel)]).is_some());
+        assert!(is_forced_move(&runner, P1));
+    }
+
+    /// CR 509.1c: Ochran Assassin must be blocked by every creature able to
+    /// block it. Each line that blocks it says that block obeys a requirement,
+    /// and a line blocking the other attacker does not.
+    #[test]
+    fn a_block_that_obeys_a_requirement_to_be_blocked_says_so() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let assassin = scenario
+            .add_creature_from_oracle(P0, "Ochran Assassin", 1, 1, OCHRAN_ASSASSIN)
+            .id();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let armodon = scenario.add_creature(P1, "Trained Armodon", 3, 3).id();
+        let ogre = scenario.add_creature(P1, "Gray Ogre", 2, 2).id();
+        let mut runner = scenario.build();
+        attack_player_one(&mut runner, &[assassin, bears]);
+
+        let (contract, request) = decision(&runner, P1);
+        let obeys = "this block obeys a requirement that the attacker be blocked";
+        option_number(
+            &request,
+            "Gray Ogre (controlled by You) blocks Grizzly Bears (controlled by Player 0)",
+        );
+        let declared = answer(
+            &runner,
+            &contract,
+            &request,
+            &[
+                option_number(
+                    &request,
+                    &format!(
+                        "Trained Armodon (controlled by You) blocks Ochran Assassin (controlled \
+                         by Player 0); {obeys}"
+                    ),
+                ),
+                option_number(
+                    &request,
+                    &format!(
+                        "Gray Ogre (controlled by You) blocks Ochran Assassin (controlled by \
+                         Player 0); {obeys}"
+                    ),
+                ),
+            ],
+        )
+        .expect("both blocking the Assassin obeys its requirement");
+
+        apply(&mut runner, &contract, declared);
+        let mut both = vec![armodon, ogre];
+        both.sort_unstable();
+        assert_eq!(blockers_of(&runner, assassin), both);
+    }
+
+    /// CR 509.1c: Tangle Angler's ability makes a creature block it if able.
+    /// That creature's lines name the attacker it must block, and a free
+    /// creature beside it blocks the other attacker.
+    #[test]
+    fn a_requirement_to_block_a_named_attacker_names_it() {
+        use engine::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let angler = scenario
+            .add_creature(P0, "Tangle Angler", 1, 5)
+            .from_oracle_text_with_keywords(&["Infect"], TANGLE_ANGLER)
+            .id();
+        let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let ogre = scenario.add_creature(P1, "Gray Ogre", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+        runner.activate(angler, 0).target_object(bears).resolve();
+        attack_player_one(&mut runner, &[angler, giant]);
+
+        let (contract, request) = decision(&runner, P1);
+        let must = "it must block Tangle Angler (controlled by Player 0) if able";
+        option_number(
+            &request,
+            &format!(
+                "Grizzly Bears (controlled by You) blocks Hill Giant (controlled by Player 0); \
+                 {must}"
+            ),
+        );
+        let declared = answer(
+            &runner,
+            &contract,
+            &request,
+            &[
+                option_number(
+                    &request,
+                    &format!(
+                        "Grizzly Bears (controlled by You) blocks Tangle Angler (controlled by \
+                         Player 0); {must}"
+                    ),
+                ),
+                option_number(
+                    &request,
+                    "Gray Ogre (controlled by You) blocks Hill Giant (controlled by Player 0)",
+                ),
+            ],
+        )
+        .expect("the required block beside a free one is a legal declaration");
+        assert!(!offered_as_candidate(&contract, &declared));
+
+        apply(&mut runner, &contract, declared);
+        assert_eq!(blockers_of(&runner, angler), vec![bears]);
+        assert_eq!(blockers_of(&runner, giant), vec![ogre]);
+    }
+
+    /// CR 508.1b: a creature can attack a planeswalker, which its line names
+    /// as the board does.
+    #[test]
+    fn a_seat_attacks_a_planeswalker() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let jace = scenario
+            .add_planeswalker_from_oracle(P1, "Jace Beleren", "Jace", 3, JACE_BELEREN)
+            .id();
+        let mut runner = scenario.build();
+        pass_to_declaration(&mut runner);
+
+        let (contract, request) = decision(&runner, P0);
+        option_number(
+            &request,
+            "Grizzly Bears (controlled by You) attacks Player 1",
+        );
+        let declared = answer(
+            &runner,
+            &contract,
+            &request,
+            &[option_number(
+                &request,
+                "Grizzly Bears (controlled by You) attacks Jace Beleren (controlled by Player 1)",
+            )],
+        )
+        .expect("attacking a planeswalker is a legal declaration");
+
+        apply(&mut runner, &contract, declared);
+        assert_eq!(
+            attacks(&runner),
+            vec![(bears, AttackTarget::Planeswalker(jace))]
+        );
     }
 
     /// Jev ranks the options it is asked about and cannot name a set, so it is

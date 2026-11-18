@@ -323,15 +323,18 @@ impl<'a> DeclarationNames<'a> {
     /// and the attacker it blocks: `Gray Ogre (controlled by You) blocks Hill
     /// Giant (controlled by Player 0)`.
     ///
-    /// `requirement` and `minimum` are the engine's records of the declaring
-    /// prompt (`blocker_constraints` for the blocker and `block_requirements`
-    /// for the attacker, on `WaitingFor::DeclareBlockers`), stated after the
-    /// pair: CR 509.1c, a requirement to block, and CR 509.1b + CR 702.111b, an
-    /// attacker that can't be blocked except by two or more creatures.
+    /// `requirement`, `must_be_blocked` and `minimum` are the engine's records
+    /// of the declaring prompt, on `WaitingFor::DeclareBlockers`, stated after
+    /// the pair: CR 509.1c, a requirement on the blocker to block
+    /// (`blocker_constraints`) and a requirement on the attacker to be blocked
+    /// that this block obeys (the blocker's `must_be_blocked_targets`), and CR
+    /// 509.1b + CR 702.111b, an attacker that can't be blocked except by two or
+    /// more creatures (`block_requirements`).
     pub fn block(
         &self,
         (blocker, attacker): (ObjectId, ObjectId),
         requirement: Option<&CombatRequirement>,
+        must_be_blocked: Option<&[ObjectId]>,
         minimum: Option<&BlockRequirement>,
     ) -> String {
         let mut line = format!(
@@ -353,6 +356,9 @@ impl<'a> DeclarationNames<'a> {
                 | CombatRequirement::CantAttack { .. },
             )
             | None => {}
+        }
+        if must_be_blocked.is_some_and(|attackers| attackers.contains(&attacker)) {
+            line.push_str("; this block obeys a requirement that the attacker be blocked");
         }
         if let Some(minimum) = minimum {
             line.push_str(&format!(
