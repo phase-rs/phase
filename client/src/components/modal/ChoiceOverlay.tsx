@@ -23,9 +23,10 @@ type ChoiceOverlayProps = {
        * Opt-in single-line header, for a short screen where every line of
        * chrome takes height from the cards. The title is the header's only
        * text and these actions sit at the end of its line, so the prompt
-       * passes its instruction as the title and its confirm here. The
-       * eyebrow, subtitle and footer are left out: the title already says
-       * what to do, and the confirm has moved up beside it.
+       * passes its instruction as the title and its confirm (a
+       * ChoiceHeaderConfirm) here. The eyebrow, subtitle and footer are left
+       * out: the title already says what to do, and the confirm has moved up
+       * beside it.
        */
       headerActions: React.ReactElement;
       subtitle?: never;
@@ -297,6 +298,35 @@ export function ConfirmButton({
         </button>
       </motion.div>
     </AnimatePresence>
+  );
+}
+
+/**
+ * The confirm for ChoiceOverlay's single-line header (`headerActions`). Where
+ * ConfirmButton fills the footer's width, this one sits at the end of the
+ * title's line, so it stays compact while keeping a 44px touch height. Every
+ * prompt that opts into the header shares it, so the header confirm looks the
+ * same in each of them.
+ */
+export function ChoiceHeaderConfirm({
+  onClick,
+  disabled = false,
+  label,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  label?: string;
+}) {
+  const { t } = useTranslation("game");
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={menuButtonClass({ tone: "cyan", size: "sm", disabled })}
+    >
+      {label ?? t("choiceOverlay.confirm")}
+    </button>
   );
 }
 

@@ -31,6 +31,7 @@ import type {
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import {
   CancelButton,
+  ChoiceHeaderConfirm,
   ChoiceOverlay,
   ConfirmButton,
   ScrollableCardStrip,
@@ -767,16 +768,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
           title: t("cardChoice.search.title"),
           instruction: subtitle,
         })}
-        headerActions={
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={!countValid}
-            className={menuButtonClass({ tone: "cyan", size: "sm", disabled: !countValid })}
-          >
-            {t("choiceOverlay.confirm")}
-          </button>
-        }
+        headerActions={<ChoiceHeaderConfirm onClick={handleConfirm} disabled={!countValid} />}
       >
         {body}
       </ChoiceOverlay>
@@ -1544,16 +1536,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     return (
       <ChoiceOverlay
         title={subtitle}
-        headerActions={
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={!isReady}
-            className={menuButtonClass({ tone: "cyan", size: "sm", disabled: !isReady })}
-          >
-            {actionLabel}
-          </button>
-        }
+        headerActions={<ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={actionLabel} />}
       >
         {body}
       </ChoiceOverlay>
@@ -2973,14 +2956,7 @@ function DiscardModal({
                 {t("choiceOverlay.cancel")}
               </button>
             )}
-            <button
-              type="button"
-              onClick={handleConfirm}
-              disabled={!isReady}
-              className={menuButtonClass({ tone: "cyan", size: "sm", disabled: !isReady })}
-            >
-              {confirmLabel}
-            </button>
+            <ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
           </>
         }
       >

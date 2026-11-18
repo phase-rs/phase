@@ -8,6 +8,7 @@ import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts"
 import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
 import { CardChoiceModal } from "../CardChoiceModal.tsx";
+import { ChoiceHeaderConfirm } from "../ChoiceOverlay.tsx";
 
 // Issue #11063: on a landscape phone (about 390 CSS px tall) the Search Library
 // prompt and the effect-zone prompts ("Choose 1 card to exile", put on top or
@@ -19,7 +20,8 @@ import { CardChoiceModal } from "../CardChoiceModal.tsx";
 // not say where the cards come from; an effect-zone title only repeats the
 // instruction's verb, so the instruction stands alone. The confirm sits at the
 // end of that line with its usual label, and there is no footer. A taller
-// screen keeps the full layout.
+// screen keeps the full layout. The header confirm is one shared component,
+// ChoiceHeaderConfirm, which the discard prompt uses too.
 
 const dispatchMock = vi.fn();
 vi.mock("../../../hooks/useGameDispatch.ts", () => ({
@@ -353,5 +355,34 @@ describe("Search Library and the effect-zone prompts on a taller screen", () => 
     expect(within(header).getByText("Choose 1 card to exile")).toBeInTheDocument();
     expect(within(header).queryByRole("button")).toBeNull();
     expect(screen.getAllByRole("button", { name: "Exile (0/1)" })).toHaveLength(1);
+  });
+});
+
+describe("ChoiceHeaderConfirm", () => {
+  it("says Confirm unless given a label, at a 44px touch height", () => {
+    const { rerender } = render(<ChoiceHeaderConfirm onClick={vi.fn()} />);
+
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+    expect(confirm).toHaveAttribute("type", "button");
+    expect(confirm).toHaveClass("min-h-11");
+
+    rerender(<ChoiceHeaderConfirm onClick={vi.fn()} label="Exile (1/1)" />);
+    expect(screen.getByRole("button", { name: "Exile (1/1)" })).toHaveClass("min-h-11");
+    expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
+  });
+
+  it("confirms on a click only while enabled", () => {
+    const onClick = vi.fn();
+    const { rerender } = render(<ChoiceHeaderConfirm onClick={onClick} disabled />);
+
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onClick).not.toHaveBeenCalled();
+
+    rerender(<ChoiceHeaderConfirm onClick={onClick} />);
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(onClick).toHaveBeenCalledTimes(1);
   });
 });
