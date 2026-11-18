@@ -44513,7 +44513,7 @@ fn you_attack_unrecognized_tail_fails_closed() {
         assert_eq!(mode, TriggerMode::Unknown(head.to_string()), "{name}");
     }
     let ainok = parse_trigger_line(
-        "Whenever you attack with ~ and/or your commander, draw a card.",
+        "Whenever you attack with this creature and/or your commander, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player.",
         "Ainok Strike Leader",
     );
     assert_eq!(ainok.mode, TriggerMode::YouAttack);

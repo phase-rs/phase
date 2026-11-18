@@ -23,31 +23,45 @@ use engine::types::triggers::TriggerMode;
 const SOL: &str = "Legendary partner (You can have two commanders if this is one of them. The other one is promoted to legendary.)\nFlying, vigilance\nTeamwork — Whenever you attack or block with both Sol, Advocate Eternal and its partner, support 4 and investigate four times.";
 const AINOK_STRIKE_LEADER: &str = "Whenever you attack with this creature and/or your commander, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player.\nSacrifice this creature: Creature tokens you control gain indestructible until end of turn.";
 
-/// CR 603.2 + CR 508.1m: Ainok's trigger is on the stack after the declaration
-/// only when Ainok itself attacks (no commander on this board).
+/// CR 603.2 + CR 508.1m + CR 903.3: Ainok's trigger fires once per declaration
+/// that includes Ainok and/or your commander (Isamaru, Hound of Konda), once
+/// even when both attack (CR 603.2c), and never for an unrelated attacker.
 #[test]
-fn ainok_triggers_only_when_it_attacks() {
-    for ainok_attacks in [false, true] {
+fn ainok_triggers_when_it_or_your_commander_attacks() {
+    for (case, expected) in [("bears", 0), ("ainok", 1), ("commander", 1), ("both", 1)] {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
         let ainok = s
             .add_creature_from_oracle(P0, "Ainok Strike Leader", 2, 2, AINOK_STRIKE_LEADER)
             .id();
+        let isamaru = s
+            .add_creature(P0, "Isamaru, Hound of Konda", 2, 2)
+            .commander()
+            .id();
         let bears = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
         let mut r = s.build();
         r.advance_to_combat();
-        let attacker = if ainok_attacks { ainok } else { bears };
-        r.declare_attackers(&[(attacker, AttackTarget::Player(P1))])
-            .expect("declare one attacker");
-        assert_eq!(
-            r.stack_names(),
-            if ainok_attacks {
-                vec!["Ainok Strike Leader".to_string()]
-            } else {
-                vec![]
-            },
-            "ainok_attacks={ainok_attacks}"
+        let attackers = match case {
+            "bears" => vec![bears],
+            "ainok" => vec![ainok],
+            "commander" => vec![isamaru],
+            _ => vec![ainok, isamaru],
+        };
+        let decl: Vec<_> = attackers
+            .iter()
+            .map(|a| (*a, AttackTarget::Player(P1)))
+            .collect();
+        r.declare_attackers(&decl).expect("declare attackers");
+        assert!(
+            attackers.iter().all(|a| r.state().objects[a].tapped),
+            "reach guard ({case}): the declaration was accepted"
         );
+        let fired = r
+            .stack_names()
+            .iter()
+            .filter(|n| *n == "Ainok Strike Leader")
+            .count();
+        assert_eq!(fired, expected, "{case}");
     }
 }
 
