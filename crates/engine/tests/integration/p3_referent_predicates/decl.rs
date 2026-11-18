@@ -100,16 +100,7 @@ fn ri_ballista(x: u32) -> (u32, u32, WaitingFor) {
     let ballista = add_creature_in_hand(&mut sc, P0, &WALKING_BALLISTA);
     let ri = add_spell(&mut sc, P1, &REJECT_IMPERFECTION);
     let mut r = sc.build();
-    cast_spell(&mut r, ballista);
-    choose_x_if_asked(&mut r, x);
-    assert_eq!(
-        zone(r.state(), ballista),
-        Zone::Stack,
-        "the X spell is on the stack"
-    );
-    let stack_mv = r.state().objects[&ballista]
-        .mana_cost
-        .mana_value_with_x(Zone::Stack, Some(x));
+    let stack_mv = cast_ballista_at_x(&mut r, ballista, x);
     r.act(GameAction::PassPriority).expect("P0 passes");
     cast_spell(&mut r, ri);
     let w = drain(&mut r);
@@ -118,9 +109,7 @@ fn ri_ballista(x: u32) -> (u32, u32, WaitingFor) {
         Zone::Graveyard,
         "reach guard: Ballista was countered"
     );
-    let gy_mv = r.state().objects[&ballista]
-        .mana_cost
-        .mana_value_with_x(Zone::Graveyard, None);
+    let gy_mv = r.state().objects[&ballista].effective_mana_value();
     (stack_mv, gy_mv, w)
 }
 
@@ -135,6 +124,10 @@ fn p3s2a_reject_imperfection_ballista_x2_reads_stack_value() {
     assert!(
         !is_proliferate(&w),
         "stack MV 4 > 3: no proliferate (a live graveyard read of 0 would prompt), got {w:?}"
+    );
+    assert!(
+        matches!(w, WaitingFor::Priority { player: P0 }),
+        "counter spell finished, got {w:?}"
     );
 }
 
@@ -200,17 +193,32 @@ fn p3s2a_sound_the_trumpets_mv3_suppresses_the_whole_recruit() {
 
 /// CR 701.70a: recruit = draw, discard, then a 1/1 white Human Soldier token iff a nonland card was discarded.
 fn recruit_discarding(land: bool) -> usize {
-    let (mut r, mut w, _t) = counter_flow(&SOUND_THE_TRUMPETS, 2, |sc| {
+    let (mut r, w, target) = counter_flow(&SOUND_THE_TRUMPETS, 2, |sc| {
         if land {
             sc.add_land_to_hand(P1, "Held Land");
         } else {
             sc.add_creature_to_hand(P1, "Held Bear", 2, 2);
         }
     });
-    assert!(
-        matches!(w, WaitingFor::DiscardChoice { .. }),
-        "reach guard: discard decision offered, got {w:?}"
+    assert_eq!(
+        zone(r.state(), target),
+        Zone::Graveyard,
+        "Trumpets countered the spell"
     );
+    let WaitingFor::DiscardChoice {
+        player,
+        count,
+        cards,
+        source_id,
+        ..
+    } = w
+    else {
+        panic!("recruit must offer a discard choice, got {w:?}");
+    };
+    assert_eq!(player, P1);
+    assert_eq!(count, 1);
+    assert_eq!(r.state().objects[&source_id].name, SOUND_THE_TRUMPETS.name);
+    assert_eq!(cards.len(), 2, "held card and the freshly drawn card");
     let held = r
         .state()
         .objects
@@ -218,12 +226,51 @@ fn recruit_discarding(land: bool) -> usize {
         .find(|o| o.name == if land { "Held Land" } else { "Held Bear" })
         .expect("held card")
         .id;
-    r.act(GameAction::SelectCards { cards: vec![held] })
-        .expect("discard the held card");
-    w = drain(&mut r);
+    assert!(cards.contains(&held), "selected card was offered");
+    let drawn = cards
+        .into_iter()
+        .find(|&id| id != held)
+        .expect("drawn alternative");
     assert!(
-        matches!(w, WaitingFor::Priority { .. }),
+        r.state().players[1].hand.contains(&held),
+        "held card in hand before selection"
+    );
+    let result = r
+        .act(GameAction::SelectCards { cards: vec![held] })
+        .expect("discard the held card");
+    let discards = result.events.iter().filter(|event| {
+        matches!(
+            event,
+            GameEvent::Discarded { player_id: P1, object_id, source_id: Some(source) }
+                if *object_id == held && *source == source_id
+        )
+    });
+    assert_eq!(
+        discards.count(),
+        1,
+        "Trumpets discarded the selected card exactly once"
+    );
+    let w = drain(&mut r);
+    assert!(
+        matches!(w, WaitingFor::Priority { player: P0 }),
         "resolution completed, got {w:?}"
+    );
+    assert!(r.state().stack.is_empty(), "recruit resolution finished");
+    assert_eq!(
+        zone(r.state(), source_id),
+        Zone::Graveyard,
+        "Trumpets finished"
+    );
+    assert_eq!(
+        zone(r.state(), held),
+        Zone::Graveyard,
+        "selected card was discarded"
+    );
+    assert!(r.state().players[1].graveyard.contains(&held));
+    assert_eq!(
+        zone(r.state(), drawn),
+        Zone::Hand,
+        "the unchosen card stayed in hand"
     );
     r.state()
         .objects
@@ -376,8 +423,7 @@ fn p3s2a_triumph_ballista_x_is_zero_on_the_battlefield_so_it_returns() {
     let ballista = add_creature_in_hand(&mut sc, P0, &WALKING_BALLISTA);
     let triumph = add_spell(&mut sc, P0, &VINDICTIVE_TRIUMPH);
     let mut r = sc.build();
-    cast_spell(&mut r, ballista);
-    choose_x_if_asked(&mut r, 2);
+    assert_eq!(cast_ballista_at_x(&mut r, ballista, 2), 4);
     let w = drain(&mut r);
     assert!(matches!(w, WaitingFor::Priority { .. }));
     assert_eq!(
@@ -385,16 +431,7 @@ fn p3s2a_triumph_ballista_x_is_zero_on_the_battlefield_so_it_returns() {
         Zone::Battlefield,
         "precondition: Ballista resolved with X=2"
     );
-    let on_stack_mv = r
-        .state()
-        .lki_by_incarnation
-        .get(&ballista)
-        .map(|h| h.values().map(|s| s.mana_value).collect::<Vec<_>>())
-        .unwrap_or_default();
-    assert!(
-        on_stack_mv.contains(&4),
-        "the stack exit recorded MV 4 for the first incarnation: {on_stack_mv:?}"
-    );
+    assert_eq!(r.state().objects[&ballista].effective_mana_value(), 0);
     let out = r.cast(triumph).target_object(ballista).resolve();
     let returned = out.events().iter().any(|e| {
         matches!(e, GameEvent::ZoneChanged { object_id, from: Some(Zone::Exile), to: Zone::Battlefield, .. } if *object_id == ballista)

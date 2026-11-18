@@ -70,6 +70,15 @@ pub const CHOKING_SANDS: Printed = Printed {
     oracle: "Destroy target non-Swamp land. If that land was nonbasic, Choking Sands deals 2 damage to the land's controller.",
 };
 
+pub const COUNTERSPELL: Printed = Printed {
+    name: "Counterspell",
+    cost: "{U}{U}",
+    type_line: "Instant",
+    pt: None,
+    keywords: &[],
+    oracle: "Counter target spell.",
+};
+
 pub const DARKSTEEL_INGOT: Printed = Printed {
     name: "Darksteel Ingot",
     cost: "{3}",
@@ -368,6 +377,7 @@ pub const ALL: &[&Printed] = &[
     &BURNING_HANDS,
     &CARNIVOROUS_CANOPY,
     &CHOKING_SANDS,
+    &COUNTERSPELL,
     &DARKSTEEL_INGOT,
     &DEEKAH_FRACTAL_THEORIST,
     &ENDLESS_SWARM,

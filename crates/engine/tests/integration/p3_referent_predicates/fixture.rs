@@ -6,7 +6,7 @@ use super::oracle::Printed;
 use engine::game::scenario::{CardBuilder, GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -148,13 +148,24 @@ pub fn cast_spell(runner: &mut GameRunner, object_id: ObjectId) {
         .unwrap_or_else(|e| panic!("cast {object_id:?}: {e:?}"));
 }
 
-/// Announce X for the spell just cast, when the engine asks for it (CR 107.3 + CR 601.2b).
-pub fn choose_x_if_asked(runner: &mut GameRunner, x: u32) {
-    if let WaitingFor::ChooseXValue { .. } = runner.state().waiting_for {
-        runner
-            .act(GameAction::ChooseX { value: x })
-            .expect("choose X");
-    }
+/// CR 107.3a + CR 202.3e: announce X, then read the committed spell's mana value.
+pub fn cast_ballista_at_x(runner: &mut GameRunner, ballista: ObjectId, x: u32) -> u32 {
+    let cast = runner.cast(ballista).x(x).commit();
+    let entry = cast
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.id == ballista)
+        .expect("Ballista was committed to the stack");
+    assert!(matches!(entry.kind, StackEntryKind::Spell { .. }));
+    let object = &cast.state().objects[&entry.id];
+    assert_eq!(object.zone, Zone::Stack);
+    assert_eq!(
+        object.cost_x_paid,
+        Some(x),
+        "announced X on the committed spell"
+    );
+    object.effective_mana_value()
 }
 
 /// Pass priority until the stack is empty or a non-priority decision appears; returns the decision.

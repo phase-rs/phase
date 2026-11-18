@@ -6,10 +6,11 @@ use super::fixture::*;
 use super::oracle::*;
 use engine::game::scenario::{GameRunner, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CopyChoiceMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::zones::Zone;
@@ -73,7 +74,7 @@ fn p3s2a_herald_mv4_puts_two_counters_and_no_damage() {
 /// P0 casts a creature spell (Herald triggers, the trigger is above the spell), P1 answers the TRIGGER with the
 /// real Essence Scatter at the spell: the spell is countered first (ruling 2024-02-02: the trigger resolves anyway).
 /// `x`: cast Walking Ballista with that X instead of a filler of mana value `mv`.
-fn herald_countered(mv: u32, x: Option<u32>) -> (GameRunner, ObjectId, ObjectId, GameState) {
+fn herald_countered(mv: u32, x: Option<u32>) -> (GameRunner, ObjectId) {
     let mut sc = scenario();
     let extra = x.map_or(mv as usize, |x| 2 * x as usize);
     sc.with_mana_pool(P0, mana_for(&[], extra));
@@ -88,26 +89,20 @@ fn herald_countered(mv: u32, x: Option<u32>) -> (GameRunner, ObjectId, ObjectId,
     };
     let scatter = add_spell(&mut sc, P1, &ESSENCE_SCATTER);
     let mut r = sc.build();
-    cast_spell(&mut r, spell);
     if let Some(x) = x {
-        choose_x_if_asked(&mut r, x);
+        assert_eq!(
+            cast_ballista_at_x(&mut r, spell, x),
+            2 * x,
+            "CR 202.3e: X counts twice for {{X}}{{X}} on the stack"
+        );
+    } else {
+        cast_spell(&mut r, spell);
     }
-    let stack_before = r.state().clone();
     assert_eq!(
         r.state().stack.len(),
         2,
         "the spell and Herald's trigger are on the stack"
     );
-    if let Some(x) = x {
-        let stack_mv = r.state().objects[&spell]
-            .mana_cost
-            .mana_value_with_x(Zone::Stack, Some(x));
-        assert_eq!(
-            stack_mv,
-            2 * x,
-            "CR 202.3e: X counts twice for {{X}}{{X}} on the stack"
-        );
-    }
     r.act(GameAction::PassPriority).expect("P0 passes");
     cast_spell(&mut r, scatter);
     let w = drain(&mut r);
@@ -120,7 +115,14 @@ fn herald_countered(mv: u32, x: Option<u32>) -> (GameRunner, ObjectId, ObjectId,
         Zone::Graveyard,
         "reach guard: the spell was countered"
     );
-    (r, herald, spell, stack_before)
+    if x.is_some() {
+        assert_eq!(
+            r.state().objects[&spell].effective_mana_value(),
+            0,
+            "X is zero off the stack"
+        );
+    }
+    (r, herald)
 }
 
 #[test]
@@ -151,14 +153,7 @@ fn p3s2a_herald_mv4_spell_countered_first_no_damage() {
 
 #[test]
 fn p3s2a_herald_ballista_x3_countered_first_reads_stack_value() {
-    let (r, herald, spell, _) = herald_countered(0, Some(3));
-    let gy_mv = r.state().objects[&spell]
-        .mana_cost
-        .mana_value_with_x(Zone::Graveyard, None);
-    assert_eq!(
-        gy_mv, 0,
-        "operands differ: stack MV 6 (X=3) versus graveyard MV 0"
-    );
+    let (r, herald) = herald_countered(0, Some(3));
     assert_eq!(
         plus_counters(r.state(), herald),
         2,
@@ -283,55 +278,198 @@ fn countered_adventure_keeps_its_spell_face_for_both_mana_value_gates() {
     );
 }
 
-/// P0 casts Overrun (sorcery, MV 5), then Twincast (instant, MV 2) targeting it. Triggers of the magecraft ability:
-/// cast Overrun (MV 5), cast Twincast (MV 2), copy of Overrun (MV 5). Printed: counters on the first and the third = 2.
-fn prismari_twincast() -> (GameRunner, ObjectId, Vec<GameEvent>) {
-    let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[OVERRUN.cost, TWINCAST.cost], 0));
-    let p = add_prismari(&mut sc);
-    let overrun = add_spell(&mut sc, P0, &OVERRUN);
-    let twincast = add_spell(&mut sc, P0, &TWINCAST);
-    let mut r = sc.build();
-    let mut c = r.cast(overrun).commit();
-    let mut events: Vec<GameEvent> = c.events().to_vec();
-    let c2 = c.cast(twincast).target_object(overrun).commit();
-    let out = c2.resolve(); // `out.events()` already contains the commit events of this cast
-    events.extend(out.events().to_vec());
-    engine::game::layers::evaluate_layers(r.state_mut());
-    (r, p, events)
+/// Pass only until the named top entry leaves, retaining its public action events.
+fn finish_top(r: &mut GameRunner, id: ObjectId) -> Vec<GameEvent> {
+    assert_eq!(r.state().stack.back().map(|entry| entry.id), Some(id));
+    let mut events = Vec::new();
+    for _ in 0..r.state().players.len() {
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+        events.extend(r.act(GameAction::PassPriority).expect("pass").events);
+        if r.state().stack.iter().all(|entry| entry.id != id) {
+            return events;
+        }
+    }
+    panic!("{id:?} did not finish after every player passed");
 }
 
-fn census(events: &[GameEvent]) -> (usize, usize, usize) {
-    let cast = events
-        .iter()
-        .filter(|e| matches!(e, GameEvent::SpellCast { .. }))
-        .count();
-    let copied = events
-        .iter()
-        .filter(|e| matches!(e, GameEvent::SpellCopied { .. }))
-        .count();
-    let added = events
-        .iter()
-        .filter(|e| matches!(e, GameEvent::CounterAdded { .. }))
-        .count();
-    (cast, copied, added)
+fn prismari_trigger(
+    r: &GameRunner,
+    apprentice: ObjectId,
+    cause: impl FnOnce(&GameEvent) -> bool,
+) -> ObjectId {
+    let entry = r.state().stack.back().expect("magecraft trigger");
+    let StackEntryKind::TriggeredAbility {
+        source_id,
+        trigger_event: Some(event),
+        ..
+    } = &entry.kind
+    else {
+        panic!("expected a magecraft trigger at the top, got {entry:?}");
+    };
+    assert_eq!(*source_id, apprentice);
+    assert!(
+        cause(event),
+        "unexpected magecraft trigger event: {event:?}"
+    );
+    entry.id
 }
 
-/// CR 707.10: the copy of Overrun is a spell on the stack, not cast; the magecraft ability's "copy" half fires on it.
+fn prismari_cast_trigger(r: &GameRunner, apprentice: ObjectId, cast: ObjectId) -> ObjectId {
+    prismari_trigger(r, apprentice, |event| {
+        matches!(
+            event,
+            GameEvent::SpellCast { card_id: _, controller: P0, object_id, cast_mana_value: _ }
+                if *object_id == cast
+        )
+    })
+}
+
+fn prismari_copy_trigger(
+    r: &GameRunner,
+    apprentice: ObjectId,
+    copy: ObjectId,
+    original: ObjectId,
+) -> ObjectId {
+    prismari_trigger(r, apprentice, |event| {
+        matches!(
+            event,
+            GameEvent::SpellCopied { card_id: _, controller: P0, object_id, original_id }
+                if *object_id == copy && *original_id == original
+        )
+    })
+}
+
+fn copied_spell(r: &GameRunner, events: &[GameEvent], original: ObjectId) -> ObjectId {
+    let mut copies = events.iter().filter_map(|event| {
+        let GameEvent::SpellCopied {
+            card_id,
+            controller,
+            object_id,
+            original_id,
+        } = event
+        else {
+            return None;
+        };
+        assert_eq!(*controller, P0);
+        assert_eq!(*original_id, original);
+        assert_eq!(*card_id, r.state().objects[&original].card_id);
+        Some(*object_id)
+    });
+    let copy = copies.next().expect("a SpellCopied event");
+    assert!(copies.next().is_none(), "Twincast copied the spell once");
+    assert_ne!(copy, original);
+    assert!(
+        r.state().stack.iter().any(|entry| {
+            entry.id == copy
+                && entry.controller == P0
+                && matches!(entry.kind, StackEntryKind::Spell { .. })
+        }),
+        "the event names P0's new spell on the stack"
+    );
+    assert!(r.state().objects[&copy].is_copy);
+    copy
+}
+
+/// CR 608.2h + CR 707.10: read the copied spell on the stack, or its stack characteristics
+/// if it was countered and ceased to exist before its own magecraft trigger resolved.
 #[test]
-fn p3s2a_prismari_twincast_copy_of_mv5_spell_earns_a_second_counter() {
-    let (r, p, events) = prismari_twincast();
-    let (cast, copied, _added) = census(&events);
-    assert_eq!(
-        (cast, copied),
-        (2, 1),
-        "reach guard: two casts (Overrun, Twincast) and one copy (of Overrun)"
-    );
-    assert_eq!(
-        plus_counters(r.state(), p),
-        2,
-        "cast of Overrun (MV 5) and copy of Overrun (MV 5); Twincast (MV 2) earns none"
-    );
+fn p3s2a_prismari_copy_magecraft_reads_live_and_countered_overrun() {
+    for (card, response, expected_mv, expected_gain) in [
+        (&OVERRUN, None, 5, 1),
+        (&OVERRUN, Some(&COUNTERSPELL), 5, 1),
+        (&HARMONIZE, Some(&COUNTERSPELL), 4, 0),
+    ] {
+        let mut sc = scenario();
+        sc.with_mana_pool(P0, mana_for(&[card.cost, TWINCAST.cost], 0));
+        let counter = response.map(|response| {
+            sc.with_mana_pool(P1, mana_for(&[response.cost], 0));
+            add_spell(&mut sc, P1, response)
+        });
+        let apprentice = add_prismari(&mut sc);
+        let original = add_spell(&mut sc, P0, card);
+        let twincast = add_spell(&mut sc, P0, &TWINCAST);
+        let mut r = sc.build();
+
+        r.cast(original).commit();
+        let cast_trigger = prismari_cast_trigger(&r, apprentice, original);
+        finish_top(&mut r, cast_trigger);
+        assert_eq!(r.state().stack.back().map(|entry| entry.id), Some(original));
+        let before_copy = plus_counters(r.state(), apprentice);
+        assert_eq!(before_copy, expected_gain, "the original spell's magecraft");
+
+        r.cast(twincast).target_object(original).commit();
+        let cast_trigger = prismari_cast_trigger(&r, apprentice, twincast);
+        finish_top(&mut r, cast_trigger);
+        let events = finish_top(&mut r, twincast);
+        let copy = copied_spell(&r, &events, original);
+        let copy_trigger = prismari_copy_trigger(&r, apprentice, copy, original);
+        assert_eq!(
+            r.state().stack.len(),
+            3,
+            "original, copy, and one copy trigger"
+        );
+        assert_eq!(r.state().objects[&copy].effective_mana_value(), expected_mv);
+        assert_eq!(plus_counters(r.state(), apprentice), before_copy);
+
+        if let Some(counter) = counter {
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
+            r.act(GameAction::PassPriority).expect("P0 passes to P1");
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ));
+            r.cast(counter).target_object(copy).commit();
+            let events = finish_top(&mut r, counter);
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::SpellCountered { object_id, countered_by, countered_by_controller: P1 }
+                    if *object_id == copy && *countered_by == counter
+            )), "Counterspell countered the specific copy");
+            assert!(
+                !r.state().objects.contains_key(&copy),
+                "CR 704.5e: the copy ceased to exist"
+            );
+            assert_eq!(
+                r.state().stack.len(),
+                2,
+                "original and the pending copy trigger"
+            );
+            assert_eq!(
+                prismari_copy_trigger(&r, apprentice, copy, original),
+                copy_trigger
+            );
+            assert_eq!(plus_counters(r.state(), apprentice), before_copy);
+        }
+
+        finish_top(&mut r, copy_trigger);
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert_eq!(r.state().stack.len(), if counter.is_some() { 1 } else { 2 });
+        assert_eq!(
+            zone(r.state(), original),
+            Zone::Stack,
+            "original remains on the stack"
+        );
+        if counter.is_none() {
+            assert_eq!(
+                zone(r.state(), copy),
+                Zone::Stack,
+                "live leg did not resolve the copy"
+            );
+        }
+        assert_eq!(
+            plus_counters(r.state(), apprentice),
+            before_copy + expected_gain,
+            "{} copy magecraft, countered: {}",
+            card.name,
+            counter.is_some()
+        );
+    }
 }
 
 // ---------------------------------------------------------------- Deekah / Zaffai controls (supported at base)
@@ -376,7 +514,6 @@ fn p3s2a_deekah_tokens_carry_the_triggering_spells_mana_value() {
 /// Overrun, the cast of Twincast and the copy of Overrun make three, each collected once.
 #[test]
 fn p3s2a_prismari_twincast_trigger_events() {
-    use engine::types::game_state::StackEntryKind;
     let mut sc = scenario();
     sc.with_mana_pool(P0, mana_for(&[OVERRUN.cost, TWINCAST.cost], 0));
     let p = add_prismari(&mut sc);
@@ -474,39 +611,8 @@ fn p3s2a_epic_copy_triggers_prismari_apprentice_once() {
 
 // ---------------------------------------------------------------- copy of a targeted spell (CopyRetarget walk)
 
-/// Pass priority (keeping copy targets when asked) until the stack is empty; every Prismari trigger that reaches the stack is
-/// recorded once by its stack id.
-fn prismari_triggers_through(r: &mut GameRunner, p: ObjectId) -> usize {
-    use engine::types::game_state::StackEntryKind;
-    let mut seen: Vec<ObjectId> = Vec::new();
-    for _ in 0..60 {
-        for e in r.state().stack.iter() {
-            if let StackEntryKind::TriggeredAbility { source_id, .. } = &e.kind {
-                if *source_id == p && !seen.contains(&e.id) {
-                    seen.push(e.id);
-                }
-            }
-        }
-        if r.state().stack.is_empty() {
-            break;
-        }
-        match r.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } => {
-                r.act(GameAction::PassPriority).expect("pass");
-            }
-            WaitingFor::CopyRetarget { .. } => {
-                r.act(GameAction::KeepAllCopyTargets)
-                    .expect("keep copy targets");
-            }
-            other => panic!("unexpected decision {other:?}"),
-        }
-    }
-    seen.len()
-}
-
-/// CR 603.2c + CR 707.10: Twincast copying a TARGETED spell goes through the CopyRetarget walk, which must not collect the
-/// copy event a second time. Printed: magecraft triggers for the
-/// cast of Lightning Bolt, the cast of Twincast and the copy of Bolt = 3.
+/// CR 603.2c + CR 707.10c: Twincast copying a targeted Bolt opens the real retarget
+/// prompt. Keeping the targets must resume Twincast without enrolling magecraft twice.
 #[test]
 fn p3s2a_prismari_twincast_on_targeted_spell_triggers_three_times() {
     let mut sc = scenario();
@@ -515,10 +621,83 @@ fn p3s2a_prismari_twincast_on_targeted_spell_triggers_three_times() {
     let bolt = add_spell(&mut sc, P0, &LIGHTNING_BOLT);
     let twincast = add_spell(&mut sc, P0, &TWINCAST);
     let mut r = sc.build();
-    let mut c = r.cast(bolt).target_player(P1).commit();
-    let _c2 = c.cast(twincast).target_object(bolt).commit();
-    let n = prismari_triggers_through(&mut r, p);
-    assert_eq!(n, 3, "cast Bolt, cast Twincast, copy of Bolt");
+    r.cast(bolt).target_player(P1).commit();
+    assert_eq!(r.state().stack.len(), 2, "Bolt and one magecraft trigger");
+    let cast_trigger = prismari_cast_trigger(&r, p, bolt);
+    finish_top(&mut r, cast_trigger);
+    assert_eq!(r.state().stack.len(), 1);
+
+    r.cast(twincast).target_object(bolt).commit();
+    assert_eq!(
+        r.state().stack.len(),
+        3,
+        "Bolt, Twincast, and one magecraft trigger"
+    );
+    let cast_trigger = prismari_cast_trigger(&r, p, twincast);
+    finish_top(&mut r, cast_trigger);
+    let events = finish_top(&mut r, twincast);
+    let copy = copied_spell(&r, &events, bolt);
+    let WaitingFor::CopyRetarget {
+        player,
+        copy_id,
+        mode,
+        target_slots,
+        can_keep_rest,
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "the targeted copy must offer retargeting, got {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(
+        (*player, *copy_id, *mode),
+        (P0, copy, Some(CopyChoiceMode::Retarget))
+    );
+    assert_eq!(target_slots.len(), 1);
+    assert_eq!(target_slots[0].current, Some(TargetRef::Player(P1)));
+    assert!(*can_keep_rest);
+
+    let resume = r
+        .act(GameAction::KeepAllCopyTargets)
+        .expect("keep copy targets");
+    assert!(
+        resume.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::CopySpell, source_id, subject: _ }
+                if *source_id == copy
+        )),
+        "keeping the target completed this copy effect"
+    );
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        r.state().stack.len(),
+        3,
+        "Bolt, copy, and exactly one copy-caused trigger"
+    );
+    let copy_trigger = prismari_copy_trigger(&r, p, copy, bolt);
+    finish_top(&mut r, copy_trigger);
+    assert_eq!(
+        r.state().stack.len(),
+        2,
+        "the one copy-caused trigger is finished"
+    );
+    let w = drain(&mut r);
+    assert!(r.state().stack.is_empty());
+    assert!(
+        matches!(w, WaitingFor::Priority { player: P0 }),
+        "finished, got {w:?}"
+    );
+    assert_eq!(life(r.state(), P1), 14, "both Bolts resolved on P1");
+    assert_eq!(
+        plus_counters(r.state(), p),
+        0,
+        "all three spells have mana value below five"
+    );
 }
 
 /// CR 608.2h + CR 400.7: Prismari Apprentice's trigger for the FIRST cast of a spell reads that cast's last known mana value even

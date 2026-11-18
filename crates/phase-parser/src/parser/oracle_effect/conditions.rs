@@ -62,15 +62,18 @@ use crate::types::zones::Zone;
 /// or event incarnation to choose live versus exit information (CR 608.2h).
 /// `subject_slot` selects a specific declared chain slot (`None` = the node's own referent).
 /// `negated` forms wrap the result with [`maybe_negate`].
-pub(super) fn referent_condition(
+fn referent_condition(
     filter: TargetFilter,
-    use_lki: bool,
+    tense: ReferentTense,
     subject: ObjectScope,
     subject_slot: Option<usize>,
 ) -> AbilityCondition {
     AbilityCondition::TargetMatchesFilter {
         filter,
-        use_lki,
+        use_lki: match tense {
+            ReferentTense::Present => false,
+            ReferentTense::Past => true,
+        },
         subject_slot,
         subject,
     }
@@ -728,7 +731,7 @@ pub(super) fn strip_target_declaring_chosen_type_conditional(
     Some((
         referent_condition(
             TargetFilter::Typed(typed),
-            false,
+            ReferentTense::Present,
             ObjectScope::Target,
             Some(0),
         ),
@@ -803,7 +806,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                         TypedFilter::creature()
                             .properties(vec![FilterProp::IsChosenCreatureType])
                             .into(),
-                        false,
+                        ReferentTense::Present,
                         ObjectScope::Target,
                         None,
                     ),
@@ -1710,7 +1713,7 @@ pub(super) fn card_type_condition_as_target_match(
         // riders evaluate; use last-known information so a creature that is being
         // destroyed this way still matches.
         TargetFilter::Typed(TypedFilter::new(core_type_to_type_filter(*core))),
-        true,
+        ReferentTense::Past,
         ObjectScope::Target,
         None,
     ))
@@ -2117,7 +2120,7 @@ fn parse_its_a_card_type_gate_body<'a>(
             }
             return Some((
                 maybe_negate(
-                    referent_condition(filter, false, ObjectScope::Target, None),
+                    referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
                     negated,
                 ),
                 after_type,
@@ -2876,7 +2879,7 @@ fn parse_target_attacked_this_turn_condition(
                     TypedFilter::creature()
                         .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
                 ),
-                false,
+                ReferentTense::Present,
                 ObjectScope::Target,
                 None,
             ),
@@ -2951,7 +2954,7 @@ fn parse_target_entered_this_turn_condition(input: &str) -> OracleResult<'_, Abi
     }
     Ok((
         rest,
-        referent_condition(filter, false, ObjectScope::Target, None),
+        referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
     ))
 }
 
@@ -3255,54 +3258,27 @@ fn parse_referent_predicate(
             ))
         }
         ReferentSurface::Supertype => {
-            // CR 205.4: Subject anaphor + copula, tracking negation. "it" carries the `'s`
-            // contraction; the explicit "that creature/permanent/card" anaphors (Coiling
-            // Rebirth: "that creature isn't legendary") use the full copula.
+            // CR 205.4: Coiling Rebirth uses a demonstrative subject in the routed
+            // condition; the specialized suffix accepts only "it".
             let (rest, polarity) = alt((
-                value(
-                    ReferentPolarity::Negative,
-                    alt((tag("it is not "), tag("it's not "), tag("it isn't "))),
-                ),
-                value(
-                    ReferentPolarity::Affirmative,
-                    alt((tag("it is "), tag("it's "))),
-                ),
-                value(
-                    ReferentPolarity::Negative,
-                    (
-                        alt((
-                            tag("that creature"),
-                            tag("that permanent"),
-                            tag("that card"),
-                        )),
-                        alt((tag(" is not "), tag(" isn't "))),
-                    ),
-                ),
-                value(
-                    ReferentPolarity::Affirmative,
-                    (
-                        alt((
-                            tag("that creature"),
-                            tag("that permanent"),
-                            tag("that card"),
-                        )),
-                        tag(" is "),
-                    ),
+                parse_it_supertype_copula,
+                preceded(
+                    alt((
+                        tag("that creature"),
+                        tag("that permanent"),
+                        tag("that card"),
+                    )),
+                    alt((
+                        value(
+                            ReferentPolarity::Negative,
+                            alt((tag(" is not "), tag(" isn't "))),
+                        ),
+                        value(ReferentPolarity::Affirmative, tag(" is ")),
+                    )),
                 ),
             ))
             .parse(input)?;
-            let (rest, supertype) = parse_supertype_word(rest)?;
-            Ok((
-                rest,
-                ReferentClause::filter(
-                    TargetFilter::Typed(
-                        TypedFilter::default()
-                            .properties(vec![FilterProp::HasSupertype { value: supertype }]),
-                    ),
-                    polarity,
-                    ReferentTense::Present,
-                ),
-            ))
+            parse_supertype_predicate(rest, polarity)
         }
         ReferentSurface::NonbasicLand => {
             // CR 205.4 + CR 608.2h: Molten Rain's "was nonbasic" sets the LKI
@@ -3470,7 +3446,7 @@ fn lower_referent_stat(
         ItsReferent::Target | ItsReferent::CostPaid => {
             return Some(referent_condition(
                 stat_threshold_filter(stat, comparator, threshold),
-                false,
+                ReferentTense::Present,
                 ObjectScope::Target,
                 None,
             ));
@@ -3517,11 +3493,7 @@ fn lower_referent_filter(
         ReferentPolarity::Affirmative => false,
         ReferentPolarity::Negative => true,
     };
-    let use_lki = match tense {
-        ReferentTense::Present => false,
-        ReferentTense::Past => true,
-    };
-    maybe_negate(referent_condition(filter, use_lki, subject, None), negated)
+    maybe_negate(referent_condition(filter, tense, subject, None), negated)
 }
 
 /// Owner + lowering for the router entry points (the remainder is returned for `all_consuming`).
@@ -3794,37 +3766,24 @@ pub(super) fn strip_property_conditional(
     text: &str,
     ctx: &ParseContext,
 ) -> (Option<AbilityCondition>, String) {
-    let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-
-    for (property, pattern) in [
-        ("power", " if its power is "),
-        ("toughness", " if its toughness is "),
-    ] {
-        let Some((before, after)) = tp.rsplit_around(pattern) else {
-            continue;
-        };
-        let clause_text = format!("its {property} is {}", after.lower);
-        let Ok((_, clause)) = parse_referent_predicate(&clause_text, ReferentSurface::ItsStat)
-        else {
-            continue;
-        };
-        let ReferentPredicate::Stat {
-            stat,
-            comparator,
-            threshold,
-        } = clause.predicate
-        else {
-            continue;
-        };
-        let referent = bind_possessive_it(ctx, before.original);
-        let Some(condition) = lower_referent_stat(referent, stat, comparator, threshold) else {
-            return (None, text.to_string());
-        };
-        return (Some(condition), before.original.to_string());
+    let Some((before, clause)) = parse_trailing_referent(text, |input| {
+        parse_referent_predicate(input, ReferentSurface::ItsStat)
+    }) else {
+        return (None, text.to_string());
+    };
+    let ReferentPredicate::Stat {
+        stat,
+        comparator,
+        threshold,
+    } = clause.predicate
+    else {
+        return (None, text.to_string());
+    };
+    let referent = bind_possessive_it(ctx, before);
+    match lower_referent_stat(referent, stat, comparator, threshold) {
+        Some(condition) => (Some(condition), before.to_string()),
+        None => (None, text.to_string()),
     }
-
-    (None, text.to_string())
 }
 
 // `PlayerProperty` / `parse_player_property_keyword` / `player_property_quantity`
@@ -4591,14 +4550,13 @@ pub(super) fn strip_counter_conditional(
 /// Handles the class of cards that conditionally apply effects based on target mana value
 /// (Fatal Push, Anoint with Affliction, Angrath, Cosmic Rebirth, etc.).
 pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityCondition>, String) {
-    let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-
     // Leading "If its mana value was N or less/greater, [effect]" (LKI hint)
     // and "If it has mana value N or less/greater, [effect]" (no hint).
     // CR 608.2h: either tense can read a pinned exit snapshot if the object left.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower.as_str()) {
-        if let Ok((rest, clause)) = parse_referent_predicate(rest, ReferentSurface::ManaValueFixed)
+    if let Ok((tail, _)) = tag_no_case::<_, _, OracleError<'_>>("if ").parse(text) {
+        let lower = tail.to_lowercase();
+        if let Ok((rest, clause)) =
+            parse_referent_predicate(lower.as_str(), ReferentSurface::ManaValueFixed)
         {
             if let Ok((rest, _)) = preceded(
                 multispace0::<_, OracleError<'_>>,
@@ -4606,10 +4564,10 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
             )
             .parse(rest)
             {
-                let body_start = text.len() - rest.len();
+                let consumed = lower.len() - rest.len();
                 return (
                     Some(lower_referent_clause(clause, ObjectScope::Target)),
-                    text[body_start..].to_string(),
+                    tail[consumed..].to_string(),
                 );
             }
         }
@@ -4618,36 +4576,13 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     // Suffix position: "[effect] if its mana value was N or less/greater" / "[effect] if it
     // has mana value N or less/greater" (fixed threshold) and "[effect] if its mana value is
     // less than or equal to [quantity]" (dynamic threshold).
-    for (pattern, subject_text, surface) in [
-        (
-            " if its mana value was ",
-            "its mana value was ",
-            ReferentSurface::ManaValueFixed,
-        ),
-        (
-            " if its mana value is ",
-            "its mana value is ",
-            ReferentSurface::ManaValueDynamic,
-        ),
-        (
-            " if it has mana value ",
-            "it has mana value ",
-            ReferentSurface::ManaValueFixed,
-        ),
-    ] {
-        if let Some((before, after)) = tp.rsplit_around(pattern) {
-            let clause_text = format!("{subject_text}{}", after.lower.trim());
-            let clause_text = clause_text.trim_end_matches('.');
-            if let Ok((_, clause)) = parse_referent_predicate(clause_text, surface) {
-                return (
-                    Some(lower_referent_clause(clause, ObjectScope::Target)),
-                    before.original.trim_end_matches('.').trim().to_string(),
-                );
-            }
-        }
-    }
-
-    (None, text.to_string())
+    strip_trailing_target_referent(text, |input| {
+        alt((
+            |input| parse_referent_predicate(input, ReferentSurface::ManaValueFixed),
+            |input| parse_referent_predicate(input, ReferentSurface::ManaValueDynamic),
+        ))
+        .parse(input)
+    })
 }
 
 /// CR 608.2c: Strip trailing "if it has the [least|greatest] <property> among
@@ -4902,66 +4837,60 @@ fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, Quantit
 }
 
 pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityCondition>, String) {
-    let lower = text.to_lowercase();
-    let tp = TextPair::new(text, &lower);
-
     // Leading "if that land was nonbasic, [effect]" (Molten Rain).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower.as_str()) {
-        if let Ok((rest, clause)) = parse_referent_predicate(rest, ReferentSurface::NonbasicLand) {
+    if let Ok((tail, _)) = tag_no_case::<_, _, OracleError<'_>>("if ").parse(text) {
+        let lower = tail.to_lowercase();
+        if let Ok((rest, clause)) =
+            parse_referent_predicate(lower.as_str(), ReferentSurface::NonbasicLand)
+        {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(", ").parse(rest) {
-                let body_start = text.len() - rest.len();
+                let consumed = lower.len() - rest.len();
                 return (
                     Some(lower_referent_clause(clause, ObjectScope::Target)),
-                    text[body_start..].to_string(),
+                    tail[consumed..].to_string(),
                 );
             }
         }
     }
 
-    // Suffix "[effect] if that land was nonbasic".
-    if let Some((before, after)) = tp.rsplit_around(" if that land was ") {
-        let clause_text = format!("that land was {}", after.lower.trim());
-        let parsed = all_consuming(terminated(
-            |i| parse_referent_predicate(i, ReferentSurface::NonbasicLand),
-            opt(tag(".")),
+    strip_trailing_target_referent(text, |input| {
+        alt((
+            |input| parse_referent_predicate(input, ReferentSurface::NonbasicLand),
+            |input| {
+                let (rest, polarity) = parse_it_supertype_copula(input)?;
+                parse_supertype_predicate(rest, polarity)
+            },
         ))
-        .parse(clause_text.as_str())
-        .ok()
-        .map(|(_, clause)| clause);
-        if let Some(clause) = parsed {
-            return (
-                Some(lower_referent_clause(clause, ObjectScope::Target)),
-                before.original.trim_end_matches('.').trim().to_string(),
-            );
-        }
-    }
+        .parse(input)
+    })
+}
 
-    // Suffix "[effect] if it's [not] <supertype>" (CR 205.4).
-    for (pattern, subject_text) in [
-        (" if it's ", "it's "),
-        (" if it is ", "it is "),
-        (" if it isn't ", "it isn't "),
-        (" if it's not ", "it's not "),
-        (" if it is not ", "it is not "),
-    ] {
-        if let Some((before, after)) = tp.rsplit_around(pattern) {
-            let clause_text = format!("{subject_text}{}", after.lower.trim_end_matches('.').trim());
-            let Ok((rest, clause)) =
-                parse_referent_predicate(&clause_text, ReferentSurface::Supertype)
-            else {
-                continue;
-            };
-            if !rest.trim().is_empty() {
-                continue;
-            }
-            return (
-                Some(lower_referent_clause(clause, ObjectScope::Target)),
-                before.original.trim_end_matches('.').trim().to_string(),
-            );
-        }
-    }
+fn parse_trailing_referent<'a>(
+    text: &'a str,
+    parse: impl for<'i> Fn(&'i str) -> OracleResult<'i, ReferentClause>,
+) -> Option<(&'a str, ReferentClause)> {
+    let boundary = find_trailing_condition_start(text)?;
+    let (suffix, _) = tag_no_case::<_, _, OracleError<'_>>(" if ")
+        .parse(&text[boundary..])
+        .ok()?;
+    let lower = suffix.trim().trim_end_matches('.').to_lowercase();
+    let (_, clause) = all_consuming(terminated(parse, multispace0))
+        .parse(lower.as_str())
+        .ok()?;
+    Some((&text[..boundary], clause))
+}
 
-    (None, text.to_string())
+fn strip_trailing_target_referent(
+    text: &str,
+    parse: impl for<'i> Fn(&'i str) -> OracleResult<'i, ReferentClause>,
+) -> (Option<AbilityCondition>, String) {
+    match parse_trailing_referent(text, parse) {
+        Some((before, clause)) => (
+            Some(lower_referent_clause(clause, ObjectScope::Target)),
+            before.trim_end_matches('.').trim().to_string(),
+        ),
+        None => (None, text.to_string()),
+    }
 }
 
 /// CR 608.2c: Start of the trailing condition clause. Normally the last
@@ -4970,23 +4899,7 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
 /// chain's FIRST " if " so `parse_or_if_disjunction` sees every disjunct instead
 /// of the effect text swallowing the leading ones.
 fn find_trailing_condition_start(text: &str) -> Option<usize> {
-    let mut positions = top_level_if_positions(text);
-    let mut start = positions.pop()?;
-    while let Some(previous) = positions.pop() {
-        let continues_or_if_chain = start
-            .checked_sub(" or".len())
-            .and_then(|or_pos| text.get(or_pos..))
-            .is_some_and(|tail| tag::<_, _, OracleError<'_>>(" or if ").parse(tail).is_ok());
-        if !continues_or_if_chain {
-            break;
-        }
-        start = previous;
-    }
-    Some(start)
-}
-
-fn top_level_if_positions(text: &str) -> Vec<usize> {
-    let mut positions = Vec::new();
+    let mut start = None;
     let mut paren_depth = 0u32;
     let mut in_quotes = false;
 
@@ -4995,13 +4908,28 @@ fn top_level_if_positions(text: &str) -> Vec<usize> {
             '"' => in_quotes = !in_quotes,
             '(' if !in_quotes => paren_depth += 1,
             ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
-            _ if !in_quotes && paren_depth == 0 && text[index..].starts_with(" if ") => {
-                positions.push(index);
+            ' ' if !in_quotes
+                && paren_depth == 0
+                && tag_no_case::<_, _, OracleError<'_>>(" if ")
+                    .parse(&text[index..])
+                    .is_ok() =>
+            {
+                let continues_or_if_chain = index
+                    .checked_sub(" or".len())
+                    .and_then(|or_pos| text.get(or_pos..))
+                    .is_some_and(|tail| {
+                        tag_no_case::<_, _, OracleError<'_>>(" or if ")
+                            .parse(tail)
+                            .is_ok()
+                    });
+                if start.is_none() || !continues_or_if_chain {
+                    start = Some(index);
+                }
             }
             _ => {}
         }
     }
-    positions
+    start
 }
 
 /// CR 603.4 + CR 608.2h: Condition-text prefixes that cannot be re-homed onto
@@ -8626,7 +8554,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     properties: vec![FilterProp::WithoutKeywordKind { value }],
                     ..Default::default()
                 }),
-                false,
+                ReferentTense::Present,
                 ObjectScope::Target,
                 None,
             ));
@@ -8840,7 +8768,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         return Some(maybe_negate(
             referent_condition(
                 TargetFilter::Typed(TypedFilter::new(type_filter)),
-                true,
+                ReferentTense::Past,
                 ObjectScope::Target,
                 None,
             ),
@@ -8872,7 +8800,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 );
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
-                    referent_condition(filter, true, ObjectScope::Target, None),
+                    referent_condition(filter, ReferentTense::Past, ObjectScope::Target, None),
                     negated_lki,
                 ));
             }
@@ -8907,7 +8835,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                         properties: vec![prop],
                         ..Default::default()
                     }),
-                    true,
+                    ReferentTense::Past,
                     ObjectScope::Target,
                     None,
                 );
@@ -8959,7 +8887,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 );
             if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
                 return Some(maybe_negate(
-                    referent_condition(filter, false, ObjectScope::Target, None),
+                    referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
                     negated,
                 ));
             }
@@ -9049,7 +8977,12 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     .any(type_filter_references_subtype)
             {
                 return Some(maybe_negate(
-                    referent_condition(filter.clone(), false, ObjectScope::Target, None),
+                    referent_condition(
+                        filter.clone(),
+                        ReferentTense::Present,
+                        ObjectScope::Target,
+                        None,
+                    ),
                     negated,
                 ));
             }
@@ -9085,7 +9018,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     properties: vec![FilterProp::HasKeywordKind { value }],
                     ..Default::default()
                 }),
-                false,
+                ReferentTense::Present,
                 ObjectScope::Target,
                 None,
             ));
@@ -9112,7 +9045,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                         properties: vec![prop],
                         ..Default::default()
                     }),
-                    false,
+                    ReferentTense::Present,
                     ObjectScope::Target,
                     None,
                 ),
@@ -9187,7 +9120,9 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
 /// The subject identity is preserved by the consumer wrapping the filter in
 /// `AbilityCondition::TargetMatchesFilter`, which evaluates `ability.targets[0]`
 /// (the trigger subject / parent target).
-fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFilter, bool, bool)> {
+fn parse_anaphoric_control_predicate(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, ReferentTense, bool)> {
     type E<'a> = OracleError<'a>;
 
     let controller_only =
@@ -9214,21 +9149,26 @@ fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFil
 
     // Axis 1 — polarity. "you " then optional negator, then the control verb.
     let (rest, _) = tag::<_, _, E>("you ").parse(input)?;
-    let (rest, negator_lki) = opt(alt((
-        value(false, tag::<_, _, E>("don't ")),
-        value(false, tag("do not ")),
-        value(true, tag("didn't ")),
-        value(true, tag("did not ")),
+    let (rest, negative_tense) = opt(alt((
+        value(
+            ReferentTense::Present,
+            alt((tag::<_, _, E>("don't "), tag("do not "))),
+        ),
+        value(ReferentTense::Past, alt((tag("didn't "), tag("did not ")))),
     )))
     .parse(rest)?;
-    let negated = negator_lki.is_some();
-    // Axis 2 — tense. "controlled" → past (LKI); "control" → present.
-    let (rest, verb_lki) = alt((
-        value(true, tag::<_, _, E>("controlled ")),
-        value(false, tag("control ")),
+    let negated = negative_tense.is_some();
+    // Axis 2 — tense. A past auxiliary or a past control verb supplies LKI.
+    let (rest, verb_tense) = alt((
+        value(ReferentTense::Past, tag::<_, _, E>("controlled ")),
+        value(ReferentTense::Present, tag("control ")),
     ))
     .parse(rest)?;
-    let use_lki = negator_lki.unwrap_or(verb_lki) || verb_lki;
+    let tense = match (negative_tense, verb_tense) {
+        (Some(ReferentTense::Past), _)
+        | (None | Some(ReferentTense::Present), ReferentTense::Past) => ReferentTense::Past,
+        (None | Some(ReferentTense::Present), ReferentTense::Present) => ReferentTense::Present,
+    };
     // Axis 3 — subject.
     let (rest, filter) = alt((
         value(controller_only, tag::<_, _, E>("it")),
@@ -9249,15 +9189,15 @@ fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFil
     ))
     .parse(rest)?;
 
-    Ok((rest, (filter, use_lki, negated)))
+    Ok((rest, (filter, tense, negated)))
 }
 
 fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
-    let (_, (filter, use_lki, negated)) = all_consuming(parse_anaphoric_control_predicate)
+    let (_, (filter, tense, negated)) = all_consuming(parse_anaphoric_control_predicate)
         .parse(lower)
         .ok()?;
     Some(maybe_negate(
-        referent_condition(filter, use_lki, ObjectScope::Target, None),
+        referent_condition(filter, tense, ObjectScope::Target, None),
         negated,
     ))
 }
@@ -9276,7 +9216,7 @@ fn parse_opponent_controls_target(input: &str) -> OracleResult<'_, AbilityCondit
         rest,
         referent_condition(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-            false,
+            ReferentTense::Present,
             ObjectScope::Target,
             None,
         ),
@@ -9361,7 +9301,7 @@ pub(super) fn strip_inverse_control_otherwise_connector(text: &str) -> Option<St
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |input| {
         let (input, _) = tag::<_, _, OracleError<'_>>("if ").parse(input)?;
-        let (input, (_filter, _use_lki, negated)) = parse_anaphoric_control_predicate(input)?;
+        let (input, (_filter, _tense, negated)) = parse_anaphoric_control_predicate(input)?;
         // Only the negated "you don't control …" form is an else-connector.
         if !negated {
             return Err(nom::Err::Error(OracleError::new(
@@ -9789,7 +9729,7 @@ fn previous_effect_damage_recipient_to_condition(
                 AbilityCondition::Not {
                     condition: Box::new(referent_condition(
                         TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
-                        true,
+                        ReferentTense::Past,
                         ObjectScope::Target,
                         None,
                     )),
@@ -9805,7 +9745,7 @@ fn previous_effect_damage_recipient_to_condition(
             conditions: vec![
                 damage_was_dealt,
                 AbilityCondition::HasObjectTarget,
-                referent_condition(filter, false, ObjectScope::Target, None),
+                referent_condition(filter, ReferentTense::Present, ObjectScope::Target, None),
             ],
         },
     }
@@ -10394,6 +10334,41 @@ fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition
         return None;
     }
     Some(lower_referent_clause(clause, ObjectScope::Target))
+}
+
+fn parse_it_supertype_copula(input: &str) -> OracleResult<'_, ReferentPolarity> {
+    preceded(
+        tag("it"),
+        alt((
+            value(
+                ReferentPolarity::Negative,
+                alt((tag(" is not "), tag("'s not "), tag(" isn't "))),
+            ),
+            value(
+                ReferentPolarity::Affirmative,
+                alt((tag(" is "), tag("'s "))),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_supertype_predicate(
+    input: &str,
+    polarity: ReferentPolarity,
+) -> OracleResult<'_, ReferentClause> {
+    let (rest, supertype) = parse_supertype_word(input)?;
+    Ok((
+        rest,
+        ReferentClause::filter(
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .properties(vec![FilterProp::HasSupertype { value: supertype }]),
+            ),
+            polarity,
+            ReferentTense::Present,
+        ),
+    ))
 }
 
 fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, OracleError<'_>> {
@@ -18286,6 +18261,39 @@ mod referent_owner_tests {
         assert_eq!(body, "~ deals 2 damage to that land's controller.");
     }
 
+    #[test]
+    fn referent_suffix_keeps_original_body_and_does_not_swallow_residue() {
+        let body = "Destroy target creature named İ";
+        let (condition, remainder) = strip_mana_value_conditional(
+            "Destroy target creature named İ IF IT HAS mana value 2 or less.",
+        );
+        assert_eq!(remainder, body);
+        assert_eq!(
+            condition,
+            owner_condition(
+                "it has mana value 2 or less",
+                ReferentSurface::ManaValueFixed
+            )
+        );
+
+        for text in [
+            "Destroy target creature if it has mana value 2 or less and is tapped.",
+            "Destroy target creature if it has mana value 2 or lesser.",
+            "Destroy target creature if it's tapped or if it has mana value 2 or less.",
+            "Create a token with \"Destroy this creature if it has mana value 2 or less.\"",
+            "Destroy target creature (if it has mana value 2 or less).",
+        ] {
+            assert_eq!(strip_mana_value_conditional(text), (None, text.to_string()));
+        }
+
+        let text = "Return target creature if that creature isn't legendary.";
+        assert_eq!(
+            strip_target_supertype_conditional(text),
+            (None, text.to_string())
+        );
+        assert!(parse_target_supertype_condition_text("that creature isn't legendary").is_some());
+    }
+
     /// `strip_property_conditional`: the seven clauses of the corpus. Declared and event
     /// referents are predicates on the referent (the owner's `PtComparison` form); the ability's
     /// own source (B1) and a cost-paid "X" threshold (B2) keep the quantity form.
@@ -18295,7 +18303,7 @@ mod referent_owner_tests {
         let stat_filter = |stat, comparator, value| {
             referent_condition(
                 stat_threshold_filter(stat, comparator, QuantityExpr::Fixed { value }),
-                false,
+                ReferentTense::Present,
                 ObjectScope::Target,
                 None,
             )
