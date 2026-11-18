@@ -325,10 +325,8 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // fire-time gate (evaluated at trigger time; the GE quantity is monotone
     // within the group — each copy's +1/+1 only raises total power, so a
     // fired gate stays fired at any re-check) + PutCounter P1P1 SelfRef
-    // (disjoint) + SetTapState Untap TriggeringSource (AST measured; Oracle
-    // "it" = the officer — mistargeted to the attack event's source, i.e. the
-    // sole attacker or a no-op; separate card-fix; idempotent either way). No
-    // flippable shared state. Commutes.
+    // (disjoint) + SetTapState Untap SelfRef (AST measured; "it" = the
+    // officer, CR 608.2c). No flippable shared state. Commutes.
     "tactical officer",
     // ---- same-event additive shared writes with per-source gates (correct
     // parses) ----
