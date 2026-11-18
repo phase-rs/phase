@@ -2,8 +2,12 @@
 //! bind to each damaged player independently.
 
 use engine::game::combat::AttackTarget;
+use engine::game::functioning_abilities::active_trigger_definitions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{
+    ControllerRef, DamageKindFilter, FilterProp, TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -14,6 +18,7 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -511,6 +516,25 @@ fn quartzwood_does_not_fire_for_an_empty_source_match() {
     let attacker = scenario.add_creature(P0, "Nontrampler", 4, 4).id();
     let mut runner = scenario.build();
     let life_before = runner.life(P1);
+
+    let expected_source = Some(TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::WithKeyword {
+                value: Keyword::Trample,
+            }]),
+    ));
+    let state = runner.state();
+    assert!(
+        active_trigger_definitions(state, &state.objects[&quartzwood]).any(|active| {
+            let trigger = active.definition;
+            trigger.mode == TriggerMode::DamageDoneOnceByController
+                && trigger.batched
+                && trigger.damage_kind == DamageKindFilter::CombatOnly
+                && trigger.valid_source == expected_source
+        }),
+        "Quartzwood must have an active batched combat-damage trigger for creatures you control with trample"
+    );
 
     drive_to_declare_attackers(&mut runner);
     runner
