@@ -240,9 +240,9 @@ impl DecisionOptions {
     }
 
     /// Whether the decision leaves one answer, so it is not put to a model.
-    fn is_forced(&self, contract: &AiDecisionContract) -> bool {
+    fn is_forced(&self, state: &GameState, contract: &AiDecisionContract) -> bool {
         match &self.declaration {
-            Some(declaration) => declaration.is_forced(&contract.candidates),
+            Some(declaration) => declaration.is_forced(state, &contract.candidates),
             None => self.candidates.len() < 2,
         }
     }
@@ -552,7 +552,7 @@ pub fn build_game_decision_prompt(
     // `ComposedDeclaration::is_forced`. A System One provider, asked over the
     // candidates, refuses a question with fewer than two itself
     // (`wire::system_one_request`).
-    if options.is_forced(contract) {
+    if options.is_forced(state, contract) {
         return Err(LlmError::UnsupportedDecision {
             detail: "only one legal option; there is nothing to decide".to_string(),
         });
