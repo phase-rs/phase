@@ -242,24 +242,28 @@ async function llmActionProposal(
       { wallMs: Date.now(), monotonicMs: performance.now() },
     );
     if (signal.aborted || !isCurrent()) return null;
+    // The engine builds nothing for a seat with no decision to make, such as
+    // one that is not the decision's authorized actor. The provider was never
+    // in play, so that does not count toward giving it up.
+    if (built == null) return null;
     // A decision this provider cannot be asked at all (a forced move has no
     // question to pose) is not the provider failing: the heuristic plays it, and
     // it does not count toward giving the seat's provider up.
-    if (built?.errorKind?.kind === "unsupportedDecision") return null;
+    if (built.errorKind?.kind === "unsupportedDecision") return null;
     // If the engine recognized a standing decision (e.g. PassPriority with no new
     // information), return the authorized proposal immediately without contacting
     // the provider or charging an attempt.
-    if (built?.proposal) {
+    if (built.proposal) {
       return built.proposal;
     }
     if (endedBySettingsChange()) return null;
     // From here the provider is in play, so an outcome without a proposal counts.
     setCharged(true);
-    if (!built?.request || !built.fingerprint) {
+    if (!built.request || !built.fingerprint) {
       // The engine's refusal text can carry a PROVIDER-authored diagnostic, and
       // the game log is prompt-renderable. Only the Phase-authored summary is
       // logged; the detail goes to the console.
-      reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) could not build a request`, built?.error);
+      reportLlmFailure(`LLM opponent (seat ${llmSeatIndex}) could not build a request`, built.error);
       return null;
     }
 
@@ -509,7 +513,12 @@ export function createAIController(config: AIControllerConfig): AIController {
   function checkAndSchedule() {
     if (!active || pending) return;
 
-    const state = useGameStore.getState().gameState;
+    const { gameState: state, pendingUndoId } = useGameStore.getState();
+    // Nothing starts while an undo runs: until it commits, the store shows the
+    // state being undone and the engine may already hold the restored one, so
+    // a request built now could render another seat's decision. The store
+    // subscription calls back here once the undo settles.
+    if (pendingUndoId !== null) return;
     if (!state?.waiting_for) return;
 
     const waitingFor = state.waiting_for;
@@ -823,6 +832,7 @@ export function createAIController(config: AIControllerConfig): AIController {
     let observedWaitingFor = initialStore.waitingFor;
     let observedFence = enginePromptFence(initialStore.gameState);
     let observedSessionGeneration = initialStore.gameSessionGeneration;
+    let observedPendingUndoId = initialStore.pendingUndoId;
     let observedActor = initialStore.gameState
       ? authorizedAiPlayer(initialStore.gameState.waiting_for, initialStore.gameState)
       : null;
@@ -839,12 +849,18 @@ export function createAIController(config: AIControllerConfig): AIController {
           ? observedFence.identity !== fence.identity || observedFence.revision !== fence.revision || actor !== observedActor
           : store.waitingFor !== observedWaitingFor;
         const sessionChanged = store.gameSessionGeneration !== observedSessionGeneration;
+        // An undo beginning ends the decision under way before the restore's
+        // first await, so its reply, which the engine would refuse as stale,
+        // is never read or counted against the seat's provider. One settling,
+        // committed or failed, lets the seats decide again.
+        const undoChanged = store.pendingUndoId !== observedPendingUndoId;
         observedWaitingFor = store.waitingFor;
         observedFence = fence;
         observedSessionGeneration = store.gameSessionGeneration;
+        observedPendingUndoId = store.pendingUndoId;
         observedActor = actor;
 
-        if (promptChanged || sessionChanged) {
+        if (promptChanged || sessionChanged || undoChanged) {
           invalidateAttempt();
           // A new snapshot gets a fresh failure budget even for an A→A
           // transition whose serialized WaitingFor payload is identical.

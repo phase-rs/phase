@@ -443,7 +443,8 @@ fn resolution_can_remove_activatable_mana_source(
     if !chain_has_battlefield_departure(root) {
         return false;
     }
-    let sources: Vec<ObjectId> = mana_sources::activatable_mana_actions_for_player(state, player)
+    let explicit = super::mana_abilities::ManaActivationPurpose::Explicit;
+    let sources: Vec<ObjectId> = mana_sources::mana_actions_for_player(state, player, explicit)
         .iter()
         .filter_map(GameAction::source_object)
         .collect();

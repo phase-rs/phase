@@ -4097,6 +4097,9 @@ fn resolve_keyword_action(
                     spacecraft_id,
                     CounterType::Generic("charge".to_string()),
                     counters_added,
+                    // CR 614.16: station's charge counters are placed by a
+                    // resolving keyword action.
+                    crate::types::proposed_event::CounterCause::ResolvingEffect,
                     events,
                 ) {
                     effects::counters::stash_pending_counter_completion_with_actions(

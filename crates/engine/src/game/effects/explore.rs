@@ -13,7 +13,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 
 use super::resolve_ability_chain;
 
@@ -28,6 +28,8 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
                 .unwrap_or(PlayerId(0)),
             object_id: explorer_id,
             counter_type: CounterType::Plus1Plus1,
+            // CR 614.16: explore's counter is placed by a resolving ability.
+            cause: CounterCause::ResolvingEffect,
         },
         count: 1,
         applied: HashSet::new(),
@@ -39,6 +41,7 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
                 actor,
                 object_id,
                 counter_type,
+                ..
             },
         count,
         ..

@@ -5529,9 +5529,10 @@ fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            window: TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::EQ,
@@ -5542,10 +5543,9 @@ fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
                 condition,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                        },
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Fixed { value: 0 },
@@ -9186,8 +9186,9 @@ fn trigger_if_you_lost_2_or_more_life() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
+                qty: QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -9200,7 +9201,7 @@ fn trigger_if_you_lost_2_or_more_life() {
     );
 }
 
-/// "if you lost life this turn" (no minimum) → controller LifeLostThisTurn ≥ 1.
+/// "if you lost life this turn" (no minimum) → controller LifeLost ≥ 1.
 #[test]
 fn trigger_if_you_lost_life_this_turn_no_minimum() {
     let def = parse_trigger_line(
@@ -9211,8 +9212,9 @@ fn trigger_if_you_lost_life_this_turn_no_minimum() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
+                qty: QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -10598,7 +10600,7 @@ fn trigger_if_gained_or_lost_life_compound() {
                 c,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn { .. }
+                        qty: QuantityRef::LifeLost { .. }
                     },
                     ..
                 }
@@ -12867,18 +12869,32 @@ fn trigger_becomes_blocked_by_a_qualified_creature_preserves_blocker_filter() {
 }
 
 #[test]
-fn trigger_becomes_blocked_by_two_or_more_creatures_stays_bare() {
+fn trigger_becomes_blocked_by_two_or_more_creatures_parses_threshold() {
+    // CR 509.3e: "by two or more creatures" is now modeled as a blocker count
+    // threshold. The parser captures the minimum blocker count and the optional
+    // blocker filter (defaulting to all creatures).
+    // Seifer, Balamb Rival: "Whenever a creature attacking one of your opponents
+    // becomes blocked by two or more creatures, that attacking creature gains
+    // deathtouch until end of turn."
     let def = parse_trigger_line(
-        "Whenever Vicious Battlerager becomes blocked by two or more creatures, draw a card.",
-        "Vicious Battlerager",
+        "Whenever a creature attacking one of your opponents becomes blocked by two or more creatures, that attacking creature gains deathtouch until end of turn.",
+        "Seifer, Balamb Rival",
     );
 
     assert_eq!(def.mode, TriggerMode::BecomesBlocked);
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-    assert!(
-        def.valid_target.is_none(),
-        "threshold wording must not be treated as a per-blocker qualifier"
-    );
+    // Subject is "a creature attacking one of your opponents" - a typed filter
+    // for creatures that are attacking an opponent.
+    assert!(matches!(
+        def.valid_card,
+        Some(TargetFilter::Typed(ref tf)) if tf.type_filters == vec![TypeFilter::Creature]
+            && tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking { defender: Some(ControllerRef::Opponent) }))
+    ));
+    let blocker_count = def
+        .blocker_count
+        .expect("blocker_count must be set for threshold form");
+    assert_eq!(blocker_count.minimum, 2);
+    // Default blocker filter is None (all creatures)
+    assert!(blocker_count.blocker.is_none());
 }
 
 /// CR 509.3b: "blocks a <filter> creature" — the plain `Blocks` mode must
@@ -15057,8 +15073,9 @@ fn parse_greatest_mana_value_among_instant_and_sorcery_spells_cast_this_turn() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     filter: Some(_),
+                    window: TurnWindow::ThisTurn,
                     ..
                 },
             },
@@ -15392,9 +15409,10 @@ fn trigger_when_you_cast_this_spell_if_youve_cast_another_spell_this_turn() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Controller,
-                    filter: None
+                    filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -15414,7 +15432,7 @@ fn trigger_attack_if_cast_spell_with_mana_value_this_turn() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Controller,
                     filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
                         FilterProp::Cmc {
@@ -15422,6 +15440,7 @@ fn trigger_attack_if_cast_spell_with_mana_value_this_turn() {
                             value: QuantityExpr::Fixed { value: 4 },
                         }
                     ]))),
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -15444,10 +15463,9 @@ fn trigger_end_step_if_cast_both_creature_and_noncreature_this_turn() {
                 condition,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
-                        },
+                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -15457,10 +15475,9 @@ fn trigger_end_step_if_cast_both_creature_and_noncreature_this_turn() {
                 condition,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
-                        },
+                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -17261,7 +17278,7 @@ fn ordinal_constraint_does_not_exempt_a_different_unhoisted_leading_guard() {
 
 /// CR 601.2a + CR 603.4: Alania's disjunctive "first-of-type this turn"
 /// intervening-if lowers to `Or` of composed `And(TriggeringSpellMatchesFilter,
-/// SpellsCastThisTurn == n)` disjuncts — NOT a bundled ordinal variant — and the
+/// SpellsCast == n)` disjuncts — NOT a bundled ordinal variant — and the
 /// residual "you may have target opponent draw a card. If you do, copy that
 /// spell" parses for free (optional Draw + preserved gated CopySpell).
 ///
@@ -17299,9 +17316,10 @@ fn trigger_alania_disjunctive_first_of_type_intervening_if() {
             },
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(filter),
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -31208,8 +31226,9 @@ fn combinator_handles_played_land_or_cast_spell_from_outside_hand_this_turn() {
         lhs:
             QuantityExpr::Ref {
                 qty:
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                        window: TurnWindow::ThisTurn,
                         ..
                     },
             },
@@ -39321,11 +39340,14 @@ fn dealt_damage_newly_opened_cell_parses_single_source_tail() {
         })
     );
 
-    // H3 — paired negative: a newly-opened cell whose trailing restriction is
-    // still unmodeled must STILL be refused. Without it the tail guard could be
-    // silently dead and no test would notice.
+    // H3 — paired negative: a cell whose trailing restriction the source
+    // grammar still cannot represent must be refused. The spell-type
+    // disjunction is now modeled (Chandra's Phoenix), but a bare "spell" head is
+    // not: "by a spell" names a source class this grammar has no filter for.
+    // Without this negative the tail guard could be silently dead and no test
+    // would notice.
     let unmodeled_tail = parse_trigger_line(
-        "Whenever ~ is dealt 3 or more damage by an attacking creature, draw a card.",
+        "Whenever ~ is dealt 3 or more damage by a spell, draw a card.",
         "Some Card",
     );
     assert!(
@@ -39348,30 +39370,163 @@ fn dealt_damage_newly_opened_cell_parses_single_source_tail() {
 }
 
 #[test]
-fn dealt_damage_previously_covered_cell_keeps_trailing_tail() {
-    // The honesty guard is AXIS-SCOPED, not blanket: a cell the former `tag()`
-    // arms already covered keeps its pre-existing behavior byte-identically.
-    // Chandra's Phoenix's dropped source restriction is a KNOWN PRE-EXISTING
-    // gap that predates the parameterization — recorded, not endorsed. Widening
-    // the guard to a blanket remainder check would regress this card (and,
-    // invisibly to coverage, Glyph of Life), so this test is the narrowness
-    // sentinel. Verbatim Oracle text.
+fn dealt_damage_chandras_phoenix_source_clause_parses_complete_filter() {
+    // CR 120.1 + CR 120.3 + CR 304 + CR 307: "by a red instant or sorcery spell
+    // you control or by a red planeswalker you control" is represented as a
+    // complete source filter — a disjunction of two typed filters, each with its
+    // own colour and controller. Verbatim Oracle text.
+    //
+    // Revert-failing: drop the `or by` disjunction or the spell-type head and
+    // the source parser fails, the tail guard refuses the line, and the trigger
+    // becomes `Unknown` instead of firing only on the printed sources.
     let def = parse_trigger_line(
         "Whenever an opponent is dealt damage by a red instant or sorcery spell you control or by a red planeswalker you control, return this card from your graveyard to your hand.",
         "Chandra's Phoenix",
     );
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::Any);
-    assert_eq!(def.damage_amount, None);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    fn red_spell_source(type_filter: TypeFilter) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![type_filter],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }],
+        })
+    }
+    assert_eq!(
+        def.valid_source,
+        Some(TargetFilter::Or {
+            filters: vec![
+                red_spell_source(TypeFilter::AnyOf(vec![
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ])),
+                red_spell_source(TypeFilter::Planeswalker),
+            ],
+        }),
+        "the complete Chandra's Phoenix source filter must be represented"
+    );
+}
+
+#[test]
+fn dealt_damage_source_qualifier_is_represented() {
+    // CR 120.1 + CR 120.3: issue #9637's synthetic passive lines — each
+    // qualifier axis must land in `valid_source` instead of being dropped.
+    let by_creature = parse_trigger_line(
+        "Whenever this creature is dealt damage by a creature, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(by_creature.mode, TriggerMode::DamageReceived);
+    assert_eq!(
+        by_creature.valid_source,
+        Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+    );
+
+    let opponent_source = parse_trigger_line(
+        "Whenever this creature is dealt damage by a source an opponent controls, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(opponent_source.mode, TriggerMode::DamageReceived);
+    assert_eq!(
+        opponent_source.valid_source,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+#[test]
+fn dealt_damage_lolth_emblem_quantified_source_parses() {
+    // CR 120.1 + CR 120.4b: Lolth's emblem triggers on combat damage "by one or
+    // more creatures you control" — a plural existential over the damage
+    // event's sources, represented by a creature-you-control source filter.
+    // Verbatim Oracle text.
+    let def = parse_trigger_line(
+        "Whenever an opponent is dealt combat damage by one or more creatures you control, if that player lost less than 8 life this turn, they lose life equal to the difference.",
+        "Lolth, Spider Queen",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(
+        def.valid_source,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You)
+        )),
+        "the emblem's quantified source must not be dropped"
+    );
+}
+
+#[test]
+fn dealt_damage_attacking_creature_source_parses() {
+    // CR 508.1k: "by an attacking creature" carries the combat status on the
+    // damage source filter. Verbatim Oracle text (Glyph of Life).
+    let def = parse_trigger_line(
+        "Whenever that creature is dealt damage by an attacking creature this turn, you gain that much life.",
+        "Glyph of Life",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(
+        def.valid_source,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Attacking { defender: None }],
+        }))
+    );
+}
+
+#[test]
+fn damage_done_to_a_token_sets_recipient_filter() {
+    // CR 111.1: "token" is an object property, not a card type. Issue #9637's
+    // synthetic active line: the recipient qualifier must land in
+    // `valid_target` instead of being dropped.
+    let def = parse_trigger_line(
+        "Whenever this creature deals damage to a token, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller: None,
+            properties: vec![FilterProp::Token],
+        }))
+    );
+}
+
+#[test]
+fn trigger_becomes_blocked_by_two_or_more_creatures_sets_threshold() {
+    // CR 509.3e: issue #9637's synthetic line — the blocker-count qualifier is
+    // part of the trigger event and must be represented, not dropped.
+    let def = parse_trigger_line(
+        "Whenever ~ becomes blocked by two or more creatures, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    let threshold = def
+        .blocker_count
+        .expect("threshold form must set blocker_count");
+    assert_eq!(threshold.minimum, 2);
+    assert!(
+        threshold.blocker.is_none(),
+        "bare creatures counts every blocker (CR 509.1a)"
+    );
 }
 
 #[test]
 fn dealt_damage_single_source_tail_without_amount_stays_unknown() {
     // V3b / H3b — CR 120.4b: the source-scoping tail is carried on the amount
     // threshold, so with no amount there is nowhere for it to live. The tail is
-    // therefore NOT consumed, and the arm's existing unconsumed-tail guard
-    // refuses this newly-opened cell — `(Total, NoncombatOnly, None)` is absent
-    // from `previously_covered`.
+    // therefore NOT consumed, and the arm's unconsumed-tail invariant refuses
+    // the line.
     //
     // Revert-failing: make the tail combinator unconditional (drop the
     // `if amount.is_some()` gating) and the tail is consumed, `remaining`
@@ -40969,48 +41124,87 @@ fn unhoistable_leading_guard_lowered_to_a_back_reference_fails_closed() {
     }
 }
 
-/// CR 603.4: "a player cast two or more spells last turn" (verbatim Gatstaf
-/// Howler back face) is true only when ONE player cast two or more spells. The
-/// table-wide `SpellsCastLastTurn` total cannot express that (two players
-/// casting one spell each would satisfy it), so the guard must not lower to it:
-/// the trigger fails closed as an `unparsed_condition` gap instead of firing on
-/// a wrong count.
-/// REVERT-PROBE: restore the per-player arm in `parse_spells_cast_last_turn` →
-/// the guard hoists as `SpellsCastLastTurn >= 2` and the body parses as a
-/// transform, so the `condition == None` and gap-kind assertions flip.
+/// CR 603.4 + CR 117.1: "a player cast two or more spells last turn" (verbatim
+/// Gatstaf Howler back face) is true only when ONE player cast two or more
+/// spells, so it lowers to the existential over players
+/// `PlayerCount { PlayerAttribute { All, SpellsCast { ScopedPlayer, None,
+/// LastTurn }, GE 2 } } >= 1`, never to a table-wide total (two players casting
+/// one spell each would satisfy that: the misread #10004 fixed).
+/// REVERT-PROBE: lower the guard to `SpellsCast { All, None, LastTurn } >= 2`
+/// (the table-wide count) and the whole-condition assertion flips.
 #[test]
-fn per_player_spells_cast_last_turn_guard_fails_the_trigger_closed() {
+fn per_player_spells_cast_last_turn_guard_lowers_to_the_existential() {
     let def = parse_trigger_line(
         "At the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.",
         "Gatstaf Howler",
     );
 
-    // Reach guard: the upkeep trigger head was recognized, so the guard was
-    // examined in intervening-if position rather than the line being rejected.
+    // Reach guard: the upkeep trigger head was recognized and the body parsed.
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::Upkeep));
     assert_eq!(
-        def.condition, None,
-        "the per-player guard must not hoist to a table-wide count"
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(QuantityRef::SpellsCast {
+                            scope: CountScope::ScopedPlayer,
+                            filter: None,
+                            window: TurnWindow::LastTurn,
+                        }),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Fixed { value: 2 }),
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
     );
     let exec = def.execute.as_deref().expect("trigger execute body");
-    match &*exec.effect {
-        Effect::Unimplemented { name, description } => {
-            assert_eq!(name, ClauseGapKind::Condition.unimplemented_name());
-            assert!(
-                description
-                    .as_deref()
-                    .is_some_and(|text| text.contains("a player cast two or more spells")),
-                "the gap must carry the rejected guard: {description:?}"
-            );
-        }
-        other => panic!("the per-player guard must fail the trigger closed, got {other:?}"),
+    assert!(
+        !matches!(&*exec.effect, Effect::Unimplemented { .. }),
+        "the transform body must survive the hoist: {:?}",
+        exec.effect
+    );
+}
+
+/// I2 (strict failure): a per-player last-turn spell guard the representation
+/// cannot express fails the trigger closed as an `unparsed_condition` gap, with
+/// the head recognized and no condition hoisted: a this-turn existential (no
+/// per-candidate reader), the "since your last turn ended" window (its own
+/// per-player counter family), a last-turn count with a spell filter or
+/// unconsumed trailing text (no per-spell data survives the boundary), and a
+/// subject that does not resolve ("they").
+#[test]
+fn unrepresentable_per_player_spell_guards_fail_the_trigger_closed() {
+    for guard in [
+        "a player cast two or more spells this turn",
+        "a player cast two or more spells since your last turn ended",
+        "a player cast two or more creature spells last turn",
+        "a player cast two or more spells last turn from exile",
+        "they cast two or more spells last turn",
+    ] {
+        let text = format!("At the beginning of each upkeep, if {guard}, transform this creature.");
+        let def = parse_trigger_line(&text, "Gatstaf Howler");
+        assert_eq!(def.mode, TriggerMode::Phase, "reach for {guard:?}");
+        assert_eq!(def.phase, Some(Phase::Upkeep), "reach for {guard:?}");
+        assert_eq!(def.condition, None, "nothing was hoisted for {guard:?}");
+        let exec = def.execute.as_deref().expect("trigger execute body");
+        assert!(
+            matches!(&*exec.effect, Effect::Unimplemented { name, .. }
+                if name == ClauseGapKind::Condition.unimplemented_name()),
+            "{guard:?} must fail the trigger closed as a condition gap, got {:?}",
+            exec.effect
+        );
     }
 }
 
-/// Control for the per-player decline: the table-wide "no spells were cast last
+/// Control for the per-player guard: the table-wide "no spells were cast last
 /// turn" guard (verbatim Gatstaf Shepherd) still hoists as
-/// `SpellsCastLastTurn == 0`, with its transform body intact.
+/// `SpellsCast { All, None, LastTurn } == 0`, with its transform body intact.
 #[test]
 fn no_spells_cast_last_turn_guard_still_hoists_as_table_wide_count() {
     let def = parse_trigger_line(
@@ -41022,7 +41216,11 @@ fn no_spells_cast_last_turn_guard_still_hoists_as_table_wide_count() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastLastTurn,
+                qty: QuantityRef::SpellsCast {
+                    scope: CountScope::All,
+                    filter: None,
+                    window: TurnWindow::LastTurn,
+                },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },

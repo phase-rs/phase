@@ -353,7 +353,6 @@ face = [
   { key = "champion of stray souls", class = "wrong_count", clauses = ["{3}{B}{B}, {T}, Sacrifice X other creatures: Return X target creature cards from your graveyard to the battlefield.", "{5}{B}{B}: Put this card from your graveyard on top of your library."] },
   { key = "chance for glory", class = "missing_effect", clauses = ["Creatures you control gain indestructible.", "Take an extra turn after this one.", "At the beginning of that turn's end step, you lose the game."] },
   { key = "chandra's fury", class = "dropped_qualifier", clauses = ["and 1 damage to each creature that player or that planeswalker's controller controls."] },
-  { key = "chandra's phoenix", class = "dropped_qualifier", clauses = ["Whenever an opponent is dealt damage by a red instant or sorcery spell you control or by a red planeswalker you control, return this card from your graveyard to your hand."] },
   { key = "chandra, awakened inferno", class = "cost_wrong", clauses = ["[−X]: Chandra deals X damage to target creature or planeswalker.", "If a permanent dealt damage this way would die this turn, exile it instead."] },
   { key = "chandra, dressed to kill", class = "dropped_qualifier", clauses = ["You may cast red spells from among them this turn."] },
   { key = "chandra, flameshaper", class = "wrong_object", clauses = ["Choose one."] },
