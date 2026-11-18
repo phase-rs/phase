@@ -89,7 +89,7 @@ pub(crate) fn probe_resolution(
         return ResolutionProbe::Prompted;
     }
     // The SAME re-entrancy guard `apply_confirmed_shortcut` holds across its own
-    // clone-and-drive. It suppresses ring accumulation and shortcut detection
+    // clone-and-drive. It suppresses play-trace recording and shortcut detection
     // inside the probe, which is exactly the recursion hazard a speculative
     // resolve would otherwise open.
     let _probe = SimulationProbeGuard::enter();
@@ -180,7 +180,7 @@ fn resolution_probe_verdict(
 /// arm's resolver has been fixed yet. It is fail-closed — it can only turn a
 /// verdict into `MayPrompt`, never the reverse — so a resolver gaining a real
 /// prompt never invalidates it.
-fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
+pub(crate) fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
     match q {
         QuantityExpr::UpTo { .. } => true,
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
@@ -212,7 +212,7 @@ fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 /// `ResolutionProbe::Prompted`, which OBSERVES the real resolver opening a real
 /// prompt on the real board. The arm only decides which classes are worth paying
 /// a clone for.
-fn effect_offers_choice(e: &Effect) -> bool {
+pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
@@ -295,6 +295,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
@@ -515,6 +516,9 @@ fn effect_offers_choice(e: &Effect) -> bool {
         // Jace tokens) — fail-closed MayPrompt.
         | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        // A revealed spell with targets/choices prompts (fail-closed: the AST
+        // gate cannot see that Boss libraries are all-token).
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
@@ -533,6 +537,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -565,6 +570,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     // where it is a pure AST walk costing nothing, and dropped from the probe below.
     node_modifiers_offer_choice(a)
         || effect_offers_choice(&a.effect)
+        || a.coin_branches.is_some()
         || a.sub_ability.as_deref().is_some_and(chain_offers_choice)
         || a.else_ability.as_deref().is_some_and(chain_offers_choice)
 }
@@ -584,6 +590,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         effect: _,
         sub_ability: _,
         else_ability: _,
+        coin_branches: _, // CR 705.1 + CR 601.2c: announced outcome carriers, classified by chain_offers_choice
         // ---- choice-bearing: folded into the verdict below ----
         optional,
         optional_player: _, // selects the optional actor; `optional` already records the choice
@@ -605,7 +612,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
-        distribute: _, // CR 601.2d/603.3d unassigned division is an announce-time choice
+        distribute: _, // CR 601.2d announce-time; CR 608.2d: resolution_time_division
         targets: _,   // concrete announced target refs (already resolved)
         declares_chosen_group: _, // announce-time identity, no resolution prompt
         reads_chosen_group: _, // bound selected targets, no new choice
@@ -661,9 +668,11 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
         entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -678,6 +687,10 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
     }
     // CR 601.2c + CR 603.3d: a resolution-time target chooser announces targets.
     if target_chooser.is_some() {
+        return true;
+    }
+    // CR 608.2d: an untargeted division is chosen while applying the effect.
+    if crate::game::ability_utils::resolution_time_division(a).is_some() {
         return true;
     }
     // CR 608.2d: resolution-timed target selection is a resolution-time choice
@@ -778,9 +791,10 @@ mod tests {
         PtValue, QuantityExpr, TapStateChange, TargetFilter, TargetRef, UnlessPayModifier,
     };
     use crate::types::counter::CounterType;
+    use crate::types::game_state::DistributionUnit;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::{CounterPlacement, DrawEventStage};
+    use crate::types::proposed_event::{CounterCause, CounterPlacement, DrawEventStage};
     use crate::types::zones::Zone;
     use std::collections::BTreeMap;
 
@@ -822,6 +836,66 @@ mod tests {
         let mut divided = base.clone();
         divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
         assert!(!chain_offers_choice(&divided));
+    }
+
+    /// V5p: CR 608.2d — a division among a tracked-set population ("any number of
+    /// those Wolves") is chosen while the effect is applied, so the chain offers a
+    /// resolution choice. Announced-target divisions whose recipient is a context
+    /// ref (`ParentTarget` after an "instead" swap; a Stumpsquall-shaped counters
+    /// division) stay announce-time and choice-free (R2-F1).
+    #[test]
+    fn resolution_time_division_is_a_resolution_choice_only_for_tracked_sets() {
+        let damage = |target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: fixed(3),
+                    target,
+                    damage_source: None,
+                    excess: None,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let tracked = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature(),
+            )),
+            caused_by: None,
+        };
+        for base in [damage(tracked.clone()), damage(TargetFilter::ParentTarget)] {
+            assert!(
+                !chain_offers_choice(&base),
+                "reach guard: the undivided base must be choice-free"
+            );
+        }
+
+        let mut tracked_division = damage(tracked);
+        tracked_division.distribute = Some(DistributionUnit::Damage);
+        assert!(chain_offers_choice(&tracked_division));
+
+        let mut parent_target_division = damage(TargetFilter::ParentTarget);
+        parent_target_division.distribute = Some(DistributionUnit::Damage);
+        assert!(!chain_offers_choice(&parent_target_division));
+
+        let mut counters = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: fixed(3),
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            !chain_offers_choice(&counters),
+            "reach guard: the undivided counters base must be choice-free"
+        );
+        counters.distribute = Some(DistributionUnit::Counters("P1P1".to_string()));
+        assert!(!chain_offers_choice(&counters));
     }
 
     /// Snapshot every axis the witness reads.
@@ -1510,6 +1584,7 @@ mod tests {
                         actor: PlayerId(0),
                         object_id: victim,
                         counter_type: CounterType::Plus1Plus1,
+                        cause: CounterCause::Other,
                     },
                     count,
                     applied: Default::default(),

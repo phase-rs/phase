@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DiceRollOverlay } from "../DiceRollOverlay";
+import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { useUiStore } from "../../../stores/uiStore";
 import type { DiceRollPayload } from "../../../stores/uiStore";
 
@@ -39,8 +40,30 @@ afterEach(() => {
   renderer.mockClear();
   coinRenderer.mockClear();
   reportBoundaryError.mockClear();
-  useUiStore.setState({ diceRoll: null, diceRollQueue: [] });
+  useUiStore.getState().resetDiceRoll();
+  usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
 });
+
+it("counts the static fallback down from when it shows, not from the landing timeout", async () => {
+  // At this speed each roll's countdown is 800 ms. A fallback face that never
+  // reported its landing would hold its roll for the 8 s landing timeout.
+  usePreferencesStore.setState({ animationSpeedMultiplier: 0.25 });
+  render(<DiceRollOverlay />);
+
+  await act(async () => {
+    useUiStore.getState().flashDiceRoll({ kind: "coin", playerId: 0, won: true, context: "ability" });
+    useUiStore.getState().flashDiceRoll({
+      kind: "die", context: "ability", sides: 20, rolls: [{ playerId: 0, value: 17 }],
+    });
+    await Promise.resolve();
+  });
+
+  expect(await screen.findByText(/you won the flip/i)).toBeInTheDocument();
+  expect(coinRenderer).toHaveBeenCalled();
+  await waitFor(() => expect(useUiStore.getState().diceRoll?.kind).toBe("die"), { timeout: 3000 });
+  await waitFor(() => expect(useUiStore.getState().diceRoll).toBeNull(), { timeout: 3000 });
+  expect(renderer).toHaveBeenCalled();
+}, 10_000);
 
 it("contains a throwing renderer, preserves the mounted parent state and lets Escape dismiss the overlay", async () => {
   render(<GameParent />);
@@ -75,17 +98,19 @@ it("keeps the starting-player result visible after the renderer throws", async (
     rounds: [[{ playerId: 0, value: 17 }, { playerId: 1, value: 4 }]],
     rolls: [{ playerId: 0, value: 17 }, { playerId: 1, value: 4 }],
     turnOrder: [
-      { slot_index: 0, player: 0, turn_number: 1, is_viewer: true, is_starting_player: true },
-      { slot_index: 1, player: 1, turn_number: 2, is_viewer: false, is_starting_player: false },
+      { slot_index: 0, player: 0, turn_number: 1, is_viewer: true },
+      { slot_index: 1, player: 1, turn_number: 2, is_viewer: false },
     ],
+    viewerTurnNumber: 2,
   } as unknown as DiceRollPayload);
   expect(renderer).toHaveBeenCalled();
   expect(reportBoundaryError).toHaveBeenCalled();
-  // The caption, the rolled values and the turn order all come from the static fallback.
-  expect(screen.getByText(/you play first/i)).toBeInTheDocument();
+  // The caption and the rolled values come from the static fallback; a stale payload's turn rows are not presented.
+  expect(screen.getByText(/you won the roll/i)).toBeInTheDocument();
   expect(screen.getAllByText("17").length).toBeGreaterThan(0);
   expect(screen.getAllByText("4").length).toBeGreaterThan(0);
-  expect(screen.getByText(/turn order/i)).toBeInTheDocument();
+  expect(screen.queryByText(/turn order/i)).toBeNull();
+  expect(screen.queryByText(/take turn/i)).toBeNull();
 });
 
 it("keeps the coin outcome visible after the coin renderer throws", async () => {

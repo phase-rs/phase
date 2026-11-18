@@ -4,9 +4,12 @@
 //! https://github.com/phase-rs/phase/issues/3862
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+
+use super::support::{assert_damage_dealt, assert_no_damage_to};
 
 const ULVENWALD_TRACKER_ORACLE: &str =
     "{1}{G}, {T}: Target creature you control fights another target creature.";
@@ -37,26 +40,33 @@ fn ulvenwald_tracker_dual_target_fight_does_not_include_tracker() {
 
     let mut runner = scenario.build();
 
-    runner
+    let outcome = runner
         .activate(tracker, 0)
         .target_objects(&[bear, wolf])
         .resolve();
 
+    assert_damage_dealt(outcome.events(), bear, TargetRef::Object(wolf), 3, false);
+    assert_eq!(outcome.zone_of(wolf), engine::types::zones::Zone::Graveyard);
+    assert_damage_dealt(outcome.events(), wolf, TargetRef::Object(bear), 2, false);
     assert_eq!(
-        runner.state().objects[&wolf].damage_marked,
-        3,
-        "Bear (3 power) must deal 3 damage to Wolf"
-    );
-    assert_eq!(
-        runner.state().objects[&bear].damage_marked,
+        outcome.state().objects[&bear].damage_marked,
         2,
         "Wolf (2 power) must deal 2 damage to Bear"
     );
     assert_eq!(
-        runner.state().objects[&tracker].damage_marked,
+        outcome.zone_of(bear),
+        engine::types::zones::Zone::Battlefield,
+    );
+    assert_eq!(
+        outcome.state().objects[&tracker].damage_marked,
         0,
         "Ulvenwald Tracker is not a fighter in this fight"
     );
+    assert_eq!(
+        outcome.zone_of(tracker),
+        engine::types::zones::Zone::Battlefield
+    );
+    assert_no_damage_to(outcome.events(), TargetRef::Object(tracker));
 }
 
 #[test]

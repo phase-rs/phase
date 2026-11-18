@@ -987,7 +987,7 @@ fn snapshot_harold_and_bob_first_numens() {
 fn inverted_as_long_as_flash_grant_attaches_condition() {
     // CR 601.3b + CR 702.8a + CR 611.3a: The inverted conditional flash-grant
     // "As long as <cond>, you may cast [type] spells as though they had flash"
-    // must lower to a `CastWithKeyword { Flash }` static carrying the condition
+    // must lower to a `CastWithFlash` static carrying the condition
     // — not silently collapse into a bare conditionless Continuous fallback.
     let result = parse(
         "As long as it's your turn, you may cast creature spells as though they had flash.",
@@ -1000,21 +1000,14 @@ fn inverted_as_long_as_flash_grant_attaches_condition() {
     let static_def = result
         .statics
         .iter()
-        .find(|static_def| {
-            matches!(
-                static_def.mode,
-                StaticMode::CastWithKeyword {
-                    keyword: Keyword::Flash
-                }
-            )
-        })
-        .expect("expected inverted flash grant to lower to CastWithKeyword { Flash }");
+        .find(|static_def| matches!(static_def.mode, StaticMode::CastWithFlash))
+        .expect("expected inverted flash grant to lower to CastWithFlash");
 
     // "it's your turn" is recognized by parse_static_condition → DuringYourTurn,
     // not just a generic Unrecognized fallback.
     assert!(
         matches!(static_def.condition, Some(StaticCondition::DuringYourTurn)),
-        "expected DuringYourTurn condition on the CastWithKeyword static, \
+        "expected DuringYourTurn condition on the CastWithFlash static, \
          got condition: {:#?}",
         static_def.condition
     );

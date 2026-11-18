@@ -369,6 +369,8 @@ fn empty_forward_result_generic_spell(
     let mut root = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter {
@@ -1107,6 +1109,8 @@ fn empty_forward_result_resolves_independent_sibling_before_dependent_tail() {
 
     let mut forward_result = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter {
@@ -1215,6 +1219,8 @@ fn empty_forward_result_suppresses_dependent_else_and_resumes_later_sibling() {
 
     let mut forward_result = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter {
@@ -1318,7 +1324,7 @@ fn emperor_of_bones_resumes_riders_after_anointed_peacekeepers_as_enters_choices
             runner.waiting_for_kind()
         );
     };
-    assert!(matches!(choice_type, ChoiceType::CardName));
+    assert!(matches!(choice_type, ChoiceType::CardName { .. }));
     runner
         .act(GameAction::ChooseOption {
             choice: NAMED_CARD.to_string(),

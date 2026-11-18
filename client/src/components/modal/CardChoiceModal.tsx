@@ -9,6 +9,7 @@ import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type {
   CounterMatch,
   CounterType,
@@ -39,7 +40,7 @@ import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { BoosterPackModal, boosterPackEntries } from "./BoosterPackModal.tsx";
-import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
+import { NamedChoiceModal, SecretAgendaModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
 import { RoomDoorChoiceModal } from "./RoomDoorChoiceModal.tsx";
@@ -123,7 +124,7 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
-type SpellCopyOrderChoice = Extract<WaitingFor, { type: "SpellCopyOrderChoice" }>;
+type MemberOrderChoice = Extract<WaitingFor, { type: "MemberOrderChoice" }>;
 
 function selectionInteractionId(
   interaction: ViewerInteraction | null,
@@ -175,6 +176,7 @@ export function CardChoiceModal() {
     selectionInteractionId(s.viewerInteraction),
   );
   const scryPromptId = useGameStore((s) => s.gameState?.derived?.scry_prompt_id);
+  const promptIdentity = useGameStore((s) => s.gameState?.derived?.waiting_for_identity);
 
   if (!waitingFor) return null;
 
@@ -203,6 +205,17 @@ export function CardChoiceModal() {
         />
       );
     case "RevealUntilBottomOrder":
+      if (!canActForWaitingState) return null;
+      return (
+        <RevealUntilBottomOrderModal
+          key={
+            activeSelectInteractionId ??
+            `${waitingFor.data.player}:${waitingFor.data.source_id}:${waitingFor.data.cards.join(",")}`
+          }
+          data={waitingFor.data}
+        />
+      );
+    case "DigBottomOrder":
       if (!canActForWaitingState) return null;
       return (
         <RevealUntilBottomOrderModal
@@ -287,9 +300,9 @@ export function CardChoiceModal() {
     case "EmpowerJaceChoice":
       if (!canActForWaitingState) return null;
       return <EmpowerJaceChoiceModal data={waitingFor.data} />;
-    case "SpellCopyOrderChoice":
+    case "MemberOrderChoice":
       if (!canActForWaitingState) return null;
-      return <SpellCopyOrderChoiceModal data={waitingFor.data} />;
+      return <MemberOrderChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -305,6 +318,9 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    case "SecretAgendaChoice":
+      if (!canActForWaitingState) return null;
+      return <SecretAgendaModal key={waitingFor.data.object_id} data={waitingFor.data} />;
     case "OpponentGuess":
       // CR 608.2d: the guesser picks one of the offered options. Display-only —
       // reuses the generic option picker; the engine computes correctness.
@@ -332,10 +348,12 @@ export function CardChoiceModal() {
       return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
       return null;
-    case "PayCost":
+    case "PayCost": {
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
-      return <PayCostDispatch key={payCostPromptKey(waitingFor.data)} data={waitingFor.data} />;
+      const promptKey = promptIdentity ?? payCostPromptKey(waitingFor.data);
+      return <PayCostDispatch key={promptKey} promptKey={promptKey} data={waitingFor.data} />;
+    }
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
@@ -385,6 +403,7 @@ export function CardChoiceModal() {
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
           })}
+          reason={t("cardChoice.discard.reason.connive")}
         />
       );
     case "DiscardChoice":
@@ -404,6 +423,15 @@ export function CardChoiceModal() {
           }
         />
       );
+    case "HeroEventChoice": {
+      if (!canActForWaitingState) return null;
+      // Per-prompt key: Baxter copies re-prompt the same hero with the same
+      // offer, and queue steps advance the same Event — `copies_pending` plus
+      // the recorded-answer count disambiguate what `cards` alone cannot, so a
+      // stale selection never survives into the next prompt.
+      const heroEventKey = `${waitingFor.data.event_id}:${waitingFor.data.player}:${waitingFor.data.copies_pending}:${waitingFor.data.answers?.length ?? 0}:${waitingFor.data.cards.join(",")}`;
+      return <HeroEventModal key={heroEventKey} data={waitingFor.data} />;
+    }
     case "WardDiscardChoice":
       if (!canActForWaitingState) return null;
       return (
@@ -411,6 +439,7 @@ export function CardChoiceModal() {
           key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
+          reason={t("cardChoice.discard.reason.ward")}
         />
       );
     case "WardSacrificeChoice":
@@ -562,9 +591,9 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               key={id}
               type="button"
               aria-label={obj.name}
-              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
+              className={`relative rounded-lg transition ${
                 isSelected
-                  ? "ring-2 ring-emerald-400/80"
+                  ? "z-10 ring-2 ring-emerald-400/80"
                   : "ring-1 ring-white/10 hover:ring-white/35"
               }`}
               initial={{ opacity: 0, y: 40, scale: 0.9 }}
@@ -575,17 +604,17 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage {...objectImageProps(obj)} size="normal" />
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  isSelected
-                    ? "bg-emerald-500/80 text-white"
-                    : "bg-slate-800/90 text-slate-300"
-                }`}
-              >
-                {isSelected
-                  ? t("cardChoice.badges.selected")
-                  : t("cardChoice.badges.choose")}
-              </span>
+              {/* Over the card, as every strip draws its selection: below lg
+                  the strip sizes its cards to fill its height, so anything
+                  stacked under a card would be cut off. The label wraps inside
+                  a narrow card rather than spilling onto its neighbours. */}
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-center text-xs font-bold text-white [overflow-wrap:anywhere]">
+                    {t("cardChoice.badges.selected")}
+                  </span>
+                </div>
+              )}
             </motion.button>
           );
         })}
@@ -848,6 +877,8 @@ function entryKey(entry: OutsideGameChoiceEntry): string {
       return `fx:${entry.source.data.object_id}`;
     case "BoosterPack":
       return `bp:${entry.source.data.pack_slot}`;
+    case "Companion":
+      return "companion";
   }
 }
 
@@ -873,6 +904,8 @@ function entryToSelection(entry: OutsideGameChoiceEntry): OutsideGameSelection {
         type: "BoosterPack",
         data: { pack_slot: entry.source.data.pack_slot },
       };
+    case "Companion":
+      return { type: "Companion" };
   }
 }
 
@@ -960,6 +993,8 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
           const sourceLabel =
             entry.source.type === "FaceUpExile"
               ? t("outsideGame.fromExile")
+              : entry.source.type === "Companion"
+                ? t("outsideGame.fromCompanion")
               : entry.source.type === "BoosterPack"
                 ? entry.source.data.origin.type === "Set"
                   ? t("outsideGame.fromBoosterPack", {
@@ -1187,16 +1222,22 @@ function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
   );
 }
 
-// CR 405.3 + CR 707.10: the controller of a batch of spell copies picks the
-// spell whose copy goes on the stack next. Display-only: the engine supplies
-// `choices` and enforces legality; clicking a spell dispatches a single-object
+// CR 608.2f + CR 405.3: the controller of an ordered member loop picks which
+// member is processed next — a spell copy, or a per-member instruction whose
+// iterations pause for a payment. Display-only: the engine supplies `choices`
+// and enforces legality; clicking a member dispatches a single-object
 // SelectCards.
-function SpellCopyOrderChoiceModal({ data }: { data: SpellCopyOrderChoice["data"] }) {
+function MemberOrderChoiceModal({ data }: { data: MemberOrderChoice["data"] }) {
   const { t } = useTranslation("game");
+  const copyBatch = data.purpose === "SpellCopies";
   return (
     <SingleObjectPickModal
-      title={t("cardChoice.spellCopyOrder.title")}
-      subtitle={t("cardChoice.spellCopyOrder.subtitle")}
+      title={t(
+        copyBatch ? "cardChoice.spellCopyOrder.title" : "cardChoice.memberOrder.title",
+      )}
+      subtitle={t(
+        copyBatch ? "cardChoice.spellCopyOrder.subtitle" : "cardChoice.memberOrder.subtitle",
+      )}
       choices={data.choices}
     />
   );
@@ -2504,10 +2545,9 @@ function RevealForCostModal({ data }: { data: PayCost["data"] }) {
 // CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
 // state — branch on `kind.type` to the matching cost-selection modal. The
 // `key` forces a fresh selection set when the prompt identity or cost step changes.
-function PayCostDispatch({ data }: { data: PayCost["data"] }) {
+function PayCostDispatch({ data, promptKey }: { data: PayCost["data"]; promptKey: string }) {
   const { t } = useTranslation("game");
   const isManaAbility = data.resume.type === "ManaAbility";
-  const promptKey = payCostPromptKey(data);
   switch (data.kind.type) {
     case "Discard":
       return (
@@ -2518,6 +2558,11 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
             isManaAbility
               ? t("cardChoice.discard.titleManaAbility")
               : t("cardChoice.discard.titleAdditionalCost")
+          }
+          reason={
+            isManaAbility
+              ? t("cardChoice.discard.reason.manaAbility")
+              : t("cardChoice.discard.reason.additionalCost")
           }
           canCancel={!isManaAbility}
         />
@@ -2646,6 +2691,19 @@ function CollectEvidenceModal({
     return obj ? sum + manaValueOfObject(obj) : sum;
   }, 0);
   const isReady = total >= data.minimum_mana_value;
+  // CR 608.2d + CR 701.59b: evidence collected by a resolving ability is not a
+  // cost that can be backed out of; the engine rejects CancelCast for it.
+  const canCancel = data.resume.type !== "Resolution";
+  const confirm = (
+    <ConfirmButton
+      onClick={handleConfirm}
+      disabled={!isReady}
+      label={t("cardChoice.buttons.collectCount", {
+        total,
+        minimum: data.minimum_mana_value,
+      })}
+    />
+  );
 
   return (
     <ChoiceOverlay
@@ -2654,16 +2712,11 @@ function CollectEvidenceModal({
         minimum: data.minimum_mana_value,
       })}
       footer={
-        <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton
-            onClick={handleConfirm}
-            disabled={!isReady}
-            label={t("cardChoice.buttons.collectCount", {
-              total,
-              minimum: data.minimum_mana_value,
-            })}
-          />
-        </CostActionFooter>
+        canCancel ? (
+          <CostActionFooter onCancel={handleCancel}>{confirm}</CostActionFooter>
+        ) : (
+          confirm
+        )
       }
     >
       <ScrollableCardStrip>
@@ -2715,6 +2768,7 @@ function CollectEvidenceModal({
 function DiscardModal({
   data,
   title,
+  reason,
   canCancel = false,
 }: {
   data: { cards: ObjectId[]; count: number } & {
@@ -2722,12 +2776,19 @@ function DiscardModal({
     unless_filter?: TargetFilter;
   };
   title?: string;
+  /**
+   * Why the prompt asks for a discard (Ward, Connive, a cost), when its title
+   * says more than the instruction. A short screen drops the title and puts
+   * the reason before the instruction instead.
+   */
+  reason?: string;
   canCancel?: boolean;
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
+  const isCompactHeight = useIsCompactHeight();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const hasUnlessOption = data.unless_filter != null;
   const isUpTo = data.up_to === true;
@@ -2788,6 +2849,87 @@ function DiscardModal({
   // The confirm button always shows the discard count (even in keep-mode where
   // `selected` tracks the keep set — invert to show how many will be discarded).
   const discardSelectedForLabel = active ? data.cards.length - selected.size : selected.size;
+  const confirmLabel = t("cardChoice.buttons.discardCount", {
+    selected: discardSelectedForLabel,
+    count: data.count,
+  });
+
+  const keepToggle = keepEligible ? (
+    <button
+      type="button"
+      className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
+      onClick={onToggleKeep}
+    >
+      {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
+    </button>
+  ) : null;
+
+  // The grid keeps its place in the tree under either header, so turning the
+  // phone mid-prompt keeps its sort and grouping. On a short screen the
+  // counter is left to screen readers while the confirm shows the same count;
+  // in keep-mode the confirm still counts discards, so the keep count stays.
+  const body = (
+    <>
+      {!isCompactHeight && keepToggle && <div className="px-1 pb-1">{keepToggle}</div>}
+      <SelectableCardGrid
+        cards={data.cards}
+        objects={objects}
+        value={selected}
+        onChange={setSelected}
+        cap={cap}
+        tone={tone}
+        badgeLabel={badgeLabel}
+        counterText={counterText}
+        hoverProps={hoverProps}
+        onConfirm={handleConfirm}
+        canConfirm={isReady}
+        counterDisplay={isCompactHeight && !active ? "screenReaderOnly" : "visible"}
+        toolbarControlSize={isCompactHeight ? "touch" : "standard"}
+        toolbarStart={isCompactHeight ? keepToggle : null}
+      />
+    </>
+  );
+
+  // On a short screen (a landscape phone) every line of chrome takes height
+  // from the cards, and the standard layout's title, instruction, counter and
+  // footer confirm each repeat the discard. One header line carries the
+  // instruction and a confirm that shows the count, and "Keep instead" joins
+  // the toolbar row. The instruction stands in for the title, keeping the
+  // reason a title names (Ward, Connive, a cost) in front of it.
+  if (isCompactHeight) {
+    return (
+      <ChoiceOverlay
+        title={
+          reason
+            ? t("cardChoice.discard.instructionWithReason", { reason, instruction: subtitle })
+            : subtitle
+        }
+        headerActions={
+          <>
+            {canCancel && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className={menuButtonClass({ tone: "slate", size: "sm" })}
+              >
+                {t("choiceOverlay.cancel")}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleConfirm}
+              disabled={!isReady}
+              className={menuButtonClass({ tone: "cyan", size: "sm", disabled: !isReady })}
+            >
+              {confirmLabel}
+            </button>
+          </>
+        }
+      >
+        {body}
+      </ChoiceOverlay>
+    );
+  }
 
   return (
     <ChoiceOverlay
@@ -2796,53 +2938,159 @@ function DiscardModal({
       footer={
         canCancel ? (
           <CostActionFooter onCancel={handleCancel}>
-            <ConfirmButton
-              onClick={handleConfirm}
-              disabled={!isReady}
-              label={t("cardChoice.buttons.discardCount", {
-                selected: discardSelectedForLabel,
-                count: data.count,
-              })}
-            />
+            <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
           </CostActionFooter>
         ) : (
-          <ConfirmButton
-            onClick={handleConfirm}
-            disabled={!isReady}
-            label={t("cardChoice.buttons.discardCount", {
-              selected: discardSelectedForLabel,
-              count: data.count,
-            })}
-          />
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
         )
       }
     >
-      <>
-        {keepEligible && (
-          <div className="px-1 pb-1">
-            <button
-              type="button"
-              className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
-              onClick={onToggleKeep}
-            >
-              {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
-            </button>
-          </div>
-        )}
-        <SelectableCardGrid
-          cards={data.cards}
-          objects={objects}
-          value={selected}
-          onChange={setSelected}
-          cap={cap}
-          tone={tone}
-          badgeLabel={badgeLabel}
-          counterText={counterText}
-          hoverProps={hoverProps}
-          onConfirm={handleConfirm}
-          canConfirm={isReady}
-        />
-      </>
+      {body}
+    </ChoiceOverlay>
+  );
+}
+
+// ── Turtle Team-Up Hero-Event Choice Modal ────────────────────────────────────
+
+function HeroEventModal({
+  data,
+}: {
+  data: Extract<WaitingFor, { type: "HeroEventChoice" }>["data"];
+}) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+  const isUpTo = data.up_to === true;
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  // Krang's Stratagem Oracle text ("As a team, the heroes discard a total of
+  // two cards" — not CR 701.9b, which only covers who chooses the discarded
+  // card): "up to N" allows min..=count (min floors the team contribution
+  // where the engine sets one); exact requires precisely count.
+  const min = data.min ?? 0;
+  const isReady = isUpTo
+    ? selected.size >= min && selected.size <= data.count
+    : selected.size === data.count;
+
+  let title: string;
+  let subtitle: string;
+  let badgeLabel: string;
+  let tone: (typeof EFFECT_ZONE_VISUAL_CLASSES)[keyof typeof EFFECT_ZONE_VISUAL_CLASSES];
+  let buttonLabel: string;
+  switch (data.event.type) {
+    case "ChromeOverload":
+      title = t("cardChoice.heroEvent.chromeOverload.title");
+      subtitle = t("cardChoice.heroEvent.chromeOverload.subtitle");
+      badgeLabel = t("cardChoice.badges.sacrifice");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.sacrificeCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "KrangStratagem":
+      title = t("cardChoice.heroEvent.krangStratagem.title");
+      subtitle =
+        isUpTo && min > 0
+          ? t("cardChoice.heroEvent.krangStratagem.subtitleMin", {
+              min,
+              count: data.count,
+              remaining: data.event.data.remaining,
+            })
+          : isUpTo
+            ? t("cardChoice.heroEvent.krangStratagem.subtitleUpTo", {
+                count: data.count,
+                remaining: data.event.data.remaining,
+              })
+            : t("cardChoice.heroEvent.krangStratagem.subtitleExact", { count: data.count });
+      badgeLabel = t("cardChoice.badges.discard");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.discardCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "Smackdown":
+      title = t("cardChoice.heroEvent.smackdown.title");
+      subtitle = t("cardChoice.heroEvent.smackdown.subtitle");
+      badgeLabel = t("cardChoice.badges.destroy");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "RatKingRevolution":
+      title = t("cardChoice.heroEvent.ratKingRevolution.title");
+      subtitle = t("cardChoice.heroEvent.ratKingRevolution.subtitle");
+      badgeLabel = t("cardChoice.badges.tap");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Tap;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "SavantiCurse":
+      title = t("cardChoice.heroEvent.savantiCurse.title");
+      subtitle = t("cardChoice.heroEvent.savantiCurse.subtitle", { count: data.count });
+      badgeLabel = t("cardChoice.badges.return");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Hand;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "Infiltration":
+      title = t("cardChoice.heroEvent.infiltration.title");
+      subtitle = t("cardChoice.heroEvent.infiltration.subtitle");
+      badgeLabel = t("cardChoice.badges.destroy");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Sacrifice;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+    case "VillainMayhem":
+      title = t("cardChoice.heroEvent.villainMayhem.title");
+      subtitle = t("cardChoice.heroEvent.villainMayhem.subtitle", { count: data.count });
+      badgeLabel = t("cardChoice.badges.keep");
+      tone = EFFECT_ZONE_VISUAL_CLASSES.Battlefield;
+      buttonLabel = t("cardChoice.buttons.confirmCount", {
+        selected: selected.size,
+        count: data.count,
+      });
+      break;
+  }
+
+  return (
+    <ChoiceOverlay
+      title={title}
+      subtitle={subtitle}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={buttonLabel} />}
+    >
+      <SelectableCardGrid
+        cards={data.cards}
+        objects={objects}
+        value={selected}
+        onChange={setSelected}
+        cap={data.count}
+        tone={tone}
+        badgeLabel={badgeLabel}
+        counterText={t("cardChoice.bulk.counterChoose", {
+          selected: selected.size,
+          cap: data.count,
+        })}
+        hoverProps={hoverProps}
+        onConfirm={handleConfirm}
+        canConfirm={isReady}
+      />
     </ChoiceOverlay>
   );
 }
@@ -2993,6 +3241,8 @@ function CommanderZoneChoiceModal({
           >
             <CardImage
               cardName={obj?.name ?? "Unknown"}
+              ownerPrinting={obj?.printing}
+              ownerPrintedRef={obj?.printed_ref}
               size="normal"
               className={CHOICE_CARD_IMAGE_CLASS}
             />
@@ -3069,6 +3319,8 @@ function RevealUntilKeptChoiceModal({
         >
           <CardImage
             cardName={obj?.name ?? "Unknown"}
+            ownerPrinting={obj?.printing}
+            ownerPrintedRef={obj?.printed_ref}
             size="normal"
             className={CHOICE_CARD_IMAGE_CLASS}
           />

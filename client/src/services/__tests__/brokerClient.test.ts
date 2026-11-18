@@ -12,7 +12,9 @@ import {
 import type { RegisterHostRequest } from "../brokerClient";
 import type { LobbyGame } from "../../adapter/types";
 import {
+  MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES,
   MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
+  MIN_LOBBY_PROTOCOL_FOR_HORDE,
   PROTOCOL_VERSION,
   type ServerInfo,
 } from "../../adapter/ws-adapter";
@@ -569,15 +571,81 @@ describe("registerHost lobby-capability floor", () => {
     expect(ws.send).toHaveBeenCalledTimes(1);
   });
 
-  it("sends a Custom: format regardless of lobby version", async () => {
-    const ws = new MockWebSocket();
-    const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion: 9 }));
-    const request = baseRequest({
+  // CR 903.12h: an older broker's validator rejects today's Brawl threshold and
+  // Custom uses_commander, so these configs need the commander-config floor.
+  const commanderConfigRows = [
+    ["Brawl", formatMetadata("Brawl")!.default_config],
+    ["HistoricBrawl", formatMetadata("HistoricBrawl")!.default_config],
+    ["Custom:5", {
       ...formatMetadata("Standard")!.default_config,
       format: "Custom:5",
-    } as RegisterHostRequest["formatConfig"]);
+    } as RegisterHostRequest["formatConfig"]],
+  ] as const;
 
-    void client.registerHost(request);
+  it.each(commanderConfigRows)("rejects %s below the commander-config floor without sending", async (_, config) => {
+    for (const lobbyProtocolVersion of [MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1, undefined]) {
+      const ws = new MockWebSocket();
+      const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion }));
+      const refusal = client.registerHost(baseRequest(config)).catch((e: unknown) => e);
+      expect(ws.send).not.toHaveBeenCalled();
+      const err = await refusal;
+      expect(err).toBeInstanceOf(LobbyCapabilityError);
+      expect(err).toEqual(expect.objectContaining({
+        neededLobbyVersion: MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES,
+      }));
+    }
+  });
+
+  it.each(commanderConfigRows)("sends %s at the commander-config floor (reach guard)", async (format, config) => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(
+      makePhaseSocket(ws, { lobbyProtocolVersion: MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES }),
+    );
+
+    void client.registerHost(baseRequest(config));
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const frame = JSON.parse(ws.send.mock.calls[0][0] as string) as {
+      type: string;
+      data: { format_config: { format: string } };
+    };
+    expect(frame.type).toBe("CreateGameWithSettings");
+    expect(frame.data.format_config.format).toBe(format);
+  });
+
+  const constructedHorde = formatMetadata("Horde")!.default_config;
+  // The engine's Commander-survivor Horde shape (100-card singleton survivors).
+  const commanderHorde = {
+    ...constructedHorde,
+    deck_size: { type: "Exactly", data: 100 },
+    singleton: true,
+    commander_damage_threshold: 21,
+    uses_commander: true,
+    default_deck_copy_limit: { type: "UpTo", data: 1 },
+    horde_ruleset: { ...constructedHorde.horde_ruleset!, survivor_deck_format: "Commander" },
+  } as RegisterHostRequest["formatConfig"];
+
+  it.each([
+    ["Commander-survivor Horde", MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1, false, commanderHorde],
+    ["Commander-survivor Horde", MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES, true, commanderHorde],
+    ["Constructed-survivor Horde", MIN_LOBBY_PROTOCOL_FOR_HORDE, true, constructedHorde],
+  ] as const)("%s at lobby protocol %i sends: %s", async (_, lobbyProtocolVersion, sends, config) => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion }));
+
+    const registration = client.registerHost(baseRequest(config)).catch((e: unknown) => e);
+
+    expect(ws.send).toHaveBeenCalledTimes(sends ? 1 : 0);
+    if (!sends) expect(await registration).toBeInstanceOf(LobbyCapabilityError);
+  });
+
+  it("sends Commander below the commander-config floor (the floor is scoped)", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(
+      makePhaseSocket(ws, { lobbyProtocolVersion: MIN_LOBBY_PROTOCOL_FOR_COMMANDER_CONFIG_RULES - 1 }),
+    );
+
+    void client.registerHost(baseRequest(formatMetadata("Commander")!.default_config));
 
     expect(ws.send).toHaveBeenCalledTimes(1);
   });

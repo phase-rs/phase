@@ -10,6 +10,7 @@ import {
   buildGameState,
   buildManaPaymentWaitingFor,
   buildPendingCast,
+  buildPlayers,
   buildStackEntry,
   gameStateFactory,
   manaSourceOptionFactory,
@@ -109,6 +110,103 @@ describe("ManaPaymentUI", () => {
     expect(screen.queryByRole("button", { name: "Pay" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  // CR 601.2g + CR 605.3a: a manual Rakdos Signet ("{1}, {T}: Add {B}{R}.")
+  // activated to pay an outer spell. The panel renders the engine's view of the
+  // Signet's own window, not the outer spell's still-pending cost.
+  function manualSignetWindowState(pinnedPoolUnits: number[] = []): GameState {
+    const signet = buildGameObjectWithCoreTypes(["Artifact"], {
+      id: 7,
+      card_id: 7,
+      name: "Rakdos Signet",
+      zone: "Battlefield",
+    });
+    const swamp = buildGameObjectWithCoreTypes(["Land"], {
+      id: 21,
+      card_id: 21,
+      name: "Swamp",
+      zone: "Battlefield",
+    });
+    const mountain = buildGameObjectWithCoreTypes(["Land"], {
+      id: 22,
+      card_id: 22,
+      name: "Mountain",
+      zone: "Battlefield",
+    });
+    return createGameState({
+      objects: buildObjectMap(signet, swamp, mountain),
+      players: buildPlayers([
+        {
+          id: 0,
+          mana_pool: {
+            mana: [
+              { color: "Black", source_id: 21, pip_id: 11, snow: false, restrictions: [] },
+              { color: "Red", source_id: 22, pip_id: 12, snow: false, restrictions: [] },
+            ],
+          },
+        },
+        1,
+      ]),
+      pending_cast: buildPendingCast({
+        cost: { type: "Cost", shards: ["Red", "Red"], generic: 2 },
+      }),
+      waiting_for: {
+        type: "ManaAbilityManaPayment",
+        data: { player: 0, pending_mana_ability: {} },
+      },
+      derived: {
+        mana_ability_payment: {
+          source_id: 7,
+          cost: { type: "Cost", shards: [], generic: 1 },
+          pinned_pool_units: pinnedPoolUnits,
+        },
+      },
+    });
+  }
+
+  it("renders a manual mana ability's own cost and source from the engine view", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = manualSignetWindowState();
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }, { type: "PassPriority" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    expect(screen.getByText(/Rakdos Signet/)).toBeInTheDocument();
+    expect(screen.getByAltText("1")).toBeInTheDocument();
+    // The outer spell's {2}{R}{R} is not this window's cost.
+    expect(screen.queryByAltText("2")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pay" })).toBeInTheDocument();
+  });
+
+  it("pins a pool unit and confirms a manual mana ability's payment", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = manualSignetWindowState();
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }, { type: "PassPriority" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Mountain/ }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "SpendPoolMana", data: { pip_id: 12 } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Pay" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "PassPriority" });
   });
 
   it("shows the convoke payment hint during convoke mana payment", () => {

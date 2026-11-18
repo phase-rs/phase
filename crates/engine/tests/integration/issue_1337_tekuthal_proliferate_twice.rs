@@ -6,19 +6,26 @@
 //!   - CR 614.6: a replacement applies only once to a given event.
 //!   - CR 701.34a: proliferate — choose targets, then add a counter of each kind.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::effects::proliferate::resolve;
 use engine::game::replacement::{replace_event, ReplacementResult};
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{Effect, ReplacementPlayerScope, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::proposed_event::ProposedEvent;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
+use engine::types::zones::Zone;
+
+use crate::support::shared_card_db as load_db;
 
 const TEKUTHAL: &str = "If you would proliferate, proliferate twice instead.";
 const TEKUTHAL_FULL: &str = "Flying\nIf you would proliferate, proliferate twice instead.\n{1}{U/P}{U/P}, Remove three counters from among other artifacts, creatures, and planeswalkers you control: Put an indestructible counter on Tekuthal. ({U/P} can be paid with either {U} or 2 life.)";
@@ -273,5 +280,117 @@ fn two_tekuthals_compound_proliferate_to_four() {
         runner.state().objects[&creature].counters[&CounterType::Plus1Plus1],
         5,
         "two Tekuthal compound to four proliferations (1 base + 4), not two"
+    );
+}
+
+/// Contentious Plan's VERBATIM Oracle text ({1}{U} sorcery, card-data export).
+const CONTENTIOUS_PLAN_ORACLE: &str = "Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)\nDraw a card.";
+
+/// Doubling Season's VERBATIM Oracle text (card-data export). Staged via
+/// from_oracle (live parser) so the def carries the CR 614.16 gate — the
+/// committed fixture entry predates the tag.
+const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
+
+/// Asserts the real card's face text is `oracle` (grub-file idiom).
+fn assert_oracle(db: &CardDatabase, name: &str, oracle: &str) {
+    assert_eq!(
+        db.get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the fixture"))
+            .oracle_text
+            .as_deref(),
+        Some(oracle)
+    );
+}
+
+/// CR 701.34a + CR 614.16 first clause (V13): Contentious Plan cast under
+/// Doubling Season proliferates the creature's +1/+1 counter into two (1 → 3
+/// total) — proliferate is a resolving-effect instruction
+/// (`ResolvingEffect`), which the gate keeps eligible. The ProliferateChoice
+/// prompt is answered through `apply()`; the trailing draw proves the spell
+/// fully resolved. Single counter candidate: no CR 616.1 prompt opens.
+///
+/// Preservation pin: 3 both pre- and post-tag — stamping proliferate `Other`
+/// leaves 2 with no other row catching it.
+#[test]
+fn proliferate_under_doubling_season_still_doubles() {
+    let db = load_db().expect("card db");
+    assert_oracle(db, "Contentious Plan", CONTENTIOUS_PLAN_ORACLE);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    let pumped = scenario
+        .add_creature(P0, "Pumped", 2, 2)
+        .with_plus_counters(1)
+        .id();
+    let plan = scenario.add_real_card(P0, "Contentious Plan", Zone::Hand, db);
+    scenario.with_library_top(P0, &["Plains"; 3]);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let library_before = runner.state().players[P0.0 as usize].library.len();
+    // The cast driver stops at the ProliferateChoice prompt.
+    let outcome = runner.cast(plan).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ProliferateChoice { .. }
+        ),
+        "reach-guard: proliferate must open its target choice, got {:?}",
+        outcome.final_waiting_for()
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(pumped)],
+        })
+        .expect("proliferate choice");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast must settle to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after the cast resolves"
+    );
+    assert!(
+        runner.state().active_proliferate_frame().is_none(),
+        "reach-guard: the answered choice releases the proliferate frame"
+    );
+    // Reach-guard: the spell fully resolved — it left the stack for the
+    // graveyard and its trailing draw ran (cast -1, draw +1 nets the hand).
+    assert_eq!(
+        runner.state().objects[&plan].zone,
+        Zone::Graveyard,
+        "reach-guard: Contentious Plan resolved to the graveyard"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len(),
+        hand_before,
+        "reach-guard: the trailing draw replaced the cast spell in hand"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].library.len(),
+        library_before - 1,
+        "reach-guard: the trailing draw took one library card"
+    );
+    assert_eq!(
+        runner.state().objects[&pumped].counters[&CounterType::Plus1Plus1],
+        3,
+        "CR 701.34a + CR 614.16: the proliferated counter must double (1 + 2)"
     );
 }

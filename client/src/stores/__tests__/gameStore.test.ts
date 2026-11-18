@@ -12,6 +12,7 @@ import {
   buildGameState,
   buildStackEntry,
 } from "../../test/factories/gameStateFactory";
+import { undoLastAction } from "../../game/dispatch";
 import type { GameMode } from "../gameStore";
 import {
   canExportAuthoritativeState,
@@ -329,7 +330,7 @@ describe("gameStore", () => {
       adapter.submitAction.mock.invocationCallOrder[0],
     );
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
-    expect(useGameStore.getState().stateHistory[0]).toEqual(envelope);
+    expect(useGameStore.getState().stateHistory[0]).toEqual({ state: envelope, logSeq: 0 });
   });
 
   it("dispatch drops the checkpoint when the session turns over mid-flight", async () => {
@@ -414,7 +415,7 @@ describe("gameStore", () => {
       exportPersistenceState: vi.fn().mockResolvedValue(JSON.stringify(envelope)),
     });
     // Model a real engine: `restoreState` actually rewinds it, so the read that
-    // follows returns the restored state. `undo` commits the snapshot's own
+    // follows returns the restored state. `undoLastAction` commits the snapshot's own
     // post-restore state (post-restore, the engine is the source of truth and
     // both halves of the pair must come from it), so a mock whose reads ignored
     // `restoreState` would be lying about the engine.
@@ -428,7 +429,7 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
     expect(useGameStore.getState().gameState?.turn_number).toBe(2);
 
-    await act(() => useGameStore.getState().undo());
+    await act(() => undoLastAction());
 
     const store = useGameStore.getState();
     expect(store.gameState?.turn_number).toBe(1);
@@ -450,7 +451,7 @@ describe("gameStore", () => {
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
 
-    act(() => useGameStore.getState().undo());
+    act(() => undoLastAction());
 
     expect(adapter.restoreState).toHaveBeenCalledOnce();
     expect(adapter.restoreState).toHaveBeenCalledWith(envelope);
@@ -460,11 +461,11 @@ describe("gameStore", () => {
     // Set stateHistory but no adapter
     act(() => {
       useGameStore.setState({
-        stateHistory: [buildGameState()],
+        stateHistory: [{ state: buildGameState(), logSeq: 0 }],
         adapter: null,
       });
     });
-    act(() => useGameStore.getState().undo());
+    act(() => undoLastAction());
     // Should not crash; stateHistory unchanged
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
   });
@@ -474,7 +475,7 @@ describe("gameStore", () => {
     const adapter = buildEngineAdapterMock(state);
     await act(() => useGameStore.getState().initGame("test-id", adapter));
 
-    act(() => useGameStore.getState().undo());
+    act(() => undoLastAction());
     expect(adapter.restoreState).not.toHaveBeenCalled();
   });
 
@@ -527,10 +528,10 @@ describe("gameStore", () => {
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     act(() => {
-      useGameStore.setState({ stateHistory: [state1], gameMode: "p2p-host" });
+      useGameStore.setState({ stateHistory: [{ state: state1, logSeq: 0 }], gameMode: "p2p-host" });
     });
 
-    await act(() => useGameStore.getState().undo());
+    await act(() => undoLastAction());
 
     // History untouched; restoreState never invoked.
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
@@ -547,10 +548,10 @@ describe("gameStore", () => {
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     act(() => {
-      useGameStore.setState({ stateHistory: [state1], gameMode: "native-ai" });
+      useGameStore.setState({ stateHistory: [{ state: state1, logSeq: 0 }], gameMode: "native-ai" });
     });
 
-    await act(() => useGameStore.getState().undo());
+    await act(() => undoLastAction());
 
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
     expect(adapter.restoreState).not.toHaveBeenCalled();

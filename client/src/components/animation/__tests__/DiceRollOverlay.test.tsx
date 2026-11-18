@@ -16,6 +16,8 @@ const reportBoundaryError = vi.hoisted(() => vi.fn());
 vi.mock("../../../services/telemetryEvents", () => ({ reportBoundaryError }));
 
 import { DiceRollOverlay } from "../DiceRollOverlay";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore";
+import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { useUiStore } from "../../../stores/uiStore";
 import type { DiceRollPayload } from "../../../stores/uiStore";
 
@@ -66,8 +68,29 @@ describe("DiceRollOverlay with an unavailable 3D chunk", () => {
     vi.restoreAllMocks();
     reportBoundaryError.mockClear();
     vi.useRealTimers();
-    useUiStore.setState({ diceRoll: null, diceRollQueue: [] });
+    useUiStore.getState().resetDiceRoll();
+    usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
+    useMultiplayerStore.setState({ playerNames: new Map() });
   });
+
+  it("counts static faces down from when they show, not from the landing timeout", async () => {
+    // At this speed each roll's countdown is 800 ms. A static face that never
+    // reported its landing would hold its roll for the 8 s landing timeout.
+    usePreferencesStore.setState({ animationSpeedMultiplier: 0.25 });
+    render(<DiceRollOverlay />);
+
+    await act(async () => {
+      useUiStore.getState().flashDiceRoll({ kind: "coin", playerId: 0, won: true, context: "ability" });
+      useUiStore.getState().flashDiceRoll({
+        kind: "die", context: "ability", sides: 20, rolls: [{ playerId: 0, value: 17 }],
+      });
+    });
+    await flushLazyImports();
+
+    expect(await screen.findByText(/you won the flip/i)).toBeInTheDocument();
+    await waitFor(() => expect(useUiStore.getState().diceRoll?.kind).toBe("die"), { timeout: 3000 });
+    await waitFor(() => expect(useUiStore.getState().diceRoll).toBeNull(), { timeout: 3000 });
+  }, 10_000);
 
   it("(d) renders the static die face instead of throwing when the Dice3D export is missing", async () => {
     const onEscape = vi.fn();
@@ -129,14 +152,31 @@ describe("DiceRollOverlay with an unavailable 3D chunk", () => {
       } });
     });
     await flushLazyImports();
-    expect(screen.queryByText(/you play first/i)).toBeNull();
+    expect(screen.queryByText(/you won the roll/i)).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
-    expect(screen.getByText(/you play first/i)).toBeInTheDocument();
+    expect(screen.getByText(/you won the roll/i)).toBeInTheDocument();
     expect(screen.getByTestId("game-parent")).toBe(parent);
     expect(onEscape).not.toHaveBeenCalled();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(useUiStore.getState().diceRoll).toBeNull();
     expect(screen.getByTestId("game-parent")).toBe(parent);
+  });
+
+  it("captions an opponent's roll win with their name", async () => {
+    // CR 103.1: the caption names the roll winner. The viewer is seat 0, so a
+    // seat-1 winner is captioned by name rather than as "you".
+    useMultiplayerStore.setState({ playerNames: new Map([[1, "Bob"]]) });
+    render(<DiceRollOverlay />);
+    await act(async () => {
+      useUiStore.setState({ diceRoll: {
+        kind: "die", context: "startingPlayer", sides: 20, winner: 1,
+        rounds: [[{ playerId: 0, value: 4 }, { playerId: 1, value: 17 }]],
+        rolls: [{ playerId: 0, value: 4 }, { playerId: 1, value: 17 }],
+      } });
+    });
+    await flushLazyImports();
+    expect(await screen.findByText("Bob won the roll")).toBeInTheDocument();
+    expect(screen.queryByText(/you won the roll/i)).toBeNull();
   });
 
   it("(d) logs the degraded 3D chunk exactly once, however many dice render", async () => {

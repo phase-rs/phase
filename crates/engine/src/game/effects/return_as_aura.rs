@@ -197,10 +197,10 @@ pub(crate) fn complete_no_target_delivery(
     BatchMoveResult::Done
 }
 
-/// CR 614.1d + CR 113.10 + CR 303.4a + CR 702.5a: Install the Aura's
-/// continuous effect on the returned object and attach it to `target_id`.
-///
-/// Builds a single `TransientContinuousEffect` carrying:
+/// CR 303.4 + CR 613.1d + CR 613.1f: the modifications the Aura's continuous
+/// effect applies to the returned object — the single list shared by
+/// [`install_aura_continuous_effect`] and the CR 611.2e with-entry carrier
+/// (`effects::with_entry_effect`), so the two cannot diverge:
 /// - Layer 4 (CR 613.1d): `SetCardTypes { core_types: [Enchantment] }`,
 ///   `RemoveAllSubtypes { set: SubtypeSet::Creature }`,
 ///   `AddSubtype { subtype: "Aura" }`.
@@ -209,17 +209,10 @@ pub(crate) fn complete_no_target_delivery(
 ///   start with `RemoveAllAbilities` — Layer 6 dependency rule CR 613.8
 ///   ensures it applies before the `Grant*` modifications, because a
 ///   `Grant*` effect depends on whether removal occurred per CR 613.8a).
-///
-/// Duration is hard-coded to `Duration::UntilHostLeavesPlay` per CR 611.2a +
-/// CR 400.7: a new object on re-entry is not the same object, so the prior
-/// continuous effect implicitly ends.
-fn install_aura_continuous_effect(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    returned_id: ObjectId,
+pub(crate) fn aura_modifications(
     enchant_filter: &TargetFilter,
     grants: Vec<ContinuousModification>,
-) {
+) -> Vec<ContinuousModification> {
     let mut modifications: Vec<ContinuousModification> = Vec::with_capacity(grants.len() + 4);
     modifications.push(ContinuousModification::SetCardTypes {
         core_types: vec![CoreType::Enchantment],
@@ -234,12 +227,31 @@ fn install_aura_continuous_effect(
         keyword: Keyword::Enchant(enchant_filter.clone()),
     });
     modifications.extend(grants);
+    modifications
+}
+
+/// CR 614.1d + CR 113.10 + CR 303.4a + CR 702.5a: Install the Aura's
+/// continuous effect on the returned object and attach it to `target_id`.
+///
+/// Builds a single `TransientContinuousEffect` carrying
+/// [`aura_modifications`].
+///
+/// Duration is hard-coded to `Duration::UntilHostLeavesPlay` per CR 611.2a +
+/// CR 400.7: a new object on re-entry is not the same object, so the prior
+/// continuous effect implicitly ends.
+fn install_aura_continuous_effect(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    returned_id: ObjectId,
+    enchant_filter: &TargetFilter,
+    grants: Vec<ContinuousModification>,
+) {
     state.add_transient_continuous_effect(
         ability.source_id,
         ability.controller,
         Duration::UntilHostLeavesPlay,
         TargetFilter::SpecificObject { id: returned_id },
-        modifications,
+        aura_modifications(enchant_filter, grants),
         None,
     );
 }
@@ -259,11 +271,21 @@ pub(crate) fn finalize_attach(
 
     install_aura_continuous_effect(state, ability, returned_id, enchant_filter, grants);
 
+    // CR 303.4a + CR 613.1d + CR 702.16c: the returned permanent is an Aura
+    // enchantment (not a creature) from the moment the continuous effect exists,
+    // so apply the layers BEFORE the attach legality check. Otherwise the
+    // protection/enchant-restriction guard reads the pre-conversion creature
+    // (Teysa, a Forest with protection from creatures, would wrongly refuse an
+    // Old-Growth Troll that is now an enchantment).
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+
     // CR 701.3 + CR 303.4: attach the Aura to the chosen permanent. This is
     // a silent no-op if the target carries `CantBeEnchanted` / `CantBeAttached`
     // (CR 701.3 / CR 702.5 / CR 702.6) — the next SBA pass will then move the
     // newly-orphaned Aura to its owner's graveyard per CR 704.5n.
-    let _ = crate::game::effects::attach::attach_to(state, returned_id, target_id);
+    let _ =
+        crate::game::effects::attach::attach_to_with_events(state, returned_id, target_id, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ReturnAsAura,
@@ -386,6 +408,13 @@ mod tests {
                 keyword: Keyword::Enchant(_)
             }
         )));
+        // CR 611.2e: the installed effect is exactly the shared builder's list,
+        // the list the with-entry carrier carries (parity: carried == installed).
+        assert_eq!(
+            tce.modifications,
+            aura_modifications(&forest_filter(), vec![]),
+            "the installer must install exactly the shared aura-modification list"
+        );
         // CR 701.3a + CR 303.4: attach_to MUST have wired both sides of the
         // attachment, not silently no-op'd. (Silent no-ops would happen if the
         // target had CantBeEnchanted or CantBeAttached — neither is set here.)

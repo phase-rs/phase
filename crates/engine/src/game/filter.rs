@@ -3,6 +3,7 @@
 //! Replaces the Forge-style string filter parsing with typed enum matching.
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -21,25 +22,26 @@ use crate::types::ability::{
     filter_contains, filter_grammar_any, filter_prop_grammar_any, player_filter_grammar_any,
     quantity_expr_grammar_any, quantity_ref_grammar_any, rewrite_filter_prop, rewrite_filter_props,
     rewrite_player_filter_props, rewrite_quantity_expr_filter_props, AbilityCondition,
-    AttachmentReferent, AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue,
-    ChosenAttribute, CombatRelation, CombatRelationSubject, ContinuousModification, ControllerRef,
-    CountScope, CrewRelation, FilterGrammarNode, FilterProp, Parity, ParitySource, PlayerFilter,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AttachmentReferent, AttackerBlockStatus, BlockPairDirection, CardTypeSetSource,
+    CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject,
+    ContinuousModification, ControllerRef, CountScope, CrewRelation, FilterGrammarNode, FilterProp,
+    Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    AttackDeclarationRecord, CounterAddedRecord, DamageEventKey, DamageRecord, GameState,
+    LKISnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
+use crate::types::proposed_event::{CoEntrants, EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -196,6 +198,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -205,6 +208,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -371,6 +375,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -463,6 +468,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -472,6 +478,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -622,6 +629,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -630,6 +638,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -943,6 +952,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
@@ -1019,6 +1029,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -1028,6 +1039,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -1204,6 +1216,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -1589,6 +1602,12 @@ pub struct FilterContext<'a> {
     pub declared_slot_view: Option<&'a [Option<crate::game::targeting::DeclaredSlotBinding>]>,
     /// CR 201.5a: the granter stamped on the definition this filter is read for.
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 614.12 + CR 614.1c: the battlefield as it stood BEFORE the
+    /// simultaneous entry whose as-enters replacement is being evaluated. A
+    /// battlefield object outside this set entered in the same event, so it is
+    /// not yet part of the population the entering permanent counts. `None`
+    /// everywhere except an entering object's replacement-time quantity read.
+    pub pre_entry_battlefield: Option<&'a HashSet<ObjectId>>,
 }
 
 impl<'a> FilterContext<'a> {
@@ -1608,6 +1627,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: source.declared_slot_view,
             granting_object: source.granting_object,
             ability_targets: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1630,6 +1650,19 @@ impl<'a> FilterContext<'a> {
     pub fn with_granting_object(self, granting_object: Option<ObjectIncarnationRef>) -> Self {
         FilterContext {
             granting_object,
+            ..self
+        }
+    }
+
+    /// CR 614.12: evaluate this filter against the battlefield as it was before
+    /// the simultaneous entry (see [`FilterContext::pre_entry_battlefield`]).
+    /// `None` leaves the live battlefield authoritative.
+    pub fn with_pre_entry_battlefield(
+        self,
+        pre_entry_battlefield: Option<&'a HashSet<ObjectId>>,
+    ) -> Self {
+        FilterContext {
+            pre_entry_battlefield,
             ..self
         }
     }
@@ -1703,6 +1736,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1725,6 +1759,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1743,6 +1778,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1761,6 +1797,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: source.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1782,6 +1819,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: source.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1805,6 +1843,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1823,6 +1862,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1843,6 +1883,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1866,6 +1907,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 }
@@ -2281,6 +2323,11 @@ fn attached_to_host_filter<'a>(
         TargetFilter::ParentTarget => {
             let mut produced_referent = false;
             if let Some(ability) = source.ability {
+                // CR 608.2b: a bound empty host is not an unassigned event
+                // reference, even when no target or creation pin survived.
+                if ability.has_authoritative_empty_binding() {
+                    return false;
+                }
                 if !ability.target_incarnations.is_empty() {
                     // Tier 1 — the creation-time snapshot. Authoritative even
                     // when stale (CR 603.7c + CR 400.7): no event-tier fallback.
@@ -2437,9 +2484,16 @@ pub(crate) fn controller_ref_player(
         // controller sacrifices a noncreature, nonland permanent").
         ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
-        ControllerRef::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-        }
+        // CR 508.5 + CR 113.7a: route through the single defending-player
+        // authority with the ability's captured trigger context, so a source
+        // removed from combat (or from the battlefield) after its ability
+        // triggered still names the player it was attacking. With no trigger
+        // context the authority falls back to the live per-attacker lookup.
+        ControllerRef::DefendingPlayer => crate::game::combat::defending_player_cr508_5(
+            state,
+            source_id,
+            ability.and_then(|ability| ability.trigger_source.as_ref()),
+        ),
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
         ControllerRef::ChosenPlayer { index } => {
@@ -2619,7 +2673,7 @@ pub(crate) fn quantity_expr_contains_filter_prop(
 ) -> bool {
     quantity_expr_grammar_any(expr, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
@@ -2682,11 +2736,12 @@ pub(crate) fn quantity_ref_operands_contain(
 }
 
 /// The operand-closed entries' visitor: a `TargetFilter` node is tested
-/// against `leaf`; a `FilterProp` node is only a step of the walk.
+/// against `leaf`; a `FilterProp` or `PlayerFilter` node is only a step of the
+/// walk.
 fn operand_leaf(node: FilterGrammarNode<'_>, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
     match node {
         FilterGrammarNode::Filter(filter) => leaf(filter),
-        FilterGrammarNode::Prop(_) => false,
+        FilterGrammarNode::Prop(_) | FilterGrammarNode::Player(_) => false,
     }
 }
 
@@ -2843,12 +2898,14 @@ fn filter_contains_input(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -3083,6 +3140,7 @@ fn filter_prop_contains_input(
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -3387,7 +3445,7 @@ fn quantity_ref_contains_input(
             slot_context,
         ),
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref().is_some_and(|inner| {
@@ -3446,6 +3504,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3467,13 +3526,14 @@ fn quantity_ref_contains_input(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
@@ -3482,6 +3542,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -3494,7 +3555,6 @@ fn quantity_ref_contains_input(
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
@@ -3867,6 +3927,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -4335,6 +4396,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -4342,6 +4404,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -4451,6 +4514,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -4628,49 +4692,13 @@ pub(crate) fn matches_target_filter_on_departure(
     from: Zone,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
-    record: Option<&ZoneChangeRecord>,
 ) -> bool {
-    // CR 603.10a + CR 704.5n: by the time a leaves-the-battlefield trigger is
-    // matched, the CR 704.5m/n SBAs have already detached the object's Auras and
-    // Equipment, so the live object's `attachments` is empty. The departure
-    // record captured the relation at the instant before the zone change; read
-    // THAT snapshot for attachment predicates.
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    let projected = record.filter(|record| !record.attachments.is_empty());
-    let Some(record) = projected else {
-        return filter_inner_with_lookup(
-            state,
-            object_id,
-            filter,
-            ctx,
-            ControllerLookup::Departed(from),
-        );
-    };
-    let mut departed = obj.clone();
-    departed.attachments = record
-        .attachments
-        .iter()
-        .map(|attachment| attachment.object_id)
-        .collect();
-    filter_inner_for_object(
+    filter_inner_with_lookup(
         state,
-        &departed,
         object_id,
         filter,
-        ctx.source_id,
-        ctx.source_controller,
-        ctx.ability,
-        ctx.trigger_source,
-        ctx.recipient_id,
-        ctx.scoped_iteration_player,
-        ctx.triggering_object,
-        ctx.declared_slot_view,
-        ctx.granting_object,
+        ctx,
         ControllerLookup::Departed(from),
-        ctx.ability_targets,
-        HeldObject::Live,
     )
 }
 
@@ -4707,19 +4735,30 @@ pub(crate) fn matches_target_filter_on_entry_observation(
     };
     // CR 400.7: only the exact observed incarnation lends its live object (and so its
     // abilities) to the view; otherwise the projection stands alone on a skeleton.
-    let mut view = match state.objects.get(&record.object_id) {
+    let view = match state.objects.get(&record.object_id) {
         Some(live) if ObjectIncarnationRef::from_object(live) == observation.identity.reference => {
-            live.clone()
+            let mut view = live.clone();
+            view.overlay_source_projection(observation);
+            view
         }
-        _ => GameObject::new(
-            record.object_id,
-            observation.card_id,
-            observation.lki.owner,
-            observation.lki.name.clone(),
-            observation.identity.expected_zone,
-        ),
+        _ => {
+            let mut view = GameObject::new(
+                record.object_id,
+                observation.card_id,
+                observation.lki.owner,
+                observation.lki.name.clone(),
+                observation.identity.expected_zone,
+            );
+            view.overlay_source_projection(observation);
+            // CR 701.27g + CR 400.7: a skeleton has no stored face and no modal flag, so its raw
+            // `transformed` is the only orientation the authority can read; it carries the
+            // latched answer, as `matches_target_filter_on_event_snapshot` reconstructs
+            // `EventObjectSnapshot.transformed`. The live-clone view keeps the raw record beside
+            // the live stash and modal flag.
+            view.transformed = observation.transformed_permanent;
+            view
+        }
     };
-    view.overlay_source_projection(observation);
     // CR 702.26b: a phased-out permanent is treated as though it does not exist.
     if view.is_phased_out() {
         return false;
@@ -5537,12 +5576,98 @@ impl EntryProjection {
 /// or granted by a `GrantStaticAbility`, per recipient) and of every transient
 /// are evaluated against the pre-entry state
 /// (`layers::pin_entry_population_conditions`); the live game, triggers and
-/// entry observations keep the realized battlefield. `state` must be the board
-/// before the entry event's first member moved (CR 603.6a); multi-object callers
-/// resolve every member first (`change_zone::resolve_change_zone_member_entries`).
+/// entry observations keep the realized battlefield. For [`Self::new`], `state`
+/// must be the board before the entry event's first member moved (CR 603.6a);
+/// multi-object callers resolve every member first
+/// (`change_zone::resolve_change_zone_member_entries`). [`Self::for_proposed_entry`]
+/// is called at the replacement check, where an earlier member of the same entry
+/// event is already delivered (members move one by one). It places the entrant on
+/// the board without those members (CR 614.4 + CR 614.12,
+/// `CoEntrants::entered_earlier`; see [`Self::pre_event_board`]), so it applies
+/// only the continuous effects that existed before the event.
 pub(crate) struct BattlefieldEntrantProjection {
     scratch: GameState,
     entrant: ObjectId,
+}
+
+// Test-only count of carrier-bearing projections `for_proposed_entry` starts to build, each a
+// state clone and a full layer pass. Thread-local like the layer counters: a test reads only its
+// own thread's work.
+#[cfg(test)]
+thread_local! {
+    static PROPOSED_ENTRY_PROJECTION_BUILDS: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
+/// Test-support work counts for the CR 614.12 token projection seams only.
+/// Thread-local so parallel tests cannot charge one another's batches.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenEntryProjectionWork {
+    pub pre_entry_boards: usize,
+    pub pre_entry_state_clones: usize,
+    pub projection_state_clones: usize,
+    pub pre_entry_layer_passes: usize,
+    pub projections: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TOKEN_ENTRY_PROJECTION_WORK: core::cell::Cell<TokenEntryProjectionWork> =
+        const { core::cell::Cell::new(TokenEntryProjectionWork {
+            pre_entry_boards: 0, pre_entry_state_clones: 0, projection_state_clones: 0,
+            pre_entry_layer_passes: 0, projections: 0,
+        }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn token_entry_projection_work() -> TokenEntryProjectionWork {
+    TOKEN_ENTRY_PROJECTION_WORK.with(core::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_token_entry_projection_work() {
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| work.set(TokenEntryProjectionWork::default()));
+}
+
+/// CR 712.14 + CR 712.14a: the face a double-faced entrant has up as it is put onto the battlefield.
+/// Engine-internal: the entry event and `BattlefieldEntrantProjection::new` keep their
+/// `enter_transformed` flag, converted once here (`EntryFace::from_enter_transformed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryFace {
+    /// CR 712.14: front face up, the default.
+    Front,
+    /// CR 712.14a: put onto the battlefield "transformed": back face up.
+    Back,
+}
+
+impl EntryFace {
+    const fn from_enter_transformed(enter_transformed: bool) -> Self {
+        if enter_transformed {
+            Self::Back
+        } else {
+            Self::Front
+        }
+    }
+
+    /// The flag `zones::move_to_zone_with_entry_flags` takes (an existing boolean boundary).
+    const fn enters_transformed(self) -> bool {
+        match self {
+            Self::Front => false,
+            Self::Back => true,
+        }
+    }
+}
+
+/// What an entry event already gives its entrant as it is placed on the scratch
+/// battlefield: the event's own fields, borrowed.
+struct EntrantStaging<'a> {
+    controller_override: Option<PlayerId>,
+    face: EntryFace,
+    face_down_profile: Option<&'a crate::types::ability::FaceDownProfile>,
+    chain_referent: crate::types::zones::ChainReferentIntent,
+    enter_with_choices: Option<&'a crate::types::proposed_event::EntryChoices>,
+    enter_as_copy: Option<&'a crate::types::proposed_event::CopyTokenSpec>,
 }
 
 impl BattlefieldEntrantProjection {
@@ -5553,37 +5678,234 @@ impl BattlefieldEntrantProjection {
     /// keeps today's pre-move read. With `enter_transformed`, the scratch entrant
     /// is turned to its back face after placement (CR 712.14a), as the real
     /// delivery does.
+    ///
+    /// Known gaps: an effect-carried entry gate does not install a with-entry
+    /// effect (no printed return carries both a gate and a `WithEntry` rider); and a
+    /// liminal (transformed or melded) entrant with a rider keeps its liminal read
+    /// (none printed).
     pub(crate) fn new(
         state: &GameState,
         entrant: ObjectId,
         controller_override: Option<PlayerId>,
         enter_transformed: bool,
     ) -> Option<Self> {
+        let (scratch, origin) = Self::place(
+            state,
+            entrant,
+            &EntrantStaging {
+                controller_override,
+                face: EntryFace::from_enter_transformed(enter_transformed),
+                face_down_profile: None,
+                chain_referent: crate::types::zones::ChainReferentIntent::Silent,
+                enter_with_choices: None,
+                enter_as_copy: None,
+            },
+        )?;
+        Some(Self::finish(
+            scratch,
+            Some((state, Some(origin))),
+            entrant,
+            None,
+        ))
+    }
+
+    /// CR 614.12 + CR 611.2e: the entrant of a proposed battlefield entry whose resolution carries a
+    /// simultaneous "is/has" effect, as it would exist on the battlefield. It is placed on a scratch
+    /// battlefield as the new object (CR 400.7) under the controller it enters under (CR 110.2a), with
+    /// the characteristics the event already gives it installed by delivery's own authority (face
+    /// down, as-enters choices, enter as a copy, CR 616.1; counters and the tapped status the event
+    /// carries are not staged, a known gap: no printed external entry replacement reads P/T or tapped
+    /// status), turned back
+    /// face up when it enters transformed (CR 712.14a), the carried effect installed on it, and the
+    /// full layer pass run (CR 613.1, 613.3, 613.6, 613.7), which a detached applier cannot reproduce.
+    /// `None` when the event carries no such effect, is not a battlefield entry, or its entrant can't
+    /// be placed (a liminal entrant keeps its liminal read; a refused placement keeps today's read).
+    /// CR 614.4: the entrant is placed on the board before the event, so a member of the same
+    /// event delivered earlier is moved back on a copy first ([`Self::pre_event_board`]);
+    /// `None` also when such a member has no entry record (not expected).
+    pub(crate) fn for_proposed_entry(state: &GameState, event: &ProposedEvent) -> Option<Self> {
+        let ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            controller_override,
+            enter_transformed,
+            face_down_profile,
+            chain_referent,
+            enter_as_copy,
+            enter_with_choices,
+            with_entry_effect: Some(effect),
+            co_entrants,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        #[cfg(test)]
+        PROPOSED_ENTRY_PROJECTION_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        // CR 614.12 + CR 614.4: the continuous effects that "already exist" are those of the
+        // board before the event; a member of this event delivered earlier is not on it.
+        let pre_event = Self::pre_event_board(state, co_entrants.as_deref())?;
+        let (scratch, origin) = Self::place(
+            &pre_event,
+            *object_id,
+            &EntrantStaging {
+                controller_override: *controller_override,
+                face: EntryFace::from_enter_transformed(*enter_transformed),
+                face_down_profile: face_down_profile.as_deref(),
+                chain_referent: *chain_referent,
+                enter_with_choices: enter_with_choices.as_deref(),
+                enter_as_copy: enter_as_copy.as_deref(),
+            },
+        )?;
+        Some(Self::finish(
+            scratch,
+            Some((&*pre_event, Some(origin))),
+            *object_id,
+            Some(effect),
+        ))
+    }
+
+    /// CR 614.12 + CR 614.4 + CR 400.7: the board a proposed entry is checked against. The
+    /// engine moves an entry event's members one at a time, so a member delivered earlier in
+    /// the same event (`CoEntrants::entered_earlier`) is on the live battlefield although it
+    /// did not exist before the event, and none of its continuous effects "already exist"
+    /// (Graaz, Unstoppable Juggernaut returned with Hill Giant by one Ever After does not make
+    /// the Giant a Juggernaut for a Metallic Mimic that named Juggernaut). On a detached copy,
+    /// each such member is moved back to the zone its entering incarnation came from
+    /// (`GameState::incarnation_entry_record`), and the copy's turn ledger is truncated back to
+    /// `state`'s, so it carries no synthetic battlefield-to-origin rows. The layer pass then
+    /// reruns, so every remaining object's characteristics are current, because
+    /// `layers::pin_entry_population_conditions` reads the pre-entry board as-is. Borrowed when
+    /// the entry has no co-entrants or none was delivered earlier. `None` when such a member has
+    /// no entry record with an
+    /// origin zone (guarded by a `debug_assert!`); the caller then keeps the read without the
+    /// carried effect. That case is not expected: every battlefield delivery records its
+    /// entered incarnation, and a member is a card moved from a zone.
+    fn pre_event_board<'a>(
+        state: &'a GameState,
+        co_entrants: Option<&CoEntrants>,
+    ) -> Option<Cow<'a, GameState>> {
+        let Some(co_entrants) = co_entrants else {
+            return Some(Cow::Borrowed(state));
+        };
+        let earlier = co_entrants
+            .as_slice()
+            .iter()
+            .filter_map(|member| state.objects.get(&member.object_id))
+            .filter(|host| co_entrants.entered_earlier(host))
+            .map(|host| {
+                state
+                    .incarnation_entry_record(ObjectIncarnationRef::from_object(host))
+                    .and_then(|record| record.from_zone)
+                    .map(|origin| (host.id, origin))
+            })
+            .collect::<Option<Vec<(ObjectId, Zone)>>>();
+        debug_assert!(
+            earlier.is_some(),
+            "a co-entrant delivered earlier has no entry record with an origin zone"
+        );
+        let earlier = earlier?;
+        if earlier.is_empty() {
+            return Some(Cow::Borrowed(state));
+        }
+        let mut board = state.clone();
+        let mut events = Vec::new();
+        for (host, origin) in earlier {
+            // CR 400.7: the zone-move primitive, on the detached copy only.
+            // allow-raw-zone: rebuilds the pre-event board on a discarded projection clone, not a gameplay zone event.
+            crate::game::zones::move_to_zone(&mut board, host, origin, &mut events);
+        }
+        // The moves back are not zone changes of the game: keep the copy's ledger as it was.
+        board
+            .zone_changes_this_turn
+            .truncate(state.zone_changes_this_turn.len());
+        // CR 613.1: the full layer pass, so no remaining object keeps a characteristic the
+        // moved members' statics gave it.
+        crate::game::layers::mark_layers_full(&mut board);
+        crate::game::layers::flush_layers(&mut board);
+        Some(Cow::Owned(board))
+    }
+
+    /// CR 614.12 + CR 611.2e + CR 614.1c: a just-delivered entrant (already placed, its entry
+    /// characteristics installed) with the carried effect installed and the layer pass run, for the
+    /// delivered `EntersWithAdditionalCounters` read.
+    /// Known gap: it reads `state` after delivery, where a member of the same entry event
+    /// delivered earlier (`CoEntrants::entered_earlier`) is on the battlefield and its
+    /// continuous effects apply, although CR 614.12 takes into account only those that
+    /// already exist. No printed `EntersWithAdditionalCounters` static reads a characteristic
+    /// such a member can change: Deanna Troi, Psychic Counsel and Master Chef read "other
+    /// creatures you control", Mysterious Pathlighter an Adventure, and Thunderous Velocipede
+    /// a Vehicle or creature and mana value.
+    pub(crate) fn entered(
+        state: &GameState,
+        entrant: ObjectId,
+        effect: &crate::types::proposed_event::WithEntryEffect,
+    ) -> Option<Self> {
+        if state.objects.get(&entrant)?.zone != Zone::Battlefield {
+            return None;
+        }
+        // The entrant is already on the live battlefield, so there is no population to pin.
+        Some(Self::finish(state.clone(), None, entrant, Some(effect)))
+    }
+
+    /// Place the entrant onto a scratch copy of `state` the way delivery does: the face-down
+    /// preflight, the move, the characteristics its event installs, the back face, then the
+    /// controller. Returns the scratch and the entrant's origin zone, or `None` when it can't be
+    /// placed.
+    fn place(
+        state: &GameState,
+        entrant: ObjectId,
+        staging: &EntrantStaging<'_>,
+    ) -> Option<(GameState, Zone)> {
         let origin = state.entering_or_live_object(entrant)?.zone;
         if state.liminal_entries.contains_key(&entrant) {
             return None;
         }
         let mut scratch = state.clone();
         let mut events = Vec::new();
+        // CR 708.3 + CR 400.4a: a face-down entrant is turned face down before the move, by
+        // delivery's own preflight, so a face-down instant or sorcery card is placed.
+        if staging.face_down_profile.is_some() {
+            crate::game::zone_pipeline::turn_face_down_before_battlefield_entry(
+                &mut scratch,
+                entrant,
+            );
+        }
         // CR 400.7 + CR 613.7d: the zone-move primitive makes the new object and draws its timestamp on the scratch.
         crate::game::zones::move_to_zone_with_entry_flags(
             &mut scratch,
             entrant,
             Zone::Battlefield,
             &mut events,
-            enter_transformed,
+            staging.face.enters_transformed(),
             None,
         );
-        let placed = scratch.objects.get(&entrant)?;
-        if placed.zone != Zone::Battlefield {
+        if scratch.objects.get(&entrant)?.zone != Zone::Battlefield {
             return None;
         }
+        // CR 708.3 + CR 608.2c + CR 614.12a + CR 707.2: what the entry event installs, by
+        // delivery's own authority and in its order.
+        crate::game::zone_pipeline::install_battlefield_entry_characteristics(
+            &mut scratch,
+            entrant,
+            staging.face_down_profile,
+            staging.chain_referent,
+            staging.enter_with_choices,
+            staging.enter_as_copy,
+            &mut events,
+        );
         // CR 712.14a: a transformed entry is turned back face up after placement, as delivery does.
-        if enter_transformed && placed.back_face.is_some() && !placed.transformed {
-            let _ = crate::game::transform::enter_back_face_up(&mut scratch, entrant);
+        match staging.face {
+            EntryFace::Back => {
+                let placed = scratch.objects.get(&entrant)?;
+                if placed.back_face.is_some() && !placed.transformed {
+                    let _ = crate::game::transform::enter_back_face_up(&mut scratch, entrant);
+                }
+            }
+            EntryFace::Front => {}
         }
         // CR 110.2a: the controller the real move installs.
-        if let Some(controller) = controller_override {
+        if let Some(controller) = staging.controller_override {
             crate::game::zones::apply_battlefield_entry_controller_override(
                 &mut scratch,
                 &mut events,
@@ -5591,17 +5913,292 @@ impl BattlefieldEntrantProjection {
                 controller,
             );
         }
+        Some((scratch, origin))
+    }
+
+    /// CR 614.12 + CR 111.1 + CR 111.2: a not-yet-committed liminal token entrant, placed on
+    /// the scratch battlefield exactly as its birth places it
+    /// (`token::place_liminal_token_on_battlefield`), under its creator's control, on the
+    /// board before its entry event: each of `co_entrants` (the tokens entering in the same
+    /// event) is absent. `None` for a card-backed liminal entrant (meld, transformed entry),
+    /// which keeps its own read.
+    pub(crate) fn for_liminal_token(
+        state: &GameState,
+        entrant: ObjectId,
+        co_entrants: &[ObjectId],
+    ) -> Option<Self> {
+        if !state
+            .liminal_entries
+            .get(&entrant)?
+            .object
+            .is_token_projection()
+        {
+            return None;
+        }
+        Self::token_on_pre_entry_board(
+            pre_entry_board(state, co_entrants),
+            state.liminal_entries.get(&entrant)?.object.projected(),
+        )
+    }
+
+    /// CR 614.12: use a caller-owned batch board, while reading the current liminal body.
+    pub(crate) fn liminal_token_on_board(
+        state: &GameState,
+        entrant: ObjectId,
+        pre_entry: &GameState,
+    ) -> Option<Self> {
+        let entry = state.liminal_entries.get(&entrant)?;
+        if !entry.object.is_token_projection() {
+            return None;
+        }
+        Self::token_on_pre_entry_board(Cow::Borrowed(pre_entry), entry.object.projected())
+    }
+
+    /// CR 614.12 + CR 707.9b: the placed copy body includes its immediate copy exceptions.
+    #[cfg(test)]
+    pub(crate) fn for_placed_token(
+        state: &GameState,
+        entrant: ObjectId,
+        body: &GameObject,
+        co_entrants: &[ObjectId],
+    ) -> Option<Self> {
+        let absent: Vec<ObjectId> = co_entrants
+            .iter()
+            .copied()
+            .chain(std::iter::once(entrant))
+            .collect();
+        Self::token_on_pre_entry_board(pre_entry_board(state, &absent), body)
+    }
+
+    /// CR 614.12: capture only the population condition rewrites, then consume an owned
+    /// board directly. No full pre-entry state is needed after capture. A borrowed batch
+    /// board needs one scratch clone; an already-owned board needs none.
+    pub(crate) fn token_on_pre_entry_board(
+        pre_entry: Cow<'_, GameState>,
+        body: &GameObject,
+    ) -> Option<Self> {
+        let mut placed = body.clone();
+        placed.phase_status = crate::game::game_object::PhaseStatus::PhasedIn;
+        if placed.zone != Zone::Battlefield {
+            return None;
+        }
+        let entrant = placed.id;
+        let pins = crate::game::layers::EntryPopulationRewrites::for_token(&pre_entry, &placed);
+        #[cfg(any(test, feature = "test-support"))]
+        TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.projections += 1;
+            counts.projection_state_clones += usize::from(matches!(pre_entry, Cow::Borrowed(_)));
+            work.set(counts);
+        });
+        let mut scratch = pre_entry.into_owned();
+        scratch.liminal_entries.remove(&entrant);
+        if scratch.battlefield.contains(&entrant) {
+            scratch.objects.insert(entrant, placed);
+        } else {
+            crate::game::effects::token::place_liminal_token_on_battlefield(
+                &mut scratch,
+                entrant,
+                placed,
+            );
+        }
+        pins.apply(&mut scratch);
+        Some(Self::finish(scratch, None, entrant, None))
+    }
+
+    /// Install the carried effect (if any) on the scratch entrant, pin the pre-entry
+    /// population conditions (if the entrant was placed from `pre_entry`), and run the layer
+    /// pass.
+    fn finish(
+        mut scratch: GameState,
+        pre_entry: Option<(&GameState, Option<Zone>)>,
+        entrant: ObjectId,
+        effect: Option<&crate::types::proposed_event::WithEntryEffect>,
+    ) -> Self {
+        // CR 611.2e + CR 613.7: the carried effect applies to the entrant as it exists on the
+        // battlefield, installed after placement (a later timestamp than the entrant). It is a
+        // description: nothing reaches the live game.
+        if let Some(effect) = effect {
+            scratch.add_transient_continuous_effect(
+                effect.source_id,
+                effect.controller,
+                crate::types::ability::Duration::Permanent,
+                TargetFilter::SpecificObject { id: entrant },
+                effect.modifications.clone(),
+                None,
+            );
+        }
         // CR 614.12 + CR 700.5: conditions count the pre-entry population (Heliod ruling 2020-01-24); the entrant's own statics still apply.
-        crate::game::layers::pin_entry_population_conditions(&mut scratch, state, Some(origin));
+        if let Some((pre, origin)) = pre_entry {
+            crate::game::layers::pin_entry_population_conditions(&mut scratch, pre, origin);
+        }
         // CR 613.1: the full layer pass, so CR 614.12's own statics and existing effects both apply.
         crate::game::layers::mark_layers_full(&mut scratch);
         crate::game::layers::flush_layers(&mut scratch);
-        Some(Self { scratch, entrant })
+        Self { scratch, entrant }
     }
 
     /// CR 614.12: whether the projected entrant matches `filter` under `ctx`.
     pub(crate) fn matches(&self, filter: &TargetFilter, ctx: &FilterContext<'_>) -> bool {
         matches_target_filter(&self.scratch, self.entrant, filter, ctx)
+    }
+
+    /// CR 614.12: the entrant as it would exist on the battlefield.
+    pub(crate) fn entrant(&self) -> Option<&GameObject> {
+        self.scratch.objects.get(&self.entrant)
+    }
+
+    /// CR 614.12 + CR 613.1f: whether the entrant, as it would exist on the battlefield,
+    /// still has its own replacement `def` (an ability-removing effect that would apply to
+    /// it strips it). Identity is structural, the identity the layer pass dedupes granted
+    /// replacements by. This only filters: it never adds a definition the entrant lacks.
+    pub(crate) fn retains_replacement(&self, def: &ReplacementDefinition) -> bool {
+        self.entrant().is_some_and(|entrant| {
+            entrant
+                .replacement_definitions
+                .iter_all()
+                .any(|held| held == def)
+        })
+    }
+}
+
+/// CR 614.12 + CR 702.26b: the board before an entry event: every `absent` object on the
+/// battlefield (a member of the same event) is phased out, so it is treated as though it
+/// does not exist, and the layers are re-derived without it. Borrowed when none is there.
+/// Only a scratch copy is written: no event, no timestamp. Also the board a copy-target
+/// answer reads its acquired entry abilities on (`replacement::copy_entry_board`).
+pub(crate) fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> Cow<'a, GameState> {
+    let present = |id: &ObjectId| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.is_phased_in_permanent())
+    };
+    if !absent.iter().any(present) {
+        return Cow::Borrowed(state);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+        let mut counts = work.get();
+        counts.pre_entry_boards += 1;
+        counts.pre_entry_state_clones += 1;
+        counts.pre_entry_layer_passes += 1;
+        work.set(counts);
+    });
+    let mut board = state.clone();
+    for id in absent.iter().filter(|id| present(id)) {
+        if let Some(obj) = board.objects.get_mut(id) {
+            obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        }
+    }
+    crate::game::layers::mark_layers_full(&mut board);
+    crate::game::layers::flush_layers(&mut board);
+    Cow::Owned(board)
+}
+
+/// A call-local token batch cache. The object-store snapshot is persistent/shared:
+/// it lets refresh skip co-entrants whose live object has not been written since
+/// the previous consult, without retaining another full game state.
+pub(crate) struct TokenEntryBatchBoard {
+    board: GameState,
+    source_objects: crate::types::object_map::ObjectMap,
+}
+
+impl TokenEntryBatchBoard {
+    pub(crate) fn new(state: &GameState, absent: &[ObjectId]) -> Self {
+        let board = pre_entry_board(state, absent);
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(board, Cow::Borrowed(_)) {
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_boards += 1;
+                counts.pre_entry_state_clones += 1;
+                work.set(counts);
+            });
+        }
+        Self {
+            board: board.into_owned(),
+            source_objects: state.objects.clone(),
+        }
+    }
+
+    pub(crate) fn board(&self) -> &GameState {
+        &self.board
+    }
+
+    /// CR 614.12: extend a batch's pre-entry board with the live, phased-out co-entrants.
+    /// They are frozen by the layer engine, so copying these objects needs no layer pass.
+    /// Entry/counter histories and resolution referents still advance in the live engine;
+    /// keep those reads current, and conservatively flush when an existing static or a
+    /// transient could read the changed context. No whole-state clone is taken here.
+    pub(crate) fn refresh(&mut self, state: &GameState, absent: &[ObjectId]) {
+        let board = &mut self.board;
+        for id in absent {
+            if self.source_objects.shares_object_with(&state.objects, *id) {
+                continue;
+            }
+            let Some(live) = state.objects.get(id) else {
+                continue;
+            };
+            let mut object = live.clone();
+            if object.is_phased_in_permanent() {
+                object.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                    cause: crate::game::game_object::PhaseOutCause::Directly,
+                };
+            }
+            if !board.battlefield.contains(id) && object.zone == Zone::Battlefield {
+                crate::game::effects::token::place_liminal_token_on_battlefield(board, *id, object);
+            } else {
+                board.objects.insert(*id, object);
+            }
+        }
+        let mut context_changed = false;
+        macro_rules! refresh {
+        ($($field:ident),+ $(,)?) => { $(
+            if board.$field != state.$field {
+                board.$field.clone_from(&state.$field);
+                context_changed = true;
+            }
+        )+ };
+    }
+        refresh!(
+            created_tokens_this_turn,
+            players_who_created_token_this_turn,
+            counter_added_this_turn,
+            object_counter_placement_count_this_turn,
+            zone_changes_this_turn,
+            battlefield_entries_this_turn,
+            battlefield_entry_observations,
+            last_created_token_ids,
+            last_effect_amount,
+            last_effect_count,
+            last_effect_excess_amount,
+            last_effect_counts_by_player,
+            combat,
+            transient_continuous_effects,
+        );
+        // The current liminal body is supplied separately by the caller; other explicit
+        // object references must still see the same parked entries as the live board.
+        board.liminal_entries.clone_from(&state.liminal_entries);
+        if context_changed
+            && (!board.transient_continuous_effects.is_empty()
+                || board
+                    .objects
+                    .values()
+                    .any(|object| !object.static_definitions.is_empty()))
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_layer_passes += 1;
+                work.set(counts);
+            });
+            crate::game::layers::mark_layers_full(board);
+            crate::game::layers::flush_layers(board);
+        }
+        self.source_objects = state.objects.clone();
     }
 }
 
@@ -5616,6 +6213,90 @@ fn entry_projection_exists_for(
             entrant.static_definitions.as_slice(),
             target_filter_characteristic_reads(consumer),
         )
+}
+
+/// CR 614.12: whether `filter`'s verdict for an object is decided by the object's identity
+/// alone, or by nothing: `Any`, a fixed object reference compared by id (`SelfRef`,
+/// `OriginalSource`, `SpecificObject`), a player reference whose object arm is a constant
+/// `false`, and `Not`/`Or`/`And` of those. Such a verdict reads no characteristic, zone or
+/// status, so the entrant "as it would exist on the battlefield" gives the same answer as the
+/// entrant itself, and the CR 614.12 projection is not built for it (a host's own `SelfRef`
+/// entry replacement, Barkhide Troll's "This creature enters with a +1/+1 counter on it.").
+/// Under a trigger-source context `SelfRef` and `OriginalSource` read the source's live
+/// incarnation (`object_matches_trigger_source`), a fact about the source, not the entrant;
+/// a replacement's `valid_card` context carries none.
+///
+/// EXHAUSTIVE and wildcard-free: adding a `TargetFilter` variant forces a decision here.
+/// `false` means "may read the object" and keeps the projection. That includes the references
+/// that read a ledger, a chain binding or the paired/attached source, because the scratch
+/// placement can change those.
+fn filter_verdict_is_identity_only(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Not { filter: inner } => filter_verdict_is_identity_only(inner),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(filter_verdict_is_identity_only)
+        }
+        // `filter_inner_for_object`: a constant, or `object_id` compared with a fixed id.
+        TargetFilter::None
+        | TargetFilter::CastingSpell
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::AllPlayers
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::OriginalController
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::SelfRef
+        | TargetFilter::OriginalSource
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. } => true,
+        TargetFilter::Typed(_)
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::GrantingObject { .. } => false,
+    }
 }
 
 /// CR 614.12 + CR 613.1d + CR 613.1e: the projection's allowlist — the own
@@ -5864,6 +6545,17 @@ pub fn matches_target_filter_on_battlefield_entry(
             controller_override,
             ..
         } if *to == Zone::Battlefield => {
+            // CR 614.12 + CR 611.2e: an entry whose resolution applies a simultaneous "is/has"
+            // effect is checked with that effect applied; every other entry keeps the reads below.
+            // A filter decided by identity alone reads nothing the effect changes, so it keeps
+            // the reads below and builds no projection.
+            if !filter_verdict_is_identity_only(filter) {
+                if let Some(projection) =
+                    BattlefieldEntrantProjection::for_proposed_entry(state, event)
+                {
+                    return projection.matches(filter, ctx);
+                }
+            }
             if let Some(profile) = face_down_profile {
                 // CR 708.2a + CR 708.3 + CR 708.10 + CR 614.12: an object
                 // entering face down IS the profile's body (a colorless 2/2
@@ -6121,6 +6813,35 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.ability_targets,
         HeldObject::Detached,
     )
+}
+
+/// CR 120.1 + CR 400.7: The `DamageRecord` written for one damage event — the
+/// same source incarnation, recipient, amount, and combat class. The newest
+/// matching row wins, so a repeated identical event (a double-strike source
+/// hitting the same player twice) reads its own row. `None` when no row was
+/// written (zero damage dealt, CR 120.3) or the event did not come from the
+/// damage pipeline. The join is `DamageEventKey`, the same five-field identity
+/// `DamageRecord::matches_damage_event` uses.
+pub fn damage_record_for_event<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    target: &TargetRef,
+    amount: u32,
+    is_combat: bool,
+) -> Option<&'a DamageRecord> {
+    let key = DamageEventKey {
+        source_id,
+        source_incarnation,
+        target: target.clone(),
+        amount,
+        is_combat,
+    };
+    state
+        .damage_dealt_this_turn
+        .iter()
+        .rev()
+        .find(|record| record.event_key() == key)
 }
 
 /// CR 120.9 + CR 608.2i + CR 608.2h: Check whether a per-turn combat-damage
@@ -6392,6 +7113,8 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // current-pairing arms fail closed regardless.
         block_pairs: Vec::new(),
         co_departed: Vec::new(),
+        co_entered: Vec::new(),
+        instruction_lead: None,
         attached_to: None,
         entered_incarnation,
         turn_zone_change_index: 0,
@@ -6628,7 +7351,7 @@ pub fn matches_zone_change_event_object_filter(
             // format modifies it).
             match origin {
                 Some(from) => {
-                    matches_target_filter_on_departure(state, *object_id, from, filter, ctx, None)
+                    matches_target_filter_on_departure(state, *object_id, from, filter, ctx)
                 }
                 None => matches_target_filter(state, *object_id, filter, ctx),
             }
@@ -6702,6 +7425,16 @@ fn filter_inner_with_lookup(
     if obj.is_phased_out() {
         return false;
     }
+    // CR 614.12 + CR 614.1c: an as-enters replacement modifies the entry before
+    // it happens, so a permanent that enters in the same simultaneous event is
+    // not part of the battlefield the entrant's replacement counts.
+    if obj.zone == Zone::Battlefield
+        && ctx
+            .pre_entry_battlefield
+            .is_some_and(|pre_entry| !pre_entry.contains(&object_id))
+    {
+        return false;
+    }
     filter_inner_for_object(
         state,
         obj,
@@ -6743,6 +7476,10 @@ fn filter_inner_for_object(
 ) -> bool {
     match filter {
         TargetFilter::None => false,
+        // CR 601.2f: the spell whose cost is being determined is a reference a
+        // cost-modifier quantity binds to that exact object before evaluating
+        // (`quantity::bind_casting_spell_referent`); unbound, it names nothing.
+        TargetFilter::CastingSpell => false,
         TargetFilter::Any => true,
         TargetFilter::Player => false, // Players are not objects
         // CR 118.12a: unless-payer population — never matches an object.
@@ -6760,9 +7497,8 @@ fn filter_inner_for_object(
         TargetFilter::SelfRef => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime, so this arm is defense-in-depth and
-        // mirrors SelfRef's source-identity semantics.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
@@ -7116,6 +7852,7 @@ fn filter_inner_for_object(
                     triggering_object,
                     declared_slot_view,
                     granting_object,
+                    pre_entry_battlefield: None,
                 },
             )
         }
@@ -7465,6 +8202,9 @@ fn filter_inner_for_object(
         | TargetFilter::PostReplacementDamageTargetOwner
         // CR 615: compound damage recipient, lowered to `DamageTargetFilter`
         // before runtime — never object-matched here.
+        // CR 608.2c: resolved only by its effect handler; never matched against
+        // the board.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ControllerAndControlledPermanents { .. } => false,
         // CR 201.2a + CR 602.5: "card with the chosen name" — match against source's
         // ChosenAttribute::CardName. The chosen name comes from a player UI prompt
@@ -7485,11 +8225,10 @@ fn filter_inner_for_object(
                 triggering_object,
                 granting_object,
             );
-            let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
-                ChosenAttribute::CardName(n) => Some(n.as_str()),
-                _ => None,
-            });
-            chosen_name.is_some_and(|name| card_names_match(&obj.name, name))
+            source_ctx.chosen_attributes.iter().any(|a| match a {
+                ChosenAttribute::CardName(n) => card_names_match(&obj.name, n),
+                _ => false,
+            })
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
@@ -7505,6 +8244,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                pre_entry_battlefield: None,
             };
             state
                 .last_chosen_damage_source
@@ -7622,8 +8362,8 @@ fn zone_change_filter_inner(
                     record_source.identity.reference == source.identity.reference
                 })
         }),
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime — mirrors SelfRef's source identity.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             trigger_source.map_or(record.object_id == source_id, |source| {
                 record
@@ -7834,11 +8574,10 @@ fn zone_change_filter_inner(
                 triggering_object,
                 ctx.granting_object,
             );
-            let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
-                    ChosenAttribute::CardName(n) => Some(n.as_str()),
-                    _ => None,
-            });
-            chosen_name.is_some_and(|name| card_names_match(&record.name, name))
+            source_ctx.chosen_attributes.iter().any(|a| match a {
+                ChosenAttribute::CardName(n) => card_names_match(&record.name, n),
+                _ => false,
+            })
         }
         // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
         // leaves-the-battlefield look-back path. The candidate occurrence is the
@@ -7948,6 +8687,7 @@ fn zone_change_filter_inner(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -7966,6 +8706,9 @@ fn zone_change_filter_inner(
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner
+        // CR 608.2c: resolved only by its effect handler; never matched against
+        // the board.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::AffectedObjectOwner => false,
     }
 }
@@ -8281,6 +9024,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -8290,6 +9034,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8430,10 +9175,44 @@ pub fn spell_object_matches_filter_from_state_for(
     all_creature_types: &[String],
     fused: bool,
 ) -> bool {
+    spell_object_matches_filter_with_announced_x(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        fused,
+        None,
+    )
+}
+
+/// Announced-X sibling of [`spell_object_matches_filter_from_state_for`].
+/// `announced_x: Some(x)` evaluates the filter against the spell as it stands
+/// once its caster has announced X (CR 601.2b): per CR 601.2a the spell being
+/// cast is on the stack, so CR 202.3e counts the announced X in its mana value
+/// (`GameObject::spell_mana_value_with_announced_x`). `None` reads the object as
+/// it currently presents itself, byte-identical to the `_for` entry.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spell_object_matches_filter_with_announced_x(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    fused: bool,
+    announced_x: Option<u32>,
+) -> bool {
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
-    let record = spell_cast_record_from_object_for(spell_obj, fused);
+    let mut record = spell_cast_record_from_object_for(spell_obj, fused);
+    if let Some(x) = announced_x {
+        record.mana_value = spell_obj.spell_mana_value_with_announced_x(fused, x);
+    }
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -8607,6 +9386,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -8616,6 +9396,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8648,8 +9429,21 @@ fn spell_object_matches_property(
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
-        FilterProp::InZone { zone: required } => zone == *required,
-        FilterProp::InAnyZone { zones } => zones.contains(&zone),
+        // CR 601.2a + CR 400.11: a cast from outside the game (CR 707.13) is from no
+        // zone, so no zone constraint holds — and its negation does.
+        FilterProp::InZone { zone: required } => !record.from_outside_game && zone == *required,
+        FilterProp::InAnyZone { zones } => !record.from_outside_game && zones.contains(&zone),
+        // CR 608.2c + CR 601.2a + CR 400.11: logical negation must recurse through THIS
+        // zone-aware evaluator, not the history arm below, which reads the record's
+        // `from_zone` (the spell's current zone, the stack) instead of the cast origin
+        // `zone`. "Cast from anywhere other than your hand" lowers to
+        // `Not(InZone(Hand))`, so a cast from outside the game (no zone) satisfies it.
+        FilterProp::Not { prop: inner } => {
+            !spell_object_matches_property(record, zone, inner, all_creature_types, context)
+        }
+        FilterProp::AnyOf { props } => props.iter().any(|inner| {
+            spell_object_matches_property(record, zone, inner, all_creature_types, context)
+        }),
         FilterProp::Cmc { comparator, value } => {
             let threshold = match value {
                 QuantityExpr::Fixed { value } => *value,
@@ -8669,7 +9463,10 @@ fn spell_object_matches_property(
         }
         FilterProp::ManaValueParity { parity } => {
             let choice = context.and_then(|ctx| ctx.state.last_named_choice.as_ref());
-            mana_value_matches_parity_source(record.mana_value, parity, choice)
+            let source_choice = context
+                .and_then(|ctx| ctx.state.objects.get(&ctx.source_id))
+                .and_then(|source| chosen_parity(&source.chosen_attributes));
+            mana_value_matches_parity_source(record.mana_value, parity, choice, source_choice)
         }
         FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
             context
@@ -8723,7 +9520,7 @@ fn spell_object_matches_property(
         // check is identity-only (`object_id != source_id`); two distinct
         // copies of the same card are NOT "the same" object. Live cost-modifier
         // callers pass `Some(spell.id)`. The turn-history "another" path now
-        // lives in `game::quantity` (the `SpellsCastThisTurn` own-cast
+        // lives in `game::quantity` (the `SpellsCast` own-cast
         // exclusion arm), which reads `SpellCastRecord.spell_object_id`
         // provenance directly; snapshot-record callers that reach THIS helper
         // still pass `spell_object_id: None` and fail-closed here.
@@ -8858,7 +9655,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
             }
         },
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, None)
+            mana_value_matches_parity_source(record.mana_value, parity, None, None)
         }
         // CR 202.1: SpellCastRecord retains colors + mana_value but no per-shard
         // ManaCost, so colored-pip count is unsupported here. RUNTIME: TODO.
@@ -8913,13 +9710,18 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // closed rather than treating every cast spell as card-represented.
         FilterProp::RepresentedByCard => false,
         FilterProp::WasPlayed => true,
-        FilterProp::InZone { zone: required } => record.from_zone == *required,
+        // CR 601.2a + CR 400.11: see the live-spell arm; outside the game is no zone.
+        FilterProp::InZone { zone: required } => {
+            !record.from_outside_game && record.from_zone == *required
+        }
         // CR 400.1 + CR 601.2a: cast-origin membership — the record's captured
         // from_zone (populated when the spell was put on the stack from where it
         // was, CR 601.2a) is one of the listed cast-capable zones. Mirrors the
         // InZone arm; used by "spell you've cast this turn from anywhere other
         // than your hand" (the Paradox cycle).
-        FilterProp::InAnyZone { zones } => zones.contains(&record.from_zone),
+        FilterProp::InAnyZone { zones } => {
+            !record.from_outside_game && zones.contains(&record.from_zone)
+        }
         // CR 201.2: Exact name match against the cast-time snapshot — case-
         // insensitive per the same convention used by the live-object path.
         // Approach of the Second Sun's "you've cast another spell named
@@ -9002,6 +9804,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         // CR 122.6: A spell on the stack hasn't received counters as a
         // permanent — fail closed against the spell-cast snapshot.
@@ -9017,8 +9820,8 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::SameNameAsParentTarget
         | FilterProp::SameNameAsExiledBySource
         | FilterProp::NameMatchesAnyPermanent { .. }
-        // CR 903.3d: Commander designation is meaningful for permanents on the
-        // battlefield. The spell-cast record path is not currently plumbed with
+        // CR 903.3d: An effect about casting a commander refers to a spell that is
+        // a commander, but the spell-cast record path is not currently plumbed with
         // commander identity — fail closed until a "cast a commander" use-case
         // requires it (CR 903.8 commander-tax tracking lives elsewhere).
         | FilterProp::IsCommander
@@ -9034,56 +9837,103 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
 }
 
 /// Context about the source of an ability, used during filter property evaluation.
-struct SourceContext<'a> {
-    id: ObjectId,
-    controller: Option<PlayerId>,
+pub(crate) struct SourceContext<'a> {
+    pub(crate) id: ObjectId,
+    pub(crate) controller: Option<PlayerId>,
     /// CR 601.2c + CR 608.2b: mirror of `FilterContext::declared_slot_view`, read
     /// only by the `AttachedTo { to: DeclaredTarget }` arm.
-    declared_slot_view: Option<&'a [Option<crate::game::targeting::DeclaredSlotBinding>]>,
+    pub(crate) declared_slot_view:
+        Option<&'a [Option<crate::game::targeting::DeclaredSlotBinding>]>,
     /// CR 400.7 + CR 603.4 + CR 603.6a: mirror of
     /// `FilterContext::triggering_object` — the identity of the object whose zone
     /// change fired the trigger being evaluated. Read by the
     /// `FilterProp::OtherThanTriggerObject` arm; `None` outside a zone-change
     /// intervening-`if`.
-    triggering_object: Option<TriggeringObjectRef>,
+    pub(crate) triggering_object: Option<TriggeringObjectRef>,
     /// Public source characteristics obtained through `TriggerSourceContext`
     /// when this filter belongs to a triggered ability. Kept as an owned
     /// projection so nested filter evaluation cannot rebind a recycled id.
-    lki: LKISnapshot,
-    trigger_source: Option<&'a TriggerSourceContext>,
+    pub(crate) lki: LKISnapshot,
+    pub(crate) trigger_source: Option<&'a TriggerSourceContext>,
     /// CR 303.4 + CR 301.5: Resolved host of the source's attachment, if any.
     /// Widened to `AttachTarget` so attachment-aware filter properties
     /// (`EnchantedBy`, `EquippedBy`) can route on Object vs Player. The
     /// `FilterContext` snapshot mirrors this shape — see `FilterContext`.
-    attached_to: Option<crate::game::game_object::AttachTarget>,
+    pub(crate) attached_to: Option<crate::game::game_object::AttachTarget>,
     /// CR 301.5f + CR 303.4: Whether the source is an attachment-capable subtype.
     /// Disambiguates `attached_to == None`: an unattached Equipment/Aura matches
     /// nothing, while a non-attachment source triggers "has any" fallback semantics.
-    source_is_aura: bool,
-    source_is_equipment: bool,
-    saddled_by: Vec<ObjectId>,
-    convoked_creatures: Vec<ObjectId>,
-    chosen_creature_type: Option<String>,
-    chosen_attributes: Vec<crate::types::ability::ChosenAttribute>,
+    pub(crate) source_is_aura: bool,
+    pub(crate) source_is_equipment: bool,
+    pub(crate) saddled_by: Vec<ObjectId>,
+    pub(crate) convoked_creatures: Vec<ObjectId>,
+    pub(crate) chosen_creature_type: Option<String>,
+    pub(crate) chosen_attributes: Vec<crate::types::ability::ChosenAttribute>,
     /// CR 107.3a + CR 601.2b: The resolving ability, when one is in scope.
     /// Dynamic filter thresholds (`QuantityRef::Variable { "X" }`, `TargetPower`, etc.)
     /// resolve against this ability's `chosen_x` and `targets`. `None` for contexts
     /// without a resolving ability (combat restrictions, layer predicates); in that
     /// case, per CR 107.2, any `Variable("X")` fallback resolves to 0.
-    ability: Option<&'a ResolvedAbility>,
+    pub(crate) ability: Option<&'a ResolvedAbility>,
     /// CR 613.4c: The per-object recipient of an ongoing layer evaluation, when
     /// one is bound. Used for recipient-relative quantities ("attached to it",
     /// "other", "shares a type with it"). `None` outside per-recipient contexts
     /// (e.g., target validation, spell-record matching, single-shot quantity
     /// resolution).
-    recipient_id: Option<ObjectId>,
+    pub(crate) recipient_id: Option<ObjectId>,
     /// CR 201.5a: mirror of `FilterContext::granting_object`.
-    granting_object: Option<ObjectIncarnationRef>,
+    pub(crate) granting_object: Option<ObjectIncarnationRef>,
     /// R2: mirror of `FilterContext::ability_targets` — the parked target
     /// authority for suspension-resume reads. Consumers that resolve a
     /// selected-target reference (`SharesQuality`) consult this when
     /// `ability` is `None`; every other context leaves it `None`.
-    ability_targets: Option<ParkedTargets<'a>>,
+    pub(crate) ability_targets: Option<ParkedTargets<'a>>,
+}
+
+impl<'a> SourceContext<'a> {
+    pub(crate) fn for_controller(id: ObjectId, controller: Option<PlayerId>) -> Self {
+        Self {
+            id,
+            controller,
+            declared_slot_view: None,
+            triggering_object: None,
+            lki: LKISnapshot {
+                name: String::new(),
+                token_image_ref: None,
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 0,
+                controller: controller.unwrap_or(PlayerId(0)),
+                owner: PlayerId(0),
+                card_types: Vec::new(),
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            },
+            trigger_source: None,
+            attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
+            saddled_by: Vec::new(),
+            convoked_creatures: Vec::new(),
+            chosen_creature_type: None,
+            chosen_attributes: Vec::new(),
+            ability: None,
+            recipient_id: None,
+            granting_object: None,
+            ability_targets: None,
+        }
+    }
 }
 
 /// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
@@ -9367,6 +10217,12 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// copy's copied name reverts once it leaves the battlefield, so the live read
 /// would report the printed name instead.
 ///
+/// CR 400.7 + CR 608.2h: an intervening instruction that yields a single referent
+/// overwrites that snapshot (Legion's End's mass exile or reveal), and the target
+/// has still left as the object it was. When the target occurrence's pinned
+/// incarnation is no longer current, its exit last-known information answers. An
+/// unpinned target or one with no exit record falls through to the live read.
+///
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
@@ -9379,6 +10235,16 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
         .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
     {
         return Some(snapshot.lki.name.clone());
+    }
+    if let Some(lki) = ability
+        .targets
+        .iter()
+        .position(|target| *target == TargetRef::Object(id))
+        .and_then(|index| ability.target_pin_at(index))
+        .filter(|pin| !pin.is_current(state))
+        .and_then(|pin| exit_lki_for_incarnation(state, id, pin.incarnation))
+    {
+        return Some(lki.name.clone());
     }
     if let Some(obj) = state.objects.get(&id) {
         return Some(obj.name.clone());
@@ -9393,8 +10259,16 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
     })
 }
 
-/// CR 400.7 + CR 608.2h: The exact incarnation `subject` names. A triggered
-/// source is named by the identity its trigger captured — for a
+/// The live incarnation at `id`, when the object still exists.
+fn live_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    state
+        .objects
+        .get(&id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
+/// CR 400.7 + CR 608.2h: The exact incarnation of the filter's source. A
+/// triggered source is named by the identity its trigger captured — for a
 /// leaves-the-battlefield trigger, the incarnation that left (CR 603.10a). An
 /// activated ability carries no trigger identity, so it falls to the
 /// incarnation stamped onto it when it reached the stack
@@ -9402,51 +10276,101 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
 /// zone it was expected to be in). Only when neither is available does this
 /// fall to the live object at the referenced id; an object that left and
 /// returned is a new object (CR 400.7) and finds nothing its predecessor
-/// recorded. `ParentTarget` prefers the incarnation pinned when it was chosen.
-fn combat_relation_subject_ref(
+/// recorded.
+fn combat_relation_source_ref(
+    state: &GameState,
+    source: &SourceContext<'_>,
+) -> Option<ObjectIncarnationRef> {
+    source
+        .trigger_source
+        .map(|context| context.identity.reference)
+        // CR 113.7: the ability's capture describes its own source, so it does not answer
+        // for a context rebound to another object (a damage source chosen as a target).
+        .or_else(|| {
+            source
+                .ability
+                .filter(|ability| ability.source_id == source.id)
+                .and_then(|ability| ability.source_ref(state))
+        })
+        .or_else(|| live_incarnation(state, source.id))
+}
+
+/// CR 400.7 + CR 603.7c + CR 608.2i: the incarnation the object target at
+/// `position` (id `id`) was announced as: a delayed-trigger referent pin keyed by
+/// id, then the occurrence pin read positionally, then the live object. A
+/// look-back takes no action on its subject, so a departed subject keeps its
+/// name: no liveness check.
+fn announced_target_incarnation(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    position: usize,
+    id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == id)
+        .copied()
+        .or_else(|| ability.target_pin_at(position))
+        .or_else(|| live_incarnation(state, id))
+}
+
+/// CR 400.7 + CR 608.2c + CR 608.2h + CR 608.2i: The exact incarnations
+/// `subject` names. `Source` names the filter's source
+/// ([`combat_relation_source_ref`]). `ParentTarget` names the ability's first
+/// object target (Trial's same-instruction slot). `AnaphoricTarget` names every
+/// object target an earlier instruction announced ("one of those creatures",
+/// Triton Tactics; a singular "it"/"that creature" has one), each by the
+/// incarnation pinned when it was chosen, so a member that left and returned is
+/// a new object whose blocks do not count (CR 400.7).
+fn combat_relation_subject_refs(
     state: &GameState,
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
-) -> Option<ObjectIncarnationRef> {
-    let live = |id: ObjectId| {
-        state
-            .objects
-            .get(&id)
-            .map(ObjectIncarnationRef::from_object)
-    };
+) -> Vec<ObjectIncarnationRef> {
     match subject {
-        CombatRelationSubject::Source => source
-            .trigger_source
-            .map(|context| context.identity.reference)
-            // CR 113.7: the ability's capture describes its own source, so it does not answer
-            // for a context rebound to another object (a damage source chosen as a target).
-            .or_else(|| {
-                source
-                    .ability
-                    .filter(|ability| ability.source_id == source.id)
-                    .and_then(|ability| ability.source_ref(state))
+        CombatRelationSubject::Source => combat_relation_source_ref(state, source)
+            .into_iter()
+            .collect(),
+        CombatRelationSubject::ParentTarget => source
+            .ability
+            .and_then(|ability| {
+                // The pin of the ORIGINATING occurrence (the first object target).
+                let position = ability
+                    .targets
+                    .iter()
+                    .position(|target| matches!(target, TargetRef::Object(_)))?;
+                let id = first_object_target(ability)?;
+                announced_target_incarnation(state, ability, position, id)
             })
-            .or_else(|| live(source.id)),
-        CombatRelationSubject::ParentTarget => {
-            let ability = source.ability?;
-            // The pin of the ORIGINATING occurrence (the first object target),
-            // read positionally; a delayed-trigger referent pin is keyed by id.
-            let position = ability
-                .targets
-                .iter()
-                .position(|target| matches!(target, TargetRef::Object(_)))?;
-            let id = first_object_target(ability)?;
-            ability
-                .target_incarnations
-                .iter()
-                .find(|pin| pin.object_id == id)
-                .copied()
-                .or_else(|| ability.target_pin_at(position))
-                .or_else(|| live(id))
-        }
+            .into_iter()
+            .collect(),
+        CombatRelationSubject::AnaphoricTarget => source
+            .ability
+            .map(|ability| {
+                ability
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, target)| match target {
+                        TargetRef::Object(id) => {
+                            announced_target_incarnation(state, ability, position, *id)
+                                // CR 608.2b: a target illegal as the creating spell resolved determines no history.
+                                .filter(|pin| {
+                                    !ability.context.creation_illegal_referents.contains(pin)
+                                })
+                        }
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
+/// CR 509.1g + CR 608.2c + CR 608.2i: does `candidate` stand in `relation` with
+/// any incarnation `subject` names? "One of those creatures" holds for any of
+/// the announced targets.
 fn matches_combat_relation(
     state: &GameState,
     candidate: ObjectIncarnationRef,
@@ -9454,46 +10378,31 @@ fn matches_combat_relation(
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
 ) -> bool {
-    let Some(subject) = combat_relation_subject_ref(state, subject, source) else {
-        return false;
-    };
-    match relation {
-        // CR 509.1g + CR 509.1h: the candidate blocks the subject, or the
-        // subject blocks the candidate — the current pairing, either way.
-        CombatRelation::BlockingOrBlockedBy => {
-            current_block_pair_holds(
-                state,
-                subject,
-                combat::BlockHistoryPair {
-                    blocker: candidate,
-                    attacker: subject,
-                },
-            ) || current_block_pair_holds(
-                state,
-                subject,
-                combat::BlockHistoryPair {
-                    blocker: subject,
-                    attacker: candidate,
-                },
-            )
-        }
-        // CR 509.1g: "blocked by <subject>" — the current pairing, in the one
-        // orientation where the subject is the blocker.
-        CombatRelation::BlockedBySubject { scope: None } => current_block_pair_holds(
-            state,
-            subject,
-            combat::BlockHistoryPair {
-                blocker: subject,
-                attacker: candidate,
-            },
-        ),
-        // CR 509.1g + CR 400.7: answered from the block-history ledgers, which
-        // CR 506.4 does not prune, by the exact subject and candidate
-        // incarnations.
-        CombatRelation::BlockedBySubject { scope: Some(scope) } => {
-            state.creature_blocked_attacker(subject, candidate, scope)
-        }
-    }
+    let CombatRelation::BlockPairing { direction, scope } = relation;
+    combat_relation_subject_refs(state, subject, source)
+        .into_iter()
+        .any(|subject| {
+            let pair_holds = |blocker, attacker| {
+                let pair = combat::BlockHistoryPair { blocker, attacker };
+                match scope {
+                    // CR 509.1g + CR 509.1h: the current pairing.
+                    None => current_block_pair_holds(state, subject, pair),
+                    // CR 509.1g + CR 400.7: answered from the block-history ledgers,
+                    // which CR 506.4 does not prune, by the exact subject and
+                    // candidate incarnations.
+                    Some(scope) => {
+                        state.creature_blocked_attacker(pair.blocker, pair.attacker, scope)
+                    }
+                }
+            };
+            match direction {
+                BlockPairDirection::SubjectIsBlocker => pair_holds(subject, candidate),
+                BlockPairDirection::CandidateIsBlocker => pair_holds(candidate, subject),
+                BlockPairDirection::Either => {
+                    pair_holds(candidate, subject) || pair_holds(subject, candidate)
+                }
+            }
+        })
 }
 
 /// CR 509.1g + CR 506.4 + CR 608.2h: does the current block pairing `pair`,
@@ -9564,9 +10473,7 @@ fn matches_crew_relation(
     relation: CrewRelation,
     source: &SourceContext<'_>,
 ) -> bool {
-    let Some(source_ref) =
-        combat_relation_subject_ref(state, CombatRelationSubject::Source, source)
-    else {
+    let Some(source_ref) = combat_relation_source_ref(state, source) else {
         return false;
     };
     let pair = match relation {
@@ -9768,6 +10675,7 @@ fn aura_can_enchant_referenced_target(
                 triggering_object: source.triggering_object,
                 declared_slot_view: source.declared_slot_view,
                 granting_object: source.granting_object,
+                pre_entry_battlefield: None,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
@@ -9844,13 +10752,27 @@ fn matches_last_chosen_card_predicate(
     }
 }
 
-fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Option<Parity> {
+/// CR 607.2d: the odd/even quality a source object chose and keeps.
+fn chosen_parity(attributes: &[ChosenAttribute]) -> Option<Parity> {
+    attributes.iter().find_map(|attribute| match attribute {
+        ChosenAttribute::OddOrEven(parity) => Some(*parity),
+        _ => None,
+    })
+}
+
+fn parity_from_source(
+    source: &ParitySource,
+    choice: Option<&ChoiceValue>,
+    source_choice: Option<Parity>,
+) -> Option<Parity> {
     match source {
         ParitySource::Fixed(parity) => Some(*parity),
         ParitySource::LastNamedChoice => match choice {
             Some(ChoiceValue::OddOrEven(parity)) => Some(*parity),
             _ => None,
         },
+        // CR 607.2d: the source's own persisted as-enters choice.
+        ParitySource::SourceChosen => source_choice,
     }
 }
 
@@ -9858,8 +10780,10 @@ fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
     choice: Option<&ChoiceValue>,
+    source_choice: Option<Parity>,
 ) -> bool {
-    parity_from_source(source, choice).is_some_and(|parity| parity.matches(i64::from(mana_value)))
+    parity_from_source(source, choice, source_choice)
+        .is_some_and(|parity| parity.matches(i64::from(mana_value)))
 }
 
 fn attacking_defender_matches(
@@ -9937,7 +10861,7 @@ fn filter_count_scope_actor_matches(
 
 /// CR 109.5: does `owner` stand in the relation `controller` names to the filter's
 /// source? The single authority for `FilterProp::Owned` on live objects and zone-change records.
-fn owned_axis_admits(
+pub(crate) fn owned_axis_admits(
     state: &GameState,
     source: &SourceContext<'_>,
     controller: &ControllerRef,
@@ -10063,18 +10987,16 @@ fn matches_filter_prop(
         // last known pairings on its departure row (Plague Wight removed with
         // its trigger on the stack).
         FilterProp::BlockingSource => {
-            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
-                |attacker| {
-                    current_block_pair_holds(
-                        state,
+            combat_relation_source_ref(state, source).is_some_and(|attacker| {
+                current_block_pair_holds(
+                    state,
+                    attacker,
+                    combat::BlockHistoryPair {
+                        blocker: ObjectIncarnationRef::from_object(obj),
                         attacker,
-                        combat::BlockHistoryPair {
-                            blocker: ObjectIncarnationRef::from_object(obj),
-                            attacker,
-                        },
-                    )
-                },
-            )
+                    },
+                )
+            })
         }
         FilterProp::CombatRelation { relation, subject } => matches_combat_relation(
             state,
@@ -10198,7 +11120,12 @@ fn matches_filter_prop(
             // CR 202.3d + CR 709.4b: combined mana value off the stack (a split
             // card's parity is that of both halves), chosen half on the stack.
             let mana_value = obj.effective_mana_value();
-            mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                chosen_parity(&source.chosen_attributes),
+            )
         }
         // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
         // mana cost via the single counting authority, then compare with the
@@ -10267,24 +11194,32 @@ fn matches_filter_prop(
         // SameName: matches objects with the same name as the tracked card from context.
         // At runtime, this checks against the source object's name (the event context card).
         FilterProp::SameName => obj.name == source.lki.name,
-        // CR 201.2: Match objects whose name equals the resolving ability's
-        // first object target (the parent target captured by the chained sub-ability).
-        // Falls back to the LKI cache when the targeted object has already left its zone
-        // (e.g., the seed was just exiled by the preceding effect).
+        // CR 201.2 + CR 201.2a: Match objects whose name equals the resolving
+        // ability's first object target (the target captured by the chained
+        // sub-ability). The reference is the move-time name when an earlier
+        // instruction of this ability moved that object. CR 201.2a: a face-down
+        // parent target has no name (CR 708.2a), so it shares its name with
+        // nothing — not with another face-down permanent, and not with itself —
+        // which is what stops the "target creature and all other creatures with
+        // the same name" class (Bile Blight) and the destroy/exile-first class
+        // (Maelstrom Pulse, Deputy of Detention) from sweeping every nameless
+        // permanent. Names are compared through `names_shared`, the single
+        // CR 201.2a name-equality rule.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
-            .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
+            .is_some_and(|name| names_shared(&obj.name, &name)),
         FilterProp::SameNameAsExiledBySource => {
             crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
                 state
                     .objects
                     .get(&link.exiled_id)
-                    .is_some_and(|exiled| obj.name.eq_ignore_ascii_case(&exiled.name))
+                    .is_some_and(|exiled| names_shared(&obj.name, &exiled.name))
             })
         }
-        // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
-        // permanent on the battlefield (optionally narrowed by controller).
-        // Name comparison is case-insensitive per `FilterProp::Named` /
-        // `FilterProp::SameName` conventions.
+        // CR 201.2 + CR 201.2a: Matches if the object's name equals the name of
+        // any permanent on the battlefield (optionally narrowed by controller).
+        // Name equality is `names_shared` — the shared CR 201.2a rule — so an
+        // object with no name (a face-down permanent, CR 708.2a) matches nothing,
+        // "including another object with no name".
         FilterProp::NameMatchesAnyPermanent { controller } => {
             let controller_pid = controller
                 .as_ref()
@@ -10336,7 +11271,7 @@ fn matches_filter_prop(
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
-                controller_ok && perm.name.eq_ignore_ascii_case(&obj.name)
+                controller_ok && names_shared(&perm.name, &obj.name)
             })
         }
         FilterProp::InZone { zone } => obj.zone == *zone,
@@ -10355,12 +11290,8 @@ fn matches_filter_prop(
                 // CR 303.4: Unattached Aura — no creature is "enchanted by" it.
                 false
             } else {
-                obj.attachments.iter().any(|att_id| {
-                    state
-                        .objects
-                        .get(att_id)
-                        .is_some_and(|att| att.card_types.subtypes.iter().any(|s| s == "Aura"))
-                })
+                phased_in_attachments(state, obj)
+                    .any(|att| att.card_types.subtypes.iter().any(|s| s == "Aura"))
             }
         }
         // CR 301.5 + CR 301.5f: Same reasoning as `EnchantedBy` — source-relative
@@ -10377,12 +11308,8 @@ fn matches_filter_prop(
                 // CR 301.5f: Unattached Equipment — no creature is "equipped by" it.
                 false
             } else {
-                obj.attachments.iter().any(|att_id| {
-                    state
-                        .objects
-                        .get(att_id)
-                        .is_some_and(|att| att.card_types.subtypes.iter().any(|s| s == "Equipment"))
-                })
+                phased_in_attachments(state, obj)
+                    .any(|att| att.card_types.subtypes.iter().any(|s| s == "Equipment"))
             }
         }
         // CR 301.5 + CR 303.4: Inverse of `EnchantedBy`/`EquippedBy` — matches
@@ -10463,16 +11390,8 @@ fn matches_filter_prop(
             kind,
             controller,
             exclude_source,
-        } => obj.attachments.iter().any(|att_id| {
-            if exclude_source.is_exclude() && *att_id == source.id {
-                return false;
-            }
-            let Some(att) = state.objects.get(att_id) else {
-                return false;
-            };
-            // CR 702.26b: a separately phased-out attachment does not exist
-            // for this live predicate, even though its attachment link remains.
-            if att.is_phased_out() {
+        } => phased_in_attachments(state, obj).any(|att| {
+            if exclude_source.is_exclude() && att.id == source.id {
                 return false;
             }
             let kind_matches = match kind {
@@ -10492,11 +11411,8 @@ fn matches_filter_prop(
         // object has at least one attachment whose subtype is in `kinds` and whose
         // controller satisfies the optional `ControllerRef`. Generalization of
         // `HasAttachment` to the "enchanted or equipped" compound-subject class.
-        FilterProp::HasAnyAttachmentOf { kinds, controller } => {
-            obj.attachments.iter().any(|att_id| {
-                let Some(att) = state.objects.get(att_id) else {
-                    return false;
-                };
+        FilterProp::HasAnyAttachmentOf { kinds, controller } => phased_in_attachments(state, obj)
+            .any(|att| {
                 let kind_matches = kinds.iter().any(|kind| match kind {
                     crate::types::ability::AttachmentKind::Aura => {
                         att.card_types.subtypes.iter().any(|s| s == "Aura")
@@ -10509,8 +11425,7 @@ fn matches_filter_prop(
                     return false;
                 }
                 attachment_controller_matches(controller.as_ref(), att.controller, state, source)
-            })
-        }
+            }),
         // CR 613.4c: In per-recipient layer contexts, "other" is relative to
         // the affected object. Outside those contexts, it remains source-relative.
         // A shared-quality reference scan binds the compared object as the
@@ -10683,10 +11598,7 @@ fn matches_filter_prop(
         // controlled by its controller (CR 303.4).
         FilterProp::Modified => {
             let has_counter = obj.counters.values().any(|&n| n > 0);
-            let has_qualifying_attachment = obj.attachments.iter().any(|att_id| {
-                let Some(att) = state.objects.get(att_id) else {
-                    return false;
-                };
+            let has_qualifying_attachment = phased_in_attachments(state, obj).any(|att| {
                 let is_equipment = att.card_types.subtypes.iter().any(|s| s == "Equipment");
                 if is_equipment {
                     // CR 301.5: Equipment attachment alone is sufficient — no
@@ -10879,6 +11791,10 @@ fn matches_filter_prop(
         },
         // CR 509.1a: Creature was declared as a blocker this turn.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&object_id),
+        // CR 701.14a + CR 400.7: fought this turn, keyed by exact incarnation.
+        FilterProp::FoughtThisTurn => state
+            .creatures_fought_this_turn
+            .contains(&ObjectIncarnationRef::from_object(obj)),
         // CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
         FilterProp::AttackedOrBlockedThisTurn => {
             state.creatures_attacked_this_turn.contains(&object_id)
@@ -10897,11 +11813,21 @@ fn matches_filter_prop(
             count,
         } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
+            // CR 400.7: a zone change makes a new object with no memory of the old one,
+            // so only records stamped with this object's CURRENT incarnation count.
+            let Some(current_incarnation) = state.objects.get(&object_id).map(|o| o.incarnation)
+            else {
+                return false;
+            };
             let total: u32 = state
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
                     record.object_id == object_id
+                        // `None` is a legacy record with no provable stamp: object-id-only.
+                        && record
+                            .incarnation
+                            .is_none_or(|stamp| stamp == current_incarnation)
                         && counters.matches(&record.counter_type)
                         && filter_count_scope_actor_matches(actor, controller, record.actor)
                 })
@@ -10927,9 +11853,9 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
-        // CR 701.27g: Match transformed permanents (a transforming DFC on the
-        // battlefield with its back face up).
-        FilterProp::Transformed => obj.transformed,
+        // CR 701.27g: Match transformed permanents ("a double-faced permanent on the
+        // battlefield with its back face up"), read through the one authority.
+        FilterProp::Transformed => crate::game::transform::is_transformed_permanent(obj),
         // CR 115.9c: If the object is a stack entry, ALL of its targets must match
         // the inner filter. Falls back permissive for non-stack objects so trigger
         // matchers remain the primary authority (they validate separately).
@@ -11156,7 +12082,12 @@ fn zone_change_record_matches_property(
         // CR 202.3 + CR 608.2c: The event-time mana value is fixed in the
         // snapshot; the chosen odd/even quality is read from resolution state.
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                record.mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                chosen_parity(&source.chosen_attributes),
+            )
         }
         // CR 202.1: Zone-change records currently snapshot mana value, not the
         // full printed mana cost. Exact-cost predicates fail closed here.
@@ -11243,10 +12174,12 @@ fn zone_change_record_matches_property(
         FilterProp::PowerGTSource => record.power.unwrap_or(0) > source.lki.power.unwrap_or(0),
         // CR 201.2: Same-name match against the tracked source object.
         FilterProp::SameName => source.lki.name.eq_ignore_ascii_case(&record.name),
-        // CR 201.2: Same-name match against the resolving ability's first object
-        // target (parent target). Mirrors the live-object evaluator.
+        // CR 201.2 + CR 201.2a: Same-name match against the resolving ability's
+        // first object target (parent target). Mirrors the live-object evaluator,
+        // including its CR 201.2a reading: a nameless record (a face-down
+        // permanent that departed, CR 708.2a) shares no name with anything.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
-            .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
+            .is_some_and(|name| names_shared(&record.name, &name)),
         // CR 608.2c + CR 400.7j + CR 608.2h: a departed member judged
         // against the resolving ability's selected target reads the same
         // reference the live door reads — `parent_target_shared_quality_values`,
@@ -11279,12 +12212,15 @@ fn zone_change_record_matches_property(
                 SharedQualityRelation::DoesNotShare => !shares,
             }
         }
+        // CR 201.2 + CR 201.2a: Same-name match against the object this source
+        // exiled. Mirrors the live-object evaluator, including its CR 201.2a
+        // reading: a nameless record or a nameless reference shares no name.
         FilterProp::SameNameAsExiledBySource => {
             crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
                 state
                     .objects
                     .get(&link.exiled_id)
-                    .is_some_and(|exiled| record.name.eq_ignore_ascii_case(&exiled.name))
+                    .is_some_and(|exiled| names_shared(&record.name, &exiled.name))
             })
         }
 
@@ -11319,7 +12255,7 @@ fn zone_change_record_matches_property(
             else {
                 return false;
             };
-            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
+            combat_relation_source_ref(state, source).is_some_and(
                 |attacker| {
                     let pair = combat::BlockHistoryPair { blocker, attacker };
                     record.block_pairs.contains(&pair)
@@ -11330,29 +12266,23 @@ fn zone_change_record_matches_property(
                 },
             )
         }
-        FilterProp::CombatRelation { relation, subject } => match relation {
-            // CR 506.4: a departed candidate was removed from combat, so it is
-            // in no current pairing; candidate-side last known pairings are not
-            // consulted (no printed card reads them), so this fails closed.
-            CombatRelation::BlockingOrBlockedBy | CombatRelation::BlockedBySubject { scope: None } => {
-                false
-            }
-            // CR 509.1g + CR 608.2i: answered from the same block-history
-            // ledgers as the live leg, through GameState::creature_blocked_attacker.
-            // CR 400.7: the record's exact departing incarnation is its own
-            // pre-change authority; a record without one fails closed.
-            CombatRelation::BlockedBySubject { scope: Some(scope) } => {
-                let Some(candidate) = record
+        // CR 506.4: a departed candidate was removed from combat, so it is in no
+        // current pairing; candidate-side last known pairings are not consulted
+        // (no printed card reads them), so `scope: None` fails closed; an entering
+        // token's row likewise answers no current pairing.
+        // CR 509.1g + CR 608.2i: a window is answered by the same authority as the
+        // live leg. CR 400.7: the record's exact departing incarnation is its own
+        // pre-change authority; a record without one fails closed.
+        FilterProp::CombatRelation { relation, subject } => {
+            let CombatRelation::BlockPairing { scope, .. } = relation;
+            scope.is_some()
+                && record
                     .trigger_source_context()
                     .map(|context| context.identity.reference)
-                else {
-                    return false;
-                };
-                combat_relation_subject_ref(state, *subject, source).is_some_and(|blocker| {
-                    state.creature_blocked_attacker(blocker, candidate, *scope)
-                })
-            }
-        },
+                    .is_some_and(|candidate| {
+                        matches_combat_relation(state, candidate, *relation, *subject, source)
+                    })
+        }
         // CR 702.122c + CR 608.2h: the crew ledger survives the candidate's
         // departure; answer from the record's own departing incarnation. A record
         // without one fails closed.
@@ -11520,6 +12450,12 @@ fn zone_change_record_matches_property(
         // CR 509.1a + CR 608.2h: sibling of `AttackedThisTurn` — same durable id-keyed ledger,
         // same look-back reasoning.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&record.object_id),
+        // CR 701.14a + CR 608.2h: answer from the record's own departing
+        // incarnation; a record without one fails closed.
+        FilterProp::FoughtThisTurn => record
+            .trigger_source_context()
+            .map(|context| context.identity.reference)
+            .is_some_and(|candidate| state.creatures_fought_this_turn.contains(&candidate)),
         // CR 508.1a + CR 509.1a + CR 608.2h: disjunction of the two ledgers above.
         FilterProp::AttackedOrBlockedThisTurn => {
             state
@@ -11681,6 +12617,17 @@ fn zone_change_record_matches_property(
     }
 }
 
+/// CR 702.26b: a phased-out attachment keeps its link but is treated as though it does not exist.
+pub(crate) fn phased_in_attachments<'a>(
+    state: &'a GameState,
+    host: &'a GameObject,
+) -> impl Iterator<Item = &'a GameObject> + 'a {
+    host.attachments
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|att| !att.is_phased_out())
+}
+
 fn attachment_controller_matches(
     controller: Option<&ControllerRef>,
     attachment_controller: PlayerId,
@@ -11782,19 +12729,51 @@ struct SharedQualitySource<'a> {
     keywords: &'a [Keyword],
 }
 
+/// CR 201.2a: the ONE nameless test. An object with no name — a face-down
+/// permanent carries `""` (CR 708.2a) — names nothing: "An object with no name
+/// doesn't have the same name as any other object, including another object
+/// with no name." Every name comparison, value-set or pairwise, reads this one
+/// function, so the rule has exactly one home. `FilterProp::SameName` still
+/// compares raw names (see its arm).
+fn name_value(name: &str) -> Option<&str> {
+    (!name.is_empty()).then_some(name)
+}
+
+/// CR 201.2a: the name value set of a single name. A nameless object yields the
+/// EMPTY set (via `name_value`, the single nameless test), which
+/// `quality_sets_overlap` can never intersect; a named object yields its
+/// ASCII-folded name. Delegating to `name_value` keeps the value-set answer
+/// identical to `names_shared`.
+fn shared_name_values(name: &str) -> HashSet<String> {
+    match name_value(name) {
+        Some(name) => HashSet::from([name.to_ascii_lowercase()]),
+        None => HashSet::new(),
+    }
+}
+
+/// CR 201.2a: the one same-name test for the object-to-object name predicates
+/// (`NameMatchesAnyPermanent`, `SameNameAsParentTarget`, `SameNameAsExiledBySource`),
+/// live and zone-change-record doors. Every call site is per-candidate inside a
+/// scan, so the pairwise comparator allocates nothing. It matches on
+/// `name_value`, the single nameless test, and folds ASCII-only on both sides,
+/// so it is provably identical to the `shared_name_values` answer that
+/// `FilterProp::SharesQuality` (#10141) and `FilterProp::DifferentNameFrom`
+/// (#10142) use. CR 201.2a "at least one name in common" keeps self-equality
+/// for a named object.
+fn names_shared(left: &str, right: &str) -> bool {
+    match (name_value(left), name_value(right)) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => false,
+    }
+}
+
 fn shared_quality_values(
     source: SharedQualitySource<'_>,
     quality: &SharedQuality,
     all_creature_types: &[String],
 ) -> HashSet<String> {
     match quality {
-        SharedQuality::Name => {
-            if source.name.is_empty() {
-                HashSet::new()
-            } else {
-                HashSet::from([source.name.to_ascii_lowercase()])
-            }
-        }
+        SharedQuality::Name => shared_name_values(source.name),
         SharedQuality::ManaValue => HashSet::from([source.mana_value.to_string()]),
         SharedQuality::Power => source
             .power
@@ -12277,6 +13256,7 @@ fn object_shares_quality_with_reference_filter(
         triggering_object: source.triggering_object,
         declared_slot_view: source.declared_slot_view,
         granting_object: source.granting_object,
+        pre_entry_battlefield: None,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
     // creature you control" or "a creature card in your graveyard" to the zone
@@ -12589,6 +13569,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -12596,6 +13577,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -12822,20 +13804,22 @@ fn player_matches_target_filter_with(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         filter_contains_filter_prop, filter_prop_contains, player_filter_contains,
         retarget_chosen_card_type_to_creature_type, AbilityDefinition, AbilityKind,
-        AggregateFunction, AttachmentKind, ChosenAttribute, CombatHistoryScope, Comparator,
-        ControllerRef, CostPaidObjectSnapshot, DamageKindFilter, Effect, FilterProp,
-        ManaContribution, ManaProduction, PlayerScope, QuantityExpr, QuantityRef,
-        ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        AggregateFunction, AttachmentKind, BlockPairDirection, ChosenAttribute, CombatHistoryScope,
+        Comparator, ControllerRef, CostPaidObjectSnapshot, DamageKindFilter, Effect, FaceDownBody,
+        FaceDownCause, FaceDownProfile, FilterProp, ManaContribution, ManaProduction, PlayerScope,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticDefinition,
+        TargetFilter, TargetRef, ThisWayCause, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AttachmentSnapshot, LKISnapshot, StackEntry, StackEntryKind, ZoneChangeRecord,
+        AttachmentSnapshot, ExileLink, ExileLinkKind, LKISnapshot, StackEntry, StackEntryKind,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
@@ -13886,6 +14870,651 @@ mod tests {
         assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
     }
 
+    // R-U2: the CR 614.12 projection of an entrant whose resolution carries a simultaneous
+    // "is/has" effect (CR 611.2e), as a building block.
+
+    /// Barkhide Troll — verbatim Oracle text.
+    const BARKHIDE_TROLL: &str = "This creature enters with a +1/+1 counter on it.\n{1}, Remove a +1/+1 counter from this creature: This creature gains hexproof until end of turn. (It can't be the target of spells or abilities your opponents control.)";
+    /// Metallic Mimic — verbatim Oracle text.
+    const METALLIC_MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
+
+    /// Which printed graveyard card a projection row places.
+    #[derive(Clone, Copy)]
+    enum Entrant {
+        /// Grizzly Bears {1}{G} Creature — Bear 2/2.
+        GrizzlyBears,
+        /// Hill Giant {3}{R} Creature — Giant 3/3.
+        HillGiant,
+        /// Barkhide Troll {G}{G} Creature — Troll 2/2.
+        BarkhideTroll,
+        /// Metallic Mimic {2} Artifact Creature — Shapeshifter 2/1.
+        MetallicMimic,
+    }
+
+    /// A board with a "Rider Source" creature on P0's battlefield (the carried effect's
+    /// source) and `entrant` in P0's graveyard with its printed characteristics.
+    fn rider_board(entrant: Entrant) -> (GameState, ObjectId, ObjectId) {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let source = scenario
+            .add_creature(PlayerId(0), "Rider Source", 1, 1)
+            .id();
+        let cost = |generic: u32, shards: Vec<ManaCostShard>| ManaCost::Cost { generic, shards };
+        let id = match entrant {
+            Entrant::GrizzlyBears => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Grizzly Bears", 2, 2)
+                .with_mana_cost(cost(1, vec![ManaCostShard::Green]))
+                .with_subtypes(vec!["Bear"])
+                .id(),
+            Entrant::HillGiant => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Hill Giant", 3, 3)
+                .with_mana_cost(cost(3, vec![ManaCostShard::Red]))
+                .with_subtypes(vec!["Giant"])
+                .id(),
+            Entrant::BarkhideTroll => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Barkhide Troll", 2, 2)
+                .with_mana_cost(cost(0, vec![ManaCostShard::Green, ManaCostShard::Green]))
+                .with_subtypes(vec!["Troll"])
+                .from_oracle_text(BARKHIDE_TROLL)
+                .id(),
+            Entrant::MetallicMimic => scenario
+                .add_creature_to_graveyard(PlayerId(0), "Metallic Mimic", 2, 1)
+                .as_artifact_creature()
+                .with_mana_cost(cost(2, vec![]))
+                .with_subtypes(vec!["Shapeshifter"])
+                .from_oracle_text(METALLIC_MIMIC)
+                .id(),
+        };
+        let mut runner = scenario.build();
+        (runner.state_mut().clone(), source, id)
+    }
+
+    fn carried_effect(
+        source: ObjectId,
+        modifications: Vec<ContinuousModification>,
+    ) -> crate::types::proposed_event::WithEntryEffect {
+        crate::types::proposed_event::WithEntryEffect {
+            source_id: source,
+            controller: PlayerId(0),
+            modifications,
+        }
+    }
+
+    /// A proposed entry of `entrant` from P0's graveyard to `to`, carrying `effect`.
+    fn carried_entry(
+        entrant: ObjectId,
+        to: Zone,
+        effect: Option<crate::types::proposed_event::WithEntryEffect>,
+    ) -> ProposedEvent {
+        let mut event = ProposedEvent::zone_change(entrant, Zone::Graveyard, to, None);
+        let ProposedEvent::ZoneChange {
+            with_entry_effect, ..
+        } = &mut event
+        else {
+            unreachable!("zone_change builds a ZoneChange");
+        };
+        *with_entry_effect = effect.map(Box::new);
+        event
+    }
+
+    fn subtype_filter(subtype: &str) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().subtype(subtype.to_string()))
+    }
+
+    fn creature_with(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![prop]))
+    }
+
+    fn power_is(value: i32) -> TargetFilter {
+        creature_with(FilterProp::PtComparison {
+            stat: crate::types::ability::PtStat::Power,
+            scope: Default::default(),
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        })
+    }
+
+    fn color_is(color: ManaColor) -> TargetFilter {
+        creature_with(FilterProp::HasColor { color })
+    }
+
+    /// Storm of Souls: "Each of them is a 1/1 Spirit with flying in addition to its other
+    /// types."
+    fn storm_of_souls_rider() -> Vec<ContinuousModification> {
+        vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Spirit".to_string(),
+            },
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            },
+        ]
+    }
+
+    fn zombie_rider() -> Vec<ContinuousModification> {
+        vec![ContinuousModification::AddSubtype {
+            subtype: "Zombie".to_string(),
+        }]
+    }
+
+    /// The proposed projection of `event` must match every `matching` filter and no
+    /// `non_matching` one.
+    fn assert_projection_reads(
+        state: &GameState,
+        source: ObjectId,
+        event: &ProposedEvent,
+        matching: &[TargetFilter],
+        non_matching: &[TargetFilter],
+    ) {
+        let ctx = FilterContext::from_source(state, source);
+        let projection = BattlefieldEntrantProjection::for_proposed_entry(state, event)
+            .expect("a carrier-bearing battlefield entry is projected");
+        for filter in matching {
+            assert!(projection.matches(filter, &ctx), "matches {filter:?}");
+        }
+        for filter in non_matching {
+            assert!(
+                !projection.matches(filter, &ctx),
+                "does not match {filter:?}"
+            );
+        }
+    }
+
+    /// R-U2 a — CR 614.12 + CR 611.2e: three printed riders' carried lists, applied in their
+    /// layers by the real layer pass. (a1) Storm of Souls on Grizzly Bears: a 1/1 Spirit with
+    /// flying (CR 613.1d, CR 613.4b, CR 613.1f). (a2) Rise from the Grave, "That creature is a
+    /// black Zombie in addition to its other colors and types.", on Grizzly Bears (CR 613.1e,
+    /// CR 613.1d). (a3) Xu-Ifit, Osteoharmonist, "It's a Skeleton in addition to its other types
+    /// and has no abilities.", on Barkhide Troll: matches "creature with no abilities"
+    /// (Muraganda Petroglyphs' "Creatures with no abilities get +2/+2."; CR 613.1f), which the
+    /// live graveyard Troll does not.
+    #[test]
+    fn battlefield_entrant_projection_applies_each_carried_rider_in_its_layer() {
+        // (a1)
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        let event = carried_entry(
+            bears,
+            Zone::Battlefield,
+            Some(carried_effect(source, storm_of_souls_rider())),
+        );
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[
+                subtype_filter("Spirit"),
+                power_is(1),
+                creature_with(FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }),
+            ],
+            &[power_is(2)],
+        );
+
+        // (a2)
+        let black_zombie = vec![
+            ContinuousModification::AddColor {
+                color: ManaColor::Black,
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Zombie".to_string(),
+            },
+        ];
+        let event = carried_entry(
+            bears,
+            Zone::Battlefield,
+            Some(carried_effect(source, black_zombie)),
+        );
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[
+                color_is(ManaColor::Black),
+                color_is(ManaColor::Green),
+                subtype_filter("Zombie"),
+            ],
+            &[],
+        );
+
+        // (a3)
+        let (state, source, troll) = rider_board(Entrant::BarkhideTroll);
+        let no_abilities = creature_with(FilterProp::HasNoAbilities);
+        let skeleton_with_no_abilities = vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Skeleton".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+        ];
+        let event = carried_entry(
+            troll,
+            Zone::Battlefield,
+            Some(carried_effect(source, skeleton_with_no_abilities)),
+        );
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Skeleton"), no_abilities.clone()],
+            &[],
+        );
+        let ctx = FilterContext::from_source(&state, source);
+        assert!(
+            !super::matches_target_filter(&state, troll, &no_abilities, &ctx),
+            "negative: the live Troll has its abilities"
+        );
+    }
+
+    /// R-U2 b, c — no projection without a carried effect, or for an entry to another zone.
+    #[test]
+    fn battlefield_entrant_projection_of_a_proposal_needs_a_carrier_and_a_battlefield_entry() {
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        // Reach guard: the same entrant with a carrier to the battlefield is projected.
+        assert!(BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(
+                bears,
+                Zone::Battlefield,
+                Some(carried_effect(source, zombie_rider()))
+            ),
+        )
+        .is_some());
+        // (b)
+        assert!(BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(bears, Zone::Battlefield, None),
+        )
+        .is_none());
+        // (c)
+        assert!(BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(
+                bears,
+                Zone::Exile,
+                Some(carried_effect(source, zombie_rider()))
+            ),
+        )
+        .is_none());
+    }
+
+    /// R-U2 d — CR 614.12: both carried-effect constructors are reads; the live state is
+    /// unchanged. Positive control: each projection sees the carried subtype.
+    #[test]
+    fn battlefield_entrant_projection_with_a_carried_effect_leaves_live_state_untouched() {
+        use rand::Rng as _;
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        let mut entered_state = state.clone();
+        crate::game::zones::move_to_zone(
+            &mut entered_state,
+            bears,
+            Zone::Battlefield,
+            &mut Vec::new(),
+        );
+        let effect = carried_effect(source, zombie_rider());
+        let event = carried_entry(bears, Zone::Battlefield, Some(effect.clone()));
+        let check_untouched =
+            |live: &GameState,
+             project: &dyn Fn(&GameState) -> Option<BattlefieldEntrantProjection>| {
+                let before = serde_json::to_value(live).expect("GameState serializes");
+                let next_timestamp = live.next_timestamp;
+                let zone_changes = live.zone_changes_this_turn.len();
+                let rng_draw = live
+                    .rng
+                    .clone()
+                    .draw(crate::types::game_state::RandomDraw::Outcome)
+                    .random::<u64>();
+
+                let projection = project(live).expect("projectable");
+                assert!(projection.matches(
+                    &subtype_filter("Zombie"),
+                    &FilterContext::from_source(live, source)
+                ));
+                drop(projection);
+
+                assert_eq!(
+                    serde_json::to_value(live).expect("GameState serializes"),
+                    before,
+                    "the projection must not mutate the live state"
+                );
+                assert_eq!(live.next_timestamp, next_timestamp);
+                assert_eq!(live.zone_changes_this_turn.len(), zone_changes);
+                assert_eq!(
+                    live.rng
+                        .clone()
+                        .draw(crate::types::game_state::RandomDraw::Outcome)
+                        .random::<u64>(),
+                    rng_draw
+                );
+                assert!(!live.transient_continuous_effects.iter().any(|effect| {
+                    effect.affected == TargetFilter::SpecificObject { id: bears }
+                }));
+            };
+        check_untouched(&state, &|live| {
+            BattlefieldEntrantProjection::for_proposed_entry(live, &event)
+        });
+        check_untouched(&entered_state, &|live| {
+            BattlefieldEntrantProjection::entered(live, bears, &effect)
+        });
+    }
+
+    /// R-U2 e, f, g — the carried effect applies on top of what the event already gives the
+    /// entrant, installed by delivery's own authority: (e) Hill Giant entering as a copy of
+    /// Grizzly Bears (CR 707.2) is a Bear Zombie, not a Giant; (f) a Metallic Mimic card whose
+    /// as-enters choice named Elf (CR 614.12a) is an Elf by its own static, and black; (g) Hill
+    /// Giant entering face down (CR 708.3) is a colorless Zombie creature, not a Giant.
+    #[test]
+    fn battlefield_entrant_projection_stacks_the_carried_effect_on_the_event_staging() {
+        // (e)
+        let (mut state, source, giant) = rider_board(Entrant::HillGiant);
+        let copied = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&copied).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Bear".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&copied]);
+        let mut event = carried_entry(
+            giant,
+            Zone::Battlefield,
+            Some(carried_effect(source, zombie_rider())),
+        );
+        if let ProposedEvent::ZoneChange { enter_as_copy, .. } = &mut event {
+            *enter_as_copy = Some(Box::new(crate::types::proposed_event::CopyTokenSpec {
+                values: Box::new(values),
+                display: Default::default(),
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+                tapped: false,
+                enters_attacking: false,
+                // Single-faced fixture values: no other face to carry.
+                double_faced: None,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+                sacrifice_at: None,
+                source_id: copied,
+                controller: PlayerId(0),
+                // Test-only enter-as-copy fixture stages no donor.
+                donor: None,
+            }));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Bear"), subtype_filter("Zombie")],
+            &[subtype_filter("Giant")],
+        );
+
+        // (f)
+        let (state, source, mimic) = rider_board(Entrant::MetallicMimic);
+        let mut event = carried_entry(
+            mimic,
+            Zone::Battlefield,
+            Some(carried_effect(
+                source,
+                vec![ContinuousModification::AddColor {
+                    color: ManaColor::Black,
+                }],
+            )),
+        );
+        if let ProposedEvent::ZoneChange {
+            enter_with_choices, ..
+        } = &mut event
+        {
+            *enter_with_choices = Some(Box::new(crate::types::proposed_event::EntryChoices(vec![
+                ChosenAttribute::CreatureType("Elf".to_string()),
+            ])));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Elf"), color_is(ManaColor::Black)],
+            &[],
+        );
+
+        // (g)
+        let (state, source, giant) = rider_board(Entrant::HillGiant);
+        let mut event = carried_entry(
+            giant,
+            Zone::Battlefield,
+            Some(carried_effect(source, zombie_rider())),
+        );
+        if let ProposedEvent::ZoneChange {
+            face_down_profile, ..
+        } = &mut event
+        {
+            *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[
+                creature_with(FilterProp::ColorCount {
+                    comparator: Comparator::EQ,
+                    count: 0,
+                }),
+                subtype_filter("Zombie"),
+            ],
+            &[subtype_filter("Giant")],
+        );
+    }
+
+    /// CR 708.3 + CR 400.4a + CR 701.40a: the projection places a face-down entrant by delivery's
+    /// own face-down preflight (`zone_pipeline::turn_face_down_before_battlefield_entry`), so an
+    /// instant card entering face down is placed as the face-down 2/2 creature rather than refused,
+    /// and the carried effect applies to it. Manifest can turn an instant face down (Whisperwood
+    /// Elemental, "At the beginning of your end step, manifest the top card of your library."; a
+    /// manifested Lightning Bolt). The graveyard origin is the fixture helper's, and no printed
+    /// face-down entry carries a with-entry rider: the carried Zombie subtype is the nearest
+    /// printed shape (Rise from the Grave, "That creature is a black Zombie in addition to its
+    /// other colors and types."). Sibling: the same card entering face up is refused (CR 400.4a).
+    #[test]
+    fn battlefield_entrant_projection_places_a_face_down_instant_card() {
+        let (mut state, source, _) = rider_board(Entrant::GrizzlyBears);
+        let bolt = graveyard_card(&mut state, "Lightning Bolt", &[CoreType::Instant]);
+        let profile = FaceDownProfile::vanilla_2_2();
+        let staging = |face_down_profile| EntrantStaging {
+            controller_override: None,
+            face: EntryFace::Front,
+            face_down_profile,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
+            enter_with_choices: None,
+            enter_as_copy: None,
+        };
+
+        let (scratch, origin) =
+            BattlefieldEntrantProjection::place(&state, bolt, &staging(Some(&profile)))
+                .expect("a face-down instant card is placed");
+        assert_eq!(origin, Zone::Graveyard);
+        assert_eq!(scratch.objects[&bolt].zone, Zone::Battlefield);
+        assert!(scratch.objects[&bolt].face_down);
+        assert!(
+            BattlefieldEntrantProjection::place(&state, bolt, &staging(None)).is_none(),
+            "sibling: face up, an instant card can't enter the battlefield (CR 400.4a)"
+        );
+
+        let mut event = carried_entry(
+            bolt,
+            Zone::Battlefield,
+            Some(carried_effect(source, zombie_rider())),
+        );
+        if let ProposedEvent::ZoneChange {
+            face_down_profile, ..
+        } = &mut event
+        {
+            *face_down_profile = Some(Box::new(profile.clone()));
+        }
+        assert_projection_reads(
+            &state,
+            source,
+            &event,
+            &[subtype_filter("Zombie"), power_is(2)],
+            &[],
+        );
+        assert_eq!(
+            state.objects[&bolt].zone,
+            Zone::Graveyard,
+            "live state untouched"
+        );
+        assert!(!state.objects[&bolt].face_down, "live state untouched");
+    }
+
+    /// CR 614.12: a filter decided by the entrant's identity alone is answered without building
+    /// the projection, with the projection's answer. Barkhide Troll's own entry replacement,
+    /// "This creature enters with a +1/+1 counter on it.", is a `SelfRef` filter read with the
+    /// Troll as its source; the carried effect is Xu-Ifit, Osteoharmonist's "It's a Skeleton in
+    /// addition to its other types and has no abilities.". Reach guard: a characteristic filter
+    /// on the same entry builds one.
+    #[test]
+    fn battlefield_entry_identity_only_filter_builds_no_projection() {
+        let (state, source, troll) = rider_board(Entrant::BarkhideTroll);
+        let skeleton_with_no_abilities = vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Skeleton".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+        ];
+        let event = carried_entry(
+            troll,
+            Zone::Battlefield,
+            Some(carried_effect(source, skeleton_with_no_abilities)),
+        );
+        let host_ctx = FilterContext::from_source(&state, troll);
+        let other_ctx = FilterContext::from_source(&state, source);
+        let builds = || PROPOSED_ENTRY_PROJECTION_BUILDS.with(core::cell::Cell::get);
+        let projection =
+            BattlefieldEntrantProjection::for_proposed_entry(&state, &event).expect("a carrier");
+        let projected_host = projection.matches(&TargetFilter::SelfRef, &host_ctx);
+        let projected_other = projection.matches(&TargetFilter::SelfRef, &other_ctx);
+        assert!(projected_host, "the Troll's own SelfRef names it");
+        assert!(!projected_other, "another source's SelfRef does not");
+
+        let before = builds();
+        assert!(super::matches_target_filter_on_battlefield_entry(
+            &state,
+            &event,
+            &subtype_filter("Skeleton"),
+            &host_ctx
+        ));
+        assert_eq!(builds(), before + 1, "reach: a subtype filter is projected");
+
+        let before = builds();
+        assert_eq!(
+            super::matches_target_filter_on_battlefield_entry(
+                &state,
+                &event,
+                &TargetFilter::SelfRef,
+                &host_ctx
+            ),
+            projected_host
+        );
+        assert_eq!(
+            super::matches_target_filter_on_battlefield_entry(
+                &state,
+                &event,
+                &TargetFilter::SelfRef,
+                &other_ctx
+            ),
+            projected_other
+        );
+        assert_eq!(builds(), before, "a SelfRef filter builds no projection");
+
+        // The classification: identity references and their compositions only.
+        assert!(super::filter_verdict_is_identity_only(&TargetFilter::Not {
+            filter: Box::new(TargetFilter::SelfRef),
+        }));
+        assert!(!super::filter_verdict_is_identity_only(
+            &TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, creature_filter()],
+            }
+        ));
+    }
+
+    /// R-U2 h — the delivered and proposed constructors read the same characteristics for the
+    /// same entry: after a real move of the Bears on a clone, `entered` and the proposal's
+    /// `for_proposed_entry` agree on card types, colors, power/toughness and keywords.
+    #[test]
+    fn battlefield_entrant_projection_carried_effect_constructors_agree() {
+        let (state, source, bears) = rider_board(Entrant::GrizzlyBears);
+        let effect = carried_effect(source, storm_of_souls_rider());
+        let proposed = BattlefieldEntrantProjection::for_proposed_entry(
+            &state,
+            &carried_entry(bears, Zone::Battlefield, Some(effect.clone())),
+        )
+        .expect("projectable");
+        let mut moved = state.clone();
+        crate::game::zones::move_to_zone(&mut moved, bears, Zone::Battlefield, &mut Vec::new());
+        let entered =
+            BattlefieldEntrantProjection::entered(&moved, bears, &effect).expect("on battlefield");
+        let read = |projection: &BattlefieldEntrantProjection| {
+            let obj = &projection.scratch.objects[&projection.entrant];
+            (
+                obj.card_types.clone(),
+                obj.color.clone(),
+                obj.power,
+                obj.toughness,
+                obj.keywords.clone(),
+            )
+        };
+        let proposed_read = read(&proposed);
+        // Reach: the rider applied.
+        assert_eq!((proposed_read.2, proposed_read.3), (Some(1), Some(1)));
+        assert_eq!(proposed_read, read(&entered));
+    }
+
+    /// N6 — CR 614.12 + CR 614.4 + CR 400.7: the pre-event board is the live board, borrowed,
+    /// while no member of the entry event has been delivered; once one has, a copy moves back
+    /// only that member (a later member, a member the move leaves on the battlefield and a
+    /// non-member stay put) and keeps the live ledger's length.
+    #[test]
+    fn battlefield_entrant_projection_pre_event_board_moves_back_only_earlier_members() {
+        let (mut state, source, giant) = rider_board(Entrant::HillGiant);
+        let bears = graveyard_card(&mut state, "Grizzly Bears", &[CoreType::Creature]);
+        let resident = graveyard_card(&mut state, "Resident", &[CoreType::Creature]);
+        crate::game::zones::move_to_zone(&mut state, resident, Zone::Battlefield, &mut Vec::new());
+        let announced: Vec<ObjectIncarnationRef> = [resident, bears, giant]
+            .iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
+            .collect();
+        let giant_co_entrants = CoEntrants::for_entrant(&announced, giant);
+
+        assert!(matches!(
+            BattlefieldEntrantProjection::pre_event_board(&state, giant_co_entrants.as_deref()),
+            Some(Cow::Borrowed(_))
+        ));
+
+        // The Bears is delivered first.
+        crate::game::zones::move_to_zone(&mut state, bears, Zone::Battlefield, &mut Vec::new());
+        let ledger_len = state.zone_changes_this_turn.len();
+        let Some(Cow::Owned(board)) =
+            BattlefieldEntrantProjection::pre_event_board(&state, giant_co_entrants.as_deref())
+        else {
+            panic!("a member delivered earlier makes a detached copy");
+        };
+        assert_eq!(board.objects[&bears].zone, Zone::Graveyard);
+        assert!(!board.battlefield.contains(&bears));
+        assert_eq!(board.objects[&giant].zone, Zone::Graveyard);
+        assert_eq!(board.objects[&resident].zone, Zone::Battlefield);
+        assert_eq!(board.objects[&source].zone, Zone::Battlefield);
+        assert_eq!(board.zone_changes_this_turn.len(), ledger_len);
+        assert_eq!(
+            state.objects[&bears].zone,
+            Zone::Battlefield,
+            "live state untouched"
+        );
+    }
+
     /// CR 614.12 + CR 712.14a + CR 400.4a (V-P6): the projection applies (a)
     /// another permanent's continuous effect, (b) the entrant's own static that
     /// would apply on the battlefield, (c) a transformed entry's back face; it
@@ -14071,6 +15700,278 @@ mod tests {
             relic_projects_creature(3),
             "three P0 artifacts before entry: a creature"
         );
+    }
+
+    // ── CR 614.12 token entrants: F1–F5, F4b ────────────────────────────────
+
+    const VOICE_OF_ALL: &str = "Flying\nAs this creature enters, choose a color.\nThis creature has protection from the chosen color.";
+    const STOLEN_IDENTITY: &str = "Create a token that's a copy of target artifact or creature.\nCipher (Then you may exile this spell card encoded on a creature you control. Whenever that creature deals combat damage to a player, its controller may cast a copy of the encoded card without paying its mana cost.)";
+    const HUMILITY: &str =
+        "All creatures lose all abilities and have base power and toughness 1/1.";
+    const MARGLE: &str =
+        "Other creatures you control lose all abilities, can't gain abilities, and get +2/+2.";
+    const APPLIED_GEOMETRY: &str = "Create a token that's a copy of target non-Aura permanent you control, except it's a 0/0 Fractal creature in addition to its other types. Put six +1/+1 counters on it.";
+    const GEMSTONE_MINE: &str = "This land enters with three mining counters on it.\n{T}, Remove a mining counter from this land: Add one mana of any color. If there are no mining counters on this land, sacrifice it.";
+
+    /// A card held in its owner's hand at setup, put onto the battlefield once the copy has
+    /// paused, so it is a resident effect as the projection runs.
+    #[derive(Clone, Copy)]
+    enum HeldRemover {
+        Humility(PlayerId),
+        Margle(PlayerId),
+    }
+
+    /// A Stolen Identity copy of P0's Voice of All, paused at its as-enters choice: the token
+    /// is a liminal entry. `own` is its copied "as enters, choose a color" definition.
+    struct PausedVoiceCopy {
+        state: GameState,
+        entrant: ObjectId,
+        own: ReplacementDefinition,
+        held: Vec<ObjectId>,
+    }
+
+    fn paused_voice_copy(held: &[HeldRemover]) -> PausedVoiceCopy {
+        use crate::game::scenario::GameScenario;
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let held: Vec<ObjectId> = held
+            .iter()
+            .map(|card| match *card {
+                HeldRemover::Humility(owner) => scenario
+                    .add_spell_to_hand(owner, "Humility", false)
+                    .as_enchantment()
+                    .from_oracle_text(HUMILITY)
+                    .id(),
+                HeldRemover::Margle(owner) => scenario
+                    .add_creature_to_hand_from_oracle(
+                        owner,
+                        "Margle, Cousin of Yargle",
+                        5,
+                        2,
+                        MARGLE,
+                    )
+                    .id(),
+            })
+            .collect();
+        let voice = scenario
+            .add_creature_from_oracle(PlayerId(0), "Voice of All", 2, 2, VOICE_OF_ALL)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Stolen Identity", false, STOLEN_IDENTITY)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(voice).commit();
+        while matches!(
+            runner.state().waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        ) && !runner.state().stack.is_empty()
+        {
+            runner
+                .act(crate::types::actions::GameAction::PassPriority)
+                .expect("priority passes");
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                crate::types::game_state::WaitingFor::NamedChoice { .. }
+            ),
+            "REACH-GUARD: the copy paused at its as-enters choice"
+        );
+        let state = runner.state().clone();
+        let (&entrant, entry) = state
+            .liminal_entries
+            .iter()
+            .next()
+            .expect("REACH-GUARD: the copy is a liminal entry");
+        let defs = entry.object.projected().replacement_definitions.as_slice();
+        assert_eq!(defs.len(), 1, "REACH-GUARD: the copied as-enters choice");
+        let own = defs[0].clone();
+        PausedVoiceCopy {
+            state,
+            entrant,
+            own,
+            held,
+        }
+    }
+
+    /// Puts a held card onto the battlefield and realizes its continuous effects.
+    fn make_resident(state: &mut GameState, card: ObjectId) {
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, card, Zone::Battlefield, &mut events);
+        assert_eq!(state.objects[&card].zone, Zone::Battlefield);
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+    }
+
+    fn liminal_retains(paused: &PausedVoiceCopy, co_entrants: &[ObjectId]) -> bool {
+        BattlefieldEntrantProjection::for_liminal_token(&paused.state, paused.entrant, co_entrants)
+            .expect("a liminal token is projectable")
+            .retains_replacement(&paused.own)
+    }
+
+    /// F1 — CR 614.12 + CR 613.1f: a resident Humility strips the liminal Voice copy's own
+    /// as-enters choice as it would exist on the battlefield; without it the definition is
+    /// retained (structural identity, positive control).
+    #[test]
+    fn liminal_token_projection_reads_a_resident_ability_remover() {
+        let paused = paused_voice_copy(&[]);
+        assert!(liminal_retains(&paused, &[]), "no remover: retained");
+
+        let mut paused = paused_voice_copy(&[HeldRemover::Humility(PlayerId(0))]);
+        assert!(
+            liminal_retains(&paused, &[]),
+            "control: Humility still in hand"
+        );
+        let humility = paused.held[0];
+        make_resident(&mut paused.state, humility);
+        assert!(!liminal_retains(&paused, &[]), "Humility strips it");
+        let projection =
+            BattlefieldEntrantProjection::for_liminal_token(&paused.state, paused.entrant, &[])
+                .expect("projectable");
+        let entrant = projection.entrant().expect("the projected entrant");
+        assert_eq!(entrant.zone, Zone::Battlefield);
+        assert_eq!(entrant.controller, PlayerId(0), "CR 111.2: its creator");
+        assert!(
+            paused.state.liminal_entries.contains_key(&paused.entrant),
+            "the live liminal entry is untouched"
+        );
+    }
+
+    /// F2 — CR 614.12 + CR 111.2: a Margle-shaped "other creatures you control" remover
+    /// strips the copy only under the token's creator.
+    #[test]
+    fn liminal_token_projection_reads_the_remover_under_the_tokens_controller() {
+        for (controller, retained) in [(PlayerId(1), true), (PlayerId(0), false)] {
+            let mut paused = paused_voice_copy(&[HeldRemover::Margle(controller)]);
+            let margle = paused.held[0];
+            make_resident(&mut paused.state, margle);
+            assert_eq!(
+                liminal_retains(&paused, &[]),
+                retained,
+                "Margle under {controller:?}"
+            );
+        }
+    }
+
+    /// F3 — CR 614.12 + CR 702.26b (Clone Legion ruling 2015-02-25): a remover entering in
+    /// the same event is absent from the pre-entry board, so the definition is retained; the
+    /// same remover not listed as a co-entrant strips it.
+    #[test]
+    fn liminal_token_projection_excludes_co_entrants() {
+        let mut paused = paused_voice_copy(&[HeldRemover::Margle(PlayerId(0))]);
+        let margle = paused.held[0];
+        make_resident(&mut paused.state, margle);
+        assert!(liminal_retains(&paused, &[margle]), "co-entrant: absent");
+        assert!(!liminal_retains(&paused, &[]), "resident: strips it");
+        assert!(
+            paused.state.objects[&margle].is_phased_in_permanent(),
+            "the live co-entrant is untouched"
+        );
+    }
+
+    /// F4 — CR 614.12: the placed-token projection of the same (exception-free) body
+    /// answers as the liminal one, with and without a resident remover.
+    #[test]
+    fn placed_token_projection_agrees_with_the_liminal_projection() {
+        for humility in [false, true] {
+            let held: &[HeldRemover] = if humility {
+                &[HeldRemover::Humility(PlayerId(0))]
+            } else {
+                &[]
+            };
+            let mut paused = paused_voice_copy(held);
+            if humility {
+                let card = paused.held[0];
+                make_resident(&mut paused.state, card);
+            }
+            let placed = create_object(
+                &mut paused.state,
+                CardId(0),
+                PlayerId(0),
+                "Voice of All".to_string(),
+                Zone::Battlefield,
+            );
+            let mut body = paused.state.liminal_entries[&paused.entrant]
+                .object
+                .projected()
+                .clone();
+            body.id = placed;
+            paused.state.objects.insert(placed, body.clone());
+            #[cfg(feature = "test-support")]
+            let copies_before = crate::game::perf_counters::take_cost_snapshot().state_copies;
+            let placed_retains =
+                BattlefieldEntrantProjection::for_placed_token(&paused.state, placed, &body, &[])
+                    .expect("a placed token is projectable")
+                    .retains_replacement(&paused.own);
+            #[cfg(feature = "test-support")]
+            assert_eq!(
+                crate::game::perf_counters::take_cost_snapshot().state_copies - copies_before,
+                1,
+                "an owned pre-entry board is consumed without another whole-state clone",
+            );
+            assert_eq!(
+                placed_retains,
+                liminal_retains(&paused, &[]),
+                "humility={humility}"
+            );
+            assert_eq!(placed_retains, !humility, "humility={humility}");
+        }
+    }
+
+    /// F4b — CR 614.12 + CR 707.9b: the placed projection reads the body it is given. An
+    /// "except it's a 0/0 Fractal creature in addition to its other types" land copy is a
+    /// creature only with the exception folded in, so Humility strips its copied "enters
+    /// with three mining counters" from the folded body and not from the stored one.
+    #[test]
+    fn placed_token_projection_reads_the_exception_folded_body() {
+        use crate::game::scenario::GameScenario;
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.add_enchantment_from_oracle(PlayerId(0), "Humility", HUMILITY);
+        let mine = scenario
+            .add_land_from_oracle(PlayerId(0), "Gemstone Mine", GEMSTONE_MINE)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Applied Geometry", false, APPLIED_GEOMETRY)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut().clone();
+        let modifications = state.objects[&spell]
+            .abilities
+            .iter()
+            .find_map(|ability| match &*ability.effect {
+                crate::types::ability::Effect::CopyTokenOf {
+                    additional_modifications,
+                    ..
+                } => Some(additional_modifications.clone()),
+                _ => None,
+            })
+            .expect("REACH-GUARD: Applied Geometry's copy effect");
+        let stored = state.objects[&mine].clone();
+        let (own, _, _) = crate::game::printed_cards::self_etb_counter_replacement_entries(
+            &stored.base_replacement_definitions,
+        )
+        .next()
+        .expect("REACH-GUARD: the mining-counter replacement");
+        let own = own.clone();
+        let mut folded = stored.clone();
+        crate::game::effects::token_copy::apply_immediate_copy_token_modifications_to_object(
+            &mut folded,
+            &modifications,
+            &state.all_creature_types,
+        );
+        assert!(
+            folded.card_types.core_types.contains(&CoreType::Creature)
+                && !stored.card_types.core_types.contains(&CoreType::Creature),
+            "REACH-GUARD: only the folded body is a creature"
+        );
+        let retains = |body: &GameObject| {
+            BattlefieldEntrantProjection::for_placed_token(&state, mine, body, &[])
+                .expect("projectable")
+                .retains_replacement(&own)
+        };
+        assert!(retains(&stored), "the land body: Humility doesn't apply");
+        assert!(!retains(&folded), "the creature body: Humility strips it");
     }
 
     /// Explicit-controller variant used by tests that exercise stack-resolving
@@ -15907,6 +17808,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let filter = TargetFilter::Typed(
@@ -16024,6 +17926,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let non_x_record = SpellCastRecord {
@@ -16083,7 +17986,12 @@ mod tests {
         });
         std::sync::Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)
             .push(ability);
-        state.pending_activations.push((source, 0));
+        // CR 602.2a: the pending entry is the announcement-bound usage key,
+        // not a `(source, index)` pair — the unbound read below must ignore
+        // it either way.
+        let pending = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the pushed ability resolves at slot 0");
+        state.pending_activations.push(pending);
 
         let filter = TargetFilter::And {
             filters: vec![
@@ -16202,6 +18110,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let exile_record = SpellCastRecord {
@@ -16927,6 +18836,7 @@ mod tests {
     // CR 701.27g: `Transformed` matches only permanents whose back face is up.
     #[test]
     fn transformed_property_matches_only_transformed() {
+        use crate::types::card::LayoutKind;
         let mut state = setup();
         let transformed = add_creature(&mut state, PlayerId(0), "Back Face");
         let normal = add_creature(&mut state, PlayerId(0), "Front Face");
@@ -16941,6 +18851,110 @@ mod tests {
         assert!(
             !matches_target_filter(&state, normal, &filter, normal),
             "a non-transformed permanent must not match"
+        );
+
+        // CR 701.27g: the filter reads `transform::is_transformed_permanent`. Each object
+        // below stores an other face; the modal ones stand in for Valentin, Dean of the Vein
+        // cast as Lisette, Dean of the Root (and then Moonmisted), the Room for Mirror Room
+        // cast as Fractured Realm, the mutated one for Gemrazer mutated under a transformed
+        // Kessig Prowler.
+        let with_stash = |state: &mut GameState,
+                          name: &str,
+                          layout: LayoutKind,
+                          transformed: bool,
+                          modal_back_face: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(layout),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = modal_back_face;
+            id
+        };
+        let modal_back = with_stash(&mut state, "Lisette", LayoutKind::Modal, false, true);
+        assert!(
+            matches_target_filter(&state, modal_back, &filter, modal_back),
+            "CR 701.27g + CR 712.11b: a modal double-faced card back face up must match"
+        );
+        let both_flags = with_stash(&mut state, "Valentin", LayoutKind::Modal, true, true);
+        assert!(
+            !matches_target_filter(&state, both_flags, &filter, both_flags),
+            "CR 701.27g: a front-face-up permanent with both flags must not match"
+        );
+        let room = with_stash(
+            &mut state,
+            "Fractured Realm",
+            LayoutKind::Split,
+            false,
+            true,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.base_card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Room".to_string()],
+            };
+            obj.card_types = obj.base_card_types.clone();
+        }
+        assert!(
+            !matches_target_filter(&state, room, &filter, room),
+            "CR 709.2: a Room cast as its right half is not a double-faced permanent"
+        );
+        let merged = with_stash(&mut state, "Mutated", LayoutKind::Transform, true, false);
+        state.objects.get_mut(&merged).unwrap().merge_kind =
+            Some(crate::game::game_object::MergeKind::Mutate);
+        assert!(
+            !matches_target_filter(&state, merged, &filter, merged),
+            "CR 701.27g + CR 730.2i: a merged permanent must not match"
+        );
+    }
+
+    /// CR 701.27g: an event snapshot carries the authority's answer, which its skeleton
+    /// reconstruction (`matches_target_filter_on_event_snapshot`) reads back. Synthetic: no
+    /// printed card filters a connive subject or any other event snapshot on "transformed";
+    /// the nearest printed reader of the property is Mutagen Connoisseur ("This creature gets
+    /// +1/+0 for each transformed permanent you control.").
+    #[test]
+    fn event_snapshot_carries_whether_the_subject_was_a_transformed_permanent() {
+        use crate::types::card::LayoutKind;
+        let mut state = setup();
+        let dfc = |state: &mut GameState, name: &str, transformed: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = true;
+            id
+        };
+        let modal_back = dfc(&mut state, "Lisette", false);
+        let both_flags = dfc(&mut state, "Valentin", true);
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Transformed]));
+        let ctx = FilterContext::from_source_with_controller(modal_back, PlayerId(0));
+
+        let snapshot = |id| {
+            state
+                .capture_connive_subject(id)
+                .expect("a live object must capture a snapshot")
+                .snapshot
+        };
+        assert!(
+            matches_target_filter_on_event_snapshot(&state, &snapshot(modal_back), &filter, &ctx),
+            "a modal double-faced card back face up was a transformed permanent"
+        );
+        assert!(
+            !matches_target_filter_on_event_snapshot(&state, &snapshot(both_flags), &filter, &ctx),
+            "a front-face-up permanent with both flags was not a transformed permanent"
         );
     }
 
@@ -17247,7 +19261,10 @@ mod tests {
         let ctx = FilterContext::from_ability(&ability);
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::ParentTarget,
             },
         ]));
@@ -17374,8 +19391,14 @@ mod tests {
         let ability = ability_of(subject, departed);
         let ctx = FilterContext::from_ability(&ability);
         for relation in [
-            CombatRelation::BlockingOrBlockedBy,
-            CombatRelation::BlockedBySubject { scope: None },
+            CombatRelation::BlockPairing {
+                direction: BlockPairDirection::Either,
+                scope: None,
+            },
+            CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: None,
+            },
         ] {
             let filter = source_relation_filter(relation);
             assert!(
@@ -17393,7 +19416,10 @@ mod tests {
         let current = state.objects[&subject].incarnation;
         assert_ne!(current, departed, "reach guard: leaving bumped the subject");
         let rebound = ability_of(subject, current);
-        let filter = source_relation_filter(CombatRelation::BlockingOrBlockedBy);
+        let filter = source_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::Either,
+            scope: None,
+        });
         assert!(
             !crate::game::filter::matches_target_filter(
                 &state,
@@ -17428,7 +19454,10 @@ mod tests {
         let departed = kill(&mut state, subject);
         let ability = ability_of(subject, departed);
         let ctx = FilterContext::from_ability(&ability);
-        let filter = source_relation_filter(CombatRelation::BlockingOrBlockedBy);
+        let filter = source_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::Either,
+            scope: None,
+        });
         assert!(
             crate::game::filter::matches_target_filter(&state, partner, &filter, &ctx),
             "reach guard: before its removal the partner matches"
@@ -17441,9 +19470,8 @@ mod tests {
         );
     }
 
-    /// CR 509.1g: the live branch. `BlockedBySubject { scope: None }` is the one
-    /// orientation where the subject is the blocker; `BlockingOrBlockedBy` is
-    /// both. Read from the attacking side: the attacker's blocker is "blocking
+    /// CR 509.1g: the live branch. `SubjectIsBlocker` is the one orientation where
+    /// the subject is the blocker; `Either` is both. Read from the attacking side: the attacker's blocker is "blocking
     /// or blocked by" it but not "blocked by" it.
     #[test]
     fn current_pairing_live_orientations() {
@@ -17454,8 +19482,14 @@ mod tests {
             other_blocker,
             ..
         } = pairing_fixture();
-        let both = source_relation_filter(CombatRelation::BlockingOrBlockedBy);
-        let blocked_by = source_relation_filter(CombatRelation::BlockedBySubject { scope: None });
+        let both = source_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::Either,
+            scope: None,
+        });
+        let blocked_by = source_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::SubjectIsBlocker,
+            scope: None,
+        });
 
         // The blocker as subject: its attacker matches both relations.
         let blocker_ability = ability_of(subject, state.objects[&subject].incarnation);
@@ -17531,11 +19565,188 @@ mod tests {
         assert!(live_block_pairs_of(&state, wall).is_empty());
     }
 
-    /// U1: `combat_relation_subject_ref`'s `ParentTarget` arm prefers a pinned
+    /// Owner-level announced-set contract, not a printed-card cast test.
+    /// Triton Tactics: "Up to two target creatures each get +0/+3 until end of
+    /// turn. Untap those creatures. At this turn's next end of combat, tap each
+    /// creature that was blocked by one of those creatures this turn and it
+    /// doesn't untap during its controller's next untap step."
+    /// CR 400.7 + CR 608.2i: each historical member retains its own identity.
+    #[test]
+    fn announced_history_subjects_keep_each_members_own_incarnation() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let a = add_creature(&mut state, PlayerId(1), "First blocker");
+        let b = add_creature(&mut state, PlayerId(1), "Second blocker");
+        let first = add_creature(&mut state, PlayerId(0), "First attacker");
+        let second = add_creature(&mut state, PlayerId(0), "Second attacker");
+        let unrelated = add_creature(&mut state, PlayerId(0), "Unrelated attacker");
+        state.objects.get_mut(&a).unwrap().incarnation = 7;
+        state.objects.get_mut(&b).unwrap().incarnation = 11;
+        let a_pin = ObjectIncarnationRef::from_object(&state.objects[&a]);
+        let b_pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        for (blocker, attacker) in [(a_pin, first), (b_pin, second)] {
+            state
+                .creature_blocked_attackers_this_turn
+                .insert(combat::BlockHistoryPair {
+                    blocker,
+                    attacker: ObjectIncarnationRef::from_object(&state.objects[&attacker]),
+                });
+        }
+        state.objects.get_mut(&b).unwrap().bump_incarnation();
+        let b_live = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        assert_ne!(b_live, b_pin);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![
+                TargetRef::Object(a),
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(b),
+            ],
+            source,
+            PlayerId(0),
+        );
+        // Keyed order differs from announcement order, and the positional
+        // second-object pin is deliberately newer than the historical one.
+        ability.target_incarnations = vec![b_pin, a_pin];
+        ability.target_pins = vec![Some(a_pin), None, Some(b_live)];
+        let refs = |ability: Option<&ResolvedAbility>, subject| {
+            let mut context = SourceContext::for_controller(source, Some(PlayerId(0)));
+            context.ability = ability;
+            combat_relation_subject_refs(&state, subject, &context)
+        };
+        assert_eq!(
+            refs(Some(&ability), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        assert_eq!(
+            refs(Some(&ability), CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            },
+        ]));
+        let context = FilterContext::from_ability(&ability);
+        assert!(super::matches_target_filter(
+            &state, first, &filter, &context
+        ));
+        assert!(super::matches_target_filter(
+            &state, second, &filter, &context
+        ));
+        assert!(!super::matches_target_filter(
+            &state, unrelated, &filter, &context
+        ));
+
+        let mut positional = ability.clone();
+        positional.target_incarnations.clear();
+        positional.target_pins = vec![Some(a_pin), None, Some(b_pin)];
+        assert_eq!(
+            refs(Some(&positional), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        let mut live = positional.clone();
+        live.target_pins.clear();
+        assert_eq!(
+            refs(Some(&live), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_live]
+        );
+        assert_eq!(
+            refs(None, CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        let mut empty = ability.clone();
+        empty.targets.clear();
+        assert_eq!(
+            refs(Some(&empty), CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        empty.targets = vec![TargetRef::Player(PlayerId(1))];
+        assert_eq!(
+            refs(Some(&empty), CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+    }
+
+    /// Reader-only creation-legality contract for the same Triton Tactics
+    /// population above; actual creation and public cast evidence are separate.
+    /// CR 608.2b + CR 400.7: exclusion names an incarnation, never just its id.
+    #[test]
+    fn announced_history_subjects_exclude_only_creation_illegal_incarnations() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let a = add_creature(&mut state, PlayerId(1), "First blocker");
+        let b = add_creature(&mut state, PlayerId(1), "Second blocker");
+        state.objects.get_mut(&a).unwrap().incarnation = 7;
+        state.objects.get_mut(&b).unwrap().incarnation = 11;
+        let a_pin = ObjectIncarnationRef::from_object(&state.objects[&a]);
+        let b_pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let source_pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        );
+        ability.target_incarnations = vec![b_pin, a_pin];
+        let refs = |ability: &ResolvedAbility, subject| {
+            let mut context = SourceContext::for_controller(source, Some(PlayerId(0)));
+            context.ability = Some(ability);
+            combat_relation_subject_refs(&state, subject, &context)
+        };
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        ability.context.creation_illegal_referents = vec![b_pin];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::Source),
+            vec![source_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        ability.context.creation_illegal_referents = vec![a_pin, b_pin, source_pin];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::Source),
+            vec![source_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        ability.context.creation_illegal_referents =
+            vec![ObjectIncarnationRef::of(b, b_pin.incarnation + 1)];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+    }
+
+    /// U1: `combat_relation_subject_refs`' `ParentTarget` arm prefers a pinned
     /// incarnation over the live object, and `target_incarnations` (the
     /// delayed-trigger referent pin) over the occurrence pin (`target_pins`) when
     /// both are populated. This path is production-unreachable today — no
-    /// parser emits `BlockedBySubject { subject: ParentTarget, .. }` — so it is
+    /// parser emits a `SubjectIsBlocker` relation with a `ParentTarget` subject — so it is
     /// exercised only here.
     #[test]
     fn parent_target_subject_prefers_the_selected_pin_over_the_live_object() {
@@ -17563,7 +19774,8 @@ mod tests {
 
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
                     scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::ParentTarget,
@@ -17621,7 +19833,7 @@ mod tests {
     }
 
     /// T12c (E15): `matches_target_filter_on_event_snapshot` must answer
-    /// `BlockedBySubject` from the SNAPSHOT's own captured incarnation, not the
+    /// a windowed `BlockPairing` from the SNAPSHOT's own captured incarnation, not the
     /// live object's — otherwise a live object bumped past the snapshot (blink,
     /// re-entry) would silently override the event-time fact the snapshot exists
     /// to freeze. The snapshot's incarnation is pinned NON-zero, because
@@ -17672,7 +19884,8 @@ mod tests {
         let ctx = FilterContext::from_source_with_controller(blocker, PlayerId(1));
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
                     scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::Source,
@@ -17711,7 +19924,8 @@ mod tests {
         );
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
                     scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::Source,
@@ -19297,6 +21511,566 @@ mod tests {
         );
     }
 
+    /// Build the production face-down shape: snapshot the real face into
+    /// `back_face`, apply the CR 708.2a characteristics, then stash it. A fixture
+    /// that only applies the profile leaves an object production never has — one
+    /// that stays nameless even after it leaves the battlefield.
+    fn apply_face_down_with_stash(
+        state: &mut GameState,
+        id: ObjectId,
+        profile: &crate::types::ability::FaceDownProfile,
+    ) {
+        let stash = crate::game::printed_cards::snapshot_object_base_face(&state.objects[&id]);
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&id).unwrap(),
+            profile,
+        );
+        state.objects.get_mut(&id).unwrap().back_face = Some(stash);
+    }
+
+    /// CR 201.2 + CR 201.2a + CR 708.2a: `FilterProp::NameMatchesAnyPermanent` —
+    /// "a permanent … has the same name as" (Mitotic Manipulation: "you may put
+    /// a card onto the battlefield if it has the same name as a permanent") —
+    /// must not treat "no name" as a name. A face-down permanent has no name
+    /// (CR 708.2a), so it has the same name as nothing, "including another
+    /// object with no name" (CR 201.2a) — not even itself.
+    ///
+    /// Provenance: no printed card applies this filter to a nameless object
+    /// today — the only producer (`DigFromAmong`'s continuation) evaluates
+    /// library cards — so this row is the filter-level boundary of the defect,
+    /// not a card-level reproduction.
+    ///
+    /// Failure shape before the fix (`perm.name.eq_ignore_ascii_case(&obj.name)`):
+    /// R1 and R1b matched, because `"".eq_ignore_ascii_case("")` is `true`.
+    #[test]
+    fn name_matches_any_permanent_refuses_a_nameless_object() {
+        let mut state = setup();
+        let face_down_a = add_creature(&mut state, PlayerId(0), "Hidden A");
+        apply_face_down_with_stash(&mut state, face_down_a, &FaceDownProfile::vanilla_2_2());
+        let face_down_b = add_creature(&mut state, PlayerId(1), "Hidden B");
+        apply_face_down_with_stash(&mut state, face_down_b, &FaceDownProfile::vanilla_2_2());
+        let elves = add_creature(&mut state, PlayerId(0), "Llanowar Elves");
+        add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let forest = add_creature(&mut state, PlayerId(0), "Forest");
+        let island = add_creature(&mut state, PlayerId(1), "Island");
+        // Reach guard: both face-down fixtures really are nameless.
+        assert_eq!(
+            state.objects[&face_down_a].name, "",
+            "face-down is nameless"
+        );
+        assert_eq!(
+            state.objects[&face_down_b].name, "",
+            "face-down is nameless"
+        );
+
+        let any_permanent = |controller: Option<ControllerRef>| {
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .properties(vec![FilterProp::NameMatchesAnyPermanent { controller }]),
+            )
+        };
+        let unscoped = any_permanent(None);
+        let mine = any_permanent(Some(ControllerRef::You));
+
+        let mut library_card = |card_id: u64, name: &str| {
+            create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            )
+        };
+        let bears_upper = library_card(101, "GRIZZLY BEARS");
+        let wurm = library_card(102, "Craw Wurm");
+
+        // R1 (CR 201.2a "including itself"): the face-down permanent is on the
+        // battlefield pool, but its nameless name matches nothing — not itself.
+        assert!(
+            !matches_target_filter(&state, face_down_a, &unscoped, face_down_a),
+            "CR 201.2a: a nameless object has the same name as nothing, not even itself"
+        );
+        // R1b (CR 201.2a "including another object with no name"): a second
+        // nameless permanent is not a name match either.
+        assert!(
+            !matches_target_filter(&state, face_down_b, &unscoped, face_down_a),
+            "CR 201.2a: two nameless objects do not share a name"
+        );
+        // R2 reach guard: a named permanent still matches itself, so R1/R1b are
+        // not passing because the pool scan is dead.
+        assert!(
+            matches_target_filter(&state, elves, &unscoped, elves),
+            "CR 201.2a: a named object has its own name in common with itself"
+        );
+
+        // R3 preservation: the comparison still folds ASCII case.
+        assert!(
+            matches_target_filter(&state, bears_upper, &unscoped, elves),
+            "names differing only in case are the same name"
+        );
+        // R4 negative: a different name does not match.
+        assert!(
+            !matches_target_filter(&state, wurm, &unscoped, elves),
+            "a card with a name unlike any permanent matches nothing"
+        );
+        // R5: `controller` narrowing is untouched — P1's "Island" is outside the
+        // `You` pool and inside the unscoped one.
+        let as_p0 = FilterContext::from_source_with_controller(elves, PlayerId(0));
+        assert!(
+            super::matches_target_filter(&state, forest, &mine, &as_p0),
+            "CR 109.5: \"you\" is the source's controller; P0's Forest is in the pool"
+        );
+        assert!(
+            !super::matches_target_filter(&state, island, &mine, &as_p0),
+            "CR 109.5: P1's Island is outside the `You` pool"
+        );
+        assert!(
+            super::matches_target_filter(&state, island, &unscoped, &as_p0),
+            "unqualified \"a permanent\" spans both players"
+        );
+
+        // R7 (CR 201.2a "any other object"): a nameless candidate never matches a
+        // NAMED pool, scoped or not — green before and after. Its own state keeps
+        // the pool free of nameless permanents, which is the reading this row
+        // pins (the face-down pool is R1/R1b's).
+        let mut named_only = setup();
+        let named_elves = add_creature(&mut named_only, PlayerId(0), "Llanowar Elves");
+        let nameless_card = create_object(
+            &mut named_only,
+            CardId(103),
+            PlayerId(0),
+            String::new(),
+            Zone::Library,
+        );
+        assert_eq!(named_only.objects[&nameless_card].name, "");
+        let named_ctx = FilterContext::from_source_with_controller(named_elves, PlayerId(0));
+        assert!(
+            !matches_target_filter(&named_only, nameless_card, &unscoped, named_elves),
+            "CR 201.2a: a nameless object shares no name with a named permanent"
+        );
+        assert!(
+            !super::matches_target_filter(
+                &named_only,
+                nameless_card,
+                &any_permanent(Some(ControllerRef::You)),
+                &named_ctx,
+            ),
+            "CR 201.2a: same under controller narrowing"
+        );
+        // Reach guard: a named candidate matches the same pool, so the two
+        // negatives above are not a dead scan.
+        let named_card = create_object(
+            &mut named_only,
+            CardId(105),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Library,
+        );
+        assert!(
+            matches_target_filter(&named_only, named_card, &unscoped, named_elves),
+            "a named candidate still matches the named pool"
+        );
+
+        // R6: with no permanents at all the pool scan matches nothing — there is
+        // no `obj`-empty early return, the scan itself is the answer.
+        let mut empty = setup();
+        let lone = create_object(
+            &mut empty,
+            CardId(104),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        assert!(
+            !super::matches_target_filter(
+                &empty,
+                lone,
+                &any_permanent(None),
+                &FilterContext::from_source(&empty, lone),
+            ),
+            "an empty battlefield holds no permanent with any name"
+        );
+    }
+
+    /// CR 201.2a: `name_value` is the single nameless test. `names_shared` is
+    /// the allocation-free pairwise comparator built on it, and
+    /// `shared_name_values` delegates to it, so the value-set path
+    /// (`SharedQuality::Name`, `SharesQuality`, `DifferentNameFrom`) and the
+    /// pairwise path give the same answer.
+    #[test]
+    fn names_shared_and_shared_name_values_agree_on_the_nameless_test() {
+        assert!(
+            !names_shared("", ""),
+            "a nameless object shares no name, not even with another nameless one"
+        );
+        assert!(
+            names_shared("Grizzly Bears", "grizzly bears"),
+            "names match ASCII-case-insensitively"
+        );
+        assert!(
+            !names_shared("", "Grizzly Bears"),
+            "a nameless object shares no name with a named one"
+        );
+        assert!(
+            shared_name_values("").is_empty(),
+            "a nameless object's name value set is empty"
+        );
+        assert_eq!(
+            shared_name_values("Grizzly Bears"),
+            HashSet::from(["grizzly bears".to_string()]),
+            "a named object's value set carries its ASCII-folded name"
+        );
+    }
+
+    /// CR 201.2 + CR 201.2a + CR 708.2a: `FilterProp::SameNameAsParentTarget`
+    /// reads the parent target's name through the shared `names_shared` rule at
+    /// both doors. Driving card: **Bile Blight** — "Target creature and all other
+    /// creatures with the same name as that creature get -3/-3 until end of
+    /// turn." The pump never moves the target, so the mass leg reads the target's
+    /// LIVE name, which is `""` for a face-down creature (CR 708.2a).
+    ///
+    /// The destroy/exile-first class (Maelstrom Pulse, Deputy of Detention) takes
+    /// the other rung: its chain walker stamps the parent instruction's
+    /// `ZoneChanged` record onto the sub-ability as `effect_context_object`
+    /// (`effects/mod.rs`), and that record carries the pre-exit name — `""` for a
+    /// face-down permanent. R8b pins that rung: the reference is the move-time
+    /// name even though the departed object's live name was restored to its
+    /// printed name on exit (CR 708.9).
+    ///
+    /// Failure shape before the fix (`eq_ignore_ascii_case` against the
+    /// reference): R8, R8b and R12 matched, because `"".eq_ignore_ascii_case("")`
+    /// is `true`. R13 matched at the record door for the same reason.
+    #[test]
+    fn same_name_as_parent_target_shares_no_name_with_a_nameless_target() {
+        let mut state = setup();
+        let target = add_creature(&mut state, PlayerId(1), "Hidden A");
+        apply_face_down_with_stash(&mut state, target, &FaceDownProfile::vanilla_2_2());
+        let sibling = add_creature(&mut state, PlayerId(1), "Hidden B");
+        apply_face_down_with_stash(&mut state, sibling, &FaceDownProfile::vanilla_2_2());
+        let nameless_other = add_creature(&mut state, PlayerId(0), "Hidden C");
+        apply_face_down_with_stash(&mut state, nameless_other, &FaceDownProfile::vanilla_2_2());
+        let bears = add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        let bears_twin = add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        let wurm = add_creature(&mut state, PlayerId(1), "Craw Wurm");
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        assert_eq!(state.objects[&target].name, "", "face-down is nameless");
+        assert_eq!(state.objects[&sibling].name, "", "face-down is nameless");
+
+        let same_name = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
+        );
+        // The Bile Blight / Echoing Courage shape: "target creature and all OTHER
+        // creatures with the same name as that creature".
+        let pump_shape = TargetFilter::And {
+            filters: vec![
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::SameNameAsParentTarget])
+                    .into(),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            ],
+        };
+
+        let ability_targeting = |id: ObjectId| {
+            ResolvedAbility::new(
+                Effect::NoOp,
+                vec![TargetRef::Object(id)],
+                source,
+                PlayerId(0),
+            )
+        };
+        let on_nameless = ability_targeting(target);
+        let on_bears = ability_targeting(bears);
+        let matches = |state: &GameState,
+                       candidate: ObjectId,
+                       filter: &TargetFilter,
+                       ability: &ResolvedAbility| {
+            super::matches_target_filter(
+                state,
+                candidate,
+                filter,
+                &FilterContext::from_ability(ability),
+            )
+        };
+
+        // R8 (live rung): the nameless parent target shares its name with no
+        // other nameless creature, so the mass leg excludes the sibling.
+        assert!(
+            !matches(&state, sibling, &pump_shape, &on_nameless),
+            "CR 201.2a: a nameless parent target names nothing"
+        );
+        // R9 reach guard: the mass leg still matches named same-name siblings.
+        assert!(
+            matches(&state, bears_twin, &pump_shape, &on_bears),
+            "two Grizzly Bears share a name"
+        );
+        // R10 negative: a different name does not match.
+        assert!(
+            !matches(&state, wurm, &pump_shape, &on_bears),
+            "Craw Wurm does not share the parent target's name"
+        );
+        // R11: a nameless candidate never matches a NAMED parent target.
+        assert!(
+            !matches(&state, nameless_other, &pump_shape, &on_bears),
+            "CR 201.2a: a nameless object shares no name with a named permanent"
+        );
+        // R12 (CR 201.2a "including itself"): without `Not{ParentTarget}` the
+        // nameless target asked about itself matches nothing.
+        assert!(
+            !matches(&state, target, &same_name, &on_nameless),
+            "CR 201.2a: a nameless object has not even its own name in common"
+        );
+        // R9b: the real "other" in the pump shape is `Not{ParentTarget}`,
+        // concretized by `resolved_object_filter` — the raw arm is unbound on a
+        // freshly-built ability (`target_incarnations` is empty), so the row must
+        // resolve the announced target first. Runs on the NAMED board: the name
+        // leg is true for both Grizzly Bears, so only the concretization decides.
+        let resolved_pump =
+            crate::game::effects::resolved_object_filter(&state, &on_bears, &pump_shape);
+        assert!(
+            !matches(&state, bears, &resolved_pump, &on_bears),
+            "CR 611.2c: the announced target does not receive the modification twice"
+        );
+        assert!(
+            matches(&state, bears_twin, &resolved_pump, &on_bears),
+            "the concretized mass leg still matches the other same-name creature"
+        );
+
+        // R13–R15: the record door reads the same reference and the same rule.
+        let record_named = |name: &str| ZoneChangeRecord {
+            name: name.to_string(),
+            ..ZoneChangeRecord::test_minimal(target, Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let on_record = |record: &ZoneChangeRecord, ability: &ResolvedAbility| {
+            zone_change_filter_inner(
+                &state,
+                record,
+                record.from_zone,
+                &same_name,
+                &FilterContext::from_ability(ability),
+            )
+        };
+        // R13: a departed nameless member names nothing.
+        assert!(
+            !on_record(&record_named(""), &on_nameless),
+            "CR 201.2a: a nameless zone-change record shares no name"
+        );
+        // R14 preservation: the record door still folds ASCII case.
+        assert!(
+            on_record(&record_named("GRIZZLY BEARS"), &on_bears),
+            "names differing only in case are the same name"
+        );
+        // R15: a nameless parent target names nothing on the record door either.
+        assert!(
+            !on_record(&record_named("Grizzly Bears"), &on_nameless),
+            "CR 201.2a: a nameless reference matches no named record"
+        );
+
+        // R8b (snapshot rung — the destroy/exile-first chain). A face-down
+        // creature leaves the battlefield: CR 708.9 restores its printed name on
+        // exit, but the zone-change record keeps the pre-exit (nameless) name,
+        // and that is the reference the chained sub-ability receives.
+        let mut departed = setup();
+        let gone = add_creature(&mut departed, PlayerId(1), "Hidden Bear");
+        apply_face_down_with_stash(&mut departed, gone, &FaceDownProfile::vanilla_2_2());
+        let gone_sibling = add_creature(&mut departed, PlayerId(1), "Hidden Twin");
+        apply_face_down_with_stash(&mut departed, gone_sibling, &FaceDownProfile::vanilla_2_2());
+        let restored = add_creature(&mut departed, PlayerId(1), "Hidden Bear");
+        assert_eq!(departed.objects[&gone].name, "", "face-down is nameless");
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut departed, gone, Zone::Graveyard, &mut events);
+        assert_eq!(
+            departed.objects[&gone].name, "Hidden Bear",
+            "CR 708.9: the printed name returns when the permanent leaves"
+        );
+        let moved_name = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.name.clone()),
+                _ => None,
+            })
+            .expect("the move emits a zone-change record");
+        assert_eq!(
+            moved_name, "",
+            "the zone-change record carries the pre-exit nameless name"
+        );
+
+        let mut snapshot_ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Object(gone)],
+            restored,
+            PlayerId(0),
+        );
+        snapshot_ability.effect_context_object = Some(CostPaidObjectSnapshot {
+            object_id: gone,
+            lki: LKISnapshot {
+                name: String::new(),
+                token_image_ref: None,
+                power: Some(2),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 0,
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            },
+            incarnation: departed.objects[&gone].incarnation,
+        });
+        assert!(
+            !matches(&departed, gone_sibling, &same_name, &snapshot_ability),
+            "CR 201.2a: the nameless move-time reference matches no nameless sibling"
+        );
+        // Reach guard: the live name of the departed object IS "Hidden Bear", so
+        // this second clause would flip to `true` if the resolver read it —
+        // proving the reference really came from the snapshot rung.
+        assert!(
+            !matches(&departed, restored, &same_name, &snapshot_ability),
+            "CR 608.2h: the reference is the move-time name, not the restored live name"
+        );
+    }
+
+    /// CR 201.2 + CR 201.2a: `FilterProp::SameNameAsExiledBySource` — the
+    /// Extraplanar Lens class, "a land with the same name as the exiled card" —
+    /// evaluates through the shared `names_shared` rule at both doors. A nameless
+    /// exiled card has no name, so it names no land, "including another object
+    /// with no name" (CR 201.2a).
+    ///
+    /// Reach: doubly latent. The candidates are battlefield lands, and a nameless
+    /// one exists only through the Yedora "it's a Forest land" profile
+    /// (CR 708.2a sentence 2); the reference is a *linked* exiled object, and no
+    /// printed imprint shape exiles a face-down permanent. The row is therefore a
+    /// unit-level boundary built by pushing the link directly.
+    ///
+    /// Failure shape before the fix: R16 and R18's first half matched, because
+    /// `"".eq_ignore_ascii_case("")` is `true`.
+    #[test]
+    fn same_name_as_exiled_by_source_shares_no_name_without_a_name() {
+        let mut state = setup();
+        let lens = add_creature(&mut state, PlayerId(0), "Extraplanar Lens");
+        let nameless_exiled = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            String::new(),
+            Zone::Exile,
+        );
+        let forest_exiled = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Exile,
+        );
+        for exiled in [nameless_exiled, forest_exiled] {
+            state.exile_links.push(ExileLink {
+                exiled_id: exiled,
+                source_id: lens,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+        }
+
+        let mut land = |card_id: u64, name: &str| {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            id
+        };
+        let forest = land(203, "Forest");
+        let island = land(204, "Island");
+        // The Yedora profile: a face-down NON-creature land with no name.
+        let nameless_land = land(205, "Yedora's Forest");
+        apply_face_down_with_stash(
+            &mut state,
+            nameless_land,
+            &FaceDownProfile {
+                power: None,
+                toughness: None,
+                body: FaceDownBody::Noncreature,
+                extra_core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".to_string()],
+                ward: None,
+                cause: FaceDownCause::Manifest,
+            },
+        );
+        assert_eq!(
+            state.objects[&nameless_land].name, "",
+            "face-down is nameless"
+        );
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsExiledBySource]),
+        );
+
+        // R16: a nameless exiled card names no land — not even the nameless one.
+        assert!(
+            !matches_target_filter(&state, nameless_land, &filter, lens),
+            "CR 201.2a: a nameless exiled card names no land"
+        );
+        // R17 reach guard: the named path still works, and discriminates.
+        assert!(
+            matches_target_filter(&state, forest, &filter, lens),
+            "a land with the same name as the exiled card matches"
+        );
+        assert!(
+            !matches_target_filter(&state, island, &filter, lens),
+            "a differently named land does not match"
+        );
+
+        // R18: the record door reads the same rule.
+        let record_nameless =
+            ZoneChangeRecord::test_minimal(nameless_land, Some(Zone::Battlefield), Zone::Graveyard);
+        assert_eq!(record_nameless.name, "", "the minimal record is nameless");
+        let ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), lens, PlayerId(0));
+        assert!(
+            !zone_change_filter_inner(
+                &state,
+                &record_nameless,
+                record_nameless.from_zone,
+                &filter,
+                &FilterContext::from_ability(&ability),
+            ),
+            "CR 201.2a: a nameless record shares no name with a nameless reference"
+        );
+        let record_forest = ZoneChangeRecord {
+            name: "Forest".to_string(),
+            ..ZoneChangeRecord::test_minimal(forest, Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        assert!(
+            zone_change_filter_inner(
+                &state,
+                &record_forest,
+                record_forest.from_zone,
+                &filter,
+                &FilterContext::from_ability(&ability),
+            ),
+            "a named record still matches its same-named exiled card"
+        );
+    }
+
     #[test]
     fn attacked_this_turn_matches_tracked_creature() {
         let mut state = setup();
@@ -19593,6 +22367,62 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 701.26a: a merged chain set holding a destroyed member and
+    /// a tapped member serves "tapped this way" and "destroyed this way"
+    /// disjointly; the cause-agnostic read sees both.
+    #[test]
+    fn tracked_set_filtered_tapped_cause_discriminates_merged_set() {
+        let mut state = setup();
+        let destroyed = add_creature(&mut state, PlayerId(0), "Destroyed Member");
+        let tapped = add_creature(&mut state, PlayerId(0), "Tapped Member");
+        let set = crate::types::identifiers::TrackedSetId(4);
+        state
+            .tracked_object_sets
+            .insert(set, vec![destroyed, tapped]);
+        let mut causes = std::collections::HashMap::new();
+        causes.insert(destroyed, ThisWayCause::Destroyed);
+        causes.insert(tapped, ThisWayCause::Tapped);
+        state
+            .tracked_set_member_causes
+            .insert(set, causes.into_iter().collect());
+        state.chain_tracked_set_id = Some(set);
+
+        let tapped_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Tapped));
+        assert!(matches_target_filter(
+            &state,
+            tapped,
+            &tapped_this_way,
+            tapped
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            destroyed,
+            &tapped_this_way,
+            tapped
+        ));
+        let destroyed_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Destroyed));
+        assert!(matches_target_filter(
+            &state,
+            destroyed,
+            &destroyed_this_way,
+            destroyed
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            tapped,
+            &destroyed_this_way,
+            destroyed
+        ));
+        let any_member = sentinel_tracked_set_filtered(None);
+        assert!(matches_target_filter(&state, tapped, &any_member, tapped));
+        assert!(matches_target_filter(
+            &state,
+            destroyed,
+            &any_member,
+            destroyed
+        ));
+    }
+
     /// Concrete (non-sentinel) `TrackedSetFiltered` ids bypass the ladder
     /// entirely — the Zimone's Experiment / Living Death resolver paths bind a
     /// real id before evaluation, and #5512 must not change that path.
@@ -19776,6 +22606,7 @@ mod tests {
                     kind: DamageKindFilter::Any,
                     source: Some(Box::new(TargetFilter::LastCreated)),
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             }],
         ] {
@@ -20286,6 +23117,7 @@ mod tests {
                                     kind: DamageKindFilter::Any,
                                     source: Some(Box::new(owned())),
                                     min_sources: 1,
+                                    relation: crate::types::ability::PlayerRelation::Opponent,
                                 }),
                             },
                         ]),
@@ -20568,6 +23400,7 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: Some(Box::new(chosen())),
                         min_sources: 1,
+                        relation: crate::types::ability::PlayerRelation::Opponent,
                     }),
                 },
             ])),
@@ -21149,10 +23982,11 @@ mod tests {
                     FilterProp::Cmc {
                         comparator: Comparator::LE,
                         value: QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn {
+                            qty: QuantityRef::LifeLost {
                                 player: PlayerScope::Opponent {
                                     aggregate: AggregateFunction::Sum,
                                 },
+                                window: TurnWindow::ThisTurn,
                             },
                         },
                     },
@@ -23152,6 +25986,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         };
@@ -23712,6 +26547,7 @@ mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
@@ -23776,6 +26612,8 @@ mod tests {
             combat_status: Default::default(),
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -24248,26 +27086,25 @@ mod tests {
         );
     }
 
-    // CR 400.1 + CR 601.2a: a spell-cast record's captured `from_zone` must be
-    // honored by `FilterProp::InAnyZone` so "spell you've cast this turn from
-    // anywhere other than your hand" counts non-hand casts (the Paradox cycle).
+    // CR 400.1 + CR 601.2a + CR 400.11: "spell you've cast this turn from anywhere other
+    // than your hand" (the Paradox cycle) is `Not(InZone(Hand))` over the record's
+    // captured origin — a non-hand cast satisfies it, a hand cast does not, and a cast
+    // from OUTSIDE the game (CR 707.13: not a zone) does.
     #[test]
-    fn spell_record_in_any_zone_cast_origin() {
-        let zones = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
-        let filter =
-            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone {
-                zones: zones.clone(),
-            }]));
+    fn spell_record_not_in_zone_cast_origin() {
+        let filter = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+        }]));
         let controller = PlayerId(0);
 
-        // A graveyard cast (e.g. flashback) is in the "anywhere other than hand" set.
+        // A graveyard cast (e.g. flashback) is "anywhere other than hand".
         let from_graveyard = SpellCastRecord {
             from_zone: Zone::Graveyard,
             ..Default::default()
         };
         assert!(
             spell_record_matches_filter(&from_graveyard, &filter, controller, &[]),
-            "a spell cast from the graveyard must satisfy InAnyZone[everything except hand]"
+            "a spell cast from the graveyard must satisfy Not(InZone(Hand))"
         );
 
         // A normal hand cast is excluded.
@@ -24277,8 +27114,33 @@ mod tests {
         };
         assert!(
             !spell_record_matches_filter(&from_hand, &filter, controller, &[]),
-            "a spell cast from hand must NOT satisfy InAnyZone[everything except hand]"
+            "a spell cast from hand must NOT satisfy Not(InZone(Hand))"
         );
+
+        // CR 707.13 + CR 400.11: an outside-the-game cast carries its staging zone as
+        // `from_zone`, but is from no zone — so it is "not from hand" even when the
+        // staging zone is the hand, and it is NOT "from exile" even when it is staged
+        // in exile.
+        let outside_staged_in_exile = SpellCastRecord {
+            from_zone: Zone::Exile,
+            from_outside_game: true,
+            ..Default::default()
+        };
+        assert!(spell_record_matches_filter(
+            &outside_staged_in_exile,
+            &filter,
+            controller,
+            &[]
+        ));
+        let from_exile = TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+        );
+        assert!(!spell_record_matches_filter(
+            &outside_staged_in_exile,
+            &from_exile,
+            controller,
+            &[]
+        ));
     }
 
     /// CR 109.4 + CR 608.2i (Admiral Beckett Brass #4735): the object-side
@@ -24301,6 +27163,7 @@ mod tests {
                         ),
                     ))),
                     min_sources: 3,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             },
         ]))
@@ -24823,6 +27686,8 @@ mod tests {
                 controller: PlayerId(0),
                 // Test-only enter-as-copy fixture stages no donor; empty mods are stamp-proof.
                 donor: None,
+                // Single-faced fixture values: no other face to carry.
+                double_faced: None,
             }));
             *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
         } else {
@@ -25281,6 +28146,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::ControlledContinuouslySinceTurnBegan
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -26089,7 +28955,7 @@ mod dandan_axis_collapse_tests {
     ) -> [bool; 2] {
         [P0, P1].map(|seat| {
             let ctx = FilterContext::from_source_with_controller(SOURCE, seat);
-            matches_target_filter_on_departure(state, id, from, filter, &ctx, None)
+            matches_target_filter_on_departure(state, id, from, filter, &ctx)
         })
     }
 
@@ -26427,7 +29293,7 @@ mod entry_projection_tests {
             choose(true, TargetSelectionMode::Chosen).sub_ability(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::card_name(),
                     chooser: ControllerRef::You,
                     persist: true,
                     selection: TargetSelectionMode::Chosen,
@@ -26995,14 +29861,15 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: Default::default(),
@@ -27122,6 +29989,15 @@ mod entry_observation_tests {
 
     /// [`fixture`] whose entrant has `keywords` when it enters.
     fn fixture_with_keywords(settle: bool, keywords: &[Keyword]) -> Fixture {
+        fixture_with_entrant(settle, keywords, |_| {})
+    }
+
+    /// [`fixture_with_keywords`] whose entrant is further shaped by `shape` before it enters.
+    fn fixture_with_entrant(
+        settle: bool,
+        keywords: &[Keyword],
+        shape: impl FnOnce(&mut GameObject),
+    ) -> Fixture {
         let mut state = GameState::new_two_player(11);
         let source = create_object(
             &mut state,
@@ -27147,6 +30023,7 @@ mod entry_observation_tests {
             obj.toughness = Some(1);
             obj.keywords = keywords.to_vec();
             obj.base_keywords = keywords.to_vec();
+            shape(obj);
         }
         mark_layers_full(&mut state);
         flush_layers(&mut state);
@@ -27296,6 +30173,79 @@ mod entry_observation_tests {
             &first_strike_kind,
             &ctx
         ));
+    }
+
+    /// CR 701.27g + CR 400.7: the enters-observer view of a departed entrant reads the
+    /// "transformed permanent" answer latched at its observation; the live-clone view keeps the
+    /// raw face record beside the live stash and modal flag. Synthetic: no printed enters
+    /// observer filters on "transformed"; the shapes stand in for Valentin, Dean of the Vein cast
+    /// as Lisette, Dean of the Root (and then Moonmisted), and a transformed Kessig Prowler. The
+    /// nearest printed reader of the property is Mutagen Connoisseur ("This creature gets +1/+0
+    /// for each transformed permanent you control.").
+    #[test]
+    fn entry_observation_skeleton_reads_the_latched_transformed_answer() {
+        use crate::types::card::LayoutKind;
+        let transformed_creature = creature_with(vec![FilterProp::Transformed]);
+        let entered = |layout: LayoutKind, transformed: bool, modal_back_face: bool| {
+            fixture_with_entrant(true, &[], |obj| {
+                obj.base_card_types = obj.card_types.clone();
+                obj.back_face = Some(crate::game::game_object::BackFaceData {
+                    name: "Entrant other face".to_string(),
+                    layout_kind: Some(layout),
+                    ..Default::default()
+                });
+                obj.transformed = transformed;
+                obj.modal_back_face = modal_back_face;
+            })
+        };
+        // CR 400.7: the entrant left; its storage id now names a new graveyard object.
+        let depart = |f: &mut Fixture| {
+            let obj = f.state.objects.get_mut(&f.entrant).unwrap();
+            obj.incarnation += 1;
+            obj.zone = Zone::Graveyard;
+            obj.transformed = false;
+            obj.modal_back_face = false;
+        };
+        let observed = |f: &Fixture| {
+            let ctx = FilterContext::from_source(&f.state, f.source);
+            matches_target_filter_on_entry_observation(
+                &f.state,
+                &f.record,
+                None,
+                &transformed_creature,
+                &ctx,
+            )
+        };
+
+        // (a) A modal card back face up (Lisette).
+        let mut lisette = entered(LayoutKind::Modal, false, true);
+        assert!(
+            observed(&lisette),
+            "reach: the live-clone view reads the live modal flag"
+        );
+        depart(&mut lisette);
+        assert!(
+            observed(&lisette),
+            "a departed modal card back face up was a transformed permanent"
+        );
+
+        // (b) A modal card front face up with both flags (Lisette Moonmisted into Valentin).
+        let mut valentin = entered(LayoutKind::Modal, true, true);
+        assert!(!observed(&valentin), "live: front face up");
+        depart(&mut valentin);
+        assert!(
+            !observed(&valentin),
+            "a departed front-face-up permanent with both flags was not a transformed permanent"
+        );
+
+        // (c) A transformed card (Sinuous Predator): the positive control.
+        let mut prowler = entered(LayoutKind::Transform, true, false);
+        assert!(observed(&prowler), "live: back face up");
+        depart(&mut prowler);
+        assert!(
+            observed(&prowler),
+            "a departed transformed card was a transformed permanent"
+        );
     }
 
     #[test]
@@ -27489,8 +30439,8 @@ mod attached_set_host_filter_tests {
     use crate::game::effects::attach::attach_to;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        filter_prop_contains, AttachmentReferent, Effect, FilterProp, ResolvedAbility,
-        TargetFilter, TypedFilter,
+        filter_prop_contains, AttachmentReferent, ControllerRef, Effect, FilterProp,
+        ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetReadOrigin, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -27578,6 +30528,115 @@ mod attached_set_host_filter_tests {
 
     fn ability(effect: Effect, targets: Vec<TargetRef>) -> ResolvedAbility {
         ResolvedAbility::new(effect, targets, ObjectId(900), PlayerId(0))
+    }
+
+    // Real cards: no printed card exhibits this shape (All oracle_text for '(all|each)
+    // (auras|equipment|permanents) ...attached to (that creature|it)' (40 hits): announced-host
+    // ones (Blastfire Bolt, Eaten by Spiders, Fires of Mount Doom, Hubris) have a single target;
+    // block-event ones (Corrosive Ooze) have none). Shape: A filter for permanents attached to
+    // 'that creature' under a blockers-declared trigger: unassigned it reads the event's blocked
+    // creature, but an unavailable announcement (own or parent) matches nothing attached to that
+    // host. Nearest printed card: Corrosive Ooze ("Whenever this creature blocks or becomes blocked
+    // by an equipped creature, destroy all Equipment attached to that creature at end of combat.");
+    // Blastfire Bolt ("Blastfire Bolt deals 5 damage to target creature. Destroy all Equipment
+    // attached to that creature.") -- Corrosive Ooze reads Equipment attached to the block-event
+    // creature (fallback case); Blastfire Bolt reads attachments of an announced target that
+    // fizzles whole.
+    #[test]
+    fn unavailable_parent_host_does_not_fall_back_to_the_firing_event() {
+        let mut state = state();
+        let host = creature(&mut state, PlayerId(1), "Event host");
+        let att = aura(&mut state, PlayerId(1), "Attached aura");
+        attach_to(&mut state, att, host);
+        let source = creature(&mut state, PlayerId(0), "Trigger source");
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(source, host)],
+        });
+        let filter = host_filter(TargetFilter::ParentTarget);
+        let mut ability = ability(destroyed(), vec![]);
+        ability.source_id = source;
+        assert!(
+            matches_target_filter(&state, att, &filter, &FilterContext::from_ability(&ability),),
+            "unassigned reference still reads the event host"
+        );
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            ability.parent_target_missing_reason =
+                Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+            assert!(
+                !matches_target_filter(
+                    &state,
+                    att,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "unavailable announcement cannot name the event host: {origin:?}"
+            );
+        }
+    }
+
+    // Real cards: no printed card exhibits this shape (Same census as typed_parent_controller test:
+    // 12 parsed ParentTargetController creature filters, all on spells or ETB targets without an
+    // untap/event referent; 0 ParentTargetOwner). Shape: A creature filter 'that player
+    // controls/owns' keyed on the parent target's controller or owner: unassigned it falls back to
+    // the untap event's object, unavailable it matches nothing, populated it matches. Nearest
+    // printed card: Mutiny ("Target creature an opponent controls deals damage equal to its power
+    // to another target creature that player controls."); Declaration in Stone ("Exile target
+    // creature and all other creatures its controller controls with the same name as that creature.
+    // That player investigates for each nontoken creature exiled this way.") -- Both read 'that
+    // player' from the first target's controller; neither resolves under a trigger event that could
+    // supply a wrong fallback.
+    #[test]
+    fn unavailable_parent_possessor_matches_no_players_objects() {
+        let mut state = state();
+        let candidate = creature(&mut state, PlayerId(1), "Event player's creature");
+        state.current_trigger_event = Some(GameEvent::PermanentUntapped {
+            object_id: candidate,
+        });
+        for controller in [
+            ControllerRef::ParentTargetController,
+            ControllerRef::ParentTargetOwner,
+        ] {
+            let filter = TargetFilter::Typed(TypedFilter::creature().controller(controller));
+            let mut ability = ability(destroyed(), vec![]);
+            assert!(
+                matches_target_filter(
+                    &state,
+                    candidate,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "unassigned projection retains event fallback"
+            );
+            for origin in [
+                TargetReadOrigin::OwnAnnouncement,
+                TargetReadOrigin::ParentAnnouncement,
+            ] {
+                ability.parent_target_missing_reason =
+                    Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+                assert!(
+                    !matches_target_filter(
+                        &state,
+                        candidate,
+                        &filter,
+                        &FilterContext::from_ability(&ability),
+                    ),
+                    "unavailable projection cannot select another player's objects"
+                );
+            }
+            ability.set_unpinned_targets(vec![TargetRef::Object(candidate)]);
+            assert!(
+                matches_target_filter(
+                    &state,
+                    candidate,
+                    &filter,
+                    &FilterContext::from_ability(&ability),
+                ),
+                "a populated binding still supplies its controller/owner"
+            );
+        }
     }
 
     fn destroyed() -> Effect {

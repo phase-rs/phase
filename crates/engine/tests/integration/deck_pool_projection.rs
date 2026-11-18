@@ -1,14 +1,16 @@
 //! #7968 — a per-seat projection carries deck-pool contents only while that player's own
 //! between-games sideboarding prompt is live (CR 100.4). Outside that prompt every pool's
-//! nine registration lists are blanked for every viewer, including the viewer's own.
+//! nine registration lists are blanked for every viewer, including the viewer's own. The
+//! bracket estimate computed from those lists stays with the pool's owner (CR 400.2).
 
 use std::io::Read;
 use std::sync::Arc;
 
+use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::deck_loading::DeckEntry;
 use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
 use engine::game::turn_control;
-use engine::game::visibility::filter_state_for_viewer;
+use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::types::card::CardFace;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, PersistedGameState, PlayerDeckPool, WaitingFor};
@@ -339,4 +341,102 @@ fn turn_controller_of_the_sideboarding_seat_is_denied_that_pool() {
             "only P0 keeps P0's pool while P0 is the seat being prompted — not seat {seat}"
         );
     }
+}
+
+/// A distinct estimate per seat, so a projection that hands one seat's estimate to another
+/// fails as surely as one that leaks it.
+const ESTIMATES: [CommanderBracketTier; SEATS as usize] = [
+    CommanderBracketTier::Exhibition,
+    CommanderBracketTier::Core,
+    CommanderBracketTier::Upgraded,
+    CommanderBracketTier::Optimized,
+];
+
+fn dump_with_estimates() -> GameState {
+    let mut state = load_dump();
+    for pool in state.deck_pools.iter_mut() {
+        pool.estimated_bracket_tier = Some(ESTIMATES[pool.player.0 as usize]);
+    }
+    // Reach guard: the declared tier must be present for the "declarations stay public"
+    // assertions below to compare anything.
+    assert!(state
+        .deck_pools
+        .iter()
+        .all(|pool| pool.bracket_tier.is_some()));
+    state
+}
+
+/// The estimate is computed from the seat's complete submitted deck, so it reveals hidden
+/// cards (CR 400.2): each seat's projection keeps its own estimate and no one else's, and an
+/// unseated viewer receives none. The declared tier is the owner's public statement and
+/// reaches every viewer unchanged.
+#[test]
+fn bracket_estimate_reaches_only_its_owner() {
+    let state = dump_with_estimates();
+
+    let mut seats_exercised = 0;
+    for seat in 0..SEATS {
+        let viewer = PlayerId(seat);
+        let projected = filter_state_for_viewer(&state, viewer);
+        assert_eq!(projected.deck_pools.len(), state.deck_pools.len());
+        for pool in projected.deck_pools.iter() {
+            let expected = (pool.player == viewer).then_some(ESTIMATES[pool.player.0 as usize]);
+            assert_eq!(
+                pool.estimated_bracket_tier, expected,
+                "seat {seat}'s projection of {:?}'s estimate",
+                pool.player
+            );
+            assert_eq!(
+                pool.bracket_tier,
+                pool_of(&state.deck_pools, pool.player).bracket_tier
+            );
+        }
+        seats_exercised += 1;
+    }
+    assert_eq!(seats_exercised, SEATS);
+
+    let unseated = filter_state_for_unseated_viewer(&state);
+    assert_eq!(unseated.deck_pools.len(), state.deck_pools.len());
+    for pool in unseated.deck_pools.iter() {
+        assert_eq!(pool.estimated_bracket_tier, None);
+        assert_eq!(
+            pool.bracket_tier,
+            pool_of(&state.deck_pools, pool.player).bracket_tier
+        );
+    }
+
+    // The unfiltered state the AI session and saved games read keeps every estimate.
+    for pool in state.deck_pools.iter() {
+        assert_eq!(
+            pool.estimated_bracket_tier,
+            Some(ESTIMATES[pool.player.0 as usize])
+        );
+    }
+}
+
+/// Controlling another seat's turn lets a player act for it, not learn its deck: the
+/// estimate gate is the pool's owner, like the registration lists above, so the controller
+/// still receives none of the controlled seat's estimate.
+#[test]
+fn turn_controller_does_not_receive_the_controlled_seats_estimate() {
+    let mut state = dump_with_estimates();
+    state.active_player = P0;
+    state.turn_decision_controller = Some(P1);
+    // Reach guard: owner-equality would pass whether or not turn control is live, so the
+    // delegation itself has to be pinned.
+    assert_eq!(
+        turn_control::authorized_submitter_for_player(&state, P0),
+        P1,
+        "the fixture must actually delegate P0's submissions to P1"
+    );
+
+    let projected = filter_state_for_viewer(&state, P1);
+    assert_eq!(
+        pool_of(&projected.deck_pools, P0).estimated_bracket_tier,
+        None
+    );
+    assert_eq!(
+        pool_of(&projected.deck_pools, P1).estimated_bracket_tier,
+        Some(ESTIMATES[1])
+    );
 }

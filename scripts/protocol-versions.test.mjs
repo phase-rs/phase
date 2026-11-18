@@ -459,7 +459,9 @@ test("migration rejects missing, renamed, expression, duplicate and partial hist
 function integrationShell() {
   const workflow = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
   const frontend = workflow.split("  frontend:\n")[1].split("\n  draft-match-wasm-proof:")[0];
-  assert.match(frontend, /uses: actions\/checkout@v4\n        with:\n          fetch-depth: 0/);
+  // Checkout is SHA-pinned per scripts/check_action_pins.py; the load-bearing
+  // part here is fetch-depth: 0 (full history for the protocol base lookup).
+  assert.match(frontend, /uses: actions\/checkout@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+\n        with:\n          fetch-depth: 0/);
   assert.match(frontend, /run: node --test scripts\/protocol-versions.test.mjs scripts\/engine-fingerprint.test.mjs/);
   assert.match(workflow.split("  pull_request:")[0], /- 'protocol\/\*\*'/);
   const blocks = [...frontend.matchAll(/      - name: Protocol integration history\n([\s\S]*?)(?=\n      - name:)/g)];

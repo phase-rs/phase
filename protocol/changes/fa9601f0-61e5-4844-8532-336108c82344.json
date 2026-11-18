@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add CoreType::Vanguard (CR 205.2a) so vanguard faces carry their card type"
+}
