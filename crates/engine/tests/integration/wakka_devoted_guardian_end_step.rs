@@ -9,6 +9,7 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -278,8 +279,13 @@ fn beast_flies_only_after_you_put_a_plus_one_counter_on_it() {
             .id();
         s.add_basic_land(caster, color);
         let mut r = s.build();
-        r.state_mut().priority_player = caster;
-        r.state_mut().waiting_for = WaitingFor::Priority { player: caster };
+        if caster == P1 {
+            r.act(GameAction::PassPriority).expect("P0 passes");
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { player: P1 }),
+                "reach guard: P1 has priority"
+            );
+        }
         r.cast(spell).target_object(beast).resolve();
         assert_eq!(
             counters(&r, beast, kind),
