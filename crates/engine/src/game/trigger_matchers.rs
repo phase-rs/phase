@@ -814,9 +814,7 @@ fn player_matches_filter_as(
         TargetFilter::Controller => trigger_controller == player_id,
         // In team games, opponents are players on other teams;
         // teammates are not opponents even though their player IDs differ.
-        TargetFilter::Opponent => {
-            crate::game::players::is_opponent(state, trigger_controller, player_id)
-        }
+        TargetFilter::Opponent => crate::game::players::is_opponent(state, trigger_controller, player_id),
         TargetFilter::Typed(TypedFilter {
             controller: Some(ControllerRef::You),
             ..
@@ -825,11 +823,12 @@ fn player_matches_filter_as(
             controller: Some(ControllerRef::Opponent),
             ..
         }) => crate::game::players::is_opponent(state, trigger_controller, player_id),
-        TargetFilter::SourceChosenPlayer => {
-            crate::game::game_object::chosen_player_in(
-                &source_context.source_read(state).lki().chosen_attributes,
-            ) == Some(player_id)
-        }
+        TargetFilter::SourceChosenPlayer => source_context
+            .source_read(state)
+            .lki()
+            .chosen_attributes
+            .iter()
+            .any(|choice| matches!(choice, crate::types::ability::ChosenAttribute::Player(chosen) if *chosen == player_id)),
         TargetFilter::AttachedTo => {
             source_context
                 .source_read(state)

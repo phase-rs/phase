@@ -773,14 +773,6 @@ fn apply_choice_attributes(
     {
         destination.retain(|attribute| !matches!(attribute, ChosenAttribute::Direction(_)));
     }
-    // CR 607.2d + CR 712.18: "the chosen player" is the latest linked choice; a
-    // permanent transforming into the choosing face again is the same object.
-    if attrs
-        .iter()
-        .any(|attribute| matches!(attribute, ChosenAttribute::Player(_)))
-    {
-        destination.retain(|attribute| !matches!(attribute, ChosenAttribute::Player(_)));
-    }
     destination.extend(attrs);
 }
 

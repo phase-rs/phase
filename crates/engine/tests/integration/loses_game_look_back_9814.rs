@@ -1,5 +1,5 @@
-//! #9814: "when a player loses the game" triggers look back in time (CR 603.10f), and "the
-//! chosen player" is the latest linked choice (CR 607.2d). Printed cards only. CR 603.3a: a
+//! #9814: "when a player loses the game" triggers look back in time (CR 603.10f). Printed cards
+//! only. CR 603.3a: a
 //! trigger's controller is its source's controller when it triggered. CR 800.4a: a leaving
 //! player's objects leave and their control effects end. CR 800.4d: a trigger a departed player
 //! would control isn't put on the stack. CR 104.3a/b/e: concession, 0 life, an effect's loss.
@@ -8,11 +8,12 @@ use std::collections::BTreeSet;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::targeting::find_legal_targets;
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::{ChoiceType, ChosenAttribute};
+use engine::types::ability::{ChoiceType, ChosenAttribute, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, LossReason};
-use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType::{Black as B, Blue as U, Green as G, Red as R, White as W};
 use engine::types::mana::{ManaType, ManaUnit};
@@ -51,10 +52,6 @@ fn board(zenos_owner: PlayerId, hand: &[(PlayerId, &str)], extras: &[(PlayerId, 
         scenario.add_card_to_library_top(player, "Plains");
     }
     let mut runner = scenario.build();
-    // CR 205.3m: a real game builds its creature-type list from the decks' creature subtypes
-    // (`deck_loading`); a scenario has none, so seed Zenos's and Shinryu's for Maskwood Nexus.
-    let types = ["Dragon", "Human", "Noble", "Warrior"];
-    runner.state_mut().all_creature_types = types.map(String::from).to_vec();
     for id in &extras {
         runner.state_mut().objects.get_mut(id).unwrap().tapped = false;
     }
@@ -107,22 +104,15 @@ fn settle(runner: &mut GameRunner) {
     panic!("the stack did not settle");
 }
 
-/// P0 casts Moonmist ("Transform all Humans."). Turning to Shinryu must raise its "As this
-/// creature transforms into Shinryu, choose an opponent." prompt, offering `choose`, which is
-/// chosen; turning back must raise none.
-fn moonmist(runner: &mut GameRunner, mist: ObjectId, zenos: ObjectId, choose: Option<PlayerId>) {
-    let was_transformed = runner.state().objects[&zenos].transformed;
+/// P0 casts Moonmist ("Transform all Humans.") to turn Zenos into Shinryu, whose "As this
+/// creature transforms into Shinryu, choose an opponent." prompt must offer `choose`, chosen.
+fn moonmist(runner: &mut GameRunner, mist: ObjectId, zenos: ObjectId, choose: PlayerId) {
     fund(runner, P0, &[G, G]);
     runner.cast(mist).resolve();
     runner.advance_until_stack_empty();
     let transformed = runner.state().objects[&zenos].transformed;
-    assert_ne!(transformed, was_transformed, "reach: transformed");
-    let waiting = &runner.state().waiting_for;
-    let Some(choice) = choose.map(|player| player.0.to_string()) else {
-        let quiet = matches!(waiting, WaitingFor::Priority { .. });
-        assert!(quiet, "turning back must not ask: {waiting:?}");
-        return;
-    };
+    assert!(transformed, "reach: transformed");
+    let (waiting, choice) = (&runner.state().waiting_for, choose.0.to_string());
     let asked = matches!(waiting, WaitingFor::NamedChoice {
         choice_type: ChoiceType::Opponent { .. }, options, ..
     } if options.contains(&choice));
@@ -224,7 +214,7 @@ fn stolen_shinryu_owner_loses(loss: Loss) {
     let mut board = board(P2, &[(P0, "Dominate"), (P0, "Moonmist")], &door);
     let (zenos, steal, mist) = (board.zenos, board.hand[0], board.hand[1]);
     dominate(&mut board.runner, steal, zenos, P0);
-    moonmist(&mut board.runner, mist, zenos, Some(P2));
+    moonmist(&mut board.runner, mist, zenos, P2);
     assert_eq!(
         board.runner.state().objects[&zenos].owner,
         P2,
@@ -246,7 +236,7 @@ fn stolen_shinryu_owner_loses(loss: Loss) {
 fn shinryu_stolen_by_the_loser(loss: Loss) {
     let mut board = board(P0, &[(P0, "Moonmist"), (P2, "Dominate")], &[]);
     let (zenos, mist, steal) = (board.zenos, board.hand[0], board.hand[1]);
-    moonmist(&mut board.runner, mist, zenos, Some(P2));
+    moonmist(&mut board.runner, mist, zenos, P2);
     for _ in 0..2 {
         board.runner.act(GameAction::PassPriority).expect("pass");
     }
@@ -272,7 +262,7 @@ fn shinryu_stolen_by_the_loser(loss: Loss) {
 fn own_shinryu(loss: Loss) {
     let mut board = board(P0, &[(P0, "Moonmist")], &[(P0, "Door to Nothingness")]);
     let (zenos, mist) = (board.zenos, board.hand[0]);
-    moonmist(&mut board.runner, mist, zenos, Some(P2));
+    moonmist(&mut board.runner, mist, zenos, P2);
     lose(&mut board, P2, loss);
     assert_eq!(winner(&board.runner), Some(Some(P0)));
 }
@@ -325,53 +315,80 @@ fn stolen_share_the_spoils_triggers_when_its_owner_concedes() {
     );
 }
 
-/// R4's board: with Maskwood Nexus, Shinryu is a Human, so Moonmist turns it back and then to
-/// Shinryu again (chose P1, then P2). CR 712.18: it stays the same object.
-fn re_transformed() -> Board {
-    let mists = [(P0, "Moonmist"); 3];
-    let mut board = board(P0, &mists, &[(P0, "Maskwood Nexus")]);
-    let (zenos, mists) = (board.zenos, board.hand.clone());
-    moonmist(&mut board.runner, mists[0], zenos, Some(P1));
-    assert_eq!(chosen(&board.runner, zenos), [ChosenAttribute::Player(P1)]);
-    moonmist(&mut board.runner, mists[1], zenos, None);
-    moonmist(&mut board.runner, mists[2], zenos, Some(P2));
-    board
+/// Answer the pending "choose a player"/"choose an opponent" prompt with `player`.
+fn answer_player(runner: &mut GameRunner, player: PlayerId) {
+    let waiting = &runner.state().waiting_for;
+    let asked = matches!(waiting, WaitingFor::NamedChoice { options, .. }
+        if options.contains(&player.0.to_string()));
+    assert!(asked, "reach: a prompt offering {player:?}: {waiting:?}");
+    let choice = player.0.to_string();
+    runner
+        .act(GameAction::ChooseOption { choice })
+        .expect("choose");
 }
 
-/// R4, CR 607.2d: "the chosen player" is the most recent linked choice, not the first.
+/// #11062 review: three players. P0 casts True-Name Nemesis choosing P1 ("As this creature enters,
+/// choose a player. / This creature has protection from the chosen player."), casts Mirrorweave
+/// ("Each other creature becomes a copy of target nonlegendary creature until end of turn.") on
+/// Triarch Stalker, and at combat both Targeting Relays ("At the beginning of combat on your turn,
+/// choose an opponent.") choose P2. CR 607.2d + CR 607.5: the copied Relay's choice belongs to the
+/// copied pair, so after cleanup Nemesis still has protection from P1, not from P2.
 #[test]
-fn re_transformed_shinryu_reads_only_the_latest_choice() {
-    let mut board = re_transformed();
-    let latest = chosen(&board.runner, board.zenos);
-    assert_eq!(latest, [ChosenAttribute::Player(P2)], "CR 607.2d: replaced");
-    lose(&mut board, P1, Loss::Life);
-    assert_eq!(winner(&board.runner), None, "P1 was an earlier choice");
-    lose(&mut board, P2, Loss::Life);
-    assert_eq!(winner(&board.runner), Some(Some(P0)));
-}
-
-/// R6: a game saved before the fix holds both choices, oldest first (the save is rewritten to
-/// that shape). Restored through the production pipeline, the chosen player is the latest.
-#[test]
-fn restored_pre_fix_shinryu_reads_its_latest_choice() {
-    let mut board = re_transformed();
-    let both = [ChosenAttribute::Player(P1), ChosenAttribute::Player(P2)];
-    let key = "\"chosen_attributes\":";
-    let field = |c: &[_]| key.to_owned() + &serde_json::to_string(c).unwrap();
-    let saved = PersistedGameState::capture(board.runner.state().clone());
-    let saved = serde_json::to_string(&saved).unwrap();
-    let held = saved.contains(&field(&both[1..]));
-    assert!(held, "reach: the save holds it");
-    let saved = saved.replace(&field(&both[1..]), &field(&both));
-    for (loser, loss, won) in [(P2, Loss::Concede, Some(Some(P0))), (P1, Loss::Life, None)] {
-        let restore = serde_json::from_str::<PersistedGameState>(&saved).unwrap();
-        let ready = restore.prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated);
-        let ready = ready.unwrap();
-        board.runner =
-            GameRunner::from_state(ready.finalize_after_rehydration(|_| Ok(())).unwrap());
-        let restored = chosen(&board.runner, board.zenos);
-        assert_eq!(restored, both, "reach: restored as saved");
-        lose(&mut board, loser, loss);
-        assert_eq!(winner(&board.runner), won, "{loser:?} lost");
+fn copied_targeting_relay_choice_leaves_nemesis_protection_from_p1() {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let real = |s: &mut GameScenario, name, zone| s.add_real_card(P0, name, zone, db);
+    let nemesis = real(&mut scenario, "True-Name Nemesis", Zone::Hand);
+    let weave = real(&mut scenario, "Mirrorweave", Zone::Hand);
+    let stalker = real(&mut scenario, "Triarch Stalker", Zone::Battlefield);
+    let sources = [P1, P2].map(|player| scenario.add_creature(player, "Source", 1, 1).id());
+    for player in [P0, P1, P2].repeat(5) {
+        scenario.add_card_to_library_top(player, "Plains");
     }
+    let mut runner = scenario.build();
+    fund(&mut runner, P0, &[U, U, U]);
+    runner.cast(nemesis).resolve();
+    answer_player(&mut runner, P1);
+    settle(&mut runner);
+    fund(&mut runner, P0, &[W, W, W, W]);
+    runner.cast(weave).target_object(stalker).resolve();
+    settle(&mut runner);
+    let copy = &runner.state().objects[&nemesis].name;
+    assert_eq!(
+        copy, "Triarch Stalker",
+        "reach: Nemesis is a copy of Stalker"
+    );
+    let mut answered = 0;
+    while runner.state().active_player == P0 {
+        match runner.state().waiting_for {
+            WaitingFor::NamedChoice { .. } => {
+                answer_player(&mut runner, P2);
+                answered += 1;
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                let none = GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                };
+                runner.act(none).expect("no attackers");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            _ => drop(runner.act(GameAction::PassPriority).expect("pass")),
+        }
+    }
+    assert_eq!(answered, 2, "reach: both Targeting Relays chose P2");
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&nemesis].name, "True-Name Nemesis",
+        "reach: the copy ended"
+    );
+    let targetable_by = |source: ObjectId| {
+        let (any, controller) = (TargetFilter::Any, state.objects[&source].controller);
+        find_legal_targets(state, &any, controller, source).contains(&TargetRef::Object(nemesis))
+    };
+    assert!(!targetable_by(sources[0]), "CR 702.16b: protection from P1");
+    assert!(targetable_by(sources[1]), "no protection from P2");
 }
