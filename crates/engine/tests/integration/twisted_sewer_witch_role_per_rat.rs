@@ -2,7 +2,7 @@
 //!
 //! CR 608.2c: "Then for each Rat you control, create a Wicked Role token
 //! attached to that Rat" is evaluated after the Rat token exists, and each
-//! iteration's "that Rat" is the member being iterated. CR 303.7 + CR 111.2:
+//! iteration's "that Rat" is the member being iterated. CR 701.7a + CR 303.7:
 //! each Role token is created attached to its own Rat. A single Role on the
 //! wrong object (or on a parent token) is the defect this test discriminates.
 
