@@ -156,6 +156,13 @@
 //! library-placement entry above boxed `library_placement`. That is under the
 //! 16,384 ceiling, so the ceiling is unchanged.
 //!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu while semantically porting
+//! the as-enters dice/counters branch (72ae22642) onto main through da2af2bca5,
+//! including canonical placement and component delivery (#10636), at 15,840 B.
+//! Measured with the isolated `-Zprint-type-sizes` command above. The merged
+//! parked-entry and pre-entry bookkeeping remains under the calibrated ceiling:
+//! 15,840.next_multiple_of(256) + 256 = 16,384, so the ceiling is unchanged.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
