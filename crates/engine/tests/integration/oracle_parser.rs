@@ -1085,7 +1085,7 @@ fn token_grant_spells_no_longer_misroute_to_static() {
 /// creating effect defines ("They have …"), held once, with no leftover grant.
 #[test]
 fn brood_birthing_parses_as_conditional_token_chain() {
-    use engine::types::ability::AbilityCondition;
+    use engine::types::ability::{AbilityCondition, TypeFilter};
 
     let result = parse(
         "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn \
@@ -1111,8 +1111,9 @@ fn brood_birthing_parses_as_conditional_token_chain() {
         panic!("expected a control-a-Spawn check: {:?}", spell.condition);
     };
     assert!(
-        matches!(filter, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You)),
-        "{filter:?}"
+        matches!(filter, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You)
+            && ["Eldrazi", "Spawn"].iter().all(|s| tf.type_filters.contains(&TypeFilter::Subtype((*s).to_string())))),
+        "an Eldrazi Spawn you control: {filter:?}"
     );
     let spawn = |effect: &Effect, n: i32| {
         matches!(effect, Effect::Token { name, count: QuantityExpr::Fixed { value }, static_abilities, .. }
