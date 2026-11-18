@@ -7,7 +7,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::anychar;
 use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, success, value, verify};
 use nom::multi::many_till;
-use nom::sequence::{delimited, preceded, terminated};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
