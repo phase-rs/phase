@@ -198,6 +198,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -374,6 +375,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -466,6 +468,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -626,6 +629,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -948,6 +952,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
@@ -1024,6 +1029,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -1210,6 +1216,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -1595,6 +1602,12 @@ pub struct FilterContext<'a> {
     pub declared_slot_view: Option<&'a [Option<crate::game::targeting::DeclaredSlotBinding>]>,
     /// CR 201.5a: the granter stamped on the definition this filter is read for.
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 614.12 + CR 614.1c: the battlefield as it stood BEFORE the
+    /// simultaneous entry whose as-enters replacement is being evaluated. A
+    /// battlefield object outside this set entered in the same event, so it is
+    /// not yet part of the population the entering permanent counts. `None`
+    /// everywhere except an entering object's replacement-time quantity read.
+    pub pre_entry_battlefield: Option<&'a HashSet<ObjectId>>,
 }
 
 impl<'a> FilterContext<'a> {
@@ -1614,6 +1627,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: source.declared_slot_view,
             granting_object: source.granting_object,
             ability_targets: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1636,6 +1650,19 @@ impl<'a> FilterContext<'a> {
     pub fn with_granting_object(self, granting_object: Option<ObjectIncarnationRef>) -> Self {
         FilterContext {
             granting_object,
+            ..self
+        }
+    }
+
+    /// CR 614.12: evaluate this filter against the battlefield as it was before
+    /// the simultaneous entry (see [`FilterContext::pre_entry_battlefield`]).
+    /// `None` leaves the live battlefield authoritative.
+    pub fn with_pre_entry_battlefield(
+        self,
+        pre_entry_battlefield: Option<&'a HashSet<ObjectId>>,
+    ) -> Self {
+        FilterContext {
+            pre_entry_battlefield,
             ..self
         }
     }
@@ -1709,6 +1736,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1731,6 +1759,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1749,6 +1778,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1767,6 +1797,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: source.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1788,6 +1819,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: source.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1811,6 +1843,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1829,6 +1862,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1849,6 +1883,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1872,6 +1907,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 }
@@ -2448,9 +2484,16 @@ pub(crate) fn controller_ref_player(
         // controller sacrifices a noncreature, nonland permanent").
         ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
-        ControllerRef::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-        }
+        // CR 508.5 + CR 113.7a: route through the single defending-player
+        // authority with the ability's captured trigger context, so a source
+        // removed from combat (or from the battlefield) after its ability
+        // triggered still names the player it was attacking. With no trigger
+        // context the authority falls back to the live per-attacker lookup.
+        ControllerRef::DefendingPlayer => crate::game::combat::defending_player_cr508_5(
+            state,
+            source_id,
+            ability.and_then(|ability| ability.trigger_source.as_ref()),
+        ),
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
         ControllerRef::ChosenPlayer { index } => {
@@ -2855,6 +2898,7 @@ fn filter_contains_input(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -3096,6 +3140,7 @@ fn filter_prop_contains_input(
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -3459,6 +3504,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3882,6 +3928,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -4352,6 +4399,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -4469,6 +4517,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -4689,19 +4738,30 @@ pub(crate) fn matches_target_filter_on_entry_observation(
     };
     // CR 400.7: only the exact observed incarnation lends its live object (and so its
     // abilities) to the view; otherwise the projection stands alone on a skeleton.
-    let mut view = match state.objects.get(&record.object_id) {
+    let view = match state.objects.get(&record.object_id) {
         Some(live) if ObjectIncarnationRef::from_object(live) == observation.identity.reference => {
-            live.clone()
+            let mut view = live.clone();
+            view.overlay_source_projection(observation);
+            view
         }
-        _ => GameObject::new(
-            record.object_id,
-            observation.card_id,
-            observation.lki.owner,
-            observation.lki.name.clone(),
-            observation.identity.expected_zone,
-        ),
+        _ => {
+            let mut view = GameObject::new(
+                record.object_id,
+                observation.card_id,
+                observation.lki.owner,
+                observation.lki.name.clone(),
+                observation.identity.expected_zone,
+            );
+            view.overlay_source_projection(observation);
+            // CR 701.27g + CR 400.7: a skeleton has no stored face and no modal flag, so its raw
+            // `transformed` is the only orientation the authority can read; it carries the
+            // latched answer, as `matches_target_filter_on_event_snapshot` reconstructs
+            // `EventObjectSnapshot.transformed`. The live-clone view keeps the raw record beside
+            // the live stash and modal flag.
+            view.transformed = observation.transformed_permanent;
+            view
+        }
     };
-    view.overlay_source_projection(observation);
     // CR 702.26b: a phased-out permanent is treated as though it does not exist.
     if view.is_phased_out() {
         return false;
@@ -5542,6 +5602,37 @@ thread_local! {
         const { core::cell::Cell::new(0) };
 }
 
+/// Test-support work counts for the CR 614.12 token projection seams only.
+/// Thread-local so parallel tests cannot charge one another's batches.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenEntryProjectionWork {
+    pub pre_entry_boards: usize,
+    pub pre_entry_state_clones: usize,
+    pub projection_state_clones: usize,
+    pub pre_entry_layer_passes: usize,
+    pub projections: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TOKEN_ENTRY_PROJECTION_WORK: core::cell::Cell<TokenEntryProjectionWork> =
+        const { core::cell::Cell::new(TokenEntryProjectionWork {
+            pre_entry_boards: 0, pre_entry_state_clones: 0, projection_state_clones: 0,
+            pre_entry_layer_passes: 0, projections: 0,
+        }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn token_entry_projection_work() -> TokenEntryProjectionWork {
+    TOKEN_ENTRY_PROJECTION_WORK.with(core::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_token_entry_projection_work() {
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| work.set(TokenEntryProjectionWork::default()));
+}
+
 /// CR 712.14 + CR 712.14a: the face a double-faced entrant has up as it is put onto the battlefield.
 /// Engine-internal: the entry event and `BattlefieldEntrantProjection::new` keep their
 /// `enter_transformed` flag, converted once here (`EntryFace::from_enter_transformed`).
@@ -5847,31 +5938,27 @@ impl BattlefieldEntrantProjection {
         {
             return None;
         }
-        let pre_entry = pre_entry_board(state, co_entrants);
-        // CR 111.1: a token comes from no zone, so no origin-zone population is pinned.
-        let mut scratch = pre_entry.clone().into_owned();
-        let entry = scratch.liminal_entries.remove(&entrant)?;
-        crate::game::effects::token::place_liminal_token_on_battlefield(
-            &mut scratch,
-            entrant,
-            entry.object.into_projected(),
-        );
-        if scratch.objects.get(&entrant)?.zone != Zone::Battlefield {
-            return None;
-        }
-        Some(Self::finish(
-            scratch,
-            Some((&pre_entry, None)),
-            entrant,
-            None,
-        ))
+        Self::token_on_pre_entry_board(
+            pre_entry_board(state, co_entrants),
+            state.liminal_entries.get(&entrant)?.object.projected(),
+        )
     }
 
-    /// CR 614.12 + CR 707.9b: a token the non-liminal copy seam has already created, as it
-    /// would exist on the battlefield. `body` is the entrant with its immediate copy
-    /// exceptions folded in (they are part of its copiable values, so they decide whether a
-    /// resident effect applies to it). The board is the one before its entry event: the
-    /// entrant itself and each of `co_entrants` are absent.
+    /// CR 614.12: use a caller-owned batch board, while reading the current liminal body.
+    pub(crate) fn liminal_token_on_board(
+        state: &GameState,
+        entrant: ObjectId,
+        pre_entry: &GameState,
+    ) -> Option<Self> {
+        let entry = state.liminal_entries.get(&entrant)?;
+        if !entry.object.is_token_projection() {
+            return None;
+        }
+        Self::token_on_pre_entry_board(Cow::Borrowed(pre_entry), entry.object.projected())
+    }
+
+    /// CR 614.12 + CR 707.9b: the placed copy body includes its immediate copy exceptions.
+    #[cfg(test)]
     pub(crate) fn for_placed_token(
         state: &GameState,
         entrant: ObjectId,
@@ -5883,21 +5970,43 @@ impl BattlefieldEntrantProjection {
             .copied()
             .chain(std::iter::once(entrant))
             .collect();
-        let pre_entry = pre_entry_board(state, &absent);
-        // CR 111.1: a token comes from no zone, so no origin-zone population is pinned.
+        Self::token_on_pre_entry_board(pre_entry_board(state, &absent), body)
+    }
+
+    /// CR 614.12: capture only the population condition rewrites, then consume an owned
+    /// board directly. No full pre-entry state is needed after capture. A borrowed batch
+    /// board needs one scratch clone; an already-owned board needs none.
+    pub(crate) fn token_on_pre_entry_board(
+        pre_entry: Cow<'_, GameState>,
+        body: &GameObject,
+    ) -> Option<Self> {
         let mut placed = body.clone();
         placed.phase_status = crate::game::game_object::PhaseStatus::PhasedIn;
         if placed.zone != Zone::Battlefield {
             return None;
         }
-        let mut scratch = pre_entry.clone().into_owned();
-        scratch.objects.insert(entrant, placed);
-        Some(Self::finish(
-            scratch,
-            Some((&pre_entry, None)),
-            entrant,
-            None,
-        ))
+        let entrant = placed.id;
+        let pins = crate::game::layers::EntryPopulationRewrites::for_token(&pre_entry, &placed);
+        #[cfg(any(test, feature = "test-support"))]
+        TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.projections += 1;
+            counts.projection_state_clones += usize::from(matches!(pre_entry, Cow::Borrowed(_)));
+            work.set(counts);
+        });
+        let mut scratch = pre_entry.into_owned();
+        scratch.liminal_entries.remove(&entrant);
+        if scratch.battlefield.contains(&entrant) {
+            scratch.objects.insert(entrant, placed);
+        } else {
+            crate::game::effects::token::place_liminal_token_on_battlefield(
+                &mut scratch,
+                entrant,
+                placed,
+            );
+        }
+        pins.apply(&mut scratch);
+        Some(Self::finish(scratch, None, entrant, None))
     }
 
     /// Install the carried effect (if any) on the scratch entrant, pin the pre-entry
@@ -5971,6 +6080,14 @@ pub(crate) fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> 
     if !absent.iter().any(present) {
         return Cow::Borrowed(state);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+        let mut counts = work.get();
+        counts.pre_entry_boards += 1;
+        counts.pre_entry_state_clones += 1;
+        counts.pre_entry_layer_passes += 1;
+        work.set(counts);
+    });
     let mut board = state.clone();
     for id in absent.iter().filter(|id| present(id)) {
         if let Some(obj) = board.objects.get_mut(id) {
@@ -5982,6 +6099,110 @@ pub(crate) fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> 
     crate::game::layers::mark_layers_full(&mut board);
     crate::game::layers::flush_layers(&mut board);
     Cow::Owned(board)
+}
+
+/// A call-local token batch cache. The object-store snapshot is persistent/shared:
+/// it lets refresh skip co-entrants whose live object has not been written since
+/// the previous consult, without retaining another full game state.
+pub(crate) struct TokenEntryBatchBoard {
+    board: GameState,
+    source_objects: crate::types::object_map::ObjectMap,
+}
+
+impl TokenEntryBatchBoard {
+    pub(crate) fn new(state: &GameState, absent: &[ObjectId]) -> Self {
+        let board = pre_entry_board(state, absent);
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(board, Cow::Borrowed(_)) {
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_boards += 1;
+                counts.pre_entry_state_clones += 1;
+                work.set(counts);
+            });
+        }
+        Self {
+            board: board.into_owned(),
+            source_objects: state.objects.clone(),
+        }
+    }
+
+    pub(crate) fn board(&self) -> &GameState {
+        &self.board
+    }
+
+    /// CR 614.12: extend a batch's pre-entry board with the live, phased-out co-entrants.
+    /// They are frozen by the layer engine, so copying these objects needs no layer pass.
+    /// Entry/counter histories and resolution referents still advance in the live engine;
+    /// keep those reads current, and conservatively flush when an existing static or a
+    /// transient could read the changed context. No whole-state clone is taken here.
+    pub(crate) fn refresh(&mut self, state: &GameState, absent: &[ObjectId]) {
+        let board = &mut self.board;
+        for id in absent {
+            if self.source_objects.shares_object_with(&state.objects, *id) {
+                continue;
+            }
+            let Some(live) = state.objects.get(id) else {
+                continue;
+            };
+            let mut object = live.clone();
+            if object.is_phased_in_permanent() {
+                object.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                    cause: crate::game::game_object::PhaseOutCause::Directly,
+                };
+            }
+            if !board.battlefield.contains(id) && object.zone == Zone::Battlefield {
+                crate::game::effects::token::place_liminal_token_on_battlefield(board, *id, object);
+            } else {
+                board.objects.insert(*id, object);
+            }
+        }
+        let mut context_changed = false;
+        macro_rules! refresh {
+        ($($field:ident),+ $(,)?) => { $(
+            if board.$field != state.$field {
+                board.$field.clone_from(&state.$field);
+                context_changed = true;
+            }
+        )+ };
+    }
+        refresh!(
+            created_tokens_this_turn,
+            players_who_created_token_this_turn,
+            counter_added_this_turn,
+            object_counter_placement_count_this_turn,
+            zone_changes_this_turn,
+            battlefield_entries_this_turn,
+            battlefield_entry_observations,
+            last_created_token_ids,
+            last_effect_amount,
+            last_effect_count,
+            last_effect_excess_amount,
+            last_effect_counts_by_player,
+            combat,
+            transient_continuous_effects,
+        );
+        // The current liminal body is supplied separately by the caller; other explicit
+        // object references must still see the same parked entries as the live board.
+        board.liminal_entries.clone_from(&state.liminal_entries);
+        if context_changed
+            && (!board.transient_continuous_effects.is_empty()
+                || board
+                    .objects
+                    .values()
+                    .any(|object| !object.static_definitions.is_empty()))
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_layer_passes += 1;
+                work.set(counts);
+            });
+            crate::game::layers::mark_layers_full(board);
+            crate::game::layers::flush_layers(board);
+        }
+        self.source_objects = state.objects.clone();
+    }
 }
 
 /// CR 614.12: whether an entrant gets a projection for `consumer` — it has a
@@ -6050,6 +6271,7 @@ fn filter_verdict_is_identity_only(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -6866,6 +7088,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         block_pairs: Vec::new(),
         co_departed: Vec::new(),
         co_entered: Vec::new(),
+        instruction_lead: None,
         attached_to: None,
         entered_incarnation,
         turn_zone_change_index: 0,
@@ -7176,6 +7399,16 @@ fn filter_inner_with_lookup(
     if obj.is_phased_out() {
         return false;
     }
+    // CR 614.12 + CR 614.1c: an as-enters replacement modifies the entry before
+    // it happens, so a permanent that enters in the same simultaneous event is
+    // not part of the battlefield the entrant's replacement counts.
+    if obj.zone == Zone::Battlefield
+        && ctx
+            .pre_entry_battlefield
+            .is_some_and(|pre_entry| !pre_entry.contains(&object_id))
+    {
+        return false;
+    }
     filter_inner_for_object(
         state,
         obj,
@@ -7238,9 +7471,8 @@ fn filter_inner_for_object(
         TargetFilter::SelfRef => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime, so this arm is defense-in-depth and
-        // mirrors SelfRef's source-identity semantics.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
@@ -7594,6 +7826,7 @@ fn filter_inner_for_object(
                     triggering_object,
                     declared_slot_view,
                     granting_object,
+                    pre_entry_battlefield: None,
                 },
             )
         }
@@ -7943,6 +8176,9 @@ fn filter_inner_for_object(
         | TargetFilter::PostReplacementDamageTargetOwner
         // CR 615: compound damage recipient, lowered to `DamageTargetFilter`
         // before runtime — never object-matched here.
+        // CR 608.2c: resolved only by its effect handler; never matched against
+        // the board.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ControllerAndControlledPermanents { .. } => false,
         // CR 201.2a + CR 602.5: "card with the chosen name" — match against source's
         // ChosenAttribute::CardName. The chosen name comes from a player UI prompt
@@ -7982,6 +8218,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                pre_entry_battlefield: None,
             };
             state
                 .last_chosen_damage_source
@@ -8099,8 +8336,8 @@ fn zone_change_filter_inner(
                     record_source.identity.reference == source.identity.reference
                 })
         }),
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime — mirrors SelfRef's source identity.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             trigger_source.map_or(record.object_id == source_id, |source| {
                 record
@@ -8443,6 +8680,9 @@ fn zone_change_filter_inner(
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner
+        // CR 608.2c: resolved only by its effect handler; never matched against
+        // the board.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::AffectedObjectOwner => false,
     }
 }
@@ -8758,6 +8998,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -9119,6 +9360,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -9536,6 +9778,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         // CR 122.6: A spell on the stack hasn't received counters as a
         // permanent — fail closed against the spell-cast snapshot.
@@ -9948,6 +10191,12 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// copy's copied name reverts once it leaves the battlefield, so the live read
 /// would report the printed name instead.
 ///
+/// CR 400.7 + CR 608.2h: an intervening instruction that yields a single referent
+/// overwrites that snapshot (Legion's End's mass exile or reveal), and the target
+/// has still left as the object it was. When the target occurrence's pinned
+/// incarnation is no longer current, its exit last-known information answers. An
+/// unpinned target or one with no exit record falls through to the live read.
+///
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
@@ -9960,6 +10209,16 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
         .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
     {
         return Some(snapshot.lki.name.clone());
+    }
+    if let Some(lki) = ability
+        .targets
+        .iter()
+        .position(|target| *target == TargetRef::Object(id))
+        .and_then(|index| ability.target_pin_at(index))
+        .filter(|pin| !pin.is_current(state))
+        .and_then(|pin| exit_lki_for_incarnation(state, id, pin.incarnation))
+    {
+        return Some(lki.name.clone());
     }
     if let Some(obj) = state.objects.get(&id) {
         return Some(obj.name.clone());
@@ -9974,8 +10233,16 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
     })
 }
 
-/// CR 400.7 + CR 608.2h: The exact incarnation `subject` names. A triggered
-/// source is named by the identity its trigger captured — for a
+/// The live incarnation at `id`, when the object still exists.
+fn live_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    state
+        .objects
+        .get(&id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
+/// CR 400.7 + CR 608.2h: The exact incarnation of the filter's source. A
+/// triggered source is named by the identity its trigger captured — for a
 /// leaves-the-battlefield trigger, the incarnation that left (CR 603.10a). An
 /// activated ability carries no trigger identity, so it falls to the
 /// incarnation stamped onto it when it reached the stack
@@ -9983,54 +10250,101 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
 /// zone it was expected to be in). Only when neither is available does this
 /// fall to the live object at the referenced id; an object that left and
 /// returned is a new object (CR 400.7) and finds nothing its predecessor
-/// recorded. `ParentTarget` and `AnaphoricTarget` prefer the incarnation pinned
-/// when it was chosen.
-fn combat_relation_subject_ref(
+/// recorded.
+fn combat_relation_source_ref(
+    state: &GameState,
+    source: &SourceContext<'_>,
+) -> Option<ObjectIncarnationRef> {
+    source
+        .trigger_source
+        .map(|context| context.identity.reference)
+        // CR 113.7: the ability's capture describes its own source, so it does not answer
+        // for a context rebound to another object (a damage source chosen as a target).
+        .or_else(|| {
+            source
+                .ability
+                .filter(|ability| ability.source_id == source.id)
+                .and_then(|ability| ability.source_ref(state))
+        })
+        .or_else(|| live_incarnation(state, source.id))
+}
+
+/// CR 400.7 + CR 603.7c + CR 608.2i: the incarnation the object target at
+/// `position` (id `id`) was announced as: a delayed-trigger referent pin keyed by
+/// id, then the occurrence pin read positionally, then the live object. A
+/// look-back takes no action on its subject, so a departed subject keeps its
+/// name: no liveness check.
+fn announced_target_incarnation(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    position: usize,
+    id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == id)
+        .copied()
+        .or_else(|| ability.target_pin_at(position))
+        .or_else(|| live_incarnation(state, id))
+}
+
+/// CR 400.7 + CR 608.2c + CR 608.2h + CR 608.2i: The exact incarnations
+/// `subject` names. `Source` names the filter's source
+/// ([`combat_relation_source_ref`]). `ParentTarget` names the ability's first
+/// object target (Trial's same-instruction slot). `AnaphoricTarget` names every
+/// object target an earlier instruction announced ("one of those creatures",
+/// Triton Tactics; a singular "it"/"that creature" has one), each by the
+/// incarnation pinned when it was chosen, so a member that left and returned is
+/// a new object whose blocks do not count (CR 400.7).
+fn combat_relation_subject_refs(
     state: &GameState,
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
-) -> Option<ObjectIncarnationRef> {
-    let live = |id: ObjectId| {
-        state
-            .objects
-            .get(&id)
-            .map(ObjectIncarnationRef::from_object)
-    };
+) -> Vec<ObjectIncarnationRef> {
     match subject {
-        CombatRelationSubject::Source => source
-            .trigger_source
-            .map(|context| context.identity.reference)
-            // CR 113.7: the ability's capture describes its own source, so it does not answer
-            // for a context rebound to another object (a damage source chosen as a target).
-            .or_else(|| {
-                source
-                    .ability
-                    .filter(|ability| ability.source_id == source.id)
-                    .and_then(|ability| ability.source_ref(state))
+        CombatRelationSubject::Source => combat_relation_source_ref(state, source)
+            .into_iter()
+            .collect(),
+        CombatRelationSubject::ParentTarget => source
+            .ability
+            .and_then(|ability| {
+                // The pin of the ORIGINATING occurrence (the first object target).
+                let position = ability
+                    .targets
+                    .iter()
+                    .position(|target| matches!(target, TargetRef::Object(_)))?;
+                let id = first_object_target(ability)?;
+                announced_target_incarnation(state, ability, position, id)
             })
-            .or_else(|| live(source.id)),
-        // CR 608.2i: a look-back takes no action on its subject, so a departed
-        // subject keeps its name. No liveness check on either arm.
-        CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget => {
-            let ability = source.ability?;
-            // The pin of the ORIGINATING occurrence (the first object target),
-            // read positionally; a delayed-trigger referent pin is keyed by id.
-            let position = ability
-                .targets
-                .iter()
-                .position(|target| matches!(target, TargetRef::Object(_)))?;
-            let id = first_object_target(ability)?;
-            ability
-                .target_incarnations
-                .iter()
-                .find(|pin| pin.object_id == id)
-                .copied()
-                .or_else(|| ability.target_pin_at(position))
-                .or_else(|| live(id))
-        }
+            .into_iter()
+            .collect(),
+        CombatRelationSubject::AnaphoricTarget => source
+            .ability
+            .map(|ability| {
+                ability
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, target)| match target {
+                        TargetRef::Object(id) => {
+                            announced_target_incarnation(state, ability, position, *id)
+                                // CR 608.2b: a target illegal as the creating spell resolved determines no history.
+                                .filter(|pin| {
+                                    !ability.context.creation_illegal_referents.contains(pin)
+                                })
+                        }
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
+/// CR 509.1g + CR 608.2c + CR 608.2i: does `candidate` stand in `relation` with
+/// any incarnation `subject` names? "One of those creatures" holds for any of
+/// the announced targets.
 fn matches_combat_relation(
     state: &GameState,
     candidate: ObjectIncarnationRef,
@@ -10038,28 +10352,31 @@ fn matches_combat_relation(
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
 ) -> bool {
-    let Some(subject) = combat_relation_subject_ref(state, subject, source) else {
-        return false;
-    };
     let CombatRelation::BlockPairing { direction, scope } = relation;
-    let pair_holds = |blocker, attacker| {
-        let pair = combat::BlockHistoryPair { blocker, attacker };
-        match scope {
-            // CR 509.1g + CR 509.1h: the current pairing.
-            None => current_block_pair_holds(state, subject, pair),
-            // CR 509.1g + CR 400.7: answered from the block-history ledgers, which
-            // CR 506.4 does not prune, by the exact subject and candidate
-            // incarnations.
-            Some(scope) => state.creature_blocked_attacker(pair.blocker, pair.attacker, scope),
-        }
-    };
-    match direction {
-        BlockPairDirection::SubjectIsBlocker => pair_holds(subject, candidate),
-        BlockPairDirection::CandidateIsBlocker => pair_holds(candidate, subject),
-        BlockPairDirection::Either => {
-            pair_holds(candidate, subject) || pair_holds(subject, candidate)
-        }
-    }
+    combat_relation_subject_refs(state, subject, source)
+        .into_iter()
+        .any(|subject| {
+            let pair_holds = |blocker, attacker| {
+                let pair = combat::BlockHistoryPair { blocker, attacker };
+                match scope {
+                    // CR 509.1g + CR 509.1h: the current pairing.
+                    None => current_block_pair_holds(state, subject, pair),
+                    // CR 509.1g + CR 400.7: answered from the block-history ledgers,
+                    // which CR 506.4 does not prune, by the exact subject and
+                    // candidate incarnations.
+                    Some(scope) => {
+                        state.creature_blocked_attacker(pair.blocker, pair.attacker, scope)
+                    }
+                }
+            };
+            match direction {
+                BlockPairDirection::SubjectIsBlocker => pair_holds(subject, candidate),
+                BlockPairDirection::CandidateIsBlocker => pair_holds(candidate, subject),
+                BlockPairDirection::Either => {
+                    pair_holds(candidate, subject) || pair_holds(subject, candidate)
+                }
+            }
+        })
 }
 
 /// CR 509.1g + CR 506.4 + CR 608.2h: does the current block pairing `pair`,
@@ -10130,9 +10447,7 @@ fn matches_crew_relation(
     relation: CrewRelation,
     source: &SourceContext<'_>,
 ) -> bool {
-    let Some(source_ref) =
-        combat_relation_subject_ref(state, CombatRelationSubject::Source, source)
-    else {
+    let Some(source_ref) = combat_relation_source_ref(state, source) else {
         return false;
     };
     let pair = match relation {
@@ -10334,6 +10649,7 @@ fn aura_can_enchant_referenced_target(
                 triggering_object: source.triggering_object,
                 declared_slot_view: source.declared_slot_view,
                 granting_object: source.granting_object,
+                pre_entry_battlefield: None,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
@@ -10645,18 +10961,16 @@ fn matches_filter_prop(
         // last known pairings on its departure row (Plague Wight removed with
         // its trigger on the stack).
         FilterProp::BlockingSource => {
-            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
-                |attacker| {
-                    current_block_pair_holds(
-                        state,
+            combat_relation_source_ref(state, source).is_some_and(|attacker| {
+                current_block_pair_holds(
+                    state,
+                    attacker,
+                    combat::BlockHistoryPair {
+                        blocker: ObjectIncarnationRef::from_object(obj),
                         attacker,
-                        combat::BlockHistoryPair {
-                            blocker: ObjectIncarnationRef::from_object(obj),
-                            attacker,
-                        },
-                    )
-                },
-            )
+                    },
+                )
+            })
         }
         FilterProp::CombatRelation { relation, subject } => matches_combat_relation(
             state,
@@ -11451,6 +11765,10 @@ fn matches_filter_prop(
         },
         // CR 509.1a: Creature was declared as a blocker this turn.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&object_id),
+        // CR 701.14a + CR 400.7: fought this turn, keyed by exact incarnation.
+        FilterProp::FoughtThisTurn => state
+            .creatures_fought_this_turn
+            .contains(&ObjectIncarnationRef::from_object(obj)),
         // CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
         FilterProp::AttackedOrBlockedThisTurn => {
             state.creatures_attacked_this_turn.contains(&object_id)
@@ -11469,11 +11787,21 @@ fn matches_filter_prop(
             count,
         } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
+            // CR 400.7: a zone change makes a new object with no memory of the old one,
+            // so only records stamped with this object's CURRENT incarnation count.
+            let Some(current_incarnation) = state.objects.get(&object_id).map(|o| o.incarnation)
+            else {
+                return false;
+            };
             let total: u32 = state
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
                     record.object_id == object_id
+                        // `None` is a legacy record with no provable stamp: object-id-only.
+                        && record
+                            .incarnation
+                            .is_none_or(|stamp| stamp == current_incarnation)
                         && counters.matches(&record.counter_type)
                         && filter_count_scope_actor_matches(actor, controller, record.actor)
                 })
@@ -11499,9 +11827,9 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
-        // CR 701.27g: Match transformed permanents (a transforming DFC on the
-        // battlefield with its back face up).
-        FilterProp::Transformed => obj.transformed,
+        // CR 701.27g: Match transformed permanents ("a double-faced permanent on the
+        // battlefield with its back face up"), read through the one authority.
+        FilterProp::Transformed => crate::game::transform::is_transformed_permanent(obj),
         // CR 115.9c: If the object is a stack entry, ALL of its targets must match
         // the inner filter. Falls back permissive for non-stack objects so trigger
         // matchers remain the primary authority (they validate separately).
@@ -11901,7 +12229,7 @@ fn zone_change_record_matches_property(
             else {
                 return false;
             };
-            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
+            combat_relation_source_ref(state, source).is_some_and(
                 |attacker| {
                     let pair = combat::BlockHistoryPair { blocker, attacker };
                     record.block_pairs.contains(&pair)
@@ -12096,6 +12424,12 @@ fn zone_change_record_matches_property(
         // CR 509.1a + CR 608.2h: sibling of `AttackedThisTurn` — same durable id-keyed ledger,
         // same look-back reasoning.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&record.object_id),
+        // CR 701.14a + CR 608.2h: answer from the record's own departing
+        // incarnation; a record without one fails closed.
+        FilterProp::FoughtThisTurn => record
+            .trigger_source_context()
+            .map(|context| context.identity.reference)
+            .is_some_and(|candidate| state.creatures_fought_this_turn.contains(&candidate)),
         // CR 508.1a + CR 509.1a + CR 608.2h: disjunction of the two ledgers above.
         FilterProp::AttackedOrBlockedThisTurn => {
             state
@@ -12896,6 +13230,7 @@ fn object_shares_quality_with_reference_filter(
         triggering_object: source.triggering_object,
         declared_slot_view: source.declared_slot_view,
         granting_object: source.granting_object,
+        pre_entry_battlefield: None,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
     // creature you control" or "a creature card in your graveyard" to the zone
@@ -13208,6 +13543,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -14873,6 +15209,8 @@ mod tests {
                 additional_modifications: vec![],
                 tapped: false,
                 enters_attacking: false,
+                // Single-faced fixture values: no other face to carry.
+                double_faced: None,
                 attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: copied,
@@ -15533,10 +15871,18 @@ mod tests {
                 .clone();
             body.id = placed;
             paused.state.objects.insert(placed, body.clone());
+            #[cfg(feature = "test-support")]
+            let copies_before = crate::game::perf_counters::take_cost_snapshot().state_copies;
             let placed_retains =
                 BattlefieldEntrantProjection::for_placed_token(&paused.state, placed, &body, &[])
                     .expect("a placed token is projectable")
                     .retains_replacement(&paused.own);
+            #[cfg(feature = "test-support")]
+            assert_eq!(
+                crate::game::perf_counters::take_cost_snapshot().state_copies - copies_before,
+                1,
+                "an owned pre-entry board is consumed without another whole-state clone",
+            );
             assert_eq!(
                 placed_retains,
                 liminal_retains(&paused, &[]),
@@ -17613,7 +17959,12 @@ mod tests {
         });
         std::sync::Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)
             .push(ability);
-        state.pending_activations.push((source, 0));
+        // CR 602.2a: the pending entry is the announcement-bound usage key,
+        // not a `(source, index)` pair — the unbound read below must ignore
+        // it either way.
+        let pending = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the pushed ability resolves at slot 0");
+        state.pending_activations.push(pending);
 
         let filter = TargetFilter::And {
             filters: vec![
@@ -18458,6 +18809,7 @@ mod tests {
     // CR 701.27g: `Transformed` matches only permanents whose back face is up.
     #[test]
     fn transformed_property_matches_only_transformed() {
+        use crate::types::card::LayoutKind;
         let mut state = setup();
         let transformed = add_creature(&mut state, PlayerId(0), "Back Face");
         let normal = add_creature(&mut state, PlayerId(0), "Front Face");
@@ -18472,6 +18824,110 @@ mod tests {
         assert!(
             !matches_target_filter(&state, normal, &filter, normal),
             "a non-transformed permanent must not match"
+        );
+
+        // CR 701.27g: the filter reads `transform::is_transformed_permanent`. Each object
+        // below stores an other face; the modal ones stand in for Valentin, Dean of the Vein
+        // cast as Lisette, Dean of the Root (and then Moonmisted), the Room for Mirror Room
+        // cast as Fractured Realm, the mutated one for Gemrazer mutated under a transformed
+        // Kessig Prowler.
+        let with_stash = |state: &mut GameState,
+                          name: &str,
+                          layout: LayoutKind,
+                          transformed: bool,
+                          modal_back_face: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(layout),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = modal_back_face;
+            id
+        };
+        let modal_back = with_stash(&mut state, "Lisette", LayoutKind::Modal, false, true);
+        assert!(
+            matches_target_filter(&state, modal_back, &filter, modal_back),
+            "CR 701.27g + CR 712.11b: a modal double-faced card back face up must match"
+        );
+        let both_flags = with_stash(&mut state, "Valentin", LayoutKind::Modal, true, true);
+        assert!(
+            !matches_target_filter(&state, both_flags, &filter, both_flags),
+            "CR 701.27g: a front-face-up permanent with both flags must not match"
+        );
+        let room = with_stash(
+            &mut state,
+            "Fractured Realm",
+            LayoutKind::Split,
+            false,
+            true,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.base_card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Room".to_string()],
+            };
+            obj.card_types = obj.base_card_types.clone();
+        }
+        assert!(
+            !matches_target_filter(&state, room, &filter, room),
+            "CR 709.2: a Room cast as its right half is not a double-faced permanent"
+        );
+        let merged = with_stash(&mut state, "Mutated", LayoutKind::Transform, true, false);
+        state.objects.get_mut(&merged).unwrap().merge_kind =
+            Some(crate::game::game_object::MergeKind::Mutate);
+        assert!(
+            !matches_target_filter(&state, merged, &filter, merged),
+            "CR 701.27g + CR 730.2i: a merged permanent must not match"
+        );
+    }
+
+    /// CR 701.27g: an event snapshot carries the authority's answer, which its skeleton
+    /// reconstruction (`matches_target_filter_on_event_snapshot`) reads back. Synthetic: no
+    /// printed card filters a connive subject or any other event snapshot on "transformed";
+    /// the nearest printed reader of the property is Mutagen Connoisseur ("This creature gets
+    /// +1/+0 for each transformed permanent you control.").
+    #[test]
+    fn event_snapshot_carries_whether_the_subject_was_a_transformed_permanent() {
+        use crate::types::card::LayoutKind;
+        let mut state = setup();
+        let dfc = |state: &mut GameState, name: &str, transformed: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = true;
+            id
+        };
+        let modal_back = dfc(&mut state, "Lisette", false);
+        let both_flags = dfc(&mut state, "Valentin", true);
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Transformed]));
+        let ctx = FilterContext::from_source_with_controller(modal_back, PlayerId(0));
+
+        let snapshot = |id| {
+            state
+                .capture_connive_subject(id)
+                .expect("a live object must capture a snapshot")
+                .snapshot
+        };
+        assert!(
+            matches_target_filter_on_event_snapshot(&state, &snapshot(modal_back), &filter, &ctx),
+            "a modal double-faced card back face up was a transformed permanent"
+        );
+        assert!(
+            !matches_target_filter_on_event_snapshot(&state, &snapshot(both_flags), &filter, &ctx),
+            "a front-face-up permanent with both flags was not a transformed permanent"
         );
     }
 
@@ -19082,7 +19538,184 @@ mod tests {
         assert!(live_block_pairs_of(&state, wall).is_empty());
     }
 
-    /// U1: `combat_relation_subject_ref`'s `ParentTarget` arm prefers a pinned
+    /// Owner-level announced-set contract, not a printed-card cast test.
+    /// Triton Tactics: "Up to two target creatures each get +0/+3 until end of
+    /// turn. Untap those creatures. At this turn's next end of combat, tap each
+    /// creature that was blocked by one of those creatures this turn and it
+    /// doesn't untap during its controller's next untap step."
+    /// CR 400.7 + CR 608.2i: each historical member retains its own identity.
+    #[test]
+    fn announced_history_subjects_keep_each_members_own_incarnation() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let a = add_creature(&mut state, PlayerId(1), "First blocker");
+        let b = add_creature(&mut state, PlayerId(1), "Second blocker");
+        let first = add_creature(&mut state, PlayerId(0), "First attacker");
+        let second = add_creature(&mut state, PlayerId(0), "Second attacker");
+        let unrelated = add_creature(&mut state, PlayerId(0), "Unrelated attacker");
+        state.objects.get_mut(&a).unwrap().incarnation = 7;
+        state.objects.get_mut(&b).unwrap().incarnation = 11;
+        let a_pin = ObjectIncarnationRef::from_object(&state.objects[&a]);
+        let b_pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        for (blocker, attacker) in [(a_pin, first), (b_pin, second)] {
+            state
+                .creature_blocked_attackers_this_turn
+                .insert(combat::BlockHistoryPair {
+                    blocker,
+                    attacker: ObjectIncarnationRef::from_object(&state.objects[&attacker]),
+                });
+        }
+        state.objects.get_mut(&b).unwrap().bump_incarnation();
+        let b_live = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        assert_ne!(b_live, b_pin);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![
+                TargetRef::Object(a),
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(b),
+            ],
+            source,
+            PlayerId(0),
+        );
+        // Keyed order differs from announcement order, and the positional
+        // second-object pin is deliberately newer than the historical one.
+        ability.target_incarnations = vec![b_pin, a_pin];
+        ability.target_pins = vec![Some(a_pin), None, Some(b_live)];
+        let refs = |ability: Option<&ResolvedAbility>, subject| {
+            let mut context = SourceContext::for_controller(source, Some(PlayerId(0)));
+            context.ability = ability;
+            combat_relation_subject_refs(&state, subject, &context)
+        };
+        assert_eq!(
+            refs(Some(&ability), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        assert_eq!(
+            refs(Some(&ability), CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            },
+        ]));
+        let context = FilterContext::from_ability(&ability);
+        assert!(super::matches_target_filter(
+            &state, first, &filter, &context
+        ));
+        assert!(super::matches_target_filter(
+            &state, second, &filter, &context
+        ));
+        assert!(!super::matches_target_filter(
+            &state, unrelated, &filter, &context
+        ));
+
+        let mut positional = ability.clone();
+        positional.target_incarnations.clear();
+        positional.target_pins = vec![Some(a_pin), None, Some(b_pin)];
+        assert_eq!(
+            refs(Some(&positional), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        let mut live = positional.clone();
+        live.target_pins.clear();
+        assert_eq!(
+            refs(Some(&live), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_live]
+        );
+        assert_eq!(
+            refs(None, CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        let mut empty = ability.clone();
+        empty.targets.clear();
+        assert_eq!(
+            refs(Some(&empty), CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        empty.targets = vec![TargetRef::Player(PlayerId(1))];
+        assert_eq!(
+            refs(Some(&empty), CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+    }
+
+    /// Reader-only creation-legality contract for the same Triton Tactics
+    /// population above; actual creation and public cast evidence are separate.
+    /// CR 608.2b + CR 400.7: exclusion names an incarnation, never just its id.
+    #[test]
+    fn announced_history_subjects_exclude_only_creation_illegal_incarnations() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let a = add_creature(&mut state, PlayerId(1), "First blocker");
+        let b = add_creature(&mut state, PlayerId(1), "Second blocker");
+        state.objects.get_mut(&a).unwrap().incarnation = 7;
+        state.objects.get_mut(&b).unwrap().incarnation = 11;
+        let a_pin = ObjectIncarnationRef::from_object(&state.objects[&a]);
+        let b_pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let source_pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        );
+        ability.target_incarnations = vec![b_pin, a_pin];
+        let refs = |ability: &ResolvedAbility, subject| {
+            let mut context = SourceContext::for_controller(source, Some(PlayerId(0)));
+            context.ability = Some(ability);
+            combat_relation_subject_refs(&state, subject, &context)
+        };
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        ability.context.creation_illegal_referents = vec![b_pin];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::Source),
+            vec![source_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        ability.context.creation_illegal_referents = vec![a_pin, b_pin, source_pin];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::Source),
+            vec![source_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        ability.context.creation_illegal_referents =
+            vec![ObjectIncarnationRef::of(b, b_pin.incarnation + 1)];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+    }
+
+    /// U1: `combat_relation_subject_refs`' `ParentTarget` arm prefers a pinned
     /// incarnation over the live object, and `target_incarnations` (the
     /// delayed-trigger referent pin) over the occurrence pin (`target_pins`) when
     /// both are populated. This path is production-unreachable today — no
@@ -21946,6 +22579,7 @@ mod tests {
                     kind: DamageKindFilter::Any,
                     source: Some(Box::new(TargetFilter::LastCreated)),
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             }],
         ] {
@@ -22456,6 +23090,7 @@ mod tests {
                                     kind: DamageKindFilter::Any,
                                     source: Some(Box::new(owned())),
                                     min_sources: 1,
+                                    relation: crate::types::ability::PlayerRelation::Opponent,
                                 }),
                             },
                         ]),
@@ -22738,6 +23373,7 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: Some(Box::new(chosen())),
                         min_sources: 1,
+                        relation: crate::types::ability::PlayerRelation::Opponent,
                     }),
                 },
             ])),
@@ -25949,6 +26585,7 @@ mod tests {
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
             co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -26498,6 +27135,7 @@ mod tests {
                         ),
                     ))),
                     min_sources: 3,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             },
         ]))
@@ -27020,6 +27658,8 @@ mod tests {
                 controller: PlayerId(0),
                 // Test-only enter-as-copy fixture stages no donor; empty mods are stamp-proof.
                 donor: None,
+                // Single-faced fixture values: no other face to carry.
+                double_faced: None,
             }));
             *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
         } else {
@@ -27478,6 +28118,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::ControlledContinuouslySinceTurnBegan
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -29200,7 +29841,6 @@ mod entry_projection_tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: Default::default(),
@@ -29210,7 +29850,6 @@ mod entry_projection_tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             each_source_batch_owner: None,
-            combat_pause_slot: None,
             unrepresentable_life_change: Default::default(),
         };
 
@@ -29322,6 +29961,15 @@ mod entry_observation_tests {
 
     /// [`fixture`] whose entrant has `keywords` when it enters.
     fn fixture_with_keywords(settle: bool, keywords: &[Keyword]) -> Fixture {
+        fixture_with_entrant(settle, keywords, |_| {})
+    }
+
+    /// [`fixture_with_keywords`] whose entrant is further shaped by `shape` before it enters.
+    fn fixture_with_entrant(
+        settle: bool,
+        keywords: &[Keyword],
+        shape: impl FnOnce(&mut GameObject),
+    ) -> Fixture {
         let mut state = GameState::new_two_player(11);
         let source = create_object(
             &mut state,
@@ -29347,6 +29995,7 @@ mod entry_observation_tests {
             obj.toughness = Some(1);
             obj.keywords = keywords.to_vec();
             obj.base_keywords = keywords.to_vec();
+            shape(obj);
         }
         mark_layers_full(&mut state);
         flush_layers(&mut state);
@@ -29496,6 +30145,79 @@ mod entry_observation_tests {
             &first_strike_kind,
             &ctx
         ));
+    }
+
+    /// CR 701.27g + CR 400.7: the enters-observer view of a departed entrant reads the
+    /// "transformed permanent" answer latched at its observation; the live-clone view keeps the
+    /// raw face record beside the live stash and modal flag. Synthetic: no printed enters
+    /// observer filters on "transformed"; the shapes stand in for Valentin, Dean of the Vein cast
+    /// as Lisette, Dean of the Root (and then Moonmisted), and a transformed Kessig Prowler. The
+    /// nearest printed reader of the property is Mutagen Connoisseur ("This creature gets +1/+0
+    /// for each transformed permanent you control.").
+    #[test]
+    fn entry_observation_skeleton_reads_the_latched_transformed_answer() {
+        use crate::types::card::LayoutKind;
+        let transformed_creature = creature_with(vec![FilterProp::Transformed]);
+        let entered = |layout: LayoutKind, transformed: bool, modal_back_face: bool| {
+            fixture_with_entrant(true, &[], |obj| {
+                obj.base_card_types = obj.card_types.clone();
+                obj.back_face = Some(crate::game::game_object::BackFaceData {
+                    name: "Entrant other face".to_string(),
+                    layout_kind: Some(layout),
+                    ..Default::default()
+                });
+                obj.transformed = transformed;
+                obj.modal_back_face = modal_back_face;
+            })
+        };
+        // CR 400.7: the entrant left; its storage id now names a new graveyard object.
+        let depart = |f: &mut Fixture| {
+            let obj = f.state.objects.get_mut(&f.entrant).unwrap();
+            obj.incarnation += 1;
+            obj.zone = Zone::Graveyard;
+            obj.transformed = false;
+            obj.modal_back_face = false;
+        };
+        let observed = |f: &Fixture| {
+            let ctx = FilterContext::from_source(&f.state, f.source);
+            matches_target_filter_on_entry_observation(
+                &f.state,
+                &f.record,
+                None,
+                &transformed_creature,
+                &ctx,
+            )
+        };
+
+        // (a) A modal card back face up (Lisette).
+        let mut lisette = entered(LayoutKind::Modal, false, true);
+        assert!(
+            observed(&lisette),
+            "reach: the live-clone view reads the live modal flag"
+        );
+        depart(&mut lisette);
+        assert!(
+            observed(&lisette),
+            "a departed modal card back face up was a transformed permanent"
+        );
+
+        // (b) A modal card front face up with both flags (Lisette Moonmisted into Valentin).
+        let mut valentin = entered(LayoutKind::Modal, true, true);
+        assert!(!observed(&valentin), "live: front face up");
+        depart(&mut valentin);
+        assert!(
+            !observed(&valentin),
+            "a departed front-face-up permanent with both flags was not a transformed permanent"
+        );
+
+        // (c) A transformed card (Sinuous Predator): the positive control.
+        let mut prowler = entered(LayoutKind::Transform, true, false);
+        assert!(observed(&prowler), "live: back face up");
+        depart(&mut prowler);
+        assert!(
+            observed(&prowler),
+            "a departed transformed card was a transformed permanent"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ import type {
   Phase,
   Player,
   PlayerId,
+  ReplacementCandidateSummary,
   ShortcutDecisionSchema,
   ShortcutProposal,
   StackEntry,
@@ -36,6 +37,7 @@ type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
 type ManaSourceSelectionWaitingFor = Extract<WaitingFor, { type: "ManaSourceSelection" }>;
 type UntapChoiceWaitingFor = Extract<WaitingFor, { type: "UntapChoice" }>;
+type ReplacementChoiceWaitingFor = Extract<WaitingFor, { type: "ReplacementChoice" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
@@ -57,6 +59,8 @@ type OptionalEffectChoiceWaitingFor = Extract<
 >;
 type ChooseFromZoneChoiceWaitingFor = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type OpponentMayChoiceWaitingFor = Extract<WaitingFor, { type: "OpponentMayChoice" }>;
+type SearchChoiceWaitingFor = Extract<WaitingFor, { type: "SearchChoice" }>;
+type LearnChoiceWaitingFor = Extract<WaitingFor, { type: "LearnChoice" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
 /**
@@ -262,6 +266,29 @@ export const opponentMayChoiceWaitingForFactory =
     },
   }));
 
+export class SearchChoiceWaitingForFactory extends PlayerWaitingForFactory<SearchChoiceWaitingFor> {}
+
+export const searchChoiceWaitingForFactory =
+  SearchChoiceWaitingForFactory.define((): SearchChoiceWaitingFor => ({
+    type: "SearchChoice",
+    data: {
+      player: 0,
+      cards: [],
+      count: 1,
+    },
+  }));
+
+export class LearnChoiceWaitingForFactory extends PlayerWaitingForFactory<LearnChoiceWaitingFor> {}
+
+export const learnChoiceWaitingForFactory =
+  LearnChoiceWaitingForFactory.define((): LearnChoiceWaitingFor => ({
+    type: "LearnChoice",
+    data: {
+      player: 0,
+      hand_cards: [],
+    },
+  }));
+
 export class UntapChoiceWaitingForFactory extends PlayerWaitingForFactory<UntapChoiceWaitingFor> {}
 
 export const untapChoiceWaitingForFactory =
@@ -275,6 +302,27 @@ export const buildUntapChoiceWaitingFor = (
 ): UntapChoiceWaitingFor => {
   return untapChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
 };
+
+export class ReplacementChoiceWaitingForFactory extends PlayerWaitingForFactory<ReplacementChoiceWaitingFor> {
+  /** Sets the candidates together with the `candidate_count` the engine sends beside them. */
+  withCandidates(candidates: ReplacementCandidateSummary[]) {
+    return this.withData({ candidates, candidate_count: candidates.length });
+  }
+}
+
+export const replacementChoiceWaitingForFactory =
+  ReplacementChoiceWaitingForFactory.define((): ReplacementChoiceWaitingFor => ({
+    type: "ReplacementChoice",
+    data: {
+      player: 0,
+      candidate_count: 2,
+      candidates: [
+        { source_id: 1, source_name: "First source", description: "First effect" },
+        { source_id: 2, source_name: "Second source", description: "Second effect" },
+      ],
+      kind: { type: "Order" },
+    },
+  }));
 
 export const pendingCastFactory = Factory.define<PendingCast>(() => ({
   object_id: 1,
@@ -714,12 +762,28 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(chooseFromZoneChoiceWaitingForFactory.withData(data).build());
   }
 
+  searchChoice(data: Partial<SearchChoiceWaitingFor["data"]> = {}) {
+    return this.variant(searchChoiceWaitingForFactory.withData(data).build());
+  }
+
+  learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {
+    return this.variant(learnChoiceWaitingForFactory.withData(data).build());
+  }
+
   opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
     return this.variant(opponentMayChoiceWaitingForFactory.withData(data).build());
   }
 
   untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
     return this.variant(untapChoiceWaitingForFactory.withData(data).build());
+  }
+
+  replacementChoice(data: Partial<ReplacementChoiceWaitingFor["data"]> = {}) {
+    // `candidate_count` follows the candidates unless `data` sets it as well.
+    const prompt = data.candidates
+      ? replacementChoiceWaitingForFactory.withCandidates(data.candidates)
+      : replacementChoiceWaitingForFactory;
+    return this.variant(prompt.withData(data).build());
   }
 
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
@@ -830,11 +894,10 @@ export const loopShortcutWaitingForFactory = LoopShortcutWaitingForFactory.defin
       residual_board_delta: { added: [], removed: [] },
     },
     schema: {
-      iteration_count: "UntilLethal",
+      iteration_count: "WithoutEnd",
       points: [],
       convoke_tappable_count: 0,
     },
-    road: "Ring",
   },
 }));
 
@@ -874,10 +937,9 @@ export const respondToShortcutWaitingForFactory =
       proposal: {
         proposer: 1,
         predicted_winner: 1,
-        count: "UntilLethal",
+        count: "WithoutEnd",
         unbounded: [{ DamageDealt: 1 }],
         win_kind: "LethalDamage",
-        road: "Ring",
       },
     },
   }));
@@ -1001,12 +1063,24 @@ export class GameStateFactory extends Factory<GameState> {
     return this.waitingFor(waitingForFactory.chooseFromZoneChoice(data).build());
   }
 
+  searchChoice(data: Partial<SearchChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.searchChoice(data).build());
+  }
+
+  learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.learnChoice(data).build());
+  }
+
   opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.opponentMayChoice(data).build());
   }
 
   untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.untapChoice(data).build());
+  }
+
+  replacementChoice(data: Partial<ReplacementChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.replacementChoice(data).build());
   }
 
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {

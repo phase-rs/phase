@@ -1047,7 +1047,12 @@ fn drive_rent_end_step(
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 saw_payment_prompt = true;
-                if runner.act(GameAction::DecideOptionalCost { pay }).is_err() {
+                if runner
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }

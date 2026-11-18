@@ -1087,12 +1087,11 @@ fn as_enters_choose_line_with_source_enters_with_sentence_is_one_enters_with_cla
 /// to the right shape: the second ability ("When you gain control of this
 /// enchantment from another player, ...") is the gain-side
 /// `ChangesController`, and the first is the upkeep `GiveControl` of the
-/// enchantment to the scoped (active) player. The card nevertheless stays
-/// honestly unsupported: layer-2 control changes (Confiscate, Control Magic)
-/// emit no `ControllerChanged` (phase-rs/phase#9903), so `card_face_gaps`
-/// reports exactly the gain-side trigger until that emitter lands.
+/// enchantment to the scoped (active) player. Every control change a full
+/// layer evaluation derives publishes `ControllerChanged`, so the card has no
+/// coverage gap.
 #[test]
-fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
+fn risky_move_gain_side_control_trigger_parses_and_card_is_supported() {
     use engine::types::triggers::{ControlChangeSide, TriggerMode};
     let face = oracle_face_for(
         "Risky Move",
@@ -1101,10 +1100,7 @@ fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
         &[],
     );
     let gaps = engine::game::coverage::card_face_gaps(&face);
-    assert_eq!(
-        gaps,
-        vec![String::from("Trigger:ChangesController { side: Gains }")]
-    );
+    assert_eq!(gaps, Vec::<String>::new());
     assert_eq!(face.triggers.len(), 2, "{:#?}", face.triggers);
     let upkeep = &face.triggers[0];
     assert_eq!(upkeep.mode, TriggerMode::Phase);

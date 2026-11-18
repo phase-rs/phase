@@ -106,6 +106,7 @@ fn setup(db: &CardDatabase, combat: bool) -> Fixture {
     // keyed to the entering permanent; answer Creature through production.
     let named_source = exact_named_choice_source(runner.state(), emissary);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: P1,
         choice_type: ChoiceType::card_type(),

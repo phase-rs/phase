@@ -1862,6 +1862,7 @@ mod codec_tests {
         assert_eq!(events.len(), 512);
         *log_entries = vec![GameLogEntry {
             seq: 1,
+            game_number: 1,
             turn: 1,
             phase: Phase::PreCombatMain,
             category: LogCategory::Game,

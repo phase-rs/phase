@@ -1122,6 +1122,7 @@ mod tests {
         AbilityDefinition,
         AbilityDefinition,
     ) {
+        use crate::game::game_object::ObjectIncarnationRefExt;
         use crate::game::layers::evaluate_layers;
 
         fn time(mut def: AbilityDefinition, timed: bool) -> AbilityDefinition {
@@ -1185,7 +1186,7 @@ mod tests {
             .into();
         }
 
-        let donor_plus = time(
+        let mut donor_plus = time(
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::GainLife {
@@ -1196,7 +1197,7 @@ mod tests {
             .cost(AbilityCost::Loyalty { amount: 1 }),
             timed,
         );
-        let donor_minus = time(
+        let mut donor_minus = time(
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Destroy {
@@ -1220,6 +1221,13 @@ mod tests {
             obj.base_card_types = obj.card_types.clone();
             obj.base_loyalty = obj.loyalty;
         }
+
+        // CR 113.2c + CR 201.5a: the donated copies carry the provider's
+        // incarnation stamp on the head. Own printed defs stay unstamped.
+        let donor_stamp =
+            crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&donor]);
+        donor_plus.granting_object = Some(donor_stamp);
+        donor_minus.granting_object = Some(donor_stamp);
 
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);

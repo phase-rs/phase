@@ -316,6 +316,10 @@ pub fn build_resolved_from_def_with_targets(
     // parser-stamped `SiblingCondition` never reaches the resolved sub and the
     // keyword list collapses after the first false gate.
     resolved.sibling_condition = def.sibling_condition;
+    // CR 608.2c: Carry the parser-stamped list-slot identity through so a
+    // further target slot of one instruction ("destroy target artifact, target
+    // creature, ...") continues the instruction its preceding slot began.
+    resolved.instruction_join = def.instruction_join;
     // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
     // through so try_materialize_reflexive_trigger can route a gated modal
     // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
@@ -6204,6 +6208,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -8779,6 +8784,11 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
     }
     match effect {
         Effect::DealDamage { target, .. } => is_any_target_filter(target),
+        // CR 115.1c: a draw replacement's slot is its substitute head's slot
+        // (Words of War) — see `extract_target_filter_from_effect`.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            effect_slot_denotes_damage_any_target(&replacement_effect.effect, slot)
+        }
         // CR 115.4 + CR 615.7: a single, declared recipient for a finite
         // "next N damage" shield uses the same creature/player/planeswalker/
         // battle domain as any other damage target. Broadcast and source-scoped

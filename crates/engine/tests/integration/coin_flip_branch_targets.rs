@@ -944,7 +944,10 @@ fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch(
             };
             let install = match family {
                 ReplacementEvent::Draw => Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(substitute),
+                    replacement_effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        substitute,
+                    )),
                 },
                 ReplacementEvent::Planeswalk => Effect::CreatePlaneswalkReplacement {
                     replacement_effect: Box::new(substitute),
@@ -2166,9 +2169,11 @@ fn empty_coin_binding_scenario(
                 "counter payoff object={id:?}; illegal B={remove_b}",
             ),
             EmptyCoinRider::BecomeBlocked => {
-                let became_blocked = payoff_events.iter().any(|event| matches!(
-                    event, GameEvent::AttackerBecameBlockedByEffect { attacker } if *attacker == id
-                ));
+                let became_blocked = payoff_events.iter().any(|event| {
+                    matches!(
+                        event, GameEvent::AttackerBecameBlocked { attacker, .. } if *attacker == id
+                    )
+                });
                 assert_eq!(
                     became_blocked, selected,
                     "blocked payoff object={id:?}; illegal B={remove_b}"

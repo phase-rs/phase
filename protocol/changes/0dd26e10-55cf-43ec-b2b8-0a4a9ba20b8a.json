@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "FilterProp gains FoughtThisTurn and GameState gains creatures_fought_this_turn (CR 701.14a); an older peer cannot decode the new filter variant"
+}

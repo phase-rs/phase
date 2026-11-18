@@ -15,7 +15,7 @@ use super::card_printing::SharedPrinting;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::display_only::DisplayOnly;
 pub use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
-use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
+use super::game_state::{InstructionLead, LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{
     CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
 };
@@ -395,9 +395,12 @@ pub struct EventObjectSnapshot {
 /// moment immediately before its instruction.
 ///
 /// Deliberately not an `Option`: the absent case is a named policy. A payload
-/// saved before this field existed, or any event built without an instruction
-/// capture, is `Unrecorded`, and `Unrecorded` never authorizes a look-back
-/// control-change trigger. It is never reconstructed from current state.
+/// saved before this field existed, any event built without an instruction
+/// capture, or a change a full layer evaluation derived on a board with no
+/// look-back control-change trigger to read it
+/// (`triggers::look_back_control_change_listener_exists`), is `Unrecorded`,
+/// and `Unrecorded` never authorizes a look-back control-change trigger. It is
+/// never reconstructed from current state.
 ///
 /// `Observed` holds only the key of its observation in
 /// `GameState::control_change_observations`. The observation itself (latched
@@ -435,6 +438,23 @@ pub struct ControlChangeObservation {
     /// against a doubler the instruction itself moved or removed.
     #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
     pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+    /// CR 603.10 + CR 113.7a: for a change a full layer evaluation derived,
+    /// every functioning gain-side control-change watcher ("when you gain
+    /// control of ~"), with its controller, immediately AFTER the change. A
+    /// derived change is published at the next drain, after later instructions
+    /// of the same resolution may have moved its watcher (CR 608.2c), so its
+    /// gain-side triggers are collected from this latch and never from a later
+    /// board. `None` (an instruction-published change, or a payload saved
+    /// before this field): the gain side is an ordinary trigger, collected from
+    /// the board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_watchers: Option<std::sync::Arc<Vec<TriggerSourceContext>>>,
+    /// CR 603.2d + CR 603.10: the functioning trigger-doubling statics, with
+    /// their controllers, on the same post-change board `gain_watchers` was
+    /// latched on. A latched gain-side trigger is counted against these, not
+    /// against the board at publication (where a doubler may have left).
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub gain_doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
 }
 
 /// CR 603.2d: one functioning "triggers an additional time" static ability
@@ -491,6 +511,8 @@ impl ControlChangeInstructionCapture {
                 subject: subject.clone(),
                 watchers: self.watchers.clone(),
                 doublers: self.doublers.clone(),
+                gain_watchers: None,
+                gain_doublers: std::sync::Arc::default(),
             })
     }
 }
@@ -526,6 +548,17 @@ pub struct ControlChangeLink {
     pub capture: std::sync::Arc<ControlChangeInstructionCapture>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub published: std::collections::BTreeSet<ObjectId>,
+}
+
+/// CR 613.1b + CR 603.2: a control change a full layer evaluation derived and no
+/// instruction announced, waiting to be published into an action's event buffer
+/// (`layers::publish_layer_control_changes`). `subject` is the exact incarnation
+/// whose controller the pass changed (CR 400.7); `event` is always the
+/// `GameEvent::ControllerChanged` it publishes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedControlChange {
+    pub subject: ObjectIncarnationRef,
+    pub event: GameEvent,
 }
 
 /// How an [`EventObjectSnapshot`] can answer a given [`TargetFilter`] shape.
@@ -696,6 +729,7 @@ impl EventObjectSnapshot {
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
             | TargetFilter::CastingSpell
@@ -828,6 +862,9 @@ impl EventObjectSnapshot {
             // CR 702.122c: the crew ledger is keyed by the subject's own
             // incarnation, which the snapshot carries (look-back arm in filter.rs).
             FilterProp::CrewedThisTurn { .. } => Supported,
+            // CR 701.14a: the fight ledger is keyed by the subject's own
+            // incarnation, which the snapshot carries (look-back arm in filter.rs).
+            FilterProp::FoughtThisTurn => Supported,
 
             // ---- embedded per-turn history ----
             FilterProp::WasDealtDamageThisTurn
@@ -980,6 +1017,25 @@ pub enum ExertOrigin {
     AbilityCost,
 }
 
+/// CR 104.3: why a player lost the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LossReason {
+    /// CR 704.5a / CR 704.6a / CR 904.13b: their life total (where life is shared, their team's) is 0 or less.
+    LifeTotal,
+    /// CR 704.5b: they attempted to draw from an empty library.
+    DrewFromEmptyLibrary,
+    /// CR 704.5c / CR 704.6b: poison counters at the threshold `players::poison_loss_measure` applies.
+    Poison,
+    /// CR 704.6c: 21 or more combat damage from one commander.
+    CommanderDamage,
+    /// CR 104.3a / CR 810.8b / CR 904.13b: they (or, where life is shared, their teammate) conceded.
+    Conceded,
+    /// CR 104.3e: an effect stated that they lose.
+    EffectStatedLoss,
+    /// CR 104.2b: an effect stated that an opponent of theirs wins.
+    OpponentWon,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -1005,6 +1061,12 @@ pub enum GameEvent {
     },
     PhaseChanged {
         phase: Phase,
+    },
+    /// CR 603.2b + CR 805.4d: the beginning of `phase` as one appropriate player's step — the
+    /// context of a phase trigger's firing for that player. Never emitted into the event stream.
+    PhaseChangedFor {
+        phase: Phase,
+        player: PlayerId,
     },
     /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
@@ -1296,8 +1358,10 @@ pub enum GameEvent {
     BecameForetold {
         object_id: ObjectId,
     },
+    /// CR 104.3 + CR 704.3: a player left the game by losing, and every reason found for it; never empty.
     PlayerLost {
         player_id: PlayerId,
+        reasons: std::collections::BTreeSet<LossReason>,
     },
     MulliganStarted,
     CardsDrawn {
@@ -1537,6 +1601,15 @@ pub enum GameEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        /// CR 608.2c + CR 603.2c: how many events of the instruction that
+        /// removed the counters precede this one, so two removals of one
+        /// resolution that came from different instructions are two events
+        /// ("Whenever one or more counters are removed" triggers once for each)
+        /// while removals of one instruction are one simultaneous event. `None`
+        /// when no watched instruction was open at the emit site; such removals
+        /// are indistinguishable and group together.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction_lead: Option<InstructionLead>,
     },
     TokenCreated {
         object_id: ObjectId,
@@ -1602,6 +1675,12 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject: Option<Box<EventObjectSnapshot>>,
     },
+    /// CR 701.3a + CR 603.2e: An Aura, Equipment, or Fortification became attached
+    /// to an object or player.
+    Attached {
+        attachment_id: ObjectId,
+        target: TargetRef,
+    },
     /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
     /// the object or player it was attached to.
     Unattached {
@@ -1635,14 +1714,23 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
-    /// CR 509.3c: An effect or entering blocker changed an unblocked attacker
-    /// into a blocked attacker. Only the bare "becomes blocked" form consumes
-    /// this first-transition event.
+    /// CR 509.3c + CR 509.3e: An attacker-side becomes-blocked occurrence whose
+    /// referent is the ATTACKER. Raw form: an effect or an entering blocker
+    /// changed an unblocked attacker into a blocked attacker (the CR 509.3c
+    /// first transition; only the bare form consumes it). Narrowed form: a
+    /// `BecomesBlocked` trigger's CR 509.3e blocker-count crossing, emitted by
+    /// the matcher as the firing's context.
     /// CR 509.3d + CR 509.4: It carries no blocker identity and never fires
     /// qualified "becomes blocked by" or blocker-side "blocks" abilities; an
     /// entering blocker supplies a separate per-creature event below.
-    AttackerBecameBlockedByEffect {
+    #[serde(alias = "AttackerBecameBlockedByEffect")]
+    AttackerBecameBlocked {
         attacker: ObjectId,
+        /// CR 400.7 + CR 608.2k: the attacker's incarnation when it became
+        /// blocked, stamped by the emitter. `None` on legacy events, which
+        /// cannot discriminate a later object at the same id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attacker_incarnation: Option<u64>,
     },
     /// CR 509.3d: An attacker-side, qualified `BecomesBlocked` or
     /// `BlocksOrBecomesBlocked` occurrence, from declaration or an entering
@@ -1724,6 +1812,12 @@ pub enum GameEvent {
     },
     DayNightChanged {
         new_state: String,
+        /// CR 731.1a: the designation the game lost. `None` when the game gained
+        /// its first designation (CR 731.1 + CR 702.145d + CR 702.145g).
+        /// `day_night::set_designation` emits nothing for an unchanged designation,
+        /// so `Some(_)` always represents a change from one designation to the other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<crate::types::game_state::DayNight>,
     },
     TurnedFaceUp {
         object_id: ObjectId,
@@ -1914,6 +2008,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+        /// CR 614.1c + CR 614.12 + CR 113.6 + CR 603.10: the entrant whose as-enters
+        /// replacement made this roll before its entry happened. Its abilities do not
+        /// function yet, so it alone is not an observer of this event. `None` for
+        /// every other roll. CR 603.2 + CR 603.10: the roll's observers are collected
+        /// when it is rolled, with the battlefield as it is then, and placed with its
+        /// entry; every other scan refuses a stamped roll.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_entry_source: Option<ObjectId>,
     },
     /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
     /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never

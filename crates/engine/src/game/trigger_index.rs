@@ -481,8 +481,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
-        // CR 904.9: resolved by the scan hook
-        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // CR 904.9: choices are made by the scheme action (the precombat-main arm,
+        // `archenemy::resolve_pending_as_set_in_motion_choices`), never
         // through event-driven dispatch. Neither a key nor unclassified.
         TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.
@@ -515,7 +515,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
-        GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
+        GameEvent::PhaseChanged { phase } | GameEvent::PhaseChangedFor { phase, .. } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
@@ -659,7 +659,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
-        GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        GameEvent::Attached { .. } | GameEvent::Unattached { .. } => {
+            push(TriggerEventKey::AttachmentChanged)
+        }
         // CR 116.2c + CR 116.1: no printed trigger condition matches "a
         // continuous effect ended". The special action doesn't use the stack, and
         // any consequential board change (a Licid reverting to a creature and
@@ -671,7 +673,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
         // "whenever ~ becomes blocked" triggers are indexed for it.
-        GameEvent::AttackerBecameBlockedByEffect { .. } => push(TriggerEventKey::Blocks),
+        GameEvent::AttackerBecameBlocked { .. } => push(TriggerEventKey::Blocks),
         GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => push(TriggerEventKey::Blocks),
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {}
         GameEvent::BecomesTarget { .. } => push(TriggerEventKey::BecomesTarget),
@@ -794,11 +796,6 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 /// matcher in `trigger_matchers.rs` emit keys; all others are no-ops.
 fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey)) {
     match kind {
-        // Production EffectResolved matchers — see `trigger_matchers.rs` lines
-        // 1896, 2072, 2126, 2172, 2198, 2234, 2261, 2313, 2338.
-        EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip => {
-            push(TriggerEventKey::AttachmentChanged);
-        }
         EffectKind::Reveal => push(TriggerEventKey::Revealed),
         EffectKind::GainControl | EffectKind::GainControlAll => {
             push(TriggerEventKey::ChangesController)
@@ -811,14 +808,17 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::Renown => push(TriggerEventKey::Renowned),
         EffectKind::Monstrosity => push(TriggerEventKey::BecomesMonstrous),
         EffectKind::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
-        EffectKind::DayTimeChange => push(TriggerEventKey::DayNightChanged),
         EffectKind::PutSticker | EffectKind::ApplySticker => {}
         // All other variants: not dispatched on by any production
         // EffectResolved matcher (verified against `trigger_matchers.rs` 1-3216).
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
         // new EffectResolved-dispatching matcher will force this match to be
         // re-classified.
-        EffectKind::StartYourEngines
+        EffectKind::DayTimeChange
+        | EffectKind::Attach
+        | EffectKind::AttachAll
+        | EffectKind::Equip
+        | EffectKind::StartYourEngines
         | EffectKind::ChangeSpeed
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
@@ -1024,7 +1024,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
         // CR 509.3c: the "becomes blocked" trigger from an effect-block is keyed
-        // off the `AttackerBecameBlockedByEffect` GameEvent (see the event→key
+        // off the `AttackerBecameBlocked` GameEvent (see the event→key
         // map above), not off `EffectResolved`, so this kind emits no key here.
         | EffectKind::BecomeBlocked
         | EffectKind::Conjure

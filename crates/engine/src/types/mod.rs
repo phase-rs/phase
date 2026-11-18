@@ -83,9 +83,9 @@ pub use replay::{
 };
 pub use resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, ChildStackDepth, DirectChoiceGate, FrameGate,
-    FrameKind, MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame,
-    RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack, ResolutionStackError,
-    ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
+    FrameKind, MultiDrawFrame, OptionalEffectFrame, ParkedOpponentMayPoll,
+    PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack,
+    ResolutionStackError, ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
 };
 pub use resolved_commands::{
     ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,

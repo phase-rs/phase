@@ -1,8 +1,8 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{
     apply_damage_after_replacement, emit_damage_dealt_and_record, pre_replacement_damage_gate,
-    tally_entries_for_record, tally_map_from_record_entries, DamageContext, DamageGateOutcome,
-    DamageResult,
+    tally_map_from_record_entries, wither_infect_post_counter_core, DamageContext,
+    DamageGateOutcome, DamageResult, PostCounterFlow,
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
@@ -15,16 +15,16 @@ use crate::types::ability::{DamageContextSnapshot, ShieldKind, TargetRef};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPauseSlot, CombatPreventionTally,
-    DamageSlot, GameState, ParkedCombatDamageEntry, PendingCombatDamageBatch, PendingCombatLeg,
-    PendingCombatLifelink, PendingCombatPhaseCRemnant, PendingLifelinkGain, PerPlayerCombatDamage,
-    PreventedDamageEntry, WaitingFor,
+    CombatDamageAssignmentMode, CombatDamageSubStep, CombatPreventionTally, DamageSlot, GameState,
+    PendingCombatDamageEntry, PendingCombatDamageReplacement, PendingCombatLeg,
+    PendingCombatLegProgress, PendingCombatLifelink, PendingCombatPhaseCRemnant,
+    PendingLifelinkGain, PerPlayerCombatDamage, PreventedDamageEntry, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
-use std::collections::HashMap;
+use std::collections::VecDeque;
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
@@ -80,12 +80,35 @@ fn process_combat_damage_triggers(
         // on the stack, but its abilities have already triggered — a Siege
         // whose CR 310.12b victory trigger waits here is not put into its
         // owner's graveyard.
-        sba::check_state_based_actions_with_waiting_triggers(state, all_events, &pending);
+        let departure_queued =
+            sba::check_state_based_actions_with_waiting_triggers(state, all_events, &pending);
 
         // If SBAs generated new events, process triggers for those events.
         if all_events.len() > events_before {
-            let new_events: Vec<_> = all_events[events_before..].to_vec();
-            before_priority_events.extend_from_slice(&new_events);
+            // CR 603.10a + CR 603.2c: a player's departure in that SBA event was
+            // collected, once, against the observers as they were immediately
+            // before it, and its occurrences claimed: its triggers join this
+            // batch and the scans below skip the claimed events.
+            let departure_triggers = state.deferred_triggers.split_off(
+                state
+                    .deferred_triggers
+                    .len()
+                    .saturating_sub(departure_queued),
+            );
+            pending.extend(departure_triggers);
+            let consumed = state.consumed_before_priority_trigger_events.clone();
+            let new_events = triggers::filter_already_collected_trigger_events_from(
+                state,
+                all_events,
+                events_before,
+                &consumed,
+            );
+            before_priority_events.extend(triggers::filter_consumed_trigger_events_from(
+                all_events,
+                events_before,
+                triggers::TriggerCollectionRequester::Delayed,
+                &consumed,
+            ));
             pending.extend(triggers::collect_triggers_for_batch(state, &new_events));
         } else {
             break;
@@ -113,45 +136,22 @@ fn process_combat_damage_triggers(
 
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
 /// CR 702.7b: If any creature has first strike or double strike, two damage sub-steps run.
-/// Between sub-steps: SBAs are checked and triggers processed.
+/// Between sub-steps: SBAs are checked, triggers processed, and (CR 510.3) the active
+/// player gets priority.
+///
+/// Performs at most ONE combat damage step per call. After the first-strike step it
+/// returns `Some(WaitingFor::Priority)` (the CR 510.3 window, whether or not anything is
+/// on the stack); the all-pass completeness gate in `priority.rs` calls it again for the
+/// regular step.
 ///
 /// Returns `Some(WaitingFor)` when an attacker with 2+ blockers needs interactive
-/// damage assignment. Returns `None` when all damage for the current phase is resolved.
+/// damage assignment, or at the window after the first-strike step. Returns `None` when
+/// the regular step's damage is resolved.
 /// Re-entrant: call again after the player submits `GameAction::AssignCombatDamage`.
 pub fn resolve_combat_damage(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    // CR 510.2 + CR 616.1: a parked PRE-application batch still owns this
-    // turn-based action and NONE of its damage may be re-collected (the batch
-    // is one event and must never be replayed). Placed AHEAD of
-    // `state.combat.as_ref()?` so no combat teardown can strand the record
-    // behind that `?`. Damage before lifelink (the single-park invariant
-    // makes the order moot; the fixed order aids review).
-    if state.pending_combat_damage.is_some() {
-        // Any live prompt — the CR 616.1 ordering choice itself, or a
-        // sub-choice raised while answering it — means an answer is still
-        // coming. Surface it rather than re-collecting assignments.
-        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return Some(state.waiting_for.clone());
-        }
-        // Settled to priority with a damage batch still parked. Either the
-        // seat that owed the CR 616.1 answer left the game (CR 800.4a:
-        // `elimination` cleared `pending_replacement` and the reconcile wrote
-        // `Priority { next }`), or a sub-choice of the answer resolved
-        // through a dispatcher other than `handle_replacement_choice`. No
-        // further `ChooseReplacement` will arrive, so settle the orphaned
-        // choice (stashing `None` iff the PAUSED choice died — never for a
-        // nested loss) and finish the batch here — otherwise the
-        // `!regular_damage_done` completeness gate (priority.rs) re-enters
-        // this function forever.
-        //
-        // `events.len()` folds nothing: no answering action's events are in
-        // flight on this path.
-        settle_orphaned_combat_damage_choice(state);
-        return resume_pending_combat_damage(state, events.len(), events);
-    }
-
     // CR 510.2 + CR 616.1: a parked batch still owns this turn-based action and
     // must never be replayed (the batch is one event). For a lifelink-gain
     // pause its damage is ALREADY dealt; for a Phase C leg pause the remnant
@@ -161,9 +161,10 @@ pub fn resolve_combat_damage(
     if state.pending_combat_lifelink.is_some() {
         // Any live prompt — the CR 616.1 ordering choice itself, or a sub-choice
         // raised while answering it — means an answer is still coming. Surface it
-        // rather than re-collecting assignments. The `matches!` below has already
-        // excluded `Priority`, so what is returned is always a genuine prompt;
-        // `resolve_combat_damage`'s contract never yields a bare `Priority`.
+        // rather than re-collecting assignments. The `matches!` below excludes
+        // `Priority`, so what is returned here is always a genuine prompt; a bare
+        // `Priority` comes only from the CR 510.3 window after the first-strike
+        // step, never from a parked batch.
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Some(state.waiting_for.clone());
         }
@@ -178,7 +179,7 @@ pub fn resolve_combat_damage(
         //
         // `events.len()` folds nothing: no answering action's events are in
         // flight on this path.
-        return resume_pending_combat_lifelink(state, events.len(), events);
+        return resume_pending_combat_lifelink(state, events.len(), None, events);
     }
 
     let combat = state.combat.as_ref()?.clone();
@@ -210,8 +211,7 @@ pub fn resolve_combat_damage(
         let batch_event_start = events.len();
         events.extend_from_slice(batch.events());
         match batch {
-            // CR 616.1: the batch parked on an ordering choice — a lifelink
-            // life-gain, or (pre-application) a combat-damage event. The
+            // CR 616.1: the batch parked on a life-gain ordering choice. The
             // sub-step flags are deliberately NOT set here — the resume sets them
             // once the batch actually completes, so neither re-entry nor
             // priority.rs's completeness gate can skip the rest of combat damage.
@@ -223,15 +223,17 @@ pub fn resolve_combat_damage(
                 );
                 return Some(*waiting_for);
             }
+            // CR 510.3 + CR 510.4: the first combat damage step is complete and ends
+            // with the active player's priority window (or a prompt that must come
+            // first); the regular step is a separate call, entered once that window
+            // closes.
             CombatDamageBatch::Complete(damage_events) => {
-                if let Some(wf) = finish_combat_damage_sub_step(
+                return finish_combat_damage_sub_step(
                     state,
                     CombatDamageSubStep::FirstStrike,
                     &damage_events,
                     events,
-                ) {
-                    return Some(wf);
-                }
+                );
             }
         }
     }
@@ -294,9 +296,10 @@ fn finish_combat_damage_sub_step(
     //
     // Reproduces the previous `!combat.first_strike_done && !has_first_or_double`,
     // which read the entry-time clone. Evaluated BEFORE the `regular_damage_done`
-    // write. Equivalent for all three reachable entry states:
+    // write. Equivalent for both reachable entry states (one combat damage step per
+    // call, so the first-strike step is never followed by the regular step in the
+    // same call):
     //   * no first strike, single sub-step               -> true  (== old true)
-    //   * first-strike sub-step ran earlier in THIS call -> first_strike_done -> false
     //   * re-entry after a prior call's first strike     -> first_strike_done -> false
     let include_phase_event = match sub_step {
         CombatDamageSubStep::FirstStrike => true,
@@ -336,27 +339,27 @@ fn finish_combat_damage_sub_step(
             }
 
             // CR 510.3 + CR 510.3a + CR 510.4: The first-strike combat-damage step is a
-            // complete step. Abilities that triggered on first-strike damage (or on SBAs
-            // taken afterward) are put on the stack, and THEN the active player receives
-            // priority — players must finish with the stack before the second (regular)
-            // combat-damage sub-step begins. If the first-strike sub-step placed anything
-            // on the stack (e.g. No Mercy's "destroy that creature", a damage trigger that
-            // bounces/exiles the attacker), grant priority now so that object resolves
-            // first. Skipping this would let a now-doomed double-strike attacker deal its
-            // regular-sub-step damage before the trigger that removes it resolves (#692).
+            // complete step, and every combat damage step ends the same way: abilities
+            // that triggered on the damage (or on SBAs taken afterward) are put on the
+            // stack, and THEN the active player receives priority. That window is
+            // unconditional, so players can respond before the second (regular) combat-
+            // damage step begins even when nothing is on the stack (kill, pump or give
+            // double strike to a creature, activate an ability, ninjutsu).
+            // A trigger on the stack (e.g. No Mercy's "destroy that creature", a damage
+            // trigger that bounces/exiles the attacker) is one case, resolved inside the
+            // window before a now-doomed double-strike attacker can deal its regular-
+            // sub-step damage (#692); an empty stack is the other.
             // Returning here leaves `regular_damage_done == false`; the mandatory regular
-            // sub-step is resumed once the stack drains and all players pass, via the
+            // sub-step is resumed once the stack is empty and all players pass, via the
             // empty-stack completeness gate in priority.rs.
-            if !state.stack.is_empty() {
-                // reset_priority here is defensive — unlike the sibling regular-substep entry in
-                // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
-                // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
-                crate::game::priority::reset_priority(state);
-                return Some(WaitingFor::Priority {
-                    player: state.active_player,
-                });
-            }
-            None
+            //
+            // reset_priority here is defensive — unlike the sibling regular-substep entry in
+            // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
+            // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
+            crate::game::priority::reset_priority(state);
+            Some(WaitingFor::Priority {
+                player: state.active_player,
+            })
         }
         CombatDamageSubStep::Regular => {
             if let Some(c) = &mut state.combat {
@@ -386,10 +389,20 @@ fn finish_combat_damage_sub_step(
 /// received priority for the CR 616.1 choice, so splitting them would be a rules
 /// regression.
 ///
+/// CR 616.1 + CR 616.1g: a batch parked EARLIER, in its replacement pass
+/// (`PendingCombatLifelink::replacement`), resumes through the same authority.
+/// `choice` is the answer to that pass's own ordering choice, consumed here
+/// rather than by the generic dispatcher (see
+/// [`parked_combat_damage_awaits_replacement_choice`]); a substitute's prompt
+/// (counters, mill) was answered by its own dispatcher before this runs, and
+/// its events fold into the batch exactly like the lifelink answer's. The pass
+/// then finishes, and Phase C and the lifelink tail run once.
+///
 /// Returns `None` when nothing is parked, so callers can keep their own wait.
 pub(crate) fn resume_pending_combat_lifelink(
     state: &mut GameState,
     action_event_start: usize,
+    choice: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let mut record = *state.pending_combat_lifelink.take()?;
@@ -421,14 +434,15 @@ pub(crate) fn resume_pending_combat_lifelink(
             }
         }
     }
-    match drain_combat_lifelink(state, record) {
+    match resume_combat_damage_replacements(state, record, choice) {
         CombatDamageBatch::Paused {
             events: batch,
             waiting_for,
         } => {
-            // CR 616.1f: a LATER source needed its own ordering choice. The
-            // still-untouched tail was re-parked with the batch so far, so the
-            // eventual completion still fires ONE CR 603.3b batch.
+            // CR 616.1f + CR 616.1g: a LATER source (or the same event's
+            // substitute, or a second ordering choice on it) needed its own
+            // answer. The still-untouched rest was re-parked with the batch so
+            // far, so the eventual completion still fires ONE CR 603.3b batch.
             events.extend_from_slice(&batch[owed_from..]);
             claim_combat_lifelink_batch_events_for_ordinary_collection(
                 state,
@@ -446,348 +460,18 @@ pub(crate) fn resume_pending_combat_lifelink(
                 events,
                 action_event_start,
             );
-            if let Some(wf) = waiting_for {
-                return Some(wf);
-            }
-            // CR 510.4: the second combat damage step is MANDATORY. Re-enter so a
-            // paused first-strike batch still runs it, exactly as the inline path
-            // does. Bounded: the record was `.take()`n above, so the re-entry
-            // guard cannot route back here; a regular sub-step that parks returns
-            // its own prompt without recursing, and a regular sub-step already
-            // done short-circuits on `regular_damage_done`.
-            resolve_combat_damage(state, events).or(Some(WaitingFor::Priority {
+            // CR 510.3 + CR 510.4: a completed batch ends its combat damage step with
+            // the active player's priority window. A first-strike batch already
+            // returned that window (or a prompt that must come first) from
+            // `finish_combat_damage_sub_step`, and the mandatory regular step is
+            // entered through it by the all-pass gate in priority.rs, the one path
+            // the inline first-strike step takes too; a regular batch is the last
+            // step and ends with this window.
+            waiting_for.or(Some(WaitingFor::Priority {
                 player: state.active_player,
             }))
         }
     }
-}
-
-/// CR 616.1 + CR 800.4a: settle a paused combat-damage batch whose choice
-/// authority died with its seat (`elimination` cleared `pending_replacement`).
-/// Shared by the resolve guard and the turn discharge so neither can hang.
-///
-/// The stash-state len gate doubles as the which-choice-died discriminator:
-/// iff UNSTASHED (`decided.len() == paused_entry`) the PAUSED choice died —
-/// stash `None` at the paused slot (taking `paused_entry_pruned` when set:
-/// damage to departed recipients does nothing, CR 800.4e/614.9), symmetric to
-/// the lifelink "never re-queued" loss. Iff STASHED
-/// (`len == paused_entry + 1`, the nested window) the died choice was NESTED,
-/// not the paused event — drop it with NO stash (the paused slot's stash is
-/// intact) and let the resume proceed. A live authority (`pending_replacement`
-/// still `Some`) settles nothing: the paused event is still owned by it.
-pub(crate) fn settle_orphaned_combat_damage_choice(state: &mut GameState) {
-    if state.pending_replacement.is_some() {
-        return;
-    }
-    let Some(record) = state.pending_combat_damage.as_mut() else {
-        return;
-    };
-    if record.decided.len() == record.paused_entry {
-        record.decided.push(None);
-        record.paused_entry_pruned = false;
-    }
-}
-
-/// CR 510.2 + CR 616.1: finish a combat-damage batch paused on a replacement
-/// ordering choice. Runs the unprocessed remainder through the batch pipeline
-/// (re-pausing on a further choice), merges every leg's survivors with the
-/// parked decided prefix, and completes through the SAME shared tail as the
-/// inline path (`apply_combat_survivors`) so the two cannot drift — the batch
-/// is one simultaneity even across the pause.
-///
-/// `action_event_start` is the caller's boundary: the answering action's
-/// events are folded into the parked batch (see
-/// `resume_pending_combat_lifelink`), so observers see ONE CR 603.3b batch.
-///
-/// CR 510.2 + CR 616.1 (Matt R12): bind the paused batch member to its
-/// replacement continuation with stable ownership captured at the pause point.
-/// Stamps `state.pending_replacement` with the paused slot (`paused_entry` +
-/// the member's damage source) so the answer-stash gate survives recipient
-/// rewrites between choices. Stamps ONLY the member's own event park: the
-/// parked `proposed` must be a Damage event from the member's source (a
-/// redirect may already have rewritten its recipient — that is exactly the
-/// case the stamp exists for). A nested child's park names a different source
-/// and stays unstamped, so its answer still delivers inline exactly once.
-/// Both park points (first park and re-pause) stamp; a re-parked prompt
-/// inherits via the NeedsChoice epilogue instead.
-fn stamp_combat_pause_slot(state: &mut GameState, paused_entry: usize, source: ObjectId) {
-    let own_park = state.pending_replacement.as_ref().is_some_and(|pending| {
-        matches!(&pending.proposed, ProposedEvent::Damage { source_id, .. } if *source_id == source)
-    });
-    if !own_park {
-        return;
-    }
-    if let Some(pending) = state.pending_replacement.as_mut() {
-        pending.combat_pause_slot = Some(CombatPauseSlot {
-            paused_entry,
-            source,
-        });
-    }
-}
-
-/// Returns `None` when nothing is parked, so callers can keep their own wait.
-pub(crate) fn resume_pending_combat_damage(
-    state: &mut GameState,
-    action_event_start: usize,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    let mut record = state.pending_combat_damage.take()?;
-    debug_assert!(
-        state.pending_combat_lifelink.is_none(),
-        "single-park invariant: the damage record is taken before the lifelink drain runs"
-    );
-    record
-        .batch_events
-        .extend_from_slice(&events[action_event_start..]);
-    // The answer stashed the paused slot (or the guard/discharge settled it):
-    // `decided` now covers `entries[..=paused_entry]`.
-    debug_assert_eq!(
-        record.decided.len(),
-        record.paused_entry + 1,
-        "a resumed batch must carry its paused slot's stash"
-    );
-    run_remaining_combat_batch(state, record, action_event_start, events)
-}
-
-/// CR 510.2 + CR 616.1: run a parked record's remaining members through the
-/// APNAP-scheduled batch loop, then complete or park fresh. Shared by the
-/// answer-stash resume above and the redirect rescheduler below: both hand
-/// over a record whose `decided` covers a settled prefix and whose `remaining`
-/// still needs processing.
-fn run_remaining_combat_batch(
-    state: &mut GameState,
-    mut record: Box<PendingCombatDamageBatch>,
-    action_event_start: usize,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    let owed_from = record.batch_events.len();
-    // Install the parked prefix as the live window so the remaining run
-    // accumulates onto it. `outer_tally` (the pre-batch window) is restored
-    // by the shared tail on completion, or now on re-pause. The live window
-    // is `#[serde(skip)]`, so a mid-pause save/load drops it: prefer it when
-    // present, else hydrate the pre-batch window the park captured.
-    let outer_tally = state.combat_prevention_tally.take().or_else(|| {
-        record
-            .outer_tally
-            .as_ref()
-            .map(|entries| tally_map_from_record_entries(entries))
-    });
-    let mut live = tally_map_from_record_entries(&record.phase_a_tally);
-    for (key, amount) in tally_map_from_record_entries(&record.phase_b_tally) {
-        *live.entry(key).or_insert(0) += amount;
-    }
-    state.combat_prevention_tally = Some(live);
-    // CR 616.1 + CR 700.1/615.8 (Matt R15): reinstall the parked one-shot
-    // ledger as the live ledger — pre-pause same-source eligibility spans
-    // the pause, and a mid-pause save/load dropped the live (`#[serde(skip)]`)
-    // copy. The re-entered batch keeps a resident ledger (see
-    // `replace_combat_damage_batch`), and a re-pause re-parks it below.
-    state.combat_one_shot_applications = Some(std::mem::take(&mut record.one_shot_applications));
-    let sub_step = record.sub_step;
-    let mut tally_accum = CombatPreventionTally::new();
-    let unfinished = std::mem::take(&mut record.remaining);
-    match run_apnap_scheduled_batch(
-        state,
-        &mut record.batch_events,
-        &mut record.entries,
-        &mut record.decided,
-        &mut tally_accum,
-        unfinished,
-    ) {
-        ScheduledBatchTail::Finished => {
-            if let Some(live) = state.combat_prevention_tally.as_mut() {
-                for (key, amount) in tally_accum {
-                    *live.entry(key).or_insert(0) += amount;
-                }
-            }
-            let combined = state.combat_prevention_tally.take().unwrap_or_default();
-            let survivors = std::mem::take(&mut record.decided);
-            let hydrated: Vec<HydratedCombatEntry> = record
-                .entries
-                .into_iter()
-                .map(|entry| HydratedCombatEntry {
-                    ctx: DamageContext::from(entry.ctx),
-                    source_is_commander: entry.source_is_commander,
-                    assignment: entry.assignment,
-                    lifelink_controller: entry.lifelink_controller,
-                })
-                .collect();
-            let batch_events = std::mem::take(&mut record.batch_events);
-            // The combined tally rides as the Phase-A leg (merging is keyed
-            // sums, so one leg + empty equals the inline two-leg merge).
-            match apply_combat_survivors(
-                state,
-                hydrated,
-                survivors,
-                combined,
-                HashMap::new(),
-                outer_tally,
-                std::mem::take(&mut record.lives_before),
-                sub_step,
-                batch_events,
-            ) {
-                CombatDamageBatch::Paused {
-                    events: batch,
-                    waiting_for,
-                } => {
-                    // CR 616.1f: a lifelink gain paused inside the resumed
-                    // batch. The still-untouched tail was re-parked with the
-                    // batch so far, so the eventual completion still fires ONE
-                    // CR 603.3b batch.
-                    events.extend_from_slice(&batch[owed_from..]);
-                    claim_combat_lifelink_batch_events_for_ordinary_collection(
-                        state,
-                        events,
-                        action_event_start,
-                    );
-                    Some(*waiting_for)
-                }
-                CombatDamageBatch::Complete(damage_events) => {
-                    events.extend_from_slice(&damage_events[owed_from..]);
-                    let waiting_for =
-                        finish_combat_damage_sub_step(state, sub_step, &damage_events, events);
-                    claim_combat_lifelink_batch_events_for_ordinary_collection(
-                        state,
-                        events,
-                        action_event_start,
-                    );
-                    if let Some(wf) = waiting_for {
-                        return Some(wf);
-                    }
-                    // CR 510.4: the second combat damage step is MANDATORY.
-                    // Re-enter so a paused first-strike batch still runs it,
-                    // exactly as the inline path does. Bounded: the record was
-                    // `.take()`n above, so the re-entry guard cannot route back
-                    // here; a regular sub-step that parks returns its own
-                    // prompt without recursing, and a regular sub-step already
-                    // done short-circuits on `regular_damage_done`.
-                    resolve_combat_damage(state, events).or(Some(WaitingFor::Priority {
-                        player: state.active_player,
-                    }))
-                }
-            }
-        }
-        ScheduledBatchTail::Parked { player, remaining } => {
-            // CR 616.1f: a LATER event needed its own ordering choice.
-            // Snapshot the live window back into ONE field (clearing Phase A
-            // so reinstall is unambiguous), restore the outer window, and park
-            // a FRESH record — never mutate the old one, so no stale
-            // `paused_entry_pruned` flag can survive across parks. The fresh
-            // park re-establishes `decided.len() == paused_entry`, re-arming
-            // the answer-stash gate by construction.
-            if let Some(live) = state.combat_prevention_tally.as_mut() {
-                for (key, amount) in tally_accum {
-                    *live.entry(key).or_insert(0) += amount;
-                }
-            }
-            let combined = state.combat_prevention_tally.take().unwrap_or_default();
-            let outer_entries = outer_tally.as_ref().map(tally_entries_for_record);
-            state.combat_prevention_tally = outer_tally;
-            let decided = std::mem::take(&mut record.decided);
-            let paused_entry = decided.len();
-            let fresh = PendingCombatDamageBatch {
-                entries: std::mem::take(&mut record.entries),
-                decided,
-                paused_entry,
-                paused_entry_pruned: false,
-                remaining,
-                phase_a_tally: Vec::new(),
-                phase_b_tally: tally_entries_for_record(&combined),
-                outer_tally: outer_entries,
-                // CR 616.1 + CR 700.1/615.8 (Matt R15): re-park the live
-                // one-shot ledger — same lifecycle as the tally above.
-                one_shot_applications: state
-                    .combat_one_shot_applications
-                    .take()
-                    .unwrap_or_default(),
-                batch_events: std::mem::take(&mut record.batch_events),
-                lives_before: std::mem::take(&mut record.lives_before),
-                sub_step: record.sub_step,
-            };
-            // CR 510.2 + CR 616.1 (Matt R12): re-bind the later paused member
-            // to its fresh prompt — the re-pause re-arms the stash gate for a
-            // NEW slot, so it needs a NEW stamp (the old prompt was consumed
-            // with its answer).
-            if let Some(entry) = fresh.entries.get(paused_entry) {
-                stamp_combat_pause_slot(state, paused_entry, entry.ctx.source_id);
-            }
-            // CR 732.2a: the batch may have moved life (an inline redirect or
-            // rider leg). Invalidate now as well as at completion, against the
-            // SAME pre-batch snapshot. The guard only ever CLEARS, so the
-            // paired calls are idempotent.
-            state.invalidate_loop_ring_on_unobserved_life_move(&fresh.lives_before);
-            let waiting_for = replacement::replacement_choice_waiting_for(player, state);
-            state.waiting_for = waiting_for.clone();
-            let returned = fresh.batch_events.clone();
-            state.pending_combat_damage = Some(Box::new(fresh));
-            events.extend_from_slice(&returned[owed_from..]);
-            claim_combat_lifelink_batch_events_for_ordinary_collection(
-                state,
-                events,
-                action_event_start,
-            );
-            Some(waiting_for)
-        }
-    }
-}
-
-/// CR 616.1 + CR 616.1f: redirect rescheduler (the answer boundary). When the
-/// answered choice re-parked the paused combat member for a later APNAP seat —
-/// a redirection rewrote its recipient (same damage SOURCE, new affected
-/// player) — while remaining members rank better, the fresh prompt must NOT be
-/// served yet: drop it (its candidates recompute live once the better-ranked
-/// members settle), APNAP-sort the unfinished suffix with entry contexts
-/// carried along, and run the scheduled batch. Returns `None` when no
-/// reschedule applies (no combat record, no fresh park, a nested child's
-/// prompt, or no inversion) so the caller serves the fresh prompt as before.
-///
-/// Same-event gated on the damage source: redirects rewrite only the
-/// recipient, so a nested child event's choice (a reflection rider, a gain
-/// rider) names a different source and keeps current behavior.
-pub(crate) fn reschedule_redirected_combat_batch(
-    state: &mut GameState,
-    action_event_start: usize,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    let record = state.pending_combat_damage.as_ref()?;
-    let fresh = state.pending_replacement.as_ref()?;
-    let ProposedEvent::Damage { source_id, .. } = &fresh.proposed else {
-        return None;
-    };
-    let paused = record.entries.get(record.paused_entry)?;
-    if paused.ctx.source_id != *source_id {
-        return None;
-    }
-    // The paused slot must be unstashed: a re-park settles nothing, so
-    // `decided` still covers exactly the strict prefix.
-    if record.decided.len() != record.paused_entry {
-        return None;
-    }
-    let order = apnap_reschedule_order(state, &fresh.proposed, &record.remaining)?;
-    // Inversion confirmed: rewrite the record and run the scheduled batch.
-    let mut record = state.pending_combat_damage.take()?;
-    record
-        .batch_events
-        .extend_from_slice(&events[action_event_start..]);
-    let fresh_proposed = state
-        .pending_replacement
-        .take()
-        .map(|pending| pending.proposed)?;
-    let paused_entry = record.paused_entry;
-    permute_unfinished(&mut record.entries, paused_entry, &order);
-    let mut all: Vec<Option<ProposedEvent>> = std::iter::once(fresh_proposed)
-        .chain(std::mem::take(&mut record.remaining))
-        .map(Some)
-        .collect();
-    record.remaining = order
-        .iter()
-        .map(|&index| {
-            all[index]
-                .take()
-                .expect("the reschedule order covers the unfinished window")
-        })
-        .collect();
-    run_remaining_combat_batch(state, record, action_event_start, events)
 }
 
 /// CR 510.2 + CR 603.2c: a combat-damage batch parked for a CR 616.1 choice
@@ -899,6 +583,24 @@ pub fn participates_in_pending_combat_damage_substep(
     };
     deals_in_substep(object, sub_step, &first_strike_participants)
         && combat_damage_amount(object) > 0
+}
+
+/// Whether combat sits between its two combat damage steps with nothing on the
+/// stack: the first-strike step is over, the regular step has not begun, and the
+/// active player's CR 510.3 priority window is open (or about to be passed).
+///
+/// CR 510.4: a combat with a first-strike or double-strike creature has two
+/// combat damage steps. CR 510.3: each step ends with the active player getting
+/// priority, so passing it on an empty stack (CR 117.4) is what starts the
+/// second step. Reads only the combat flags and the stack, never `waiting_for`
+/// or `phase`, so the unit-test drivers that call [`resolve_combat_damage`]
+/// directly share it with the integration harness.
+pub(crate) fn between_combat_damage_steps(state: &GameState) -> bool {
+    state
+        .combat
+        .as_ref()
+        .is_some_and(|combat| combat.first_strike_done && !combat.regular_damage_done)
+        && state.stack.is_empty()
 }
 
 /// Damage amounts fixed by an ordinary one-on-one combat exchange.
@@ -1923,22 +1625,34 @@ pub fn lethal_damage_needed(
         .unwrap_or(1)
 }
 
-/// CR 510.2: One source's place in a simultaneous combat-damage batch — the
-/// damage context, commander flag, and original assignment, carried alongside
-/// the source's `ProposedEvent` so Phase C can apply the post-replacement
-/// survivor and run combat-only bookkeeping.
-struct BatchEntry<'a> {
-    ctx: DamageContext,
-    source_is_commander: bool,
-    assignment: &'a DamageAssignment,
-    /// CR 119.3 + CR 702.15b: when the source has lifelink, the controller it
-    /// gains life for. `ctx.has_lifelink` is forced off so the per-assignment
-    /// apply path does NOT emit a life-gain event; instead the whole batch from
-    /// one source is summed and gained once (see Phase C) so "whenever you gain
-    /// life" triggers fire once per source, not once per damaged target.
-    lifelink_controller: Option<PlayerId>,
-}
-
+/// Apply all combat damage assignments simultaneously (CR 510.2).
+///
+/// Combat damage is one simultaneous event batch (CR 510.2). To keep prevention
+/// shields (e.g. Inkshield's "prevent all combat damage ... for each 1 damage
+/// prevented, create a token") rules-correct (CR 615.7 — count the amount, not
+/// the sources; CR 615.13 — the rider fires once per batch), this runs in
+/// three phases:
+///
+/// - **Phase A (Collect):** build a `ProposedEvent::Damage` per assignment
+///   through `pre_replacement_damage_gate` (0-damage / protection / prohibition
+///   gates) WITHOUT applying any damage yet.
+/// - **Phase B (Batch replace):** pass the whole proposed-event slice through
+///   `replace_combat_damage_batch`, which runs the replacement pipeline per
+///   event but aggregates continuous all-damage and one-shot prevention riders.
+///   `ShieldKind::PreventionOneShot` (Awe Strike) emits real source/recipient
+///   `DamagePrevented` events per portion. `Prevention { All }` with
+///   `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+///   path and emits its aggregate event at the rider boundary. This pass can
+///   park on a CR 616.1 ordering choice or a prompt raised by a replacement's
+///   substitute (CR 616.1g); see [`CombatDamageBatch::Paused`].
+/// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
+///   event via `apply_damage_after_replacement`, then run the player-batching
+///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
+///   `runtime_execute` rider exactly once against the aggregate prevented
+///   amount (CR 615.5 + CR 615.13).
+///
+/// Used by both the automatic assignment path and the interactive
+/// `AssignCombatDamage` handler.
 /// CR 510.2: the outcome of applying one simultaneous combat-damage batch.
 ///
 /// An enum rather than a `Vec<GameEvent>` plus an out-param: the previous return
@@ -1947,17 +1661,20 @@ struct BatchEntry<'a> {
 pub(crate) enum CombatDamageBatch {
     /// Every assignment applied, every lifelink gain completed, and Phase D fired.
     Complete(Vec<GameEvent>),
-    /// CR 616.1: the batch met a replacement choice it cannot make itself —
-    /// a lifelink life-gain event with two or more co-applicable
-    /// replacements, a leg whose life loss paused (Horde damage→mill
-    /// redirect, loss replacements), or a combat-damage event paused before
-    /// application. For a gain pause all damage is already dealt; for a leg
-    /// pause the unapplied tail rides the record's Phase C remnant; for a
-    /// pre-application pause nothing is dealt and the whole batch is parked
-    /// in `state.pending_combat_damage`. The unfinished tail is parked in
-    /// `state.pending_combat_lifelink` (gain and leg pauses), and
-    /// state.pending_replacement holds the paused event as the resume's
-    /// authority.
+    /// CR 616.1 + CR 616.1g: the batch parked on a choice made while one of its
+    /// events is applied, and the unfinished rest is in
+    /// `state.pending_combat_lifelink`. Three park points:
+    /// * Phase B (`PendingCombatLifelink::replacement` is `Some`): a damage
+    ///   event met two or more co-applicable replacements and the affected
+    ///   player orders them (`state.pending_replacement` holds that event), or
+    ///   a replacement's substitute raised a prompt of its own (counters, mill).
+    ///   No damage has been dealt yet.
+    /// * Phase C (`phase_c_remnant` is `Some`): a leg's life loss paused (Horde
+    ///   damage->mill redirect, loss replacements); the unapplied legs ride the
+    ///   remnant and `state.pending_replacement` holds the paused event.
+    /// * The lifelink tail: a lifelink life-gain event met two or more
+    ///   co-applicable replacement effects. All damage is already dealt;
+    ///   `state.pending_replacement` holds the paused source's own `LifeGain`.
     Paused {
         events: Vec<GameEvent>,
         /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
@@ -1992,6 +1709,15 @@ enum PhaseCRunOutcome {
     /// stash is parked). The leg's lifelink share and bookkeeping are already
     /// folded into the accumulators; legs after `index` never applied.
     PausedOnLoss {
+        index: usize,
+    },
+    /// CR 120.3d + CR 616.1: leg `index` paused on its `-1/-1` counter
+    /// replacements (a combat-flagged counter stash is parked). Same folding
+    /// contract as `PausedOnLoss`: the leg's lifelink share and bookkeeping
+    /// are already folded into the accumulators; legs after `index` never
+    /// applied. The resume runs the core ONLY (no lifelink — it drains via
+    /// the folded tail).
+    PausedOnCounter {
         index: usize,
     },
 }
@@ -2034,8 +1760,21 @@ fn fold_combat_leg_amount(
         }
     }
 
-    // Combat-only bookkeeping (not part of the shared damage pipeline):
-    if let TargetRef::Player(player_id) = &leg.target {
+    // Combat-only bookkeeping (not part of the shared damage pipeline).
+    // CR 614.6: a replaced event never happens, so the bookkeeping follows the
+    // SURVIVING event's recipient, not the assigned one — a hit redirected
+    // away from the player credits that player nothing. CR 120.8: a source
+    // that would deal 0 damage deals no damage at all, so a zero delivered
+    // amount (fully replaced or prevented) records no hit either; CR 903.10a
+    // and the Ring level-four trigger count damage actually dealt.
+    let delivered_player = match leg.survivor.as_ref() {
+        Some(ProposedEvent::Damage {
+            target: TargetRef::Player(player_id),
+            ..
+        }) if actual_amount > 0 => Some(*player_id),
+        _ => None,
+    };
+    if let Some(player_id) = &delivered_player {
         let source_id = leg.ctx.source_id;
         // CR 510.2: Track per-source amounts for this step. Each source
         // appears at most once per player per step; dedup guards any edge
@@ -2089,8 +1828,10 @@ fn fold_combat_leg_amount(
 
 /// CR 510.2 + CR 120.3 + CR 616.1: apply Phase C legs in batch order —
 /// shared by the fresh batch and the remnant resume. A leg whose life loss
-/// pauses (a combat-flagged stash that was absent before this leg) folds
-/// eagerly and parks the tail; a leg paused on poison-counter ordering
+/// pauses (a combat-flagged loss stash that was absent before this leg) folds
+/// eagerly and parks the tail; a leg whose `-1/-1` counter placement pauses
+/// (a combat-flagged counter stash that was absent before this leg) folds
+/// eagerly and parks the same way; a leg paused on poison-counter ordering
 /// (infect/toxic stash nothing) keeps the legacy drop, and `None` survivors
 /// apply as 0 with bookkeeping, exactly as the never-paused path would.
 fn run_phase_c_legs(
@@ -2104,16 +1845,17 @@ fn run_phase_c_legs(
             // CR 120.3 + CR 120.4b: Apply the post-replacement event WITHOUT
             // re-running the replacement pipeline.
             Some(survivor_event) => {
-                // Snapshot BEFORE applying: the loss branch is the only
-                // combat path that stashes, so a combat-flagged stash that
-                // appears here identifies THIS leg's loss pause.
-                let had_stash = state.pending_damage_post_loss.is_some();
+                // Snapshot BEFORE applying: the loss and counter branches are
+                // the combat paths that stash, so a combat-flagged stash that
+                // appears here identifies THIS leg's pause.
+                let had_loss_stash = state.pending_damage_post_loss.is_some();
+                let had_counter_stash = state.pending_damage_post_counter.is_some();
                 let ctx = DamageContext::from(leg.ctx);
                 match apply_damage_after_replacement(state, &ctx, survivor_event, true, events) {
                     DamageResult::Applied(amt) => amt,
                     DamageResult::NeedsChoice => {
                         let mut loss_pause_amount = None;
-                        if !had_stash {
+                        if !had_loss_stash {
                             if let Some(stashed) = state.pending_damage_post_loss.as_ref() {
                                 if stashed.is_combat {
                                     loss_pause_amount = Some(stashed.actual_amount);
@@ -2123,6 +1865,22 @@ fn run_phase_c_legs(
                         if let Some(amt) = loss_pause_amount {
                             fold_combat_leg_amount(state, leg, amt, accums);
                             return PhaseCRunOutcome::PausedOnLoss { index };
+                        }
+                        let mut counter_pause_amount = None;
+                        if !had_counter_stash {
+                            if let Some(stashed) = state.pending_damage_post_counter.as_ref() {
+                                if stashed.is_combat {
+                                    counter_pause_amount = Some(stashed.actual_amount);
+                                }
+                            }
+                        }
+                        if let Some(amt) = counter_pause_amount {
+                            // CR 120.3d + CR 616.1: same folding contract as
+                            // the loss pause — fold eagerly, park the tail;
+                            // the resume runs the core ONLY (lifelink arrives
+                            // via the folded tail).
+                            fold_combat_leg_amount(state, leg, amt, accums);
+                            return PhaseCRunOutcome::PausedOnCounter { index };
                         }
                         // CR 510.2 (legacy): poison-counter ordering pauses
                         // (infect/toxic) carry no post-loss stash, so the
@@ -2167,11 +1925,11 @@ fn build_combat_damage_to_players_aggregate(
 }
 
 /// CR 510.2 + CR 616.1: complete a parked Phase C tail — consume the paused
-/// leg's combat stash into its deferred `DamageDealt` event + CR 120.1
-/// record, apply the remaining legs, then build the aggregate and the
-/// per-source lifelink gains onto the record. Only called once the paused
-/// loss fully settles (the funnel resumes combat solely after the batch drain
-/// retires with no re-park).
+/// leg's combat stash into its deferred post-loss or post-counter remainder
+/// (`DamageDealt` event + CR 120.1 record), apply the remaining legs, then
+/// build the aggregate and the per-source lifelink gains onto the record.
+/// Only called once the paused event fully settles (the funnel resumes combat
+/// solely after the batch drain retires with no re-park).
 fn complete_combat_phase_c_remnant(
     state: &mut GameState,
     remnant: PendingCombatPhaseCRemnant,
@@ -2199,6 +1957,31 @@ fn complete_combat_phase_c_remnant(
             &mut record.batch_events,
         );
     }
+    // CR 120.3d + CR 616.1: the same contract for a counter-paused leg — run
+    // the core ONLY (F1 split: lifelink already folded at park time). A core
+    // pause hands ownership to the redirect leg's own stash, exactly as the
+    // loss path leaves a re-parked loss stash for the code above on re-entry.
+    if let Some(stashed) = state
+        .pending_damage_post_counter
+        .take_if(|stashed| stashed.is_combat)
+    {
+        let ctx = DamageContext::from(stashed.ctx);
+        // CR 120.10: the remnant passes the STASHED pre-damage values — never
+        // a live reread (loyalty/defense removal already ran before the park).
+        match wither_infect_post_counter_core(
+            state,
+            &ctx,
+            &stashed.target,
+            stashed.actual_amount,
+            stashed.loyalty_before,
+            stashed.defense_before,
+            true,
+            &mut record.batch_events,
+        ) {
+            PostCounterFlow::Paused => {}
+            PostCounterFlow::Continue { .. } => {}
+        }
+    }
     let PendingCombatPhaseCRemnant {
         remaining,
         lifelink_by_source,
@@ -2216,11 +1999,7 @@ fn complete_combat_phase_c_remnant(
                 accums.combat_damage_to_players,
                 &accums.source_incarnations,
             );
-            record.remaining = accums
-                .lifelink_by_source
-                .into_iter()
-                .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
-                .collect();
+            record.remaining = lifelink_gains_in_apnap_order(state, accums.lifelink_by_source);
             RemnantOutcome::Complete
         }
         PhaseCRunOutcome::PausedOnLoss { index } => RemnantOutcome::Repaused {
@@ -2231,352 +2010,111 @@ fn complete_combat_phase_c_remnant(
                 source_incarnations: accums.source_incarnations,
             },
         },
-    }
-}
-
-/// CR 510.2: one source's place in a combat-damage batch, hydrated for the
-/// shared completion tail — owned on both paths (cloned from the inline
-/// borrowed `BatchEntry`, rebuilt from the parked snapshot on resume).
-struct HydratedCombatEntry {
-    ctx: DamageContext,
-    source_is_commander: bool,
-    assignment: DamageAssignment,
-    lifelink_controller: Option<PlayerId>,
-}
-
-/// CR 510.2 + CR 615.13 + CR 120.3: the completion tail shared by the inline
-/// path and the CR 616.1 resume so the two cannot drift — tally merge/close/
-/// restore, Phase C survivor application + combat bookkeeping, the per-player
-/// aggregate, and the `drain_combat_lifelink` call (gains, aggregate, Phase D
-/// riders, ring guard).
-///
-/// `phase_a_tally` is the live Phase-A window's contents and `phase_b_tally`
-/// the batch run's aggregate; the resume passes its combined tally as the
-/// Phase-A leg with an empty Phase-B leg (merging is keyed sums, so one leg +
-/// empty equals the inline two-leg merge). `events` is the batch's events so
-/// far (inline rider/drain events, plus every folded answer span on resume).
-#[allow(clippy::too_many_arguments)]
-fn apply_combat_survivors(
-    state: &mut GameState,
-    entries: Vec<HydratedCombatEntry>,
-    survivors: Vec<Option<ProposedEvent>>,
-    phase_a_tally: CombatPreventionTally,
-    phase_b_tally: CombatPreventionTally,
-    outer_tally: Option<CombatPreventionTally>,
-    lives_before: Vec<i32>,
-    sub_step: CombatDamageSubStep,
-    mut events: Vec<GameEvent>,
-) -> CombatDamageBatch {
-    // CR 510.2 + CR 615.13 (Matt R7-F1): Phase B ran under its own fresh tally
-    // (restoring the Phase-A window on exit), so merge its aggregate into the
-    // Phase-A protection tally — the boundary publishes ONE aggregate per
-    // (shield, recipient) for the whole step. Then close this step's window
-    // and restore any outer tally untouched.
-    let mut prevention_tally = phase_a_tally;
-    for (key, amount) in phase_b_tally {
-        *prevention_tally.entry(key).or_insert(0) += amount;
-    }
-    state.combat_prevention_tally = outer_tally;
-
-    // Deterministic order: the tally arrives as a `HashMap`, but it is stored in
-    // `PendingCombatLifelink` (which is `Serialize`/`Deserialize`, so a parked
-    // batch must round-trip byte-identically) and Phase D fires one CR 615.5
-    // rider per entry IN THIS ORDER. Sorted here (rather than after Phase C)
-    // so a leg pause parks the same order the drain would have seen; Phase C
-    // never touches the tally.
-    let prevention_tally = sorted_prevention_entries(prevention_tally);
-
-    // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
-    // Owned legs (rather than the borrowed entries) so a leg pause parks the
-    // unapplied tail in the remnant and the resume shares the same runner.
-    debug_assert_eq!(
-        entries.len(),
-        survivors.len(),
-        "batch survivor count must align with collected entries"
-    );
-    let legs: Vec<PendingCombatLeg> = entries
-        .iter()
-        .zip(survivors)
-        .map(|(entry, survivor)| PendingCombatLeg {
-            ctx: DamageContextSnapshot::from(&entry.ctx),
-            source_is_commander: entry.source_is_commander,
-            target: match &entry.assignment.target {
-                DamageTarget::Object(id) => TargetRef::Object(*id),
-                DamageTarget::Player(id) => TargetRef::Player(*id),
-            },
-            lifelink_controller: entry.lifelink_controller,
-            survivor,
-        })
-        .collect();
-    let mut accums = PhaseCAccumulators {
-        lifelink_by_source: Vec::new(),
-        combat_damage_to_players: Vec::new(),
-        source_incarnations: Vec::new(),
-    };
-    if let PhaseCRunOutcome::PausedOnLoss { index } =
-        run_phase_c_legs(state, &legs, &mut accums, &mut events)
-    {
-        // CR 510.2 + CR 616.1: a leg's life loss paused - park the unapplied
-        // tail (the paused leg's post-loss work rides its combat stash) and
-        // surface the prompt WITHOUT completing the sub-step, so the turn
-        // framework never advances over an open choice.
-        let batch_events = events.clone();
-        state.pending_combat_lifelink = Some(Box::new(PendingCombatLifelink {
-            remaining: std::collections::VecDeque::new(),
-            batch_events: events,
-            damage_to_players: Vec::new(),
-            prevention_tally,
-            lives_before,
-            sub_step,
-            phase_c_remnant: Some(PendingCombatPhaseCRemnant {
-                remaining: legs[index + 1..].to_vec(),
+        // CR 120.3d + CR 616.1: same re-park shape as the loss pause — the
+        // paused leg rides its combat-flagged counter stash.
+        PhaseCRunOutcome::PausedOnCounter { index } => RemnantOutcome::Repaused {
+            remnant: PendingCombatPhaseCRemnant {
+                remaining: remaining[index + 1..].to_vec(),
                 lifelink_by_source: accums.lifelink_by_source,
                 combat_damage_to_players: accums.combat_damage_to_players,
                 source_incarnations: accums.source_incarnations,
-            }),
-        }));
-        return CombatDamageBatch::Paused {
-            events: batch_events,
-            waiting_for: Box::new(state.waiting_for.clone()),
-        };
-    }
-
-    // CR 510.2: the per-player aggregate, built here in exactly the order it has
-    // always been emitted and carried to the drain so a pause cannot reorder it
-    // ahead of a resumed gain.
-    let damage_to_players = build_combat_damage_to_players_aggregate(
-        accums.combat_damage_to_players,
-        &accums.source_incarnations,
-    );
-
-    // CR 616.1 + CR 702.15e: each surviving source's lifelink gain is its own
-    // event. The whole tail â€” gains, the per-player aggregate, Phase D's
-    // prevention riders, and the CR 732.2a ring guard - lives in the drain, in
-    // the order it has always been emitted, so a CR 616.1 pause can suspend it
-    // without reordering it.
-    drain_combat_lifelink(
-        state,
-        PendingCombatLifelink {
-            remaining: accums
-                .lifelink_by_source
-                .into_iter()
-                .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
-                .collect(),
-            batch_events: events,
-            damage_to_players,
-            prevention_tally,
-            lives_before,
-            sub_step,
-            phase_c_remnant: None,
+            },
         },
-    )
-}
-
-/// CR 616.1 + CR 616.1f: APNAP rank of an unfinished batch member's CURRENT
-/// affected player. A redirection answered (or auto-applied) since the batch
-/// was sorted rewrites the recipient, so the rank is re-read here — never
-/// cached from the pre-sort.
-fn apnap_reschedule_order(
-    state: &GameState,
-    paused_proposed: &ProposedEvent,
-    remaining: &[ProposedEvent],
-) -> Option<Vec<usize>> {
-    let mut order: Vec<usize> = (0..remaining.len() + 1).collect();
-    // Stable: rank ties keep current relative order (same-player events were
-    // already correctly sequenced by the initial sort).
-    order.sort_by_key(|&index| {
-        let proposed = if index == 0 {
-            paused_proposed
-        } else {
-            &remaining[index - 1]
-        };
-        triggers::trigger_apnap_rank(state, proposed.affected_player(state))
-    });
-    let identity = order
-        .iter()
-        .enumerate()
-        .all(|(position, &index)| position == index);
-    (!identity).then_some(order)
-}
-
-/// Applies an [`apnap_reschedule_order`] permutation to a parallel entry vec's
-/// unfinished window, so members stay aligned with their contexts.
-fn permute_unfinished<T>(entries: &mut Vec<T>, decided_len: usize, order: &[usize]) {
-    debug_assert_eq!(
-        entries.len() - decided_len,
-        order.len(),
-        "the order covers exactly the unfinished window"
-    );
-    let mut window: Vec<Option<T>> = entries
-        .split_off(decided_len)
-        .into_iter()
-        .map(Some)
-        .collect();
-    let reordered: Vec<T> = order
-        .iter()
-        .map(|&index| {
-            window[index]
-                .take()
-                .expect("the reschedule order covers the unfinished window")
-        })
-        .collect();
-    entries.extend(reordered);
-}
-
-/// Outcome of [`run_apnap_scheduled_batch`]: either the batch parked on a
-/// prompt with no APNAP inversion left, or it ran to completion.
-enum ScheduledBatchTail {
-    Parked {
-        player: PlayerId,
-        remaining: Vec<ProposedEvent>,
-    },
-    Finished,
-}
-
-/// CR 616.1 + CR 616.1f: run `replace_combat_damage_batch` over `unfinished`,
-/// re-running with an APNAP-resorted unfinished suffix whenever the parked
-/// event's CURRENT affected player ranks behind a remaining member. A
-/// redirection answered (or auto-applied) since the last sort moved the parked
-/// event to a later seat; the better-ranked members' outstanding choices come
-/// first ("choices are made in APNAP order", CR 616.1), and their pipelines
-/// consume shared shields before the moved event re-parks.
-///
-/// The decided prefix is never reordered (its members were first-ranked when
-/// processed, and a later redirect cannot unrank them); only the unfinished
-/// suffix moves, with entry contexts carried along positionally. The dropped
-/// park's candidates recompute live on re-run — deterministically identical
-/// when nothing settled in between (a park re-derives itself: no applies
-/// precede it), and correctly re-read once better-ranked members settle.
-/// Each re-run strictly consumes redirect applications (every application
-/// marks its replacement applied, CR 614.6), so the loop terminates.
-fn run_apnap_scheduled_batch<T>(
-    state: &mut GameState,
-    batch_events: &mut Vec<GameEvent>,
-    entries: &mut Vec<T>,
-    decided: &mut Vec<Option<ProposedEvent>>,
-    tally: &mut CombatPreventionTally,
-    mut unfinished: Vec<ProposedEvent>,
-) -> ScheduledBatchTail {
-    // CR 616.1f backstop (mirrors `continue_replacement`): a dropped park's
-    // life policy rides onto the re-derived park, never downgraded.
-    let mut dropped_life_policy = None;
-    loop {
-        match replacement::replace_combat_damage_batch(state, batch_events, unfinished) {
-            replacement::CombatDamageReplacementOutcome::Complete {
-                survivors,
-                tally: partial,
-            } => {
-                for (key, amount) in partial {
-                    *tally.entry(key).or_insert(0) += amount;
-                }
-                decided.extend(survivors);
-                return ScheduledBatchTail::Finished;
-            }
-            replacement::CombatDamageReplacementOutcome::Paused {
-                decided: partial,
-                remaining,
-                tally: partial_tally,
-                player,
-            } => {
-                for (key, amount) in partial_tally {
-                    *tally.entry(key).or_insert(0) += amount;
-                }
-                decided.extend(partial);
-                let parked_proposed = state
-                    .pending_replacement
-                    .as_ref()
-                    .map(|pending| pending.proposed.clone());
-                let order = parked_proposed
-                    .as_ref()
-                    .and_then(|proposed| apnap_reschedule_order(state, proposed, &remaining));
-                let Some(order) = order else {
-                    if let (Some(policy), Some(reparked)) =
-                        (dropped_life_policy, state.pending_replacement.as_mut())
-                    {
-                        reparked.inherit_unrepresentable_life_change(policy);
-                    }
-                    return ScheduledBatchTail::Parked { player, remaining };
-                };
-                if dropped_life_policy.is_none() {
-                    dropped_life_policy = state
-                        .pending_replacement
-                        .as_ref()
-                        .map(|pending| pending.unrepresentable_life_change);
-                }
-                state.pending_replacement = None;
-                permute_unfinished(entries, decided.len(), &order);
-                let parked_proposed =
-                    parked_proposed.expect("the order derived from a parked event");
-                let mut all: Vec<Option<ProposedEvent>> = std::iter::once(parked_proposed)
-                    .chain(remaining)
-                    .map(Some)
-                    .collect();
-                unfinished = order
-                    .iter()
-                    .map(|&index| {
-                        all[index]
-                            .take()
-                            .expect("the reschedule order covers the unfinished window")
-                    })
-                    .collect();
-            }
-        }
     }
 }
 
-/// Apply all combat damage assignments simultaneously (CR 510.2).
-///
-/// Combat damage is one simultaneous event batch (CR 510.2). To keep prevention
-/// shields (e.g. Inkshield's "prevent all combat damage ... for each 1 damage
-/// prevented, create a token") rules-correct (CR 615.7 — count the amount, not
-/// the sources; CR 615.13 — the rider fires once per batch), this runs in
-/// three phases:
-///
-/// - **Phase A (Collect):** build a `ProposedEvent::Damage` per assignment
-///   through `pre_replacement_damage_gate` (0-damage / protection / prohibition
-///   gates) WITHOUT applying any damage yet.
-/// - **Phase B (Batch replace):** pass the whole proposed-event slice through
-///   `replace_combat_damage_batch`, which runs the replacement pipeline per
-///   event but aggregates continuous all-damage and one-shot prevention riders.
-///   Every shield — `ShieldKind::PreventionOneShot` (Awe Strike) included —
-///   publishes one `DamagePrevented` per (shield, recipient) at the aggregate
-///   boundary (Matt R15). `Prevention { All }` with `consume_on_apply`
-///   (Impulsive Maneuvers' lose branch) uses the continuous-All path and
-///   emits its aggregate event at the rider boundary.
-/// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
-///   event via `apply_damage_after_replacement`, then run the player-batching
-///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
-///   `runtime_execute` rider exactly once against the aggregate prevented
-///   amount (CR 615.5 + CR 615.13).
-///
-/// Used by both the automatic assignment path and the interactive
-/// `AssignCombatDamage` handler.
+/// CR 101.4: a player's position in APNAP order (active player first, then
+/// each other living player in turn order); players outside it sort last. The
+/// order is computed once, so a sort key built from the returned closure does
+/// not rebuild it per comparison.
+fn apnap_ranker(state: &GameState) -> impl Fn(PlayerId) -> usize {
+    let order = super::players::apnap_order(state);
+    move |player| {
+        order
+            .iter()
+            .position(|seat| *seat == player)
+            .unwrap_or(usize::MAX)
+    }
+}
+
+/// CR 702.15e + CR 616.1 + CR 101.4: each lifelink source's gain is its own
+/// event, and when two players must each order replacements on their own gain
+/// those choices are made in APNAP order of the GAINING player (the source's
+/// controller) — independent of whose creature was damaged, which is why the
+/// damage entries are never reordered for this. The sort is stable, so one
+/// seat's gains keep their first-seen order.
+fn lifelink_gains_in_apnap_order(
+    state: &GameState,
+    lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
+) -> VecDeque<PendingLifelinkGain> {
+    let mut gains = lifelink_by_source;
+    let rank = apnap_ranker(state);
+    gains.sort_by_key(|(_, controller, _)| rank(*controller));
+    gains
+        .into_iter()
+        .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
+        .collect()
+}
+
+/// CR 616.1 + CR 101.4 + CR 510.2: combat damage is dealt simultaneously, so
+/// the order in which attackers were declared and their damage assigned
+/// carries no rules weight; when several players must each choose among
+/// replacement effects for the batch, "choices are made in APNAP order". The
+/// pass proposes events one at a time and re-evaluates each against the
+/// current state after every answer, so ordering the batch by the APNAP rank
+/// of each event's affected player (a damaged player, or the controller of a
+/// damaged permanent — the chooser CR 616.1 names) makes the prompts arrive
+/// active player first, then each nonactive player in turn order. The sort is
+/// stable: one seat's events keep their assignment order, and `entries` stays
+/// aligned 1:1 with the events.
+/// CR 616.1: the seat that chooses among replacements for a proposed damage
+/// event as first proposed — a damaged player, or the controller of a damaged
+/// permanent. `None` for a non-damage event or a recipient that left the game.
+pub(crate) fn combat_damage_affected_seat(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<PlayerId> {
+    let ProposedEvent::Damage { target, .. } = event else {
+        return None;
+    };
+    match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+    }
+}
+
+fn order_batch_by_affected_seat(
+    state: &GameState,
+    entries: &mut Vec<PendingCombatDamageEntry>,
+    proposed_events: &mut VecDeque<ProposedEvent>,
+) {
+    let rank_of_seat = apnap_ranker(state);
+    let rank = |event: &ProposedEvent| -> usize {
+        combat_damage_affected_seat(state, event).map_or(usize::MAX, &rank_of_seat)
+    };
+    let mut paired: Vec<(PendingCombatDamageEntry, ProposedEvent)> = std::mem::take(entries)
+        .into_iter()
+        .zip(std::mem::take(proposed_events))
+        .collect();
+    paired.sort_by_key(|(_, event)| rank(event));
+    for (entry, event) in paired {
+        entries.push(entry);
+        proposed_events.push_back(event);
+    }
+}
+
 pub(crate) fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],
     sub_step: CombatDamageSubStep,
 ) -> CombatDamageBatch {
-    let mut events = Vec::new();
-    // CR 510.2 + CR 732.2a: the pre-batch life totals, so the loop-detection ring can be
-    // invalidated on the DAMAGE EVENT rather than on a `WaitingFor` window that an
-    // unblocked attacker never opens. Snapshotted per batch, not hoisted: first-strike
-    // and regular damage are two separate CR 510.2 events (`:131` / `:188`) and a
-    // double-strike attacker must be caught at the first, not only the second. See
-    // `GameState::invalidate_loop_ring_on_unobserved_life_move`.
-    let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+    let events = Vec::new();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
-    // CR 702.16e + CR 510.2 (Matt R7-F1): the batch tally window opens BEFORE
-    // Phase A so protection prevention accumulates into this step's aggregate
-    // instead of emitting per-source. Saved/restored, never merged outward:
-    // combat is its own simultaneity even if an outer batch is live.
-    let outer_tally = state.combat_prevention_tally.take();
-    state.combat_prevention_tally = Some(HashMap::new());
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
-    // and are dropped here; the gate accumulates any required DamagePrevented
-    // into the tally above for the boundary publisher.
-    let mut entries: Vec<BatchEntry> = Vec::with_capacity(assignments.len());
-    let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(assignments.len());
+    // and are dropped here; the gate already emitted any required DamagePrevented.
+    let mut entries: Vec<PendingCombatDamageEntry> = Vec::with_capacity(assignments.len());
+    let mut proposed_events: VecDeque<ProposedEvent> = VecDeque::with_capacity(assignments.len());
     for (source_id, assignment) in assignments {
         // Read commander flag before DamageContext borrows — both are immutable reads.
         let source_is_commander = state
@@ -2612,151 +2150,229 @@ pub(crate) fn apply_combat_damage(
             DamageTarget::Player(id) => TargetRef::Player(*id),
         };
 
-        // CR 702.16e + CR 615.13 (Matt F4, aggregated by R7-F1, R14-MED):
-        // protections propose into the Phase B pipeline, whose applier
-        // aggregates through the shared helper into the tally window opened
-        // above, publishing once per recipient at the boundary.
-        match pre_replacement_damage_gate(state, &ctx, &target_ref, assignment.amount, true) {
-            DamageGateOutcome::Proposed(proposed) => {
-                entries.push(BatchEntry {
-                    ctx,
-                    source_is_commander,
-                    assignment,
-                    lifelink_controller,
-                });
-                proposed_events.push(proposed);
-            }
-            DamageGateOutcome::Gated => {}
+        if let DamageGateOutcome::Proposed(proposed) =
+            pre_replacement_damage_gate(state, &ctx, &target_ref, assignment.amount, true)
+        {
+            // CR 510.2: the entry carries the damage context, commander flag and
+            // recipient alongside the source's `ProposedEvent`, so Phase C can
+            // apply the post-replacement survivor and run combat-only bookkeeping
+            // — snapshotted, because a CR 616.1 pause can park the batch.
+            entries.push(PendingCombatDamageEntry {
+                context: DamageContextSnapshot::from(&ctx),
+                source_is_commander,
+                target: assignment.target.clone(),
+                lifelink_controller,
+            });
+            proposed_events.push_back(proposed);
         }
     }
 
-    // CR 101.4 + CR 616.1 (Matt R15): simultaneous replacement prompts are
-    // made in APNAP order, not attack-declaration order. Stable-sort the
-    // parallel batch vecs by the affected player's APNAP rank — ties keep
-    // declaration order, and same-player events were already correctly
-    // sequenced. The reordering happens before Phase B, so decided /
-    // remaining / survivor indices, parks, and resumes all stay aligned.
-    // A redirection answered mid-batch re-ranks by CURRENT recipient instead
-    // (see `run_apnap_scheduled_batch` / `reschedule_redirected_combat_batch`).
-    {
-        let mut paired: Vec<(BatchEntry, ProposedEvent)> =
-            entries.into_iter().zip(proposed_events).collect();
-        paired.sort_by_key(|(_, proposed)| {
-            super::triggers::trigger_apnap_rank(state, proposed.affected_player(state))
-        });
-        (entries, proposed_events) = paired.into_iter().unzip();
-    }
+    // CR 616.1 + CR 101.4: the batch's replacement prompts follow APNAP order
+    // of the affected seats, not assignment order.
+    order_batch_by_affected_seat(state, &mut entries, &mut proposed_events);
 
     // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
-    // CR 616.1: the APNAP-scheduled loop re-sorts the unfinished suffix
-    // whenever a redirection moves the parked event to a later seat, so
-    // outstanding choices are served in current-recipient APNAP order.
-    let mut decided: Vec<Option<ProposedEvent>> = Vec::with_capacity(proposed_events.len());
-    let mut phase_b_tally = CombatPreventionTally::new();
-    match run_apnap_scheduled_batch(
+    let record = PendingCombatLifelink {
+        remaining: VecDeque::new(),
+        batch_events: events,
+        damage_to_players: Vec::new(),
+        prevention_tally: Vec::new(),
+        sub_step,
+        replacement: None,
+        phase_c_remnant: None,
+    };
+    let pass = replacement::CombatDamageReplacementPass::new(proposed_events);
+    run_combat_damage_replacements(state, record, entries, pass, None)
+}
+
+/// CR 510.2 + CR 615.7 + CR 616.1: Phase B of one simultaneous combat-damage
+/// batch — the replacement pass over its damage events — then Phase C and the
+/// completion tail.
+///
+/// The pass parks on a CR 616.1 ordering choice or on a prompt its substitute
+/// raised (CR 616.1g); the whole batch is then parked in
+/// `state.pending_combat_lifelink` with `replacement` set, exactly where a
+/// lifelink pause parks it, and `resume_pending_combat_lifelink` re-enters here
+/// with `resume`. Nothing is dealt before the pass completes, so the resumed
+/// batch applies each event once.
+fn run_combat_damage_replacements(
+    state: &mut GameState,
+    mut record: PendingCombatLifelink,
+    entries: Vec<PendingCombatDamageEntry>,
+    mut pass: replacement::CombatDamageReplacementPass,
+    resume: Option<replacement::CombatDamageReplacementResume>,
+) -> CombatDamageBatch {
+    match replacement::replace_combat_damage_batch(
         state,
-        &mut events,
-        &mut entries,
-        &mut decided,
-        &mut phase_b_tally,
-        proposed_events,
+        &mut record.batch_events,
+        &mut pass,
+        resume,
     ) {
-        ScheduledBatchTail::Finished => {
-            let survivors = decided;
-            let phase_a_tally = state.combat_prevention_tally.take().unwrap_or_default();
-            let hydrated: Vec<HydratedCombatEntry> = entries
-                .into_iter()
-                .map(|entry| HydratedCombatEntry {
-                    ctx: entry.ctx,
-                    source_is_commander: entry.source_is_commander,
-                    assignment: entry.assignment.clone(),
-                    lifelink_controller: entry.lifelink_controller,
-                })
-                .collect();
-            apply_combat_survivors(
-                state,
-                hydrated,
-                survivors,
-                phase_a_tally,
-                phase_b_tally,
-                outer_tally,
-                lives_before,
-                sub_step,
-                events,
-            )
+        replacement::CombatDamageReplacementOutcome::Complete => {
+            apply_combat_damage_survivors(state, record, entries, pass)
         }
-        ScheduledBatchTail::Parked { player, remaining } => {
-            // CR 616.1: one event's pipeline needs an ordering choice. NOTHING
-            // has been applied yet (Phase C never ran) — park the whole
-            // pre-application batch and prompt the affected player. The paused
-            // event is `entries[decided.len()]`: consumed from the batch
-            // iterator, so it is in neither `decided` nor `remaining`, and
-            // `state.pending_replacement` (left populated by the batch fn) is
-            // the resume's authority for it.
-            debug_assert!(
-                state.pending_combat_lifelink.is_none(),
-                "single-park invariant: the damage record parks before the lifelink drain runs"
-            );
-            let paused_entry = decided.len();
-            debug_assert_eq!(
-                entries.len(),
-                paused_entry + 1 + remaining.len(),
-                "paused slot must sit exactly between decided and remaining"
-            );
-            let phase_a_tally =
-                tally_entries_for_record(&state.combat_prevention_tally.take().unwrap_or_default());
-            let phase_b_tally = tally_entries_for_record(&phase_b_tally);
-            let outer_entries = outer_tally.as_ref().map(tally_entries_for_record);
-            state.combat_prevention_tally = outer_tally;
-            let parked_entries: Vec<ParkedCombatDamageEntry> = entries
-                .into_iter()
-                .map(|entry| ParkedCombatDamageEntry {
-                    ctx: DamageContextSnapshot::from(&entry.ctx),
-                    source_is_commander: entry.source_is_commander,
-                    assignment: entry.assignment.clone(),
-                    lifelink_controller: entry.lifelink_controller,
-                })
-                .collect();
-            // CR 510.2 + CR 616.1 (Matt R12): bind the paused member to this
-            // prompt BEFORE the record parks, so the answer-stash gate keeps
-            // working after an answered choice redirects the event.
-            if let Some(entry) = parked_entries.get(paused_entry) {
-                stamp_combat_pause_slot(state, paused_entry, entry.ctx.source_id);
-            }
-            // CR 732.2a: the batch may already have moved life (an inline
-            // redirect or rider leg inside Phase B). Invalidate now as well as
-            // at completion, against the SAME pre-batch snapshot. The guard
-            // only ever CLEARS, so the paired calls are idempotent.
-            state.invalidate_loop_ring_on_unobserved_life_move(&lives_before);
-            let waiting_for = replacement::replacement_choice_waiting_for(player, state);
-            state.waiting_for = waiting_for.clone();
-            let returned = events.clone();
-            state.pending_combat_damage = Some(Box::new(PendingCombatDamageBatch {
-                entries: parked_entries,
-                decided,
-                paused_entry,
-                paused_entry_pruned: false,
-                remaining,
-                phase_a_tally,
-                phase_b_tally,
-                outer_tally: outer_entries,
-                // CR 616.1 + CR 700.1/615.8 (Matt R15): park the live
-                // one-shot ledger — a mid-pause save/load would otherwise
-                // drop pre-pause same-source eligibility.
-                one_shot_applications: state
-                    .combat_one_shot_applications
-                    .take()
-                    .unwrap_or_default(),
-                batch_events: events,
-                lives_before,
-                sub_step,
-            }));
+        replacement::CombatDamageReplacementOutcome::Paused { waiting_for } => {
+            // CR 616.1: nothing of this batch has been dealt; park all of it.
+            // The tally is carried as a `Vec` (an enum key is not a JSON map key)
+            // and reinstalled on resume. CR 615.8: the one-shot application
+            // ledger is parked with it, so a "next time" shield that already
+            // applied to an earlier portion still covers the source's portions
+            // proposed after the pause. The tally is sorted so a parked state
+            // serializes identically however the map iterated.
+            record.prevention_tally = sorted_prevention_entries(pass.tally);
+            record.replacement = Some(PendingCombatDamageReplacement {
+                entries,
+                resolved: pass.resolved,
+                one_shot_applications: pass.one_shot_applications,
+            });
+            state.waiting_for = (*waiting_for).clone();
+            let events = record.batch_events.clone();
+            state.pending_combat_lifelink = Some(Box::new(record));
             CombatDamageBatch::Paused {
-                events: returned,
-                waiting_for: Box::new(waiting_for),
+                events,
+                waiting_for,
             }
         }
     }
+}
+
+/// CR 616.1 + CR 616.1g: resume a batch parked in its replacement pass. An
+/// ordering choice is answered here, with `choice`; a substitute's prompt has
+/// already been answered by its own dispatcher, and the pass picks up the
+/// parked entry's settled survivor.
+fn resume_combat_damage_replacements(
+    state: &mut GameState,
+    mut record: PendingCombatLifelink,
+    choice: Option<usize>,
+) -> CombatDamageBatch {
+    let Some(parked) = record.replacement.take() else {
+        return drain_combat_lifelink(state, record);
+    };
+    let resume = replacement::CombatDamageReplacementResume { choice };
+    let pass = replacement::CombatDamageReplacementPass {
+        resolved: parked.resolved,
+        tally: tally_map_from_record_entries(&std::mem::take(&mut record.prevention_tally)),
+        one_shot_applications: parked.one_shot_applications,
+    };
+    run_combat_damage_replacements(state, record, parked.entries, pass, Some(resume))
+}
+
+/// True when the parked combat-damage batch is waiting on the CR 616.1 ordering
+/// choice for one of its own damage events — the `ChooseReplacement` that
+/// answers it belongs to the batch (`resume_pending_combat_lifelink` with a
+/// choice), not to the generic replacement-choice dispatcher, which would deal
+/// the damage outside the batch.
+pub(crate) fn parked_combat_damage_awaits_replacement_choice(state: &GameState) -> bool {
+    state
+        .pending_combat_lifelink
+        .as_ref()
+        .is_some_and(|record| {
+            record.replacement.as_ref().is_some_and(|parked| {
+                parked.resolved.iter().any(|leg| {
+                    matches!(
+                        leg,
+                        PendingCombatLegProgress::AwaitingChoice { parked: None, .. }
+                    )
+                })
+            })
+        })
+}
+
+/// CR 120.3 + CR 510.2: Phase C of a simultaneous combat-damage batch — apply
+/// each surviving post-replacement event and run the combat bookkeeping, then
+/// hand the tail (lifelink gains, per-player aggregate, Phase D riders) to
+/// [`drain_combat_lifelink`]. Runs only once the replacement pass is complete.
+fn apply_combat_damage_survivors(
+    state: &mut GameState,
+    mut record: PendingCombatLifelink,
+    entries: Vec<PendingCombatDamageEntry>,
+    pass: replacement::CombatDamageReplacementPass,
+) -> CombatDamageBatch {
+    // Deterministic order: the tally arrives as a `HashMap`, but it is stored in
+    // `PendingCombatLifelink` (which is `Serialize`/`Deserialize`, so a parked
+    // batch must round-trip byte-identically) and Phase D fires one CR 615.5
+    // rider per entry IN THIS ORDER. A `HashMap`'s arbitrary iteration order
+    // would let the same batch serialize — and emit its rider events —
+    // differently across saves and AI clones. The ids are not `Ord`, so sort on
+    // their inner integers, exactly as `blocker_ids` is sorted above. Sorted
+    // here (rather than after Phase C) so a leg pause parks the same order the
+    // drain would have seen; Phase C never touches the tally.
+    let prevention_tally = sorted_prevention_entries(pass.tally);
+
+    // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
+    // Owned legs so a leg pause parks the unapplied tail in the remnant and the
+    // resume shares the same runner.
+    let survivors = replacement::settled_survivors(pass.resolved);
+    debug_assert_eq!(
+        entries.len(),
+        survivors.len(),
+        "batch survivor count must align with collected entries"
+    );
+    let legs: Vec<PendingCombatLeg> = entries
+        .into_iter()
+        .zip(survivors)
+        .map(|(entry, survivor)| PendingCombatLeg {
+            ctx: entry.context,
+            source_is_commander: entry.source_is_commander,
+            target: match entry.target {
+                DamageTarget::Object(id) => TargetRef::Object(id),
+                DamageTarget::Player(id) => TargetRef::Player(id),
+            },
+            lifelink_controller: entry.lifelink_controller,
+            survivor,
+        })
+        .collect();
+    let mut accums = PhaseCAccumulators {
+        lifelink_by_source: Vec::new(),
+        combat_damage_to_players: Vec::new(),
+        source_incarnations: Vec::new(),
+    };
+    // CR 510.2 + CR 616.1: a leg's post-replacement event paused — park the
+    // unapplied tail (the paused leg's post-loss or post-counter work rides
+    // its combat stash) and surface the prompt WITHOUT completing the
+    // sub-step, so the turn framework never advances over an open choice.
+    // An `if let` (not the exhaustive match — the loss arm is NOT the only
+    // pause anymore), so the counter arm is spelled out beside it.
+    let paused_index = match run_phase_c_legs(state, &legs, &mut accums, &mut record.batch_events) {
+        PhaseCRunOutcome::Complete => None,
+        PhaseCRunOutcome::PausedOnLoss { index } => Some(index),
+        // CR 120.3d + CR 616.1: a leg's `-1/-1` counter placement paused —
+        // park exactly like the loss pause (the paused leg's post-counter
+        // work rides its combat-flagged counter stash).
+        PhaseCRunOutcome::PausedOnCounter { index } => Some(index),
+    };
+    if let Some(index) = paused_index {
+        let batch_events = record.batch_events.clone();
+        record.prevention_tally = prevention_tally;
+        record.phase_c_remnant = Some(PendingCombatPhaseCRemnant {
+            remaining: legs[index + 1..].to_vec(),
+            lifelink_by_source: accums.lifelink_by_source,
+            combat_damage_to_players: accums.combat_damage_to_players,
+            source_incarnations: accums.source_incarnations,
+        });
+        state.pending_combat_lifelink = Some(Box::new(record));
+        return CombatDamageBatch::Paused {
+            events: batch_events,
+            waiting_for: Box::new(state.waiting_for.clone()),
+        };
+    }
+
+    // CR 510.2: the per-player aggregate, built here in exactly the order it has
+    // always been emitted and carried to the drain so a pause cannot reorder it
+    // ahead of a resumed gain.
+    record.damage_to_players = build_combat_damage_to_players_aggregate(
+        accums.combat_damage_to_players,
+        &accums.source_incarnations,
+    );
+
+    // CR 616.1 + CR 702.15e: each surviving source's lifelink gain is its own
+    // event. The whole tail — gains, the per-player aggregate, and Phase D's
+    // prevention riders — lives in the drain, in
+    // the order it has always been emitted, so a CR 616.1 pause can suspend it
+    // without reordering it.
+    record.remaining = lifelink_gains_in_apnap_order(state, accums.lifelink_by_source);
+    record.prevention_tally = prevention_tally;
+    drain_combat_lifelink(state, record)
 }
 
 /// CR 616.1 + CR 702.15e + CR 615.5 + CR 732.2a: finish one simultaneous
@@ -2793,12 +2409,6 @@ fn drain_combat_lifelink(
             Err(ReplacementDeferred::ReplacementChoice) => {
                 let waiting_for = state.waiting_for.clone();
                 let events = record.batch_events.clone();
-                // CR 732.2a: the batch has already moved life (CR 120.3a damage,
-                // and any earlier source's gain). Invalidate now as well as at
-                // completion, against the SAME pre-batch snapshot, so the ring is
-                // not stale for the duration of an arbitrarily long player pause.
-                // The guard only ever CLEARS, so the paired calls are idempotent.
-                state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
                 state.pending_combat_lifelink = Some(Box::new(record));
                 return CombatDamageBatch::Paused {
                     events,
@@ -2839,20 +2449,6 @@ fn drain_combat_lifelink(
         &mut record.batch_events,
         false,
     );
-    // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
-    // prohibition keys on, and this is the last statement that can move life in it.
-    // The batch moves life in three places and only a call here sees all three:
-    // Phase C's `apply_damage_after_replacement` (CR 120.3a), the per-source
-    // lifelink gains above, and a prevention rider's `runtime_execute` (CR 615.5).
-    // `lives_before` is the PRE-BATCH snapshot carried in the record. On a resume
-    // this window arithmetically spans the paused source's own gain, which
-    // `engine_replacement.rs` applied before the drain was re-entered — but that
-    // span has no observable consequence: `apply()` has already cleared
-    // `loop_detect_ring` on the answering `ChooseReplacement`, which sits in
-    // neither its action exemption list nor `WaitingFor::is_forced_cascade_window`.
-    // MEASURED, not inferred. The load-bearing call is the PAUSE-path one above,
-    // reached under the exempt `PassPriority`.
-    state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
     CombatDamageBatch::Complete(record.batch_events)
 }
 
@@ -3508,6 +3104,21 @@ mod tests {
             .push(Keyword::BandsWithOther("Wolf".to_string()));
     }
 
+    /// CR 510.3 + CR 510.4: resolve BOTH combat damage steps of a first-strike or
+    /// double-strike combat. `resolve_combat_damage` performs one step per call and
+    /// returns the active player's priority window after the first-strike step;
+    /// while that window is open with an empty stack, calling it again models every
+    /// player passing it (the all-pass gate in `priority.rs` re-enters the function).
+    /// Tests that assert the window itself make the two calls explicitly instead.
+    fn resolve_both_combat_damage_steps(state: &mut GameState, events: &mut Vec<GameEvent>) {
+        let mut waiting = resolve_combat_damage(state, events);
+        while matches!(waiting, Some(WaitingFor::Priority { .. }))
+            && between_combat_damage_steps(state)
+        {
+            waiting = resolve_combat_damage(state, events);
+        }
+    }
+
     /// Drive `resolve_combat_damage` and, whenever it pauses on an
     /// `AssignCombatDamage` prompt (now reachable for single-blocker trample with
     /// excess per CR 702.19b, as well as the existing 2+ blocker case), submit the
@@ -3663,7 +3274,7 @@ mod tests {
                 add_orphaned_blocker(&mut state, orphan);
 
                 let mut events = Vec::new();
-                resolve_combat_damage(&mut state, &mut events);
+                resolve_both_combat_damage_steps(&mut state, &mut events);
 
                 let row = format!("{keyword:?} power {orphan_power}");
                 assert_eq!(
@@ -4017,8 +3628,36 @@ mod tests {
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);
 
-        assert_eq!(state.objects[&attacker].damage_marked, 2);
-        assert_eq!(state.objects[&blocker].damage_marked, 2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *target == blocker
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: true,
+                ..
+            } if *source_id == blocker && *target == attacker
+        )));
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the attacker is destroyed by lethal combat damage"
+        );
+        assert_eq!(
+            state.objects[&blocker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the blocker is destroyed by lethal combat damage"
+        );
     }
 
     #[test]
@@ -4035,8 +3674,14 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        let first = resolve_combat_damage(&mut state, &mut events);
 
+        // CR 510.3: the first-strike step ends with the priority window.
+        assert!(
+            matches!(first, Some(WaitingFor::Priority { .. })),
+            "the first-strike step ends with a priority window, got {first:?}"
+        );
+        assert!(between_combat_damage_steps(&state));
         // First strike dealt 3 damage (lethal) to blocker
         // SBAs ran between steps -- blocker should have been destroyed
         // Blocker can't deal damage back in regular step (dead)
@@ -4044,12 +3689,63 @@ mod tests {
         assert_eq!(state.objects[&attacker].damage_marked, 0);
         // Blocker should be in graveyard (SBAs ran between steps)
         assert!(!state.battlefield.contains(&blocker));
+
+        // The regular step (one pass round later) adds nothing: the dead blocker
+        // deals no damage and the first striker does not strike again.
+        let second = resolve_combat_damage(&mut state, &mut events);
+        assert!(second.is_none(), "the regular step completes: {second:?}");
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        assert_eq!(state.objects[&attacker].damage_marked, 0);
     }
 
+    /// CR 510.4 + CR 702.7b: Youthful Knight (2/1, first strike) blocked by Goblin
+    /// Piker (2/1). The Knight's first-strike damage kills the Piker, so the Piker
+    /// never deals its regular-step damage and the Knight survives; the Knight does
+    /// not deal damage again in the second step.
+    #[test]
+    fn youthful_knight_kills_a_toughness_one_blocker_before_it_strikes_back() {
+        let mut state = setup();
+        let knight = create_creature(&mut state, PlayerId(0), "Youthful Knight", 2, 1);
+        state
+            .objects
+            .get_mut(&knight)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        let piker = create_creature(&mut state, PlayerId(1), "Goblin Piker", 2, 1);
+        setup_combat(&mut state, vec![knight], vec![(knight, vec![piker])]);
+
+        let mut events = Vec::new();
+        let first = resolve_combat_damage(&mut state, &mut events);
+
+        assert!(matches!(first, Some(WaitingFor::Priority { .. })));
+        assert!(
+            !state.battlefield.contains(&piker),
+            "reach guard: the Piker died"
+        );
+        assert_eq!(state.objects[&knight].damage_marked, 0);
+
+        let second = resolve_combat_damage(&mut state, &mut events);
+
+        assert!(second.is_none());
+        assert_eq!(
+            state.objects[&knight].damage_marked, 0,
+            "the dead Piker deals no regular-step damage"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "a blocked attacker deals no damage to the player"
+        );
+    }
+
+    /// CR 510.4 + CR 702.4b + CR 510.3: Fencing Ace (1/1, double strike) attacks an
+    /// unblocked player. The first combat damage step deals 1 and ends with the
+    /// active player's priority window; the regular step, one pass round later,
+    /// deals 1 more.
     #[test]
     fn double_strike_deals_damage_twice() {
         let mut state = setup();
-        let attacker = create_creature(&mut state, PlayerId(0), "Knight", 3, 3);
+        let attacker = create_creature(&mut state, PlayerId(0), "Fencing Ace", 1, 1);
         state
             .objects
             .get_mut(&attacker)
@@ -4057,12 +3753,33 @@ mod tests {
             .keywords
             .push(Keyword::DoubleStrike);
         setup_combat(&mut state, vec![attacker], vec![]);
+        // Stale priority bookkeeping the window must clear (CR 510.3).
+        state.priority_player = PlayerId(1);
+        state.priority_passes.insert(PlayerId(1));
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        let first = resolve_combat_damage(&mut state, &mut events);
 
-        // 3 + 3 = 6 damage to player
-        assert_eq!(state.players[1].life, 14);
+        // First step: 1 damage, then the active player's priority window.
+        assert!(
+            matches!(first, Some(WaitingFor::Priority { player }) if player == PlayerId(0)),
+            "CR 510.3: the first combat damage step ends with the active player's priority, got {first:?}"
+        );
+        assert_eq!(state.players[1].life, 19, "the first-strike hit landed");
+        let combat = state.combat.as_ref().unwrap();
+        assert!(combat.first_strike_done && !combat.regular_damage_done);
+        assert!(state.stack.is_empty());
+        assert!(between_combat_damage_steps(&state));
+        assert_eq!(state.priority_player, PlayerId(0));
+        assert!(state.priority_passes.is_empty());
+
+        // All players pass: the gate re-enters for the regular step.
+        let second = resolve_combat_damage(&mut state, &mut events);
+
+        assert!(second.is_none(), "the regular step completes: {second:?}");
+        assert_eq!(state.players[1].life, 18, "1 + 1 = 2 damage to the player");
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        assert!(!between_combat_damage_steps(&state));
     }
 
     #[test]
@@ -4153,6 +3870,12 @@ mod tests {
             .unwrap()
             .keywords
             .push(Keyword::Deathtouch);
+        assert!(state.objects[&attacker]
+            .keywords
+            .contains(&Keyword::Trample));
+        assert!(state.objects[&attacker]
+            .keywords
+            .contains(&Keyword::Deathtouch));
         let blocker1 = create_creature(&mut state, PlayerId(1), "Bear1", 2, 2);
         let blocker2 = create_creature(&mut state, PlayerId(1), "Bear2", 2, 2);
         setup_combat(
@@ -4197,9 +3920,49 @@ mod tests {
         let result = resolve_combat_damage(&mut state, &mut events);
         assert!(result.is_none(), "All damage should be resolved");
 
-        // With deathtouch, 1 to each blocker is lethal; 3 excess tramples to player
-        assert_eq!(state.objects[&blocker1].damage_marked, 1);
-        assert_eq!(state.objects[&blocker2].damage_marked, 1);
+        // Damage events retain the assignment before the resulting SBAs move the blockers.
+        for blocker in [blocker1, blocker2] {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 1,
+                    is_combat: true,
+                    ..
+                } if *source_id == attacker && *target == blocker
+            )));
+            assert_eq!(
+                state.objects[&blocker].zone,
+                crate::types::zones::Zone::Graveyard,
+                "CR 702.2b + CR 704.5h: one damage from a deathtouch source destroys the blocker"
+            );
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 2,
+                    is_combat: true,
+                    ..
+                } if *source_id == blocker && *target == attacker
+            )));
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Player(player),
+                amount: 3,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *player == PlayerId(1)
+        )));
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Battlefield
+        );
+        assert_eq!(state.objects[&attacker].damage_marked, 4);
         assert_eq!(state.players[1].life, 17);
     }
 
@@ -4481,7 +4244,13 @@ mod tests {
     /// `fire_batch_prevention_riders` and the first two indices invert.
     #[test]
     fn completed_batch_emits_gain_then_aggregate_then_prevention_rider() {
-        let mut state = setup();
+        // CR 120.8: a fully prevented hit deals no damage, so the aggregate
+        // needs a hit that is actually dealt — the lifelinker attacks a second
+        // defender (P2) who has no shield, while the Ogre's hit on P1 is
+        // prevented by P1's Inkshield.
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
         install_inkshield(&mut state, PlayerId(1));
         let prevented = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
         let lifelinker = create_creature(&mut state, PlayerId(0), "Vampire", 3, 3);
@@ -4491,12 +4260,15 @@ mod tests {
             .unwrap()
             .keywords
             .push(Keyword::Lifelink);
-        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
-        setup_combat(
-            &mut state,
-            vec![prevented, lifelinker],
-            vec![(prevented, vec![]), (lifelinker, vec![blocker])],
-        );
+        setup_combat(&mut state, vec![prevented, lifelinker], Vec::new());
+        if let Some(info) = state.combat.as_mut().and_then(|combat| {
+            combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == lifelinker)
+        }) {
+            *info = AttackerInfo::attacking_player(lifelinker, PlayerId(2));
+        }
 
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);
@@ -4580,9 +4352,46 @@ mod tests {
         let result = resolve_combat_damage(&mut state, &mut events);
         assert!(result.is_none(), "All damage should be resolved");
 
-        // All 5 to blocker1, none to blocker2
-        assert_eq!(state.objects[&blocker1].damage_marked, 5);
+        // The event records the assignment before state-based actions move Bear1.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 5,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *target == blocker1
+        )));
+        for blocker in [blocker1, blocker2] {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 2,
+                    is_combat: true,
+                    ..
+                } if *source_id == blocker && *target == attacker
+            )));
+        }
+        assert_eq!(
+            state.objects[&blocker1].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the 2/2 blocker leaves after five combat damage"
+        );
+        assert_eq!(
+            state.objects[&blocker2].zone,
+            crate::types::zones::Zone::Battlefield,
+            "the unassigned blocker remains on the battlefield"
+        );
         assert_eq!(state.objects[&blocker2].damage_marked, 0);
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Battlefield,
+            "Fatty survives with one less than lethal damage"
+        );
+        assert_eq!(state.objects[&attacker].damage_marked, 4);
         // No damage to player
         assert_eq!(state.players[1].life, 20);
     }
@@ -4653,13 +4462,45 @@ mod tests {
             .unwrap()
             .keywords
             .push(Keyword::Deathtouch);
+        assert!(state.objects[&attacker]
+            .keywords
+            .contains(&Keyword::Deathtouch));
         let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);
 
-        assert!(state.objects[&blocker].dealt_deathtouch_damage);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 1,
+                is_combat: true,
+                ..
+            } if *source_id == attacker && *target == blocker
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: true,
+                ..
+            } if *source_id == blocker && *target == attacker
+        )));
+        assert_eq!(
+            state.objects[&blocker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 702.2b + CR 704.5h: the deathtouch-damaged Bear is destroyed"
+        );
+        assert_eq!(
+            state.objects[&attacker].zone,
+            crate::types::zones::Zone::Graveyard,
+            "CR 704.5g: the 1/1 attacker is destroyed by the Bear's two damage"
+        );
     }
 
     #[test]
@@ -5981,7 +5822,24 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        let prevented_count = |events: &[GameEvent]| {
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::DamagePrevented { .. }))
+                .count()
+        };
+
+        // CR 510.4: the first combat-damage step is its own batch and its own
+        // rider firing (4), ending with the CR 510.3 priority window.
+        let first = resolve_combat_damage(&mut state, &mut events);
+        assert!(matches!(first, Some(WaitingFor::Priority { .. })));
+        assert_eq!(state.players[1].life, 20, "the first strike was prevented");
+        assert_eq!(count_inklings(&state), 4, "first-strike step: 4 Inklings");
+        assert_eq!(prevented_count(&events), 1, "one DamagePrevented so far");
+
+        // The regular step is the second batch and the second firing (4).
+        let second = resolve_combat_damage(&mut state, &mut events);
+        assert!(second.is_none());
 
         assert_eq!(state.players[1].life, 20, "both strikes prevented");
         // CR 510.4: two separate combat-damage steps → two rider firings of 4.
@@ -5991,11 +5849,11 @@ mod tests {
             "double strike: 4 (first-strike step) + 4 (regular step) = 8"
         );
         // CR 510.4: two DamagePrevented events, one per combat-damage step.
-        let prevented = events
-            .iter()
-            .filter(|e| matches!(e, GameEvent::DamagePrevented { .. }))
-            .count();
-        assert_eq!(prevented, 2, "one DamagePrevented per combat-damage step");
+        assert_eq!(
+            prevented_count(&events),
+            2,
+            "one DamagePrevented per combat-damage step"
+        );
     }
 
     /// Step 7: Trample attacker partially blocked, defending player shielded.
@@ -6029,96 +5887,6 @@ mod tests {
         assert_eq!(state.players[1].life, 20, "trample-over damage prevented");
         // CR 615.7: only the 3 player-targeted damage is aggregated.
         assert_eq!(count_inklings(&state), 3, "3 trample damage → 3 Inklings");
-    }
-
-    /// CR 615.13 vs CR 120.3 at the seam — the row that pins the split.
-    ///
-    /// One shield covering BOTH legs of one CR 510.2 simultaneous batch (the
-    /// installed Inkshield's `damage_target_filter` is nulled here, which is the
-    /// shape of every Fog-class / `PreventDamage{Any}` shield — 218 of them in the
-    /// corpus — and of Safe Passage's two-legged filter): a trample attacker puts
-    /// 2 on the blocker and 3 over to the player.
-    ///
-    /// CR 120.3 makes the RECIPIENT per-event, so TWO `DamagePrevented` events are
-    /// emitted, one per recipient, each with its own amount. CR 615.13 makes the
-    /// APPLICATION the trigger/rider unit, so the CR 615.5 rider fires ONCE — five
-    /// Inklings from the batch total, not ten from firing per recipient.
-    ///
-    /// This is the single most likely mis-implementation of the per-recipient
-    /// split, and nothing else in the suite catches it: every other prevention
-    /// fixture is single-recipient, so per-shield and per-recipient firing
-    /// coincide.
-    #[test]
-    fn multi_recipient_shield_emits_per_recipient_but_fires_its_rider_once() {
-        let mut state = setup();
-        install_inkshield(&mut state, PlayerId(1));
-        // Widen the resolution-created shield to cover creatures too. Installed
-        // floating (no host permanent), so it lives under the ObjectId(0) sentinel
-        // in `pending_damage_replacements`.
-        state
-            .pending_damage_replacements
-            .iter_mut()
-            .for_each(|repl| repl.damage_target_filter = None);
-
-        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
-        state
-            .objects
-            .get_mut(&attacker)
-            .unwrap()
-            .keywords
-            .push(Keyword::Trample);
-        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 2);
-        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
-
-        let mut events = Vec::new();
-        resolve_combat_with_greedy_assignment(&mut state, &mut events);
-
-        // Reach-guards: BOTH legs really were prevented. The 0/2 Wall surviving a
-        // 5/5 trampler is the creature leg's proof; life 20 is the player leg's.
-        assert!(
-            state.battlefield.contains(&blocker),
-            "reach-guard: the widened shield prevented the blocker's lethal 2, so \
-             CR 704.5g never removed it"
-        );
-        assert_eq!(
-            state.objects[&blocker].damage_marked, 0,
-            "reach-guard: the creature leg was prevented, not merely survived"
-        );
-        assert_eq!(
-            state.players[1].life, 20,
-            "reach-guard: the 3 trample-over damage was prevented"
-        );
-
-        // CR 120.3: one event per RECIPIENT, each carrying that recipient's own
-        // amount. Exact list, length included.
-        let mut prevented: Vec<(TargetRef, u32)> = events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::DamagePrevented { target, amount, .. } => {
-                    Some((target.clone(), *amount))
-                }
-                _ => None,
-            })
-            .collect();
-        prevented.sort();
-        let mut expected = vec![
-            (TargetRef::Object(blocker), 2),
-            (TargetRef::Player(PlayerId(1)), 3),
-        ];
-        expected.sort();
-        assert_eq!(
-            prevented, expected,
-            "CR 120.3: two recipients in one application → two events, 2 and 3"
-        );
-
-        // CR 615.13 + CR 615.5: ONE rider firing against the batch TOTAL. Ten
-        // Inklings would mean the rider fired once per recipient.
-        assert_eq!(
-            count_inklings(&state),
-            5,
-            "the CR 615.5 rider fires ONCE per prevention application, against the \
-             group total (2 + 3) — not once per recipient"
-        );
     }
 
     /// Step 8: A mixed batch — attacker X hits a creature, attacker Y hits the
@@ -6904,8 +6672,9 @@ mod tests {
     }
 
     /// CR 510.4 + CR 702.7b + CR 702.4b: a first-strike combat damage step is
-    /// followed by a second combat damage step, and both are counted. Here the
-    /// second step follows the first in the same `resolve_combat_damage` call.
+    /// followed by a second combat damage step, and both are counted. The second
+    /// step follows the CR 510.3 priority window after the first (one pass round
+    /// later), not the first step in the same `resolve_combat_damage` call.
     #[test]
     fn step_tally_counts_the_second_combat_damage_step() {
         for double_strike in [false, true] {
@@ -6927,6 +6696,30 @@ mod tests {
             let mut runner = scenario.build();
             let life_before = runner.life(P1);
             drive_to_combat_damage(&mut runner, &[attacker], vec![]);
+
+            // The first step is over and its priority window is open: its damage is
+            // dealt (Youthful Knight 2, Fencing Ace 1) and only it has begun.
+            let state = runner.state();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "double strike {double_strike}: {:?}",
+                state.waiting_for
+            );
+            assert!(state.stack.is_empty());
+            assert!(combat(&runner).first_strike_done && !combat(&runner).regular_damage_done);
+            assert_eq!(
+                runner.life(P1),
+                life_before - if double_strike { 1 } else { 2 },
+                "double strike {double_strike}: only the first step's damage is dealt"
+            );
+            assert_eq!(
+                combat_damage_steps(&runner),
+                1,
+                "double strike {double_strike}: one combat damage step has begun"
+            );
+
+            // Both players pass the window; the second step begins.
+            runner.pass_both_players();
 
             let state = runner.state();
             assert!(
@@ -6981,9 +6774,10 @@ mod tests {
         assert_eq!(combat_damage_steps(&runner), 1);
     }
 
-    /// CR 510.3a + CR 510.4: a trigger from the first-strike step pauses the
-    /// combat before the second step. The second step is counted once, when it
-    /// begins through the `priority.rs` completeness gate, and not before.
+    /// CR 510.3a + CR 510.4: a trigger from the first-strike step fills the
+    /// (unconditional) priority window before the second step. The second step is
+    /// counted once, when it begins through the `priority.rs` completeness gate,
+    /// and not before.
     #[test]
     fn step_tally_counts_the_second_combat_damage_step_after_a_pause() {
         let mut scenario = GameScenario::new();
@@ -7052,6 +6846,22 @@ mod tests {
             vec![(cadet_1, bears), (cadet_2, bears)],
         );
 
+        // The first step (the Knight's 2) ends in its priority window; the second
+        // step has not begun.
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(combat(&runner).first_strike_done);
+        assert!(!combat(&runner).regular_damage_done);
+        assert!(combat(&runner).damage_step_index.is_none());
+        assert_eq!(runner.life(P1), life_before - 2);
+        assert_eq!(combat_damage_steps(&runner), 1);
+
+        // Passing the window begins the second step, which prompts the Bears'
+        // assignment.
+        runner.pass_both_players();
+
         assert!(
             matches!(
                 runner.state().waiting_for,
@@ -7083,7 +6893,95 @@ mod tests {
         assert_eq!(combat_damage_steps(&runner), 2);
     }
 
-    // ── F1: pausable combat-damage batch (CR 616.1 protection overlap) ──
+    /// CR 615.13 vs CR 120.3 at the seam — the row that pins the split.
+    ///
+    /// One shield covering BOTH legs of one CR 510.2 simultaneous batch (the
+    /// installed Inkshield's `damage_target_filter` is nulled here, which is the
+    /// shape of every Fog-class / `PreventDamage{Any}` shield — 218 of them in the
+    /// corpus — and of Safe Passage's two-legged filter): a trample attacker puts
+    /// 2 on the blocker and 3 over to the player.
+    ///
+    /// CR 120.3 makes the RECIPIENT per-event, so TWO `DamagePrevented` events are
+    /// emitted, one per recipient, each with its own amount. CR 615.13 makes the
+    /// APPLICATION the trigger/rider unit, so the CR 615.5 rider fires ONCE — five
+    /// Inklings from the batch total, not ten from firing per recipient.
+    ///
+    /// This is the single most likely mis-implementation of the per-recipient
+    /// split, and nothing else in the suite catches it: every other prevention
+    /// fixture is single-recipient, so per-shield and per-recipient firing
+    /// coincide.
+    #[test]
+    fn multi_recipient_shield_emits_per_recipient_but_fires_its_rider_once() {
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+        // Widen the resolution-created shield to cover creatures too. Installed
+        // floating (no host permanent), so it lives under the ObjectId(0) sentinel
+        // in `pending_damage_replacements`.
+        state
+            .pending_damage_replacements
+            .iter_mut()
+            .for_each(|repl| repl.damage_target_filter = None);
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
+
+        // Reach-guards: BOTH legs really were prevented. The 0/2 Wall surviving a
+        // 5/5 trampler is the creature leg's proof; life 20 is the player leg's.
+        assert!(
+            state.battlefield.contains(&blocker),
+            "reach-guard: the widened shield prevented the blocker's lethal 2, so \
+             CR 704.5g never removed it"
+        );
+        assert_eq!(
+            state.objects[&blocker].damage_marked, 0,
+            "reach-guard: the creature leg was prevented, not merely survived"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "reach-guard: the 3 trample-over damage was prevented"
+        );
+
+        // CR 120.3: one event per RECIPIENT, each carrying that recipient's own
+        // amount. Exact list, length included.
+        let mut prevented: Vec<(TargetRef, u32)> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamagePrevented { target, amount, .. } => {
+                    Some((target.clone(), *amount))
+                }
+                _ => None,
+            })
+            .collect();
+        prevented.sort();
+        let mut expected = vec![
+            (TargetRef::Object(blocker), 2),
+            (TargetRef::Player(PlayerId(1)), 3),
+        ];
+        expected.sort();
+        assert_eq!(
+            prevented, expected,
+            "CR 120.3: two recipients in one application → two events, 2 and 3"
+        );
+
+        // CR 615.13 + CR 615.5: ONE rider firing against the batch TOTAL. Ten
+        // Inklings would mean the rider fired once per recipient.
+        assert_eq!(
+            count_inklings(&state),
+            5,
+            "the CR 615.5 rider fires ONCE per prevention application, against the \
+             group total (2 + 3) — not once per recipient"
+        );
+    }
 
     /// Paint a source's colors so protection qualities match it.
     fn paint(state: &mut GameState, id: ObjectId, colors: Vec<crate::types::mana::ManaColor>) {
@@ -7241,6 +7139,16 @@ mod tests {
             .unwrap_or_else(|| panic!("no candidate hosted on {source:?}: {candidates:?}"))
     }
 
+    /// The replacement pass of a combat-damage batch parked on a CR 616.1 choice.
+    fn parked_replacement_pass(
+        state: &GameState,
+    ) -> Option<&crate::types::game_state::PendingCombatDamageReplacement> {
+        state
+            .pending_combat_lifelink
+            .as_ref()
+            .and_then(|record| record.replacement.as_ref())
+    }
+
     fn expect_order_prompt(waiting: &WaitingFor, player: PlayerId, count: usize) {
         use crate::types::game_state::ReplacementChoiceKind;
         let WaitingFor::ReplacementChoice {
@@ -7288,19 +7196,9 @@ mod tests {
         let waiting =
             resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses the batch");
         expect_order_prompt(&waiting, PlayerId(1), 2);
-        let record = state
-            .pending_combat_damage
-            .as_ref()
-            .expect("the batch parks its pre-application record");
-        assert_eq!(
-            (
-                record.paused_entry,
-                record.decided.len(),
-                record.remaining.len()
-            ),
-            (1, 1, 0),
-            "APNAP order decides the active player's return damage first; \
-             the overlap pauses second with nothing left in remaining"
+        assert!(
+            parked_replacement_pass(&state).is_some(),
+            "the batch parks its replacement pass before applying anything"
         );
         assert!(
             state.pending_replacement.is_some(),
@@ -7326,7 +7224,7 @@ mod tests {
             "the batch settles after its choice, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(state.pending_replacement.is_none());
         assert!(
             state.combat.as_ref().unwrap().regular_damage_done,
@@ -7394,7 +7292,7 @@ mod tests {
             !matches!(waiting, Some(WaitingFor::ReplacementChoice { .. })),
             "a single quality claims: no ordering prompt, got {waiting:?}"
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(
             state.combat.as_ref().unwrap().regular_damage_done,
             "the sub-step completes inline"
@@ -7459,10 +7357,16 @@ mod tests {
         let waiting_a = resolve_combat_damage(&mut state, &mut events).expect("batch A pauses");
         expect_order_prompt(&waiting_a, PlayerId(1), 2);
 
-        // A's answer completes A; the MANDATORY second sub-step runs and B parks.
+        // A's answer completes A. CR 510.4: players receive priority before
+        // the regular combat damage step; that step's batch B then parks.
         state.waiting_for = waiting_a.clone();
         answer_replacement_choice(&mut state, &mut events, 0);
-        let waiting_b = state.waiting_for.clone();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "CR 510.4: priority between the first-strike and regular steps, got {:?}",
+            state.waiting_for
+        );
+        let waiting_b = resolve_combat_damage(&mut state, &mut events).expect("batch B pauses");
         expect_order_prompt(&waiting_b, PlayerId(1), 2);
         let pending = state
             .pending_replacement
@@ -7494,7 +7398,7 @@ mod tests {
             "both batches settle, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(state.combat.as_ref().unwrap().regular_damage_done);
         let prevented: Vec<(TargetRef, u32)> = events
             .iter()
@@ -7555,16 +7459,9 @@ mod tests {
         let mut events = Vec::new();
         let waiting = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
         expect_order_prompt(&waiting, PlayerId(1), 2);
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (
-                record.paused_entry,
-                record.decided.len(),
-                record.remaining.len()
-            ),
-            (2, 2, 0),
-            "APNAP order decides the P0 return strike and the lifelinker \
-             first; the overlap pauses last with nothing left in remaining"
+        assert!(
+            parked_replacement_pass(&state).is_some(),
+            "the overlap parks the batch's replacement pass"
         );
 
         state.waiting_for = waiting.clone();
@@ -7592,7 +7489,7 @@ mod tests {
             state.objects[&attacker].damage_marked, 2,
             "the blocker's return damage (remaining) still lands"
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
     }
 
     /// CR 616.1f: TWO-LEVEL pause. E (protection overlap + a Comeuppance-class
@@ -7651,14 +7548,10 @@ mod tests {
             "N owns the REFLECTION damage to the attacker, got {:?}",
             pending.proposed
         );
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (record.paused_entry, record.decided.len()),
-            (0, 1),
-            "E's slot is stashed (None: prevented) while N is open"
+        assert!(
+            parked_replacement_pass(&state).is_some(),
+            "the batch stays parked while N is open"
         );
-        assert_eq!(record.decided[0], None);
-        assert!(!record.paused_entry_pruned);
 
         // Answer N: the nested damage delivers inline exactly once, and the
         // batch completes through the resume.
@@ -7669,7 +7562,7 @@ mod tests {
             "the batch settles after N, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(state.combat.as_ref().unwrap().regular_damage_done);
 
         // (b) nested delivery: 5 reflected − 2 − 1 = 2, exactly once —
@@ -7718,11 +7611,13 @@ mod tests {
             prevented.contains(&(blocker, TargetRef::Object(blocker), 5)),
             "E's prevention publishes under the chosen SHIELD, got {prevented:?}"
         );
-        // (c) ONE batch: N's legs fold in ahead of E's aggregate.
+        // (c) CR 700.1: the reflection is its own (noncombat) event, so N's
+        // partial `Next(N)` preventions publish per event, naming the damage
+        // source (the reflector's host), ahead of E's aggregate.
         assert!(
-            prevented.contains(&(attacker, TargetRef::Object(attacker), 2))
-                && prevented.contains(&(attacker, TargetRef::Object(attacker), 1)),
-            "N's partial preventions join the same batch, got {prevented:?}"
+            prevented.contains(&(blocker, TargetRef::Object(attacker), 2))
+                && prevented.contains(&(blocker, TargetRef::Object(attacker), 1)),
+            "N's partial preventions publish per event, got {prevented:?}"
         );
         let nested_dealt = events
             .iter()
@@ -7826,18 +7721,9 @@ mod tests {
             "N owns the rider's LIFE GAIN, got {:?}",
             pending.proposed
         );
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (record.paused_entry, record.decided.len()),
-            (1, 2),
-            "APNAP order decides the P0 return strike first; E's Execute \
-             survivor is stashed (slot 1) while N is open"
-        );
         assert!(
-            matches!(&record.decided[1], Some(ProposedEvent::Damage { amount, .. })
-                if *amount == 2),
-            "E's stash carries the 2 surviving damage, got {:?}",
-            record.decided[1]
+            parked_replacement_pass(&state).is_some(),
+            "the batch stays parked while N is open"
         );
 
         // Answer N: the gain applies inline (modified exactly once); the
@@ -7849,7 +7735,7 @@ mod tests {
             "the batch settles after N, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(state.pending_combat_lifelink.is_none());
         let gains: Vec<i32> = events
             .iter()
@@ -8026,7 +7912,7 @@ mod tests {
             (PlayerId(1), commander, 3),
             "exactly the dealt amount, exactly once"
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
     }
 
     /// CR 615.7 + CR 615.13: the order choice consumes the CHOSEN shield
@@ -8083,7 +7969,7 @@ mod tests {
             "the tally records only this batch's prevented, got {events:?}"
         );
         assert_eq!(state.objects[&blocker].damage_marked, 0);
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
 
         // Paired guard: a lone Next(5) inline ends in the same consumed state.
         let mut control = setup();
@@ -8111,111 +7997,6 @@ mod tests {
             (true, true),
             "chosen-via-pause consumes exactly as chosen-inline"
         );
-    }
-
-    /// CR 732.2a: the record carries the PRE-BATCH life totals (never
-    /// re-snapshotted), and the pause-path observation fires at every park —
-    /// an inline rider leg's life move invalidates the ring AT THE PAUSE.
-    /// (First real ring test for a parked batch: gains/losses apply through
-    /// `apply_*` with no ring observation of their own, so only the
-    /// pause-path call can clear the seeded ring here.)
-    #[test]
-    fn f1_n7_pause_carries_lives_before_and_observes_inline_life_move() {
-        use crate::types::ability::{PreventionAmount, ResolvedAbility};
-        use crate::types::keywords::ProtectionTarget;
-        use crate::types::mana::ManaColor;
-
-        let mut state = setup();
-        // Event 1: absorbed by an Awe-Strike-class Next shield whose rider
-        // gains its controller the prevented amount (inline life move).
-        let ogre = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
-        let squire = create_creature(&mut state, PlayerId(1), "Squire", 3, 3);
-        let rider = ResolvedAbility::new(
-            Effect::GainLife {
-                amount: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-                player: TargetFilter::Controller,
-            },
-            vec![],
-            squire,
-            PlayerId(1),
-        );
-        // #10392: riders live in the arena — install before the push borrows state.
-        let rider_id = state.install_replacement_continuation(rider);
-        state
-            .objects
-            .get_mut(&squire)
-            .unwrap()
-            .replacement_definitions
-            .push(
-                ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                    .prevention_shield(PreventionAmount::Next(3))
-                    .valid_card(TargetFilter::SelfRef)
-                    .runtime_execute(rider_id)
-                    .description("Awe-Strike-class shield".to_string()),
-            );
-        // Event 2: the protection overlap that pauses.
-        let attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 3, 3);
-        paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
-        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
-        install_protection_overlap(
-            &mut state,
-            TargetRef::Object(blocker),
-            ProtectionTarget::Color(ManaColor::Red),
-            ProtectionTarget::Color(ManaColor::Green),
-        );
-        setup_combat(
-            &mut state,
-            vec![ogre, attacker],
-            vec![(ogre, vec![squire]), (attacker, vec![blocker])],
-        );
-
-        // Seed the ring (mirrors the loop-test seeding pattern).
-        for life in [40, 39, 38] {
-            state.players[1].life = life;
-            state.record_loop_detect_sample();
-        }
-        assert_eq!(
-            state.loop_detect_ring.len(),
-            3,
-            "reach guard: the ring is seeded before the batch"
-        );
-
-        let mut events = Vec::new();
-        let waiting = resolve_combat_damage(&mut state, &mut events).expect("event 2 pauses");
-        expect_order_prompt(&waiting, PlayerId(1), 2);
-        assert!(
-            state.loop_detect_ring.is_empty(),
-            "the pause-path observation fired: the inline 38 -> 41 gain \
-             invalidated the ring AT THE PARK"
-        );
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            record.lives_before,
-            vec![20, 38],
-            "lives_before is the PRE-BATCH snapshot, carried — never re-snapshotted"
-        );
-        assert_eq!(
-            (record.paused_entry, record.decided.len()),
-            (3, 3),
-            "APNAP order decides both P0 return strikes plus event 1 (its \
-             prevention tallied); event 2 paused"
-        );
-        assert!(
-            record
-                .phase_b_tally
-                .iter()
-                .any(|entry| { entry.recipient == TargetRef::Object(squire) && entry.amount == 3 }),
-            "the inline leg's prevention is already tallied at the pause, got {:?}",
-            record.phase_b_tally
-        );
-
-        state.waiting_for = waiting.clone();
-        answer_replacement_choice(&mut state, &mut events, 0);
-        assert_eq!(state.players[1].life, 41, "the inline gain stands");
-        assert!(state.pending_combat_damage.is_none());
-        assert!(state.loop_detect_ring.is_empty());
     }
 
     /// CR 615.13 + CR 120.3: a fully prevented PAUSED event still publishes
@@ -8259,7 +8040,7 @@ mod tests {
             "protection-keyed aggregate (recipient + amount) publishes exactly once, got {events:?}"
         );
         assert_eq!(state.players[1].life, 20);
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
 
         // Paired guard: the Inkshield inline path emits the same shape —
         // one aggregate, same recipient and amount (its own shield source).
@@ -8319,7 +8100,7 @@ mod tests {
             "the batch settles, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         let prevented: Vec<u32> = events
             .iter()
             .filter_map(|e| match e {
@@ -8360,7 +8141,7 @@ mod tests {
             "the batch settles, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(state.combat.as_ref().unwrap().regular_damage_done);
         assert_eq!(state.players[1].life, 20, "the damage was prevented");
     }
@@ -8425,7 +8206,7 @@ mod tests {
             "the CHOSEN shield's prevention publishes (provenance: the shield's \
              host, not the protection sentinel), got {events:?}"
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
     }
 
     /// CR 616.1 (R2): the pausable batch also covers non-protection
@@ -8467,7 +8248,7 @@ mod tests {
             "the chosen shield's rider fires once vs the aggregate; the other fires nothing"
         );
         assert_eq!(state.players[1].life, 20);
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
     }
 
     /// A single OPTIONAL shield in combat pauses with an accept/decline
@@ -8523,7 +8304,7 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::DamagePrevented { amount: 3, .. })),
             "accept prevents all 3, got {events:?}"
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
 
         // Decline: full damage lands.
         let (mut state, blocker) = fixture();
@@ -8547,221 +8328,7 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
             "decline prevents nothing, got {events:?}"
         );
-        assert!(state.pending_combat_damage.is_none());
-    }
-
-    /// B6 (unstashed): the paused choice's seat departs mid-pause. Elimination
-    /// retains the paused entry and SETS `paused_entry_pruned`; the guard
-    /// settle converts the paused slot to `None`, TAKING the flag — and the
-    /// batch completes instead of hanging.
-    #[test]
-    fn f1_guard_settle_unstashed_chooser_loss_completes_batch() {
-        use crate::types::format::FormatConfig;
-        use crate::types::keywords::ProtectionTarget;
-        use crate::types::mana::ManaColor;
-
-        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
-        state.turn_number = 2;
-        state.active_player = PlayerId(0);
-        let attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 3, 3);
-        paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
-        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
-        install_protection_overlap(
-            &mut state,
-            TargetRef::Object(blocker),
-            ProtectionTarget::Color(ManaColor::Red),
-            ProtectionTarget::Color(ManaColor::Green),
-        );
-        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
-
-        let mut events = Vec::new();
-        let waiting = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
-        expect_order_prompt(&waiting, PlayerId(1), 2);
-
-        // The chooser departs: pending clears, the paused entry is retained
-        // with the prune flag (its owner left with the seat).
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut events);
-        assert!(
-            state.pending_replacement.is_none(),
-            "the died seat's authority is cleared"
-        );
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (record.paused_entry, record.decided.len()),
-            (1, 1),
-            "APNAP order decides the P0 return strike first; the overlap is \
-             still unstashed after the prune"
-        );
-        assert!(
-            record.paused_entry_pruned,
-            "owner-keyed departure flags the retained paused entry"
-        );
-
-        // The guard settles (stash None, take flag) and the batch completes.
-        settle_orphaned_combat_damage_choice(&mut state);
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            record.decided.len(),
-            2,
-            "the decided return strike plus the paused slot"
-        );
-        assert!(
-            record.decided[1].is_none(),
-            "the paused choice died: stash None, got {:?}",
-            record.decided[1]
-        );
-        assert!(
-            !record.paused_entry_pruned,
-            "the settle TAKES the flag on use"
-        );
-        let settled = resolve_combat_damage(&mut state, &mut events);
-        assert!(
-            matches!(settled, Some(WaitingFor::Priority { .. }) | None),
-            "the batch completes instead of hanging, got {settled:?}"
-        );
-        assert!(state.pending_combat_damage.is_none());
-        assert!(state.combat.as_ref().unwrap().regular_damage_done);
-    }
-
-    /// B6 site 3 (N5-cross): a STOLEN creature as paused recipient — the OWNER
-    /// concedes while the CONTROLLER (the chooser) lives. The prune flags the
-    /// retained paused entry (owner-keyed: the controller's survival does not
-    /// matter); the living controller's answer then converts the paused slot
-    /// to `None`, TAKING the flag on the answer path.
-    #[test]
-    fn f1_answer_takes_prune_flag_for_departed_recipient() {
-        use crate::types::format::FormatConfig;
-        use crate::types::keywords::ProtectionTarget;
-        use crate::types::mana::ManaColor;
-
-        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
-        state.turn_number = 2;
-        state.active_player = PlayerId(0);
-        let attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 3, 3);
-        paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
-        // Stolen: owned by P1, controlled (and chosen) by the living P2.
-        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
-        state.objects.get_mut(&blocker).unwrap().controller = PlayerId(2);
-        install_protection_overlap(
-            &mut state,
-            TargetRef::Object(blocker),
-            ProtectionTarget::Color(ManaColor::Red),
-            ProtectionTarget::Color(ManaColor::Green),
-        );
-        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
-
-        let mut events = Vec::new();
-        let waiting = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
-        expect_order_prompt(&waiting, PlayerId(2), 2);
-
-        // The owner concedes: the authority SURVIVES (the chooser lives) but
-        // the paused entry flags — damage to departed recipients does nothing.
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut events);
-        assert!(
-            state.pending_replacement.is_some(),
-            "the living chooser's authority survives the owner's departure"
-        );
-        assert!(
-            state
-                .pending_combat_damage
-                .as_ref()
-                .unwrap()
-                .paused_entry_pruned,
-            "owner-keyed departure flags the retained paused entry"
-        );
-
-        // The living controller answers; the stash takes the flag (None) and
-        // the batch completes with the departed recipient taking nothing.
-        state.waiting_for = waiting.clone();
-        answer_replacement_choice(&mut state, &mut events, 0);
-        assert!(
-            matches!(state.waiting_for, WaitingFor::Priority { .. }),
-            "the batch settles, got {:?}",
-            state.waiting_for
-        );
-        assert!(state.pending_combat_damage.is_none());
-        assert!(
-            !events.iter().any(|e| matches!(
-                e,
-                GameEvent::DamageDealt { target, .. } if *target == TargetRef::Object(blocker)
-            )),
-            "the departed recipient is dealt nothing, got {events:?}"
-        );
-    }
-
-    /// B6 (stashed): the NESTED choice's seat departs mid-pause. The guard
-    /// settle drops the nested loss with NO stash — E's stash is intact
-    /// (`len == paused_entry + 1`) — and the batch completes.
-    #[test]
-    fn f1_guard_settle_stashed_nested_loss_keeps_paused_stash() {
-        use crate::types::format::FormatConfig;
-        use crate::types::keywords::ProtectionTarget;
-        use crate::types::mana::ManaColor;
-
-        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
-        state.turn_number = 2;
-        state.active_player = PlayerId(0);
-        // T4's shape: E answered (reflector) with N open is the stashed window.
-        let attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 5, 5);
-        paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
-        install_next_shield(&mut state, attacker, 2, "Ward of Embers", false);
-        install_next_shield(&mut state, attacker, 1, "Ward of Thorns", false);
-        // APNAP fixture: the blocker assigns no combat damage, so the batch
-        // holds only E — the return strike would otherwise pause first under
-        // APNAP order (its recipient is the active player's attacker, which
-        // carries the same two-shield overlap N needs).
-        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 0, 2);
-        install_protection_overlap(
-            &mut state,
-            TargetRef::Object(blocker),
-            ProtectionTarget::Color(ManaColor::Red),
-            ProtectionTarget::Color(ManaColor::Green),
-        );
-        install_comeuppance_reflector(&mut state, blocker);
-        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
-
-        let mut events = Vec::new();
-        let waiting_e = resolve_combat_damage(&mut state, &mut events).expect("E pauses the batch");
-        state.waiting_for = waiting_e.clone();
-        let reflector = candidate_index_for_source(&waiting_e, blocker);
-        answer_replacement_choice(&mut state, &mut events, reflector);
-        let waiting_n = state.waiting_for.clone();
-        expect_order_prompt(&waiting_n, PlayerId(0), 2);
-
-        // N's chooser (P0) departs: pending clears, E's stash is untouched.
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
-        assert!(
-            state.pending_replacement.is_none(),
-            "the died seat's authority is cleared"
-        );
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (record.paused_entry, record.decided.len()),
-            (0, 1),
-            "E's stash survives N's chooser departing"
-        );
-        assert_eq!(record.decided[0], None);
-
-        // The guard settle stashes NOTHING (the died choice was nested) and
-        // the batch completes.
-        settle_orphaned_combat_damage_choice(&mut state);
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            record.decided.len(),
-            1,
-            "no nested stash: decided stays exactly the paused slot"
-        );
-        let settled = resolve_combat_damage(&mut state, &mut events);
-        assert!(
-            matches!(settled, Some(WaitingFor::Priority { .. }) | None),
-            "the batch completes instead of hanging, got {settled:?}"
-        );
-        assert!(state.pending_combat_damage.is_none());
-        assert!(state.combat.as_ref().unwrap().regular_damage_done);
-        assert_eq!(
-            state.objects[&blocker].damage_marked, 0,
-            "E was prevented: the blocker takes nothing"
-        );
+        assert!(state.pending_combat_lifelink.is_none());
     }
 
     /// CR 616.1f: the SAME batch pauses twice. Two warded blockers (E1, E2):
@@ -8826,16 +8393,9 @@ mod tests {
             "E1 owns the FIRST overlap (attacker A's hit), got {:?}",
             pending.proposed
         );
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (
-                record.paused_entry,
-                record.decided.len(),
-                record.remaining.len()
-            ),
-            (2, 2, 1),
-            "APNAP order decides both P0 returns first; E1 pauses third and \
-             E2 waits in remaining"
+        assert!(
+            parked_replacement_pass(&state).is_some(),
+            "E1's overlap parks the batch's replacement pass"
         );
 
         // Answer E1: the resume hits E2's overlap and re-pauses with a FRESH
@@ -8854,20 +8414,11 @@ mod tests {
             "E2 owns the SECOND overlap — the same batch re-paused, got {:?}",
             pending.proposed
         );
-        let fresh = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (fresh.paused_entry, fresh.decided.len()),
-            (3, 3),
-            "the fresh park re-arms the stash gate (decided.len() == paused_entry)"
-        );
-        assert_eq!(
-            fresh.decided[2], None,
-            "E1's prevention stash carries into the fresh record"
-        );
-        assert!(
-            !fresh.paused_entry_pruned,
-            "a fresh park never inherits a stale prune flag (B6 site 3)"
-        );
+        let fresh = state
+            .pending_combat_lifelink
+            .as_ref()
+            .expect("the same batch re-parks on E2");
+        assert!(fresh.replacement.is_some(), "E2 parks the replacement pass");
         assert!(
             !fresh
                 .batch_events
@@ -8885,7 +8436,7 @@ mod tests {
             "the batch settles after E2, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(state.pending_replacement.is_none());
         assert!(state.combat.as_ref().unwrap().regular_damage_done);
         let prevented: Vec<(TargetRef, u32)> = events
@@ -8967,12 +8518,9 @@ mod tests {
             "the repeat owns the SAME event (not a nested child), got {:?}",
             pending.proposed
         );
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (record.paused_entry, record.decided.len()),
-            (1, 1),
-            "APNAP order decides the P0 return strike first; no stash on the \
-             repeat path: the paused slot settles exactly once"
+        assert!(
+            parked_replacement_pass(&state).is_some(),
+            "the repeat keeps the batch parked"
         );
 
         // Second answer: the event settles and the one batch completes.
@@ -8983,7 +8531,7 @@ mod tests {
             "the batch settles after the repeat, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         assert!(state.pending_replacement.is_none());
         assert!(state.combat.as_ref().unwrap().regular_damage_done);
         assert_eq!(
@@ -9058,25 +8606,21 @@ mod tests {
         let mut events = Vec::new();
         let waiting = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
         expect_order_prompt(&waiting, PlayerId(1), 2);
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            (record.paused_entry, record.decided.len()),
-            (3, 3),
-            "APNAP order decides both P0 returns plus the singly-protected \
-             hit (entry 2, decided inline); the overlap pauses last"
-        );
-        assert_eq!(
-            record.phase_a_tally.len(),
-            0,
-            "reach guard: the gate claims nothing, so the merge's Phase-A leg is empty"
+        let record = state
+            .pending_combat_lifelink
+            .as_ref()
+            .expect("the overlap parks the batch");
+        assert!(
+            record.replacement.is_some(),
+            "the replacement pass is parked"
         );
         assert!(
             record
-                .phase_b_tally
+                .prevention_tally
                 .iter()
                 .any(|entry| entry.recipient == TargetRef::Object(guarded) && entry.amount == 3),
-            "reach guard: the singly-protected hit is tallied in the Phase-B prefix at the pause, got {:?}",
-            record.phase_b_tally
+            "reach guard: the singly-protected hit is tallied in the parked prefix, got {:?}",
+            record.prevention_tally
         );
 
         state.waiting_for = waiting.clone();
@@ -9086,7 +8630,7 @@ mod tests {
             "the batch settles, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
+        assert!(state.pending_combat_lifelink.is_none());
         let prevented: Vec<(TargetRef, u32)> = events
             .iter()
             .filter_map(|e| match e {
@@ -9189,8 +8733,8 @@ mod tests {
             pending.proposed
         );
         assert!(
-            state.pending_combat_damage.is_none(),
-            "the damage record is consumed by its resume"
+            parked_replacement_pass(&state).is_none(),
+            "the replacement pass is consumed by its resume"
         );
         assert!(
             state.pending_combat_lifelink.is_some(),
@@ -9205,7 +8749,6 @@ mod tests {
             "the batch settles after the gain, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_combat_damage.is_none());
         assert!(
             state.pending_combat_lifelink.is_none(),
             "the lifelink record drains on completion"
@@ -9236,109 +8779,6 @@ mod tests {
                     if *target == TargetRef::Object(blocker))
             ),
             "the overlap's prevention still publishes, got {events:?}"
-        );
-    }
-
-    /// CR 510.2 + CR 615.13: the pre-batch outer window survives a mid-pause
-    /// save/load. The live window is `#[serde(skip)]`, so the round trip drops
-    /// it — but the park captured it in `record.outer_tally`, and the
-    /// wrapper/resume installs prefer the parked copy when the live window is
-    /// gone. The batch still completes with its own aggregate published once
-    /// (never merged into the outer window).
-    ///
-    /// REVERT PROBE: install the live window alone (drop the `or_else`) → the
-    /// restored-outer assertion fails (the load silently downgrades `Some` to
-    /// `None`, flipping accumulate-vs-emit for later prevention).
-    #[test]
-    fn f1_outer_tally_restored_after_mid_pause_save_load() {
-        use crate::types::keywords::ProtectionTarget;
-        use crate::types::mana::ManaColor;
-        use crate::types::proposed_event::AppliedReplacementKey;
-
-        let mut state = setup();
-        let attacker = create_creature(&mut state, PlayerId(0), "RG Attacker", 3, 3);
-        paint(&mut state, attacker, vec![ManaColor::Red, ManaColor::Green]);
-        let blocker = create_creature(&mut state, PlayerId(1), "Warded Bear", 2, 2);
-        install_protection_overlap(
-            &mut state,
-            TargetRef::Object(blocker),
-            ProtectionTarget::Color(ManaColor::Red),
-            ProtectionTarget::Color(ManaColor::Green),
-        );
-        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
-
-        // Seed a pre-batch outer window (an outer simultaneity's accumulation).
-        let outer_key = (
-            AppliedReplacementKey::Object {
-                source: attacker,
-                index: 0,
-            },
-            TargetRef::Player(PlayerId(0)),
-        );
-        let mut outer_window = std::collections::HashMap::new();
-        outer_window.insert(outer_key, 7);
-        state.combat_prevention_tally = Some(outer_window.clone());
-
-        // The overlap parks, capturing the outer window on the record.
-        let mut events = Vec::new();
-        let waiting = resolve_combat_damage(&mut state, &mut events).expect("the overlap pauses");
-        expect_order_prompt(&waiting, PlayerId(1), 2);
-        let record = state.pending_combat_damage.as_ref().unwrap();
-        assert_eq!(
-            record.outer_tally.as_ref().map(|entries| entries.len()),
-            Some(1),
-            "reach guard: the park captures the pre-batch window, got {:?}",
-            record.outer_tally
-        );
-        assert_eq!(
-            state.combat_prevention_tally.as_ref(),
-            Some(&outer_window),
-            "reach guard: the live window still holds the outer at the park"
-        );
-
-        // Mid-pause save/load: the live window drops (serde skip); the record
-        // — outer tally included — survives.
-        let json = serde_json::to_string(&state).expect("mid-pause state serializes");
-        let mut loaded: GameState = serde_json::from_str(&json).expect("mid-pause state reloads");
-        assert!(
-            loaded.combat_prevention_tally.is_none(),
-            "the hole: the live window does not survive the round trip"
-        );
-        assert_eq!(
-            loaded.pending_combat_damage.as_ref().unwrap().outer_tally,
-            record.outer_tally,
-            "the parked outer tally survives the round trip"
-        );
-
-        // Answer on the reloaded state: the batch completes AND the outer
-        // window is restored exactly (not merged, not dropped).
-        loaded.waiting_for = waiting.clone();
-        let mut loaded_events = Vec::new();
-        answer_replacement_choice(&mut loaded, &mut loaded_events, 0);
-        assert!(
-            matches!(loaded.waiting_for, WaitingFor::Priority { .. }),
-            "the reloaded batch settles, got {:?}",
-            loaded.waiting_for
-        );
-        assert!(loaded.pending_combat_damage.is_none());
-        assert_eq!(
-            loaded.combat_prevention_tally.as_ref(),
-            Some(&outer_window),
-            "the pre-batch outer window is restored on completion"
-        );
-        let prevented: Vec<(TargetRef, u32)> = loaded_events
-            .iter()
-            .filter_map(|e| match e {
-                GameEvent::DamagePrevented { target, amount, .. } => {
-                    Some((target.clone(), *amount))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            prevented,
-            vec![(TargetRef::Object(blocker), 3)],
-            "the batch publishes its own aggregate once — never merged into the outer, got {loaded_events:?}"
         );
     }
 }

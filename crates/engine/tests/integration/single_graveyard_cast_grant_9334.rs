@@ -722,7 +722,11 @@ fn whispersteel_concession_prices_an_additional_cost_choice() {
     .expect("Bayou Groff's additional cost");
     assert!(matches!(
         &groff_cost,
-        AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })
+        AdditionalCost::Choice(costs)
+            if matches!(
+                costs.as_slice(),
+                [AbilityCost::Sacrifice(_), AbilityCost::Mana { .. }]
+            )
     ));
     let groff_mana = ManaCost::Cost {
         shards: vec![ManaCostShard::Green],
@@ -774,7 +778,7 @@ fn whispersteel_concession_prices_an_additional_cost_choice() {
     );
     // CR 601.2b: declining the preferred sacrifice picks "pay {3}".
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("red mana pays {1}{G} plus {3} under the concession");
     assert_eq!(runner.state().objects[&theirs].zone, Zone::Stack);
     assert_eq!(

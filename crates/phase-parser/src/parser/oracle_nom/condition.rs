@@ -1859,6 +1859,10 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::HasMaxSpeed,
             alt((tag("you have max speed"), tag("have max speed"))),
         ),
+        // CR 122.1f + CR 109.5: "player is poisoned" — parse the subject scope
+        // and the "is poisoned" predicate. Mirrors the monarch identity subject
+        // pattern: subject × predicate, not enumerated phrases.
+        parse_player_poisoned_condition,
         map(
             (opt(tag("you ")), parse_dont, tag(" have max speed")),
             |_| StaticCondition::Not {
@@ -1948,6 +1952,38 @@ fn parse_speed_threshold_condition(input: &str) -> OracleResult<'_, StaticCondit
             })?,
         },
     ))
+}
+
+/// CR 122.1f + CR 109.5: "player is poisoned" — parse the subject scope and
+/// the "is poisoned" predicate. The subject axis decomposes into:
+/// - "you are"/"you're" -> Controller
+/// - "an opponent is" -> Opponent (existential: at least one opponent)
+/// - "that player is"/"that opponent is" -> ScopedPlayer (anaphor)
+/// - "defending player is" -> DefendingPlayer (CR 508.5)
+///
+/// The predicate is always "is poisoned" (or "are poisoned" for "you").
+/// Mirrors `parse_monarch_identity_subject` pattern.
+fn parse_player_poisoned_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, player) = alt((
+        value(
+            PlayerScope::Controller,
+            alt((recognize((parse_you_are, tag(" "))), tag("you "))),
+        ),
+        value(
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+            tag("an opponent "),
+        ),
+        value(
+            PlayerScope::ScopedPlayer,
+            alt((tag("that player "), tag("that opponent "))),
+        ),
+        value(PlayerScope::DefendingPlayer, tag("defending player ")),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((tag("are poisoned"), tag("is poisoned"))).parse(rest)?;
+    Ok((rest, StaticCondition::PlayerIsPoisoned { player }))
 }
 
 fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -3178,6 +3214,9 @@ fn parse_strict_n_counters(input: &str) -> OracleResult<'_, (u32, Option<u32>)> 
 /// Fails if the input does not contain `" counter"` before end of string,
 /// or if the token slice is empty (that case is the caller's `Any` branch).
 fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
+    // CR 122.1: "[different] kinds of counters on ~" quantifies over counter
+    // kinds; it names none, so it must not become `Generic("kinds of")`.
+    let (input, _) = super::primitives::not_counter_kind_quantifier(input)?;
     let (rest_after_noun, type_slice) = take_until(" counter").parse(input)?;
     if type_slice.is_empty() {
         // Fail so the caller's `Any` branch (bare "counter[s]") can try.
@@ -4884,6 +4923,7 @@ fn typed_slot_type_axis_matches(
         | TargetFilter::Neighbor { .. }
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::DeclaredPlayer { .. }
@@ -10490,6 +10530,28 @@ fn parse_no_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
     ))
 }
 
+/// CR 103.2a + CR 702.139b: "N or more cards in your starting deck" —
+/// Whtz, the Bibliophile's activation discount ("...if you had 200 or more
+/// cards in your starting deck"). Reads the `Player::starting_deck_size`
+/// latch (library + command-zone decklist cards, single-counted at load),
+/// never the live library. Only the "your" possessive binds
+/// (`PlayerScope::Controller`); any other possessive fails loud so a
+/// mistargeted count can never silently gate a discount. The caller strips the
+/// past-tense "you had " auxiliary.
+fn parse_you_had_starting_deck_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_number(input)?;
+    let (rest, _) = tag(" or more cards in your starting deck").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            },
+            n,
+        ),
+    ))
+}
+
 /// Parse "[N or more / a / an] [type] entered the battlefield under your control this turn".
 ///
 /// Unifies the count variant ("two or more creatures entered...") and the singular
@@ -10499,6 +10561,14 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let had_enter_suffix = "enter the battlefield under your control this turn";
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you had ").parse(input) {
+        // CR 103.2a: "you had N or more cards in your starting deck" (Whtz,
+        // the Bibliophile's activation discount) — the latched
+        // `Player::starting_deck_size` snapshot, not an ETB count. Tried
+        // before the entered-count shapes so the "200 or more cards" numeral
+        // cannot be misread as an entering-permanents threshold.
+        if let Ok((rest, condition)) = parse_you_had_starting_deck_count(rest) {
+            return Ok((rest, condition));
+        }
         // "you had N or more [type] enter ..." (counted threshold, GE) — the
         // "you had" auxiliary reads the present-tense "enter" surface. Falls
         // back to the singular "you had a/an/another [type] enter ..." form.
@@ -12895,6 +12965,7 @@ pub fn parse_you_put_counters_on_type_this_way_condition(
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
                     caused_by: None,
+                    destination: None,
                 },
             },
             comparator: Comparator::GE,
@@ -13167,7 +13238,7 @@ pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, CountScope, PtStat, PtValueScope, RoundingMode,
+        CardTypeSetSource, ControllerRef, CountScope, Effect, PtStat, PtValueScope, RoundingMode,
         TargetFilter, TriggerCondition, TypeFilter, TypedFilter, UnlessPayScaling, ZoneRef,
     };
     use crate::types::card_type::Supertype;
@@ -15564,6 +15635,43 @@ mod tests {
         );
     }
 
+    /// CR 122.1: the counter-has condition family never reads the counter-kind
+    /// quantifier ("[different] kind(s) of") as a counter NAME — no counter is
+    /// named "kind". A kinds census on a single object has no condition arm, so
+    /// it fails closed instead of becoming `HasCounters` over a counter named
+    /// "kinds of".
+    #[test]
+    fn counter_has_condition_never_names_a_kind_of_counter() {
+        // Reach guards: both surface forms still read a named counter.
+        for (text, minimum) in [
+            ("there are two or more ki counters on ~", 2),
+            ("~ has a ki counter on it", 1),
+        ] {
+            assert_eq!(
+                parse_inner_condition(text),
+                Ok((
+                    "",
+                    StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Generic("ki".into())),
+                        minimum,
+                        maximum: None,
+                    }
+                )),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "there are three or more different kinds of counters on ~",
+            "there are two or more kinds of counters on ~",
+            "there are three or more kinds of counters on it",
+            "~ has a kind of counter on it",
+            "~ has two or more kinds of counters on it",
+        ] {
+            let parsed = parse_inner_condition(text);
+            assert!(parsed.is_err(), "{text:?} must fail closed, got {parsed:?}");
+        }
+    }
+
     /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white
     /// or blue creature" must parse to a negated opponent presence (not the
     /// `Unrecognized` fallthrough it used to).
@@ -16922,6 +17030,128 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 200 },
             } if card_types.is_empty()
         ));
+    }
+
+    #[test]
+    fn whtz_had_starting_deck_count_parses_to_latched_count_ge() {
+        // CR 103.2a: Whtz, the Bibliophile's activation discount — "if you
+        // had 200 or more cards in your starting deck" reads the latched
+        // `Player::starting_deck_size` snapshot, never the live library.
+        // The revert (loud `None`) would leave the discount unconditional.
+        assert_eq!(
+            crate::parser::oracle_condition::parse_restriction_condition(
+                "you had 200 or more cards in your starting deck"
+            ),
+            Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::StartingDeckSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 200 },
+            })
+        );
+    }
+
+    #[test]
+    fn removed_library_vs_starting_deck_comparative_fails_loud() {
+        // CR 103.2a: the removed "you have more cards in your <zone> than
+        // your starting deck" arm parsed nothing in the corpus — no printed
+        // card uses that wording (Nylea's Oracle prints the existential
+        // "there are" shape, which never routed here). Both zone variants
+        // must fail loud rather than bind the latch. Reach-guard: the kept
+        // `whtz_had_starting_deck_count_parses_to_latched_count_ge` test
+        // stays green in the same run, proving the failure is the deletion
+        // and not a broken condition pipeline.
+        assert!(
+            parse_inner_condition("you have more cards in your library than your starting deck")
+                .is_err(),
+            "removed library comparative must fail loud, never bind the latch"
+        );
+        assert!(
+            parse_inner_condition("you have more cards in your graveyard than your starting deck")
+                .is_err(),
+            "graveyard comparative must not bind the starting-deck latch"
+        );
+    }
+
+    #[test]
+    fn nylea_there_are_comparative_binds_no_latch_comparison() {
+        // CR 103.2a (F2 parity): Nylea's Oracle prints the existential
+        // "there are more cards in your library than your starting deck"
+        // shape, which never routed through the removed `you have …` arm —
+        // base output (measured before the deletion) carries the honest
+        // conjure gap and no latch comparison. Deleting the arm must leave
+        // this output identical.
+        let text = "When this creature enters, conjure X cards named Nylea's Oracle into your library, where X is your devotion to green, then shuffle. Then if there are more cards in your library than your starting deck, creatures you control get +X/+X and gain haste until end of turn.";
+        let result = crate::parser::parse_oracle_text(
+            text,
+            "Nylea's Oracle",
+            &[],
+            &["Creature".to_string()],
+            &["God".to_string()],
+        );
+        assert!(
+            result.parse_warnings.is_empty(),
+            "base output carries no warnings, got: {:?}",
+            result.parse_warnings
+        );
+        assert_eq!(
+            result.triggers.len(),
+            1,
+            "one ETB trigger, no extra trigger from the comparative"
+        );
+        let trigger = &result.triggers[0];
+        assert!(
+            trigger.condition.is_none(),
+            "the trigger carries no intervening-if condition"
+        );
+        // Walk the execute chain (conjure gap → shuffle → +X/+X grant):
+        // the "then if" binds no condition on any link.
+        let mut next = trigger.execute.as_deref();
+        let mut saw_gap = false;
+        while let Some(ability) = next {
+            assert!(
+                ability.condition.is_none(),
+                "no chain link may carry the comparative as a condition"
+            );
+            if matches!(&*ability.effect, Effect::Unimplemented { .. }) {
+                saw_gap = true;
+            }
+            next = ability.sub_ability.as_deref();
+        }
+        assert!(
+            saw_gap,
+            "the conjure gap must be present as the honest marker — \
+             without it the no-comparison assertions pass on a fully parsed card"
+        );
+        let debug = format!("{:?}", result.triggers);
+        assert!(
+            // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
+            !debug.contains("StartingDeckSize"),
+            "no latch comparison may bind out of the there-are sentence"
+        );
+        assert!(
+            // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
+            !debug.contains("ZoneCardCount"),
+            "no live zone count may bind out of the there-are sentence"
+        );
+    }
+
+    #[test]
+    fn present_tense_have_starting_deck_stays_a_loud_gap() {
+        // Coverage honesty: the latch is past-tense ("had") by rule — a
+        // present-tense "you have 200 or more cards in your starting deck"
+        // has no live-library reading that preserves the snapshot semantics,
+        // so it must fail loud (`None`) rather than bind `ZoneCardCount`.
+        assert_eq!(
+            crate::parser::oracle_condition::parse_restriction_condition(
+                "you have 200 or more cards in your starting deck"
+            ),
+            None,
+            "present-tense starting-deck count must stay a loud gap"
+        );
     }
 
     #[test]

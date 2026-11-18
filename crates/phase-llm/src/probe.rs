@@ -10,8 +10,8 @@
 
 use crate::error::LlmResult;
 use crate::prompt::{decode_choice, DecisionFrame, LlmPrompt};
-use crate::provider::{LlmProvider, WireProtocol};
-use crate::wire::completion_from_response;
+use crate::provider::{HttpRequestSpec, LlmEndpointConfig, LlmProvider, WireProtocol};
+use crate::wire::{build_chat_request, build_thread_request, completion_from_response, ThreadTurn};
 
 /// The option count a chat probe offers. One option means a working model has
 /// exactly one legal answer, so a decode failure is a real signal about the
@@ -43,6 +43,28 @@ pub fn connection_probe_prompt() -> LlmPrompt {
             options: vec!["Pass priority".to_string(), "Take no action".to_string()],
         },
     }
+}
+
+/// The probe request for `config`: the [`connection_probe_prompt`] in the
+/// shape the endpoint's game decisions use.
+///
+/// For a profile that keeps its seats on Anthropic message threads, that is a
+/// thread create (the `thread` field, the beta header and the top-level
+/// `cache_control`), the first request of every seat that uses a thread (Medium
+/// difficulty and above), so a probe that passes proves a proxy or gateway in
+/// front of the API accepts them too. The thread it creates is never continued, and
+/// the API drops it after five idle minutes. Every other profile is probed with
+/// exactly the request [`build_chat_request`] builds.
+///
+/// # Errors
+///
+/// Whatever the request builder refuses, as [`LlmError`](crate::LlmError).
+pub fn build_probe_request(config: &LlmEndpointConfig) -> LlmResult<HttpRequestSpec> {
+    let prompt = connection_probe_prompt();
+    if config.uses_message_threads() {
+        return build_thread_request(config, ThreadTurn::Create { prompt: &prompt });
+    }
+    build_chat_request(config, &prompt)
 }
 
 /// Validate a probe response exactly as a game decision would be validated.
@@ -149,5 +171,83 @@ mod tests {
         let prompt = connection_probe_prompt();
         assert!(prompt.user.contains("[0]"));
         assert!(!prompt.user.contains("[1]"));
+    }
+
+    // ── The request a probe sends ────────────────────────────────────────
+
+    fn probed(provider: LlmProvider, context: crate::provider::DecisionContext) -> HttpRequestSpec {
+        build_probe_request(&LlmEndpointConfig {
+            provider,
+            base_url: None,
+            api_key: "key".to_string(),
+            model: "model-x".to_string(),
+            max_output_tokens: None,
+            temperature: None,
+            decision_context: context,
+        })
+        .unwrap()
+    }
+
+    fn body(spec: &HttpRequestSpec) -> serde_json::Value {
+        serde_json::from_str(&spec.body).unwrap()
+    }
+
+    /// A profile on message threads is probed with the shape its first game
+    /// decision sends, so a gateway that rejects the thread field or the beta
+    /// fails the probe instead of every decision of the game.
+    #[test]
+    fn a_threaded_profile_is_probed_with_a_thread_create() {
+        use crate::provider::DecisionContext;
+        let spec = probed(LlmProvider::Anthropic, DecisionContext::MessageThread);
+        assert_eq!(
+            body(&spec)["thread"],
+            serde_json::json!({ "type": "create" })
+        );
+        assert_eq!(
+            body(&spec)["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert!(spec
+            .headers
+            .iter()
+            .any(|header| header.name == "anthropic-beta"));
+    }
+
+    #[test]
+    fn every_other_profile_is_probed_with_todays_request() {
+        use crate::provider::DecisionContext;
+        for (provider, context) in [
+            (LlmProvider::Anthropic, DecisionContext::SelfContained),
+            (LlmProvider::OpenAi, DecisionContext::MessageThread),
+            (LlmProvider::Gemini, DecisionContext::MessageThread),
+        ] {
+            let config = LlmEndpointConfig {
+                provider,
+                base_url: None,
+                api_key: "key".to_string(),
+                model: "model-x".to_string(),
+                max_output_tokens: None,
+                temperature: None,
+                decision_context: context,
+            };
+            assert_eq!(
+                build_probe_request(&config).unwrap(),
+                build_chat_request(&config, &connection_probe_prompt()).unwrap(),
+                "{provider:?} under {context:?}"
+            );
+        }
+    }
+
+    /// An organization that cannot use threads fails the probe with the
+    /// thread error, which names the cause, rather than with a decode failure.
+    #[test]
+    fn a_refused_thread_fails_the_probe_with_the_thread_error() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"no","details":{"error_code":"thread_unsupported_request"}}}"#;
+        assert_eq!(
+            validate_probe_response(LlmProvider::Anthropic, 400, body),
+            Err(LlmError::ThreadUnavailable {
+                code: crate::error::ThreadErrorCode::UnsupportedRequest
+            })
+        );
     }
 }

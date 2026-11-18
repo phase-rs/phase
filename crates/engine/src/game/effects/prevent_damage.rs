@@ -1718,16 +1718,23 @@ mod tests {
             source_incarnation: None,
             applied: std::collections::HashSet::new(),
         };
-        let crate::game::replacement::CombatDamageReplacementOutcome::Complete { survivors, tally } =
-            crate::game::replacement::replace_combat_damage_batch(
-                &mut state,
-                &mut events,
-                vec![proposed],
-            )
-        else {
-            panic!("a single Prevention::All shield is one candidate: no CR 616.1 pause is possible here");
-        };
-        assert_eq!(survivors, vec![None], "all 3 combat damage prevented");
+        let mut pass = crate::game::replacement::CombatDamageReplacementPass::new([proposed]);
+        let outcome = crate::game::replacement::replace_combat_damage_batch(
+            &mut state,
+            &mut events,
+            &mut pass,
+            None,
+        );
+        assert!(matches!(
+            outcome,
+            crate::game::replacement::CombatDamageReplacementOutcome::Complete
+        ));
+        let tally = pass.tally;
+        assert_eq!(
+            crate::game::replacement::settled_survivors(pass.resolved),
+            vec![None],
+            "all 3 combat damage prevented"
+        );
         // CR 615.7: the shield aggregated 3 prevented damage.
         let total: i32 = tally.values().sum();
         assert_eq!(total, 3);

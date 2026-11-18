@@ -395,7 +395,6 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: ZoneDeliveryExileTracking::None,
@@ -405,7 +404,6 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         may_cost_remaining: None,
         delivery_boundary: None,
         each_source_batch_owner: None,
-        combat_pause_slot: None,
         unrepresentable_life_change: Default::default(),
     });
     let parked = engine::game::replacement::replacement_choice_waiting_for(P0, runner.state());

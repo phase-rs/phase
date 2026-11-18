@@ -25,7 +25,7 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
-use super::oracle_ir::context::{ParseContext, PlayerAntecedents};
+use super::oracle_ir::context::{ParseContext, PlayerAntecedents, TriggerConditionObjects};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
     inject_controller_you, parse_life_total_comparator, parse_spell_history_filter,
@@ -35,7 +35,8 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
-use crate::parser::oracle_effect::parse_controls_permanent_object;
+use crate::parser::oracle_effect::{parse_controls_permanent_object, resolve_it_pronoun};
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 use crate::parser::oracle_target::{
     parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
 };
@@ -115,7 +116,42 @@ fn parse_counter_quantity_type(raw: &str) -> Option<Option<CounterType>> {
         return saw_quantity_lead_in.then_some(None);
     }
 
+    // CR 122.1: "[different] kind(s) of counter(s) on …" is a counter-kind
+    // census, not a count of a counter named "kind of". Declined here so the
+    // suffix-split callers fail closed instead of manufacturing that name.
+    if names_counter_kind_quantifier(&counter_text.to_lowercase()) {
+        return None;
+    }
+
     Some(Some(normalize_counter_type(counter_text)))
+}
+
+/// CR 122.1: Whether a counter-name slice carries the counter-kind quantifier
+/// ("kind of" / "kinds of") at any word boundary. No counter is named with it,
+/// and the slice reaching the legacy funnel may still carry lead-in words the
+/// strip loop above does not know, so the quantifier is scanned for at every
+/// word boundary rather than only at the start. Lowercase input.
+///
+/// Also the decline guard of the open-ended object-count fallbacks (the
+/// cost-modification "for each <type phrase>" reader): a counter-kind census
+/// those fallbacks reach is one the census readers declined, never a type
+/// phrase.
+pub(crate) fn names_counter_kind_quantifier(lower: &str) -> bool {
+    let mut remaining = lower;
+    loop {
+        if nom_primitives::not_counter_kind_quantifier(remaining).is_err() {
+            return true;
+        }
+        match preceded(
+            take_till1(|c: char| c == ' '),
+            tag::<_, _, OracleError<'_>>(" "),
+        )
+        .parse(remaining)
+        {
+            Ok((rest, _)) => remaining = rest,
+            Err(_) => return false,
+        }
+    }
 }
 
 /// CR 119.1 + CR 102.1: "the {highest|lowest} life total among {all players|
@@ -252,39 +288,26 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
-    // "the number of [counter type] counters on [filter]" — total counters across
-    // all matching objects, distinct from object count.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(trimmed) {
-        for suffix in [
-            " counters on ",
-            " counter on ",
-            " counters among ",
-            " counter among ",
-        ] {
-            let Ok((after_suffix, counter_text)) =
-                take_until::<_, _, OracleError<'_>>(suffix).parse(rest)
-            else {
-                continue;
-            };
-            let Ok((after_filter, _)) = tag::<_, _, OracleError<'_>>(suffix).parse(after_suffix)
-            else {
-                continue;
-            };
-            let counter_text = counter_text.trim();
-            if counter_text.is_empty() {
-                continue;
-            }
-            let counter_type = normalize_counter_type(counter_text);
-            let (filter, remainder) = parse_type_phrase_folding_with_ctx(after_filter, ctx);
-            if remainder.trim().is_empty()
-                && !matches!(filter, TargetFilter::Any)
-                && !is_empty_typed_filter(&filter)
-            {
-                return Some(QuantityRef::CountersOnObjects {
-                    counter_type: Some(counter_type),
-                    filter,
-                });
-            }
+    // CR 109.5 + CR 122.1: the context-aware entry for anaphoric populations;
+    // grammar lives in parse_counters_on_population. The caller's context is
+    // carried (subject, trigger, declared players, chain-bound qualifiers).
+    // The shared controller binder selects the referent of "they control" /
+    // "that player controls"; an optional actor is not an antecedent.
+    // The read runs on a tentative clone committed back only on
+    // success (the `ChosenColorQualifierScope` merge-back rule), so a pending
+    // printed-colour choice it records reaches the chain.
+    if let Ok((population, _)) = alt((
+        tag::<_, _, OracleError<'_>>("the total number of "),
+        tag("the number of "),
+    ))
+    .parse(trimmed)
+    {
+        let mut population_ctx = ctx.clone();
+        if let Ok(("", qty)) =
+            nom_quantity::parse_counters_on_population_with_ctx(population, &mut population_ctx)
+        {
+            *ctx = population_ctx;
+            return Some(qty);
         }
     }
 
@@ -550,6 +573,8 @@ pub(crate) fn parse_quantity_ref_with_context(
                     // Count context ("for each opponent dealt …") has no
                     // "N or more distinct sources" restriction — default 1.
                     min_sources: 1,
+                    // This grammar names an opponent explicitly — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             });
         }
@@ -664,6 +689,11 @@ pub(crate) fn parse_quantity_ref_with_context(
             // trim() matches the sibling completeness checks (470/482/489/527) and
             // tolerates trailing whitespace.
             if rest_after.trim().is_empty() {
+                // Counter populations already used the caller-aware census above.
+                // A context-free retry must not invent a controller after it declined.
+                if matches!(&qty, QuantityRef::CountersOnObjects { .. }) {
+                    return None;
+                }
                 return Some(canonicalize_quantity_ref(qty));
             }
         }
@@ -2092,22 +2122,21 @@ pub(crate) fn parse_event_context_quantity_with_context(
         return Some(expr);
     }
 
+    // CR 706.2: "the result" of a coin flip / die roll — the result amount
+    // is exposed via the same EventContextAmount channel that "that much" /
+    // "that many" use (Adorable Kitten "You gain life equal to the result"
+    // after roll-a-die). Both compile to the same runtime resolver. The whole
+    // phrase only: a remainder falls through to the `Offset` arms.
+    if let Ok(("", qty)) = nom_quantity::parse_die_result_ref(lower) {
+        return Some(QuantityExpr::Ref { qty });
+    }
+
     match lower {
         // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
         "that much" | "that many" | "that many cards" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             })
-        }
-        // CR 706.2: "the result" of a coin flip / die roll — the result amount
-        // is exposed via the same EventContextAmount channel that "that much" /
-        // "that many" use (Adorable Kitten "You gain life equal to the result"
-        // after roll-a-die). Both compile to the same runtime resolver.
-        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
-        "the result" => {
-            return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            });
         }
         // CR 608.2k: bare anaphoric "its" — referent bound at parse time by the
         // enclosing clause's subject/target. Emits `Anaphoric` so context
@@ -2633,9 +2662,15 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     )))
     .parse(rest)
     .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("returned"),
-        tag::<_, _, OracleError<'_>>("put into a graveyard"),
+    // CR 614.6: "put into a graveyard" names the destination the member must
+    // have actually reached; "returned" prints for both bounce destinations and
+    // so names none.
+    let (rest, destination) = alt((
+        value(None, tag::<_, _, OracleError<'_>>("returned")),
+        map(
+            preceded(tag("put into "), parse_graveyard_destination_phrase),
+            Some,
+        ),
     ))
     .parse(rest)
     .ok()?;
@@ -2646,6 +2681,7 @@ fn parse_filtered_landing_zone_this_way(lower: &str) -> Option<QuantityRef> {
     Some(QuantityRef::FilteredTrackedSetSize {
         filter: Box::new(filter),
         caused_by: None,
+        destination,
     })
 }
 
@@ -2655,6 +2691,7 @@ fn parse_control_gained_this_way(input: &str) -> OracleResult<'_, QuantityRef> {
         QuantityRef::FilteredTrackedSetSize {
             filter: Box::new(TargetFilter::Any),
             caused_by: Some(ThisWayCause::ControlGained),
+            destination: None,
         },
         (
             tag("one "),
@@ -2679,6 +2716,7 @@ fn parse_filtered_revealed_this_way(lower: &str) -> Option<QuantityRef> {
                 return Some(QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
                     caused_by: None,
+                    destination: None,
                 });
             }
             return Some(QuantityRef::TrackedSetSize);
@@ -2693,6 +2731,7 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
             Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(filter),
                 caused_by: Some(cause),
+                destination: None,
             })
         }
         _ => None,
@@ -2705,6 +2744,7 @@ fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<Quanti
             Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(filter),
                 caused_by: Some(cause),
+                destination: None,
             })
         }
         // CR 608.2c: a bare "<verb> this way" with no restricting filter counts
@@ -2739,8 +2779,15 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
 /// CR 611.3a: The provenance-preserving entry, for the one caller that CAN bind
 /// the anaphor — `oracle_static`, whose `lower_static_ir` knows the affected set
 /// and so knows whether "it" names the source or each affected object.
-pub(crate) fn parse_for_each_clause_expr_deferred(clause: &str) -> Option<QuantityExpr> {
-    parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause_deferred)
+/// `subject_number` is the static subject's verb-agreement number (see
+/// `parse_for_each_clause_deferred`).
+pub(crate) fn parse_for_each_clause_expr_deferred(
+    clause: &str,
+    subject_number: Option<AnaphorNumber>,
+) -> Option<QuantityExpr> {
+    parse_for_each_clause_expr_with_parser(clause, move |segment| {
+        parse_for_each_clause_deferred(segment, subject_number)
+    })
 }
 
 /// "Other spell(s) cast this turn" (Storm Entity class): all spells cast this
@@ -3083,8 +3130,9 @@ fn parse_drew_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleErr
 /// Rejecting lets the clause fall through to the existing `TrackedSetSize`
 /// fallback, i.e. exactly today's behaviour, keeping the gap visible.
 fn parse_this_way_filter_and_cause(lower: &str) -> Option<(TargetFilter, Option<ThisWayCause>)> {
-    if let Some(QuantityRef::FilteredTrackedSetSize { filter, caused_by }) =
-        parse_filtered_landing_zone_this_way(lower)
+    if let Some(QuantityRef::FilteredTrackedSetSize {
+        filter, caused_by, ..
+    }) = parse_filtered_landing_zone_this_way(lower)
     {
         return Some((*filter, caused_by));
     }
@@ -3234,7 +3282,11 @@ fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
 /// The trailing "s" of "counters" is left to the caller's shared `opt(tag("s"))`
 /// so every characteristic arm pluralizes through one place.
 fn parse_counter_kind_noun(input: &str) -> OracleResult<'_, &str> {
-    recognize((tag("kind"), opt(tag("s")), tag(" of counter"))).parse(input)
+    recognize((
+        nom_primitives::parse_counter_kind_quantifier,
+        tag(" counter"),
+    ))
+    .parse(input)
 }
 
 /// CR 105.1 + CR 205.2 + CR 205.3 + CR 122.1: the distinct-characteristic
@@ -3405,54 +3457,120 @@ fn parse_spell_history_clause(
     None
 }
 
+/// CR 614.6 + CR 400.3: the graveyard phrase of a "put into <graveyard> this
+/// way" destination — "a graveyard", a possessive singular ("your", "their",
+/// "its owner's", "that player's", …) or the plural owners' form. Every
+/// spelling names the graveyard zone; whose graveyard is fixed by the cards'
+/// owners (CR 400.3), so the possessive carries no extra restriction.
+/// Shared by every "put into <graveyard> this way" consumer.
+pub(crate) fn parse_graveyard_destination_phrase(input: &str) -> OracleResult<'_, Zone> {
+    value(
+        Zone::Graveyard,
+        alt((
+            preceded(
+                alt((
+                    tag("a "),
+                    tag("your "),
+                    tag("their "),
+                    tag("its owner's "),
+                    tag("their owner's "),
+                    tag("that player's "),
+                    tag("target player's "),
+                    tag("an opponent's "),
+                    tag("each player's "),
+                )),
+                tag("graveyard"),
+            ),
+            tag("their owners' graveyards"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c + CR 614.6: the "<verb phrase> this way" tail of a tracked-set
+/// consumer, as the destination the verb phrase names. "put into <a graveyard>
+/// this way" names the graveyard (`Some(Zone::Graveyard)`): only members that
+/// arrived there count. Any other verb phrase ("milled", "exiled", …) names an
+/// action, not a destination (`None`): the member counts wherever it is. A
+/// relative-clause lead-in ("that was/were") is optional. `None` overall when
+/// the tail is not a "this way" phrase or has trailing text.
+fn parse_this_way_destination_tail(input: &str) -> Option<Option<Zone>> {
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("that was "),
+        tag("that were "),
+    )))
+    .parse(input.trim_start())
+    .ok()?;
+    let (rest, destination) = alt((
+        map(
+            preceded(tag("put into "), parse_graveyard_destination_phrase),
+            Some,
+        ),
+        value(None, take_until("this way")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = (opt(tag(" ")), tag::<_, _, OracleError<'_>>("this way"))
+        .parse(rest)
+        .ok()?;
+    rest.trim().is_empty().then_some(destination)
+}
+
 /// CR 608.2c + CR 400.7: "<TYPE> card <verb> this way" → count only the
 /// tracked-set members matching <TYPE> (`FilteredTrackedSetSize`), so
 /// "for each creature card put into a graveyard this way" makes a token per
 /// creature milled, not per card (Dread Summons, #4678-adjacent #4697). A bare
-/// "card" (`TypeFilter::Card`) or a typeless clause is the unfiltered count and
-/// returns `None`, so the caller keeps `TrackedSetSize`. Building block for the
-/// whole "for each <filter> card <verb> this way" class (creature / land /
-/// artifact / … milled / exiled / destroyed / put into a graveyard).
-/// `caused_by: None` counts every filtered member of the most recent tracked set
-/// (the cards moved "this way").
+/// "card" or a typeless clause is the unfiltered count and returns `None`, so
+/// the caller keeps `TrackedSetSize` — EXCEPT when the verb phrase names a
+/// destination ([`parse_this_way_destination_tail`]): "for each card put into a
+/// graveyard this way" counts only the cards that actually arrived in a
+/// graveyard (CR 614.6), so it keeps the card filter and carries the
+/// destination. Building block for the whole "for each <filter> card <verb> this
+/// way" class (creature / land / artifact / … milled / exiled / destroyed / put
+/// into a graveyard). `caused_by: None` counts every filtered member of the most
+/// recent tracked set (the cards moved "this way").
 fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
     let (filter, rest) = parse_type_phrase_folding(clause);
     let TargetFilter::Typed(ref typed) = filter else {
         return None;
     };
-    // Only a SPECIFIC card type filters the set; a typeless clause or the generic
-    // "card" (`TypeFilter::Card`) is the unfiltered `TrackedSetSize` count.
-    if typed.type_filters.is_empty()
-        || typed
-            .type_filters
-            .iter()
-            .all(|t| matches!(t, TypeFilter::Card))
-    {
-        return None;
-    }
-    // The remainder must be a "<zone-move verb> this way" tracked-set phrase
-    // (e.g. "put into a graveyard this way", "milled this way", "exiled this
-    // way"): nom `take_until("this way") + tag`, with nothing after it.
-    let terminates_this_way = (
-        take_until::<_, _, OracleError<'_>>("this way"),
-        tag::<_, _, OracleError<'_>>("this way"),
-    )
-        .parse(rest.trim())
-        .map(|(after, _)| after.trim().is_empty())
-        .unwrap_or(false);
-    if !terminates_this_way {
+    let destination = parse_this_way_destination_tail(rest)?;
+    // Only a SPECIFIC card type narrows the set by type. A typeless clause is
+    // the unfiltered count; the generic "card" (`TypeFilter::Card`) is too, but
+    // it still counts only the cards that reached a named destination.
+    let names_specific_type = typed
+        .type_filters
+        .iter()
+        .any(|t| !matches!(t, TypeFilter::Card));
+    let names_cards = !typed.type_filters.is_empty();
+    if !(names_specific_type || (names_cards && destination.is_some())) {
         return None;
     }
     Some(QuantityRef::FilteredTrackedSetSize {
         filter: Box::new(filter),
         caused_by: None,
+        destination,
     })
 }
 
+/// The context-free entry: a caller reaching it has no clause context, so it
+/// cannot tell which object a pronoun names.
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
-    let mut qty = parse_for_each_clause_deferred(clause)?;
-    // CR 608.2k: settle a deferred counter anaphor for every caller that has no
-    // antecedent to bind it to. Only `oracle_static`'s lowering knows the
+    // The counter-kind census of a pronoun ("kind of counter on it") gets no
+    // reading here — its antecedent is the clause context's to decide, and this
+    // entry has none (a parser-scope decision). Declined up front: the nom
+    // grammar declines it, but the legacy `parse_quantity_ref` fallback would
+    // otherwise misread "kind of" as a counter name.
+    if counter_kinds_pronoun_number(clause).is_some() {
+        return None;
+    }
+    let mut qty = parse_for_each_clause_with_they_controller(
+        clause,
+        PlayerAntecedents::for_each_iteration_unscoped(),
+        &ParseContext::default(),
+    )?;
+    // CR 608.2k: settle a deferred counter-COUNT anaphor for every caller that
+    // has no antecedent to bind it to. Only `oracle_static`'s lowering knows the
     // affected set, so it takes the `_deferred` entry below; for everyone else
     // the pronoun names the ability's own object — exactly what `Source` meant
     // before the scope started carrying provenance, so the AST is unchanged.
@@ -3463,12 +3581,107 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
 /// CR 611.3a: The provenance-preserving entry, for the one caller that CAN bind
 /// the anaphor — `oracle_static`, whose `lower_static_ir` knows the affected set
 /// and so knows whether "it" names the source or each affected object.
-pub(crate) fn parse_for_each_clause_deferred(clause: &str) -> Option<QuantityRef> {
+///
+/// `subject_number` is the grammatical number of the static's subject as its
+/// verb agreement states it ("Each creature you control gets" / "Creatures you
+/// control get"); `None` when the caller saw no agreeing verb.
+///
+/// CR 608.2k + CR 611.3a: the counter-kind census of a pronoun is returned as
+/// the `DistinctCounterKindsAmong { filter: SelfRef }` placeholder that the
+/// static binder (`bind_counter_anaphor_to_recipient`) keeps for a self-scoped
+/// static and rebinds to each affected object for a per-recipient one — but
+/// only when the pronoun agrees in number with that subject, which is when it
+/// names the subject's object(s). A singular "it" after a plural subject
+/// ("Other creatures you control get … on it") names some other object, and a
+/// plural "them" after a singular subject names no affected object; both
+/// decline, as does a census whose subject number is unknown.
+pub(crate) fn parse_for_each_clause_deferred(
+    clause: &str,
+    subject_number: Option<AnaphorNumber>,
+) -> Option<QuantityRef> {
+    if let Some(pronoun_number) = counter_kinds_pronoun_number(clause) {
+        return (subject_number == Some(pronoun_number)).then_some(
+            QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::SelfRef,
+            },
+        );
+    }
     parse_for_each_clause_with_they_controller(
         clause,
         PlayerAntecedents::for_each_iteration_unscoped(),
         &ParseContext::default(),
     )
+}
+
+/// CR 122.1 + CR 608.2k: The grammatical number of the pronoun when the whole
+/// clause is a counter-kind census of a bare object pronoun
+/// ("kind of counter on it" / "… among them"); `None` for any other clause.
+pub(crate) fn counter_kinds_pronoun_number(clause: &str) -> Option<AnaphorNumber> {
+    all_consuming(nom_quantity::parse_counter_kinds_on_object_pronoun)
+        .parse(clause.trim().trim_end_matches('.'))
+        .ok()
+        .map(|(_, number)| number)
+}
+
+/// CR 608.2k + CR 608.2h: The single antecedent an effect clause's
+/// counter-kind census of "it" may bind to — the ability's own object — and
+/// only when the context POSITIVELY establishes that object as the antecedent:
+/// a triggered ability whose condition names its own object and no other
+/// object ("Whenever this creature deals combat damage to a player", "When
+/// this creature dies"), with no nearer object reference anywhere in the
+/// chain. CR 608.2h reads the source's current or last-known counters, which
+/// the per-object counter authority provides for exactly this object.
+///
+/// Every other antecedent fails closed (`None`): a typed or attached trigger
+/// subject (the event's object), a condition that also names a second object
+/// ("blocks a creature", "becomes attached to a creature" — "it" could be
+/// either), a pinned pronoun (a cast spell, an event recipient, a parent
+/// target), an earlier instruction's target or created token, a prior mass
+/// population, exile set, or chosen object, and any non-triggered ability (a
+/// cost-paid object such as a sacrificed or exiled card is the nearer
+/// antecedent there). The census reads none of those. Nor does it read inside
+/// a delayed-trigger body (CR 603.7): that body resolves later, and the engine
+/// freezes a delayed trigger's counter COUNT at creation but takes no census
+/// snapshot, so by then a source that left the battlefield would read its new
+/// object's empty counters (CR 400.7 + CR 122.2) —
+/// `ParseContext::enter_delayed_trigger_body` resets the condition
+/// classification there, so `SourceOnly` never holds.
+pub(crate) fn kinds_census_pronoun_self_antecedent(ctx: &ParseContext) -> Option<TargetFilter> {
+    let names_own_object = ctx.in_trigger
+        && ctx.subject == Some(TargetFilter::SelfRef)
+        // CR 603.1 + CR 608.2k: the condition names no object besides the
+        // source, so "it" cannot name a second one.
+        && ctx.trigger_condition_objects == TriggerConditionObjects::SourceOnly
+        // A condition that pins "it" may pin it only to the source itself
+        // (CR 509.3a: "~ blocks" names no other object), never to another one.
+        && matches!(ctx.object_pronoun_ref, None | Some(TargetFilter::SelfRef))
+        && resolve_it_pronoun(ctx) == TargetFilter::SelfRef;
+    let chain_names_no_nearer_object = !ctx.parent_target_available
+        && ctx.chain_declared_object_target.is_none()
+        && !ctx.token_created_in_chain
+        && ctx.chain_prior_mass_population.is_none()
+        && !ctx.chain_has_prior_exile_producer
+        && ctx.chain_prior_chosen_target.is_none();
+    (names_own_object && chain_names_no_nearer_object).then_some(TargetFilter::SelfRef)
+}
+
+/// CR 122.1 + CR 608.2k: Does the clause carry a "for each kind of counter
+/// on it/them" quantifier anywhere in its own grammar? Scans word boundaries
+/// with the shared census-pronoun combinator, after masking quoted ability
+/// text (a granted trigger's own census belongs to that trigger's parse, not
+/// to the granting clause). "double the number of each kind of counter on it"
+/// is not a "for each" quantifier and does not match.
+pub(crate) fn has_kinds_pronoun_census_tail(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let unquoted = nom_primitives::strip_double_quoted_spans(&lower);
+    nom_primitives::scan_at_word_boundaries(&unquoted, |input| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("for each "),
+            nom_quantity::parse_counter_kinds_on_object_pronoun,
+        )
+        .parse(input)
+    })
+    .is_some()
 }
 
 /// CR 608.2k: Collapse an unbound deferred counter anaphor back to `Source`.
@@ -3484,14 +3697,23 @@ pub(crate) fn parse_for_each_clause_with_context(
     clause: &str,
     ctx: &ParseContext,
 ) -> Option<QuantityRef> {
+    // CR 608.2k: the counter-kind census of a pronoun gets no reading on this
+    // shared quantity entry — its pump, object-filter, and repeat callers cannot
+    // tell which object the pronoun names. The effect-clause dispatch
+    // (`try_parse_for_each_effect`) binds it only when the antecedent is
+    // positively the ability's own object
+    // (`kinds_census_pronoun_self_antecedent`) and fails closed otherwise.
+    // Declined up front so it never falls through to a counter-name read.
+    if counter_kinds_pronoun_number(clause).is_some() {
+        return None;
+    }
     let mut qty = parse_for_each_clause_with_they_controller(
         clause,
         PlayerAntecedents::for_each_iteration(ctx),
         ctx,
     )?;
-    // CR 608.2k: same settle as `parse_for_each_clause` — this context-carrying
-    // entry has no antecedent for the pronoun either, so an unbound anaphor
-    // names the ability's own object.
+    // CR 608.2k: same settle as `parse_for_each_clause` — the counter-COUNT
+    // anaphor keeps its established reading here, the ability's own object.
     settle_deferred_counter_anaphor_ref(&mut qty);
     Some(qty)
 }
@@ -3726,6 +3948,8 @@ fn parse_for_each_clause_with_they_controller(
                 source: source.map(Box::new),
                 // Count context has no "N or more distinct sources" restriction — default 1.
                 min_sources: 1,
+                // This grammar names an opponent explicitly — keep `Opponent`.
+                relation: PlayerRelation::Opponent,
             },
         });
     }
@@ -3754,8 +3978,12 @@ fn parse_for_each_clause_with_they_controller(
         });
     }
 
-    // "[counter type] counter(s) on that creature/permanent" — anaphoric, must check
-    // before the wildcard "counter on" guard below which would misroute to CountersOnSelf.
+    // "[counter type] counter(s) on that creature/permanent" — anaphoric.
+    // CR 122.1: counter counts bind to the object the text names; the nom
+    // source/target/population arms are the authority. An unrecognized object
+    // returns None — callers must surface it (the DynamicQty swallow detector
+    // does on effect/replacement routes; the cost-modification route's ObjectCount
+    // fallback does not — see phase-rs/phase#9513).
     if clause.contains("counter on that") {
         if let Some(qty) = parse_quantity_ref_with_context(
             clause,
@@ -3768,11 +3996,8 @@ fn parse_for_each_clause_with_they_controller(
     // CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it" —
     // objects matching a type filter AND bearing at least one counter of the given
     // type. The filter is the type-phrase plus a
-    // `FilterProp::Counters { OfType(t), GE, Fixed(1) }`.
-    // This must be checked BEFORE the self-counter fallback below, which would
-    // otherwise misroute any clause containing "counter on" to CountersOnSelf and
-    // discard the subject type phrase (Inspiring Call bug: "creature you control
-    // with a +1/+1 counter on it" → CountersOnSelf{ "creature you control with a +1/+1" }).
+    // `FilterProp::Counters { OfType(t), GE, Fixed(1) }` (Inspiring Call:
+    // "creature you control with a +1/+1 counter on it").
     if let Ok((_, type_part)) = take_until::<_, _, OracleError<'_>>(" with ").parse(clause) {
         let suffix_part = &clause[type_part.len() + 1..]; // starts at "with "
         if let Some((counter_prop, consumed)) =
@@ -3801,16 +4026,6 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
-    if clause.contains("counter on") {
-        let raw_type = clause.split("counter").next().unwrap_or("").trim();
-        if !raw_type.is_empty() {
-            return Some(QuantityRef::CountersOn {
-                scope: ObjectScope::Source,
-                counter_type: Some(normalize_counter_type(raw_type)),
-            });
-        }
-    }
-
     // Delegate to the nom for-each clause parser for patterns it covers
     // (e.g. "counter on this equipment" — any-counter source form).
     if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref.parse(clause) {
@@ -3829,13 +4044,20 @@ fn parse_for_each_clause_with_they_controller(
     ) {
         return Some(qty);
     }
-    // Handle singular → plural: "card in your hand" → "cards in your hand"
+    // Handle singular → plural: "card in your hand" → "cards in your hand".
+    // CR 122.1: a counter-kind census head is not a noun to pluralize — the
+    // retry would turn "kinds of" into "kindss of", a slice the counter-name
+    // funnel no longer recognizes as the quantifier.
+    let pluralizable_head =
+        nom_primitives::not_counter_kind_quantifier(&clause.to_lowercase()).is_ok();
     if let Some((first_word, rest)) = clause.split_once(' ') {
         let pluralized = format!("{first_word}s {rest}");
         if let Some(qty) = parse_quantity_ref_with_context(
             &pluralized,
             &mut for_each_anaphor_context(ctx, &antecedents).clone_player_antecedents(),
-        ) {
+        )
+        .filter(|_| pluralizable_head)
+        {
             return Some(qty);
         }
     }
@@ -3927,11 +4149,9 @@ fn parse_for_each_clause_with_they_controller(
 fn for_each_anaphor_context(ctx: &ParseContext, antecedents: &PlayerAntecedents) -> ParseContext {
     ParseContext {
         relative_player_scope: antecedents.third_person.clone(),
-        subject: ctx.subject.clone(),
-        card_name: ctx.card_name.clone(),
-        host_self_reference: ctx.host_self_reference.clone(),
-        current_trigger_index: ctx.current_trigger_index,
-        ..Default::default()
+        declared_player_scope: None,
+        prior_player_declaration: false,
+        ..ctx.clone_throwaway()
     }
 }
 
@@ -4040,6 +4260,8 @@ fn with_target_controller(filter: TargetFilter, controller: ControllerRef) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_ir::context::ChosenColorQualifierScope;
+    use crate::types::ability::ChoiceType;
     use crate::types::ability::{
         CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
         RoundingMode, SubtypeExclusion, TypeFilter, TypedFilter,
@@ -4683,7 +4905,7 @@ mod tests {
     /// when the static modifies only the object printing it.
     #[test]
     fn for_each_any_counter_on_pronoun_defers() {
-        let qty = parse_for_each_clause_deferred("counter on it");
+        let qty = parse_for_each_clause_deferred("counter on it", None);
         assert!(
             matches!(
                 qty,
@@ -4711,11 +4933,319 @@ mod tests {
         );
     }
 
+    /// CR 608.2k + CR 608.2h: the census pronoun binds only a context that
+    /// POSITIVELY names the ability's own object — a self-referential trigger
+    /// subject whose condition names no other object, with no nearer object
+    /// anywhere in the chain. Every other context declines; the shared
+    /// quantity entry never reads the pronoun.
+    #[test]
+    fn kinds_census_pronoun_self_antecedent_requires_the_abilitys_own_object() {
+        let self_trigger = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            in_trigger: true,
+            trigger_condition_objects: TriggerConditionObjects::SourceOnly,
+            ..Default::default()
+        };
+        assert_eq!(
+            kinds_census_pronoun_self_antecedent(&self_trigger),
+            Some(TargetFilter::SelfRef)
+        );
+        // CR 509.3a: a condition that pins "it" to the source itself ("~
+        // blocks") still names only the ability's own object.
+        assert_eq!(
+            kinds_census_pronoun_self_antecedent(&ParseContext {
+                object_pronoun_ref: Some(TargetFilter::SelfRef),
+                ..self_trigger.clone()
+            }),
+            Some(TargetFilter::SelfRef)
+        );
+        // The shared quantity entry declines the pronoun census even here, so
+        // no pump, object-filter, or repeat caller can read it.
+        assert_eq!(
+            parse_for_each_clause_with_context("kind of counter on it", &self_trigger),
+            None
+        );
+        // Reach guard: the non-pronoun census parses on the same entry.
+        assert!(matches!(
+            parse_for_each_clause_with_context(
+                "kind of counter on permanents you control",
+                &self_trigger,
+            ),
+            Some(QuantityRef::DistinctCounterKindsAmong { .. })
+        ));
+
+        let creature_you_control =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let declines = [
+            (
+                "typed trigger subject",
+                ParseContext {
+                    subject: Some(creature_you_control),
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "subject Any",
+                ParseContext {
+                    subject: Some(TargetFilter::Any),
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "no subject",
+                ParseContext {
+                    subject: None,
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "sacrifice anchor",
+                ParseContext {
+                    subject: Some(TargetFilter::CostPaidObject),
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "non-trigger SelfRef",
+                ParseContext {
+                    in_trigger: false,
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "condition names a second object",
+                ParseContext {
+                    trigger_condition_objects: TriggerConditionObjects::NotSourceOnly,
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "condition objects unestablished",
+                ParseContext {
+                    trigger_condition_objects: TriggerConditionObjects::Unestablished,
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "spell-cast object pronoun",
+                ParseContext {
+                    object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "pinned event recipient",
+                ParseContext {
+                    object_pronoun_ref: Some(TargetFilter::EventTarget),
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "parent target",
+                ParseContext {
+                    parent_target_available: true,
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "chain-declared target",
+                ParseContext {
+                    chain_declared_object_target: Some(
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ),
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "token created in chain",
+                ParseContext {
+                    token_created_in_chain: true,
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "prior mass population",
+                ParseContext {
+                    chain_prior_mass_population: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "prior exile producer",
+                ParseContext {
+                    chain_has_prior_exile_producer: true,
+                    ..self_trigger.clone()
+                },
+            ),
+            (
+                "prior chosen target",
+                ParseContext {
+                    chain_prior_chosen_target: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    ..self_trigger.clone()
+                },
+            ),
+        ];
+        for (label, ctx) in &declines {
+            assert_eq!(kinds_census_pronoun_self_antecedent(ctx), None, "{label}");
+        }
+    }
+
+    /// CR 122.1 + CR 608.2k: the census-pronoun tail detector fires on a
+    /// "for each kind of counter on it/them" quantifier at any position, never
+    /// on a doubling of "each kind of counter on it", a non-pronoun census, or a
+    /// quoted granted ability's own census.
+    #[test]
+    fn kinds_pronoun_census_tail_is_a_for_each_quantifier_on_a_pronoun() {
+        for text in [
+            "draw a card for each kind of counter on it",
+            "Target creature gets +1/+1 until end of turn for each kind of counter on it.",
+            "creatures you control get +1/+1 for each kind of counter on them",
+            "for each kind of counter among them, draw a card",
+        ] {
+            assert!(has_kinds_pronoun_census_tail(text), "{text:?}");
+        }
+        for text in [
+            "double the number of each kind of counter on it",
+            "draw a card for each kind of counter on permanents you control",
+            "draw a card for each kind of counter on items you control",
+            "target creature gains \"Whenever this creature deals combat damage to a player, draw a card for each kind of counter on it\" and it can't be blocked this turn",
+        ] {
+            assert!(!has_kinds_pronoun_census_tail(text), "{text:?}");
+        }
+    }
+
+    /// CR 608.2k: with no context there is no antecedent, so the context-free
+    /// entry declines the pronoun census — through every fallback — while the
+    /// static-only deferred entry keeps the `SelfRef` placeholder its binder
+    /// resolves only when the pronoun agrees in number with the static's
+    /// subject; a mismatched or unknown subject number declines.
+    #[test]
+    fn kinds_census_pronoun_without_context_declines_or_defers() {
+        // Reach guard: the context-free entry parses the non-pronoun census.
+        assert!(matches!(
+            parse_for_each_clause("kind of counter on permanents you control"),
+            Some(QuantityRef::DistinctCounterKindsAmong { .. })
+        ));
+        assert_eq!(parse_for_each_clause("kind of counter on it"), None);
+        assert_eq!(parse_for_each_clause("kind of counter on them"), None);
+        let placeholder = Some(QuantityRef::DistinctCounterKindsAmong {
+            filter: TargetFilter::SelfRef,
+        });
+        for (text, subject_number, expected) in [
+            (
+                "kind of counter on it",
+                Some(AnaphorNumber::Singular),
+                placeholder.clone(),
+            ),
+            (
+                "kind of counter on them",
+                Some(AnaphorNumber::Plural),
+                placeholder.clone(),
+            ),
+            ("kind of counter on it", Some(AnaphorNumber::Plural), None),
+            (
+                "kind of counter on them",
+                Some(AnaphorNumber::Singular),
+                None,
+            ),
+            ("kind of counter on it", None, None),
+            ("kind of counter on them", None, None),
+        ] {
+            assert_eq!(
+                parse_for_each_clause_deferred(text, subject_number),
+                expected,
+                "{text:?} after a {subject_number:?} subject"
+            );
+        }
+    }
+
+    /// CR 122.1: "kind(s) of counter(s) on <object>" quantifies over counter
+    /// kinds; no counter is named "kind". Every quantity entry either reads the
+    /// distinct-kinds census (where its grammar binds the object) or declines —
+    /// none counts a counter named "kind of" / "kinds of" / "different kinds of".
+    #[test]
+    fn counter_kind_quantifier_is_never_read_as_a_counter_name() {
+        // Reach guards: the real census phrases and ordinary named counters
+        // still read through the same entries.
+        assert!(matches!(
+            parse_for_each_clause("kind of counter on permanents you control"),
+            Some(QuantityRef::DistinctCounterKindsAmong { .. })
+        ));
+        assert!(matches!(
+            parse_quantity_ref(
+                "the number of different kinds of counters among permanents you control"
+            ),
+            Some(QuantityRef::DistinctCounterKindsAmong { .. })
+        ));
+        for (text, counter_type) in [
+            (
+                "acquired taste counter on ~",
+                CounterType::Generic("acquired taste".into()),
+            ),
+            ("the number of +1/+1 counters on ~", CounterType::Plus1Plus1),
+            ("oil counter on it", CounterType::Generic("oil".into())),
+            ("kind counters on ~", CounterType::Generic("kind".into())),
+        ] {
+            assert_eq!(
+                parse_quantity_ref(text),
+                Some(QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(counter_type),
+                }),
+                "{text:?}"
+            );
+        }
+
+        let census_phrases = [
+            "kind of counter on ~",
+            "kind of counter on it",
+            "kinds of counters on ~",
+            "the number of kinds of counters on ~",
+            "the number of kind of counter on it",
+            "different kinds of counters on ~",
+            "the number of different kinds of counters on ~",
+            "the number of different kinds of counters on it",
+            "kind of counter on that creature",
+            "kinds of counters on that permanent",
+            "kind of counter on target creature",
+        ];
+        for text in census_phrases {
+            assert_eq!(
+                parse_quantity_ref(text),
+                None,
+                "parse_quantity_ref({text:?})"
+            );
+            assert_eq!(
+                parse_cda_quantity(text),
+                None,
+                "parse_cda_quantity({text:?})"
+            );
+            assert_eq!(
+                parse_for_each_clause(text),
+                None,
+                "parse_for_each_clause({text:?})"
+            );
+            // The static-only deferred entry keeps its `SelfRef` placeholder for
+            // the bare pronoun census after an agreeing (singular) subject;
+            // every other phrase declines.
+            let expected_deferred = (text == "kind of counter on it").then_some(
+                QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::SelfRef,
+                },
+            );
+            assert_eq!(
+                parse_for_each_clause_deferred(text, Some(AnaphorNumber::Singular)),
+                expected_deferred,
+                "parse_for_each_clause_deferred({text:?})"
+            );
+        }
+    }
+
     #[test]
     fn for_each_singular_counter_on_self() {
         // Singular "counter on it" (not "counters on it") — same deferred
         // referent, exercising the singular arm of the counter-word axis.
-        let qty = parse_for_each_clause_deferred("blight counter on it").unwrap();
+        let qty = parse_for_each_clause_deferred("blight counter on it", None).unwrap();
         assert!(
             matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Anaphoric, counter_type: Some(ref counter_type) } if *counter_type == CounterType::Generic("blight".to_string())),
             "singular counter form should defer the pronoun, got {qty:?}"
@@ -4793,7 +5323,8 @@ mod tests {
 
     #[test]
     fn for_each_this_way_produces_tracked_set_size() {
-        let qty = parse_for_each_clause("card put into a graveyard this way").unwrap();
+        // A destination-less bare "card ... this way" keeps the unfiltered set.
+        let qty = parse_for_each_clause("card returned this way").unwrap();
         assert_eq!(qty, QuantityRef::TrackedSetSize);
     }
 
@@ -4802,6 +5333,7 @@ mod tests {
         let control_gained = QuantityRef::FilteredTrackedSetSize {
             filter: Box::new(TargetFilter::Any),
             caused_by: Some(ThisWayCause::ControlGained),
+            destination: None,
         };
         for clause in [
             "one they gained control of this way",
@@ -5044,6 +5576,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{CombatOnly}}"
@@ -5069,6 +5603,8 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{Any}}"
@@ -5090,6 +5626,8 @@ mod tests {
                         kind: DamageKindFilter::NoncombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{NoncombatOnly}}"
@@ -6169,6 +6707,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }
             }
@@ -6190,6 +6730,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }
             }
@@ -6223,6 +6765,8 @@ mod tests {
                             kind: DamageKindFilter::CombatOnly,
                             source: None,
                             min_sources: 1,
+                            // Opponent grammar — keep `Opponent`.
+                            relation: PlayerRelation::Opponent,
                         },
                     }
                 },
@@ -6259,6 +6803,8 @@ mod tests {
                     })),
 
                     min_sources: 1,
+                    // Opponent grammar — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             }
         );
@@ -6280,6 +6826,8 @@ mod tests {
                     source: Some(Box::new(TargetFilter::SelfRef)),
 
                     min_sources: 1,
+                    // Opponent grammar — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             }
         );
@@ -6302,6 +6850,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must parse to unfiltered OpponentDealtDamage"
@@ -6666,6 +7216,28 @@ mod tests {
                 qty: QuantityRef::EventContextAmount
             })
         );
+    }
+
+    /// CR 706.4 + CR 706.2: "the total of those results" (Neverwinter Hydra,
+    /// Hydradoodle) names the same die-result channel as "the result". The
+    /// phrase is matched whole: a suffixed phrase is not consumed by this arm,
+    /// and the CDA authority stays blind to the bare die-result phrase (the
+    /// where-X binder relies on that).
+    #[test]
+    fn parse_event_context_quantity_die_result_aggregate() {
+        let event_amount = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        assert_eq!(
+            parse_event_context_quantity("the total of those results"),
+            event_amount
+        );
+        assert_eq!(parse_event_context_quantity("the result"), event_amount);
+        assert_ne!(
+            parse_event_context_quantity("the total of those results plus one"),
+            event_amount
+        );
+        assert_eq!(parse_cda_quantity("the total of those results"), None);
     }
 
     /// The TOTAL channel. Every phrase here names an unqualified
@@ -8817,7 +9389,9 @@ mod tests {
     fn nonland_card_revealed_this_way_uses_filtered_tracked_set_nonland() {
         let qty = parse_for_each_clause("nonland card revealed this way").expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+            QuantityRef::FilteredTrackedSetSize {
+                filter, caused_by, ..
+            } => {
                 assert_eq!(caused_by, None, "revealed-this-way is action-agnostic");
                 match *filter {
                     TargetFilter::Typed(ref tf) => {
@@ -8848,7 +9422,10 @@ mod tests {
         assert_eq!(factor, 2);
         match *inner {
             QuantityExpr::Ref {
-                qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by },
+                qty:
+                    QuantityRef::FilteredTrackedSetSize {
+                        filter, caused_by, ..
+                    },
             } => {
                 assert_eq!(caused_by, None, "returned-this-way is action-agnostic");
                 match *filter {
@@ -8872,7 +9449,10 @@ mod tests {
         let result =
             parse_event_context_quantity("the number of Mountains put into a graveyard this way");
         let Some(QuantityExpr::Ref {
-            qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by },
+            qty:
+                QuantityRef::FilteredTrackedSetSize {
+                    filter, caused_by, ..
+                },
         }) = result
         else {
             panic!("expected Ref(FilteredTrackedSetSize), got {result:?}");
@@ -8977,7 +9557,9 @@ mod tests {
     fn nonland_card_discarded_this_way_uses_filtered_tracked_set_nonland() {
         let qty = parse_for_each_clause("nonland card discarded this way").expect("must parse");
         match qty {
-            QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+            QuantityRef::FilteredTrackedSetSize {
+                filter, caused_by, ..
+            } => {
                 assert_eq!(
                     caused_by,
                     Some(crate::types::ability::ThisWayCause::Discarded),
@@ -9024,15 +9606,108 @@ mod tests {
         }
     }
 
-    /// Regression: a bare "card put into a graveyard this way" (no card type)
-    /// counts EVERY tracked-set member and must keep the unfiltered
-    /// `TrackedSetSize`.
+    /// CR 614.6: a bare "card put into a graveyard this way" counts every CARD in
+    /// the tracked set that actually arrived in a graveyard — the card filter and
+    /// the named destination, never the unfiltered `TrackedSetSize` (which would
+    /// also count a card a replacement exiled instead).
     #[test]
-    fn bare_card_put_into_graveyard_this_way_keeps_tracked_set_size() {
+    fn bare_card_put_into_graveyard_this_way_carries_the_graveyard_destination() {
+        for clause in [
+            "card put into a graveyard this way",
+            "card put into your graveyard this way",
+            "card put into their graveyard this way",
+            "card put into its owner's graveyard this way",
+        ] {
+            let qty =
+                parse_for_each_clause(clause).unwrap_or_else(|| panic!("{clause:?} must parse"));
+            let QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by,
+                destination,
+            } = qty
+            else {
+                panic!("{clause:?}: expected FilteredTrackedSetSize, got {qty:?}");
+            };
+            assert_eq!(caused_by, None, "{clause:?}: action-agnostic");
+            assert_eq!(destination, Some(Zone::Graveyard), "{clause:?}");
+            assert_eq!(
+                *filter,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Card)),
+                "{clause:?}: counts cards"
+            );
+        }
+    }
+
+    /// CR 614.6 + CR 701.17c: the destination phrasings name the graveyard —
+    /// singular ("a graveyard") and possessive ("their graveyard", Coerced
+    /// Confession) — and keep the type filter.
+    #[test]
+    fn creature_card_put_into_graveyard_this_way_carries_the_graveyard_destination() {
+        for clause in [
+            "creature card put into a graveyard this way",
+            "creature card put into their graveyard this way",
+            "creature card that was put into your graveyard this way",
+        ] {
+            let qty =
+                parse_for_each_clause(clause).unwrap_or_else(|| panic!("{clause:?} must parse"));
+            let QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by,
+                destination,
+            } = qty
+            else {
+                panic!("{clause:?}: expected FilteredTrackedSetSize, got {qty:?}");
+            };
+            assert_eq!(caused_by, None, "{clause:?}");
+            assert_eq!(destination, Some(Zone::Graveyard), "{clause:?}");
+            assert_eq!(
+                *filter,
+                TargetFilter::Typed(TypedFilter::creature()),
+                "{clause:?}"
+            );
+        }
+    }
+
+    /// CR 701.17c: "milled this way" names an ACTION, not a destination, so it
+    /// keeps counting every milled card wherever it is now (the Locke-style
+    /// reference to a milled card found in its public zone): bound to the
+    /// `Milled` cause with no destination.
+    #[test]
+    fn creature_card_milled_this_way_names_no_destination() {
+        let qty = parse_for_each_clause("creature card milled this way").expect("must parse");
+        let QuantityRef::FilteredTrackedSetSize {
+            filter,
+            caused_by,
+            destination,
+        } = qty
+        else {
+            panic!("expected FilteredTrackedSetSize, got {qty:?}");
+        };
+        assert_eq!(caused_by, Some(ThisWayCause::Milled));
         assert_eq!(
-            parse_for_each_clause("card put into a graveyard this way"),
-            Some(QuantityRef::TrackedSetSize),
+            destination, None,
+            "an action-named count has no destination"
         );
+        assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+    }
+
+    /// CR 614.6: the landing-zone building block carries the graveyard
+    /// destination too (Volcanic Eruption: a destroyed Mountain a replacement
+    /// exiled was not "put into a graveyard"), while "returned" names none.
+    #[test]
+    fn landing_zone_this_way_carries_the_graveyard_destination_only() {
+        let Some(QuantityRef::FilteredTrackedSetSize { destination, .. }) =
+            parse_filtered_landing_zone_this_way("mountains put into a graveyard this way")
+        else {
+            panic!("expected FilteredTrackedSetSize");
+        };
+        assert_eq!(destination, Some(Zone::Graveyard));
+        let Some(QuantityRef::FilteredTrackedSetSize { destination, .. }) =
+            parse_filtered_landing_zone_this_way("mountains returned this way")
+        else {
+            panic!("expected FilteredTrackedSetSize");
+        };
+        assert_eq!(destination, None);
     }
 
     /// CR 406.6 + CR 614.1c: "for each instant and sorcery card exiled with it"
@@ -9877,6 +10552,123 @@ mod tests {
             );
         }
     }
+
+    // ── Counter counts: the wildcard object reading is gone (CR 122.1) and the
+    // context-aware counter census binds anaphoric controllers (CR 109.5).
+
+    #[test]
+    fn for_each_counter_clause_with_an_unparsed_object_fails_closed() {
+        // Reach guard: Deepwood Denizen's population clause parses.
+        assert!(matches!(
+            parse_for_each_clause("+1/+1 counter on creatures you control"),
+            Some(QuantityRef::CountersOnObjects { .. })
+        ));
+        // Ulasht's conjoined tail is two clauses, not one counter-on-self count.
+        assert_eq!(
+            parse_for_each_clause(
+                "other red creature you control and a +1/+1 counter on it for each other \
+                 green creature you control"
+            ),
+            None
+        );
+        // A cost-paid object has no counter-count reading here.
+        assert_eq!(
+            parse_for_each_clause("+1/+1 counter on the sacrificed creature"),
+            None
+        );
+    }
+
+    #[test]
+    fn for_each_multi_word_named_counter_on_self() {
+        assert_eq!(
+            parse_for_each_clause("acquired taste counter on this artifact"),
+            Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Generic("acquired taste".to_string())),
+            })
+        );
+    }
+
+    #[test]
+    fn number_of_counters_on_creatures_they_control_binds_the_context_player() {
+        let text = "the number of +1/+1 counters on creatures they control";
+        let mut defending = ParseContext {
+            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_quantity_ref_with_context(text, &mut defending),
+            Some(QuantityRef::CountersOnObjects {
+                counter_type: Some(CounterType::Plus1Plus1),
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::DefendingPlayer)
+                ),
+            })
+        );
+        assert_eq!(
+            parse_quantity_ref_with_context(text, &mut ParseContext::default()),
+            None
+        );
+        // An optional actor is not a controller antecedent.
+        let mut acting = ParseContext {
+            actor: Some(ControllerRef::Opponent),
+            ..Default::default()
+        };
+        assert_eq!(parse_quantity_ref_with_context(text, &mut acting), None);
+        acting.relative_player_scope = Some(ControllerRef::DefendingPlayer);
+        assert_eq!(
+            parse_quantity_ref_with_context(text, &mut acting),
+            Some(QuantityRef::CountersOnObjects {
+                counter_type: Some(CounterType::Plus1Plus1),
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::DefendingPlayer)
+                ),
+            })
+        );
+        // "the total number of" heads the same census.
+        assert_eq!(
+            parse_quantity_ref_with_context(
+                "the total number of +1/+1 counters on creatures they control",
+                &mut ParseContext {
+                    relative_player_scope: Some(ControllerRef::DefendingPlayer),
+                    ..Default::default()
+                },
+            ),
+            Some(QuantityRef::CountersOnObjects {
+                counter_type: Some(CounterType::Plus1Plus1),
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::DefendingPlayer)
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn counter_census_reads_the_same_under_a_carried_context() {
+        // The context-aware census carries the caller's context. A phrase
+        // with no anaphor reads identically under a populated context and a
+        // fresh one.
+        for text in [
+            "time counters among permanents you control",
+            "counters on permanents you control",
+            "+1/+1 counters on other creatures you control",
+        ] {
+            let fresh =
+                nom_quantity::parse_counters_on_population(text, Some(ControllerRef::ScopedPlayer));
+            let mut carried = ParseContext {
+                card_name: Some("Kate Stewart".to_string()),
+                in_trigger: true,
+                subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+                actor: Some(ControllerRef::You),
+                relative_player_scope: Some(ControllerRef::ScopedPlayer),
+                ..Default::default()
+            };
+            let with_ctx = nom_quantity::parse_counters_on_population_with_ctx(text, &mut carried);
+            assert!(fresh.is_ok(), "reach guard: {text:?} must parse");
+            assert_eq!(with_ctx, fresh, "{text:?}");
+        }
+    }
+
     // -----------------------------------------------------------------------
     // CR 107.3c + CR 701.17a + CR 400.7 + CR 404.1 + CR 115.1a:
     // "the number of cards [that were] put into target player's graveyard from
@@ -9906,6 +10698,82 @@ mod tests {
                 ])),
             },
         }
+    }
+
+    #[test]
+    fn discarded_for_each_reader_does_not_bind_a_printed_color_choice() {
+        // Synthetic grammar discriminator: the discarded type-reader context
+        // cannot publish the chooser it would need for IsChosenColor.
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::Opponent),
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_for_each_clause_with_context(
+                "creatures they control of the color of your choice",
+                &ctx,
+            ),
+            None,
+        );
+        assert_eq!(ctx.pending_printed_color_choice, None);
+        assert_eq!(
+            parse_for_each_clause_with_context("creatures they control", &ctx),
+            Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent)
+                ),
+            }),
+            "reach guard: discarding chooser authority must preserve the player binder",
+        );
+    }
+
+    #[test]
+    fn counter_census_carries_and_commits_the_callers_chain_context() {
+        // CR 105.4 + CR 608.2c: the census reads its population under the
+        // CALLER's context, not a fresh one. Only an effect-chain context
+        // (`ChainBound`) may consume the printed "of the color of your choice"
+        // qualifier, and the pending colour choice it records must reach that
+        // caller. "they control" makes the context-free reading decline, so the
+        // phrase reaches the context-aware census.
+        let text =
+            "the number of +1/+1 counters on creatures they control of the color of your choice";
+        let mut chain = ParseContext {
+            relative_player_scope: Some(ControllerRef::Opponent),
+            chosen_color_qualifier: ChosenColorQualifierScope::ChainBound,
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_quantity_ref_with_context(text, &mut chain),
+            Some(QuantityRef::CountersOnObjects {
+                counter_type: Some(CounterType::Plus1Plus1),
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::Opponent)
+                        .properties(vec![FilterProp::IsChosenColor])
+                ),
+            })
+        );
+        assert_eq!(
+            chain.pending_printed_color_choice,
+            Some(ChoiceType::color()),
+            "the chooser request is committed to the caller's context"
+        );
+        assert_eq!(
+            chain.relative_player_scope,
+            Some(ControllerRef::Opponent),
+            "the census preserves the caller's player antecedent"
+        );
+
+        // The same phrase under an unbound context leaves the qualifier
+        // unconsumed, so the census declines it rather than stamping a
+        // chooser-less colour filter.
+        let mut unbound = ParseContext {
+            relative_player_scope: Some(ControllerRef::Opponent),
+            ..Default::default()
+        };
+        assert_eq!(parse_quantity_ref_with_context(text, &mut unbound), None);
+        assert_eq!(unbound.pending_printed_color_choice, None);
     }
 
     #[test]

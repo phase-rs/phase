@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, peek, value, verify};
+use nom::combinator::{opt, peek, recognize, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -1258,6 +1258,16 @@ fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
     // "instead" but still route through the replacement pipeline.
     nom_primitives::scan_at_word_boundaries(lower, |input| {
         alt((
+            // Typed middle ("can't have -1/-1 counters put on" — Darksteel
+            // Angel): `recognize` keeps the arm's `&str` output so it
+            // unifies with the `tag` arms. Either order is correct (the
+            // arms are disjoint); typed first by the specific-first
+            // convention.
+            recognize((
+                tag::<_, _, OracleError>("can't have "),
+                nom_primitives::parse_counter_type_typed,
+                tag(" counters put on"),
+            )),
             tag::<_, _, OracleError>("can't have counters put on"),
             tag("players can't get counters"),
             tag("counters can't be put on"),

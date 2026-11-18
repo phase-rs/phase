@@ -524,6 +524,10 @@
     "apiKeyMissing": "Vuelve a introducir tu clave de API. Las claves no se conservan al recargar, y este proveedor no se usa para los asientos de IA ni para los bots del draft hasta que lo hagas.",
     "apiKeyStorage": "Se mantiene en memoria solo durante esta sesión del navegador. Las claves de API nunca se escriben en disco y quedan excluidas de la copia de seguridad y de la sincronización en la nube, así que tendrás que volver a introducirla tras recargar. Además, una clave de API exige un endpoint https:// salvo que el servidor esté en localhost.",
     "apiKeyGet": "Obtener una clave",
+    "messageThreads": {
+      "label": "Recordar decisiones anteriores",
+      "hint": "Los asientos de IA con dificultad Media o superior mantienen su partida en un hilo de mensajes de Anthropic, para que el modelo parta de su razonamiento anterior."
+    },
     "test": "Probar conexión",
     "testing": "Probando…",
     "testOk": "Conectado.",

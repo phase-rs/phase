@@ -17,7 +17,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
     PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneOpponentChooserPurpose,
+    PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -440,6 +440,18 @@ fn resolution_choice_cardinality(
     }
 }
 
+/// CR 118.3 + CR 608.2d: the fewest objects a resolution-time zone pick must
+/// take, whatever the zone holds ("exile two cards from your graveyard" is 2
+/// over an empty graveyard). `None` while the count waits on an unannounced X.
+fn resolution_pick_required_min(state: &GameState, ability: &ResolvedAbility) -> Option<usize> {
+    let Some(spec) = ability.multi_target.as_ref() else {
+        return Some(1);
+    };
+    crate::game::ability_utils::resolve_multi_target_bounds(state, ability, spec, usize::MAX)
+        .ok()
+        .map(|bounds| bounds.min)
+}
+
 fn resolution_zone_candidates(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -625,6 +637,50 @@ pub(crate) fn exact_scoped_graveyard_exile_is_infeasible(
         )
         .is_err(),
     )
+}
+
+/// CR 608.2d + CR 400.7: an ordinary-optional exact graveyard exile ("that
+/// player may exile a card from their graveyard", Web of Inertia) is
+/// impossible when no eligible card exists — the typed move names a graveyard
+/// population, and an exact selection from an empty set cannot be performed.
+/// Sibling of [`exact_scoped_graveyard_exile_is_infeasible`], which serves the
+/// `optional_for: AnyPlayer` fan-out shape; this one serves the single-prompt
+/// shape (`multi_target: None`, exact-1, non-`up_to`) with any typed filter.
+/// Untargeted moves only: bound targets keep today's behavior under the
+/// targeting/fizzle machinery. Returns `false` (feasible) for shapes outside
+/// the gate or with a candidate in hand.
+pub(crate) fn optional_exact_graveyard_exile_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        target: TargetFilter::Typed { .. },
+        up_to: false,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    if !ability.optional || ability.multi_target.is_some() || !ability.targets.is_empty() {
+        return false;
+    }
+    let target_filter = match &ability.effect {
+        Effect::ChangeZone { target, .. } => target,
+        _ => unreachable!("shape matched above"),
+    };
+    let filter_controller =
+        crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
+    let candidates = resolution_zone_candidates(
+        state,
+        ability,
+        target_filter,
+        filter_controller,
+        &[Zone::Graveyard],
+        Zone::Exile,
+    );
+    candidates.is_empty()
 }
 
 // PLAN §7 Phase A: the zone-change pipeline (result enums, delivery tail,
@@ -930,6 +986,186 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
 }
 
+/// The zones an untargeted resolution-time move chooses from, and its eligible
+/// objects ([`untargeted_zone_pool`]).
+struct UntargetedZonePool {
+    scan_zones: Vec<Zone>,
+    eligible: Vec<ObjectId>,
+}
+
+/// CR 608.2c: the zones an untargeted resolution-time move chooses from, and its
+/// eligible objects. `resolve` and `optional_zone_pick_is_infeasible` both read
+/// it, so the offer and the move can't disagree.
+fn untargeted_zone_pool(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    origin: Option<Zone>,
+    destination: Zone,
+    filter_controller: PlayerId,
+    exile_tracked_set_library_only: bool,
+) -> UntargetedZonePool {
+    // CR 608.2c: A tracked-set filter ("from among the milled cards" / "X
+    // cards revealed this way") scopes the selection to a set of objects
+    // that may live in any zone. The tracked-set membership is the scope —
+    // there is no fixed `InZone` constraint to extract — so derive the scan
+    // zone from the members' actual zone rather than defaulting to the
+    // battlefield.
+    let scan_zones = if exile_tracked_set_library_only {
+        vec![Zone::Library]
+    } else if let Some(origin) = origin {
+        vec![origin]
+    } else {
+        let extracted = target_filter.extract_zones();
+        if !extracted.is_empty() {
+            extracted
+        } else if let Some(zone) = target_filter.extract_in_zone() {
+            vec![zone]
+        } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
+            zones
+        } else {
+            vec![Zone::Battlefield]
+        }
+    };
+    // Filter-controller override is primary here: when a filter like
+    // "creature you control" needs "you" to resolve to the *target* player
+    // (not the caster), we pass `filter_controller` explicitly. Include the
+    // resolving ability so `Owned { ScopedPlayer }` reads `scoped_player`.
+    let eligible = resolution_zone_candidates(
+        state,
+        ability,
+        target_filter,
+        filter_controller,
+        &scan_zones,
+        destination,
+    );
+    UntargetedZonePool {
+        scan_zones,
+        eligible,
+    }
+}
+
+/// CR 118.12 + CR 118.3 + CR 608.2d: an optional move whose objects the player
+/// picks at resolution from a zone ("Then you may exile an artifact or creature
+/// card from your hand", Nexus of Becoming) is an impossible option when the
+/// pick must take at least one object and the zone holds none that is eligible.
+/// Reads the pool `resolve` chooses from, and the pick's required minimum
+/// whatever the zone holds ("exile two cards" needs two). Bound and referent
+/// subjects keep their own arms, an up-to or zero-count pick is always
+/// possible, and an `optional_for` fan-out is decided
+/// per accepting player (CR 101.4).
+pub(crate) fn optional_zone_pick_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    // CR 608.2d: an up-to pick may choose zero, so it is never impossible.
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        up_to: false,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    // CR 608.2d: only a pick made while the effect is applied is decided here;
+    // cast-time targets keep target legality.
+    if ability.target_choice_timing != TargetChoiceTiming::Resolution {
+        return false;
+    }
+    // CR 101.4: an `optional_for` fan-out binds "their" zone to each accepting
+    // player, so the controller's pool would answer for the wrong player.
+    if ability.optional_for.is_some() {
+        return false;
+    }
+    // CR 610.3: the move does not happen once its "until" event occurred, and
+    // `resolve` then completes without failing.
+    if until_event_already_occurred(state, ability, &[]) {
+        return false;
+    }
+    // CR 400.7: a pinned referent that became a new object affects nothing,
+    // and `resolve` then completes without failing.
+    if ability.pinned_object_targets_all_stale(state) {
+        return false;
+    }
+    // CR 608.2h + CR 603.2: a triggered ability's pick may read its trigger event
+    // (Kodama of the East Tree's "equal or lesser mana value"), and that answer
+    // exists only while the effect is applied. Outside its resolution no event is
+    // bound, so impossibility can't be proven here.
+    if ability.trigger_source.is_some() && state.current_trigger_event.is_none() {
+        return false;
+    }
+    let effective = crate::game::targeting::resolve_tracked_set_sentinel(state, target.clone());
+    // Bound and context referents keep their own arms (CR 400.7, CR 608.2b).
+    if matches!(
+        effective,
+        TargetFilter::ParentTarget
+            | TargetFilter::SelfRef
+            | TargetFilter::TriggeringSource
+            | TargetFilter::ParentTargetSlot { .. }
+    ) {
+        return false;
+    }
+    let origin = expected_move_origin(state, *origin, &effective);
+    // CR 701.23b: `Library`/`None` + `Any` is the fail-to-find put-step
+    // continuation, which `resolve` completes as a no-op.
+    if (origin == Some(Zone::Library) || origin.is_none()) && matches!(effective, TargetFilter::Any)
+    {
+        return false;
+    }
+    // CR 608.2c: an announced or inherited object is moved, not picked.
+    if !bound_move_members(state, ability, &effective).is_empty() {
+        return false;
+    }
+    let filter_controller =
+        crate::game::effects::controller_for_relative_filter(state, ability, &effective);
+    let pool = untargeted_zone_pool(
+        state,
+        ability,
+        &effective,
+        origin,
+        *destination,
+        filter_controller,
+        false,
+    );
+    pool.eligible.is_empty()
+        && resolution_pick_required_min(state, ability).is_some_and(|min| min > 0)
+}
+
+/// CR 400.7 + CR 608.2c: the bound members a referent move ("exile it",
+/// `ChangeZone { target: SelfRef | TriggeringSource }`) will actually move,
+/// with its destination — read through the resolver's own binding and
+/// per-member movability test. `None` for every other effect.
+pub(crate) fn referent_move_departures(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<(Vec<ObjectId>, Zone)> {
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    if !matches!(
+        target,
+        TargetFilter::SelfRef | TargetFilter::TriggeringSource
+    ) {
+        return None;
+    }
+    let (members, expected_origin) = referent_move_members(state, ability, *origin, target);
+    Some((
+        members
+            .into_iter()
+            .filter(|&id| !zone_move_member_cannot_move(state, id, expected_origin))
+            .collect(),
+        *destination,
+    ))
+}
+
 // CR 701.24a + CR 701.24d: An explicitly owned terminal Shuffle randomizes the
 // delivered set once. Bottom is only a transient delivery position; a printed
 // placement remains authoritative, and ordinary library moves keep auto-shuffling.
@@ -1073,6 +1309,9 @@ pub fn resolve(
     // was put onto the stack (activated) or triggered (triggered) but before its
     // initial one-shot zone change, the object does not move.
     if until_event_already_occurred(state, ability, events) {
+        // CR 609.3 + CR 608.2c: nothing moved, so a following "this way"
+        // count reads 0 rather than an earlier chain step's count.
+        state.last_effect_count = Some(0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -1155,6 +1394,7 @@ pub fn resolve(
     if matches!(target_filter, TargetFilter::ParentTarget)
         && ability.parent_target_missing_reason.is_some()
     {
+        state.last_effect_count = Some(0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -1217,9 +1457,16 @@ pub fn resolve(
         // Exception: when `target_choice_timing == Resolution` the player has not
         // yet had a chance to choose — targets are empty by design and the zone-scan
         // path must be reached so `EffectZoneChoice` can be issued.
+        //
+        // Every early return in this empty-targets block moved nothing, so each
+        // stamps `last_effect_count = Some(0)` before returning. CR 609.3: the
+        // move did only as much as possible (nothing); CR 608.2c: a following
+        // "this way" step (`QuantityRef::PreviousEffectCount`) must read that 0,
+        // not inherit a count an earlier chain step left behind.
         if ability.targeting_is_optional()
             && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
         {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1233,6 +1480,24 @@ pub fn resolve(
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
         if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+
+        // CR 400.7: an untargeted "it" whose inferred referent was this ability's own
+        // source names nothing once the source changed zones; return before the zone
+        // scan, exactly as the SelfRef guard above.
+        if crate::game::targeting::inferred_source_referent_is_unbound(
+            state,
+            ability,
+            target_filter,
+        ) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1254,6 +1519,7 @@ pub fn resolve(
         // (CR 603.7b) — it simply affected nothing, and the game log / event
         // observers / chain machinery must see that.
         if ability.pinned_object_targets_all_stale(state) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1270,6 +1536,7 @@ pub fn resolve(
         // which would otherwise find nothing only through `filter.rs`'s slot
         // arm and would set `cost_payment_failed_flag` on the way out.
         if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1309,6 +1576,7 @@ pub fn resolve(
         if (origin == Some(Zone::Library) || origin.is_none())
             && matches!(target_filter, TargetFilter::Any)
         {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1317,41 +1585,21 @@ pub fn resolve(
             return Ok(completed_result(0));
         }
 
-        // CR 608.2c: A tracked-set filter ("from among the milled cards" / "X
-        // cards revealed this way") scopes the selection to a set of objects
-        // that may live in any zone. The tracked-set membership is the scope —
-        // there is no fixed `InZone` constraint to extract — so derive the scan
-        // zone from the members' actual zone rather than defaulting to the
-        // battlefield.
-        let scan_zones = if exile_tracked_set_library_only {
-            vec![Zone::Library]
-        } else if let Some(origin) = origin {
-            vec![origin]
-        } else {
-            let extracted = target_filter.extract_zones();
-            if !extracted.is_empty() {
-                extracted
-            } else if let Some(zone) = target_filter.extract_in_zone() {
-                vec![zone]
-            } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
-                zones
-            } else {
-                vec![Zone::Battlefield]
-            }
-        };
-        let scan_zone = scan_zones[0];
-        // Filter-controller override is primary here: when a filter like
-        // "creature you control" needs "you" to resolve to the *target* player
-        // (not the caster), we pass `filter_controller` explicitly. Include the
-        // resolving ability so `Owned { ScopedPlayer }` reads `scoped_player`.
-        let eligible = resolution_zone_candidates(
+        // CR 608.2c: the untargeted pick's scan zones and eligible objects, read
+        // through the same authority the optional-pick feasibility check reads.
+        let UntargetedZonePool {
+            scan_zones,
+            eligible,
+        } = untargeted_zone_pool(
             state,
             ability,
             target_filter,
-            filter_controller,
-            &scan_zones,
+            origin,
             dest_zone,
+            filter_controller,
+            exile_tracked_set_library_only,
         );
+        let scan_zone = scan_zones[0];
         // CR 701.24d-e: retain an explicitly designated typed player even when
         // the source zone supplies zero eligible cards.
         publish_finalized_owner_library_subjects(state, ability, &[]);
@@ -1377,6 +1625,7 @@ pub fn resolve(
             if !up_to {
                 state.cost_payment_failed_flag = true;
             }
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1398,6 +1647,11 @@ pub fn resolve(
             // selected object's zone, not the prompt's default scan zone.
             let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
+            // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
+            // this entry's Devour snapshot, so a seat frame parked for it lies
+            // beneath the snapshot and the snapshot stays adjacent to its
+            // PostReplacement frame.
+            let attack_seat = crate::game::zone_pipeline::PausedEntryAttackSeat::seat_frame(state);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
             // tapped/attacking riders before it moves.
@@ -1415,6 +1669,7 @@ pub fn resolve(
                 effect_enter_transformed,
                 member.enter_tapped,
                 member.enters_attacking,
+                attack_seat,
                 enters_under_player,
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
@@ -1486,6 +1741,11 @@ pub fn resolve(
             // zone of the selection filter's union.
             let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
+            // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
+            // this entry's Devour snapshot, so a seat frame parked for it lies
+            // beneath the snapshot and the snapshot stays adjacent to its
+            // PostReplacement frame.
+            let attack_seat = crate::game::zone_pipeline::PausedEntryAttackSeat::seat_frame(state);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
             // tapped/attacking riders before it moves.
@@ -1503,6 +1763,7 @@ pub fn resolve(
                 effect_enter_transformed,
                 member.enter_tapped,
                 member.enters_attacking,
+                attack_seat,
                 enters_under_player,
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
@@ -1641,14 +1902,11 @@ pub fn resolve(
     // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
     // Captured before any member enters so every co-arriver (and the devourers
     // themselves) is excluded regardless of iteration order.
-    if dest_zone == Zone::Battlefield
-        && state.active_devour_eligible_snapshot().is_none()
-        && targeted_objects
-            .iter()
-            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
-    {
-        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
-    }
+    crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
+        state,
+        targeted_objects.iter().copied(),
+        dest_zone,
+    );
 
     // CR 603.6a + CR 614.12: one event — every member's gates read the board
     // before any member moves.
@@ -1661,8 +1919,12 @@ pub fn resolve(
     // Tracked the same way the mass `resolve_all` path counts, so the chained
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
-    let mut logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
+    let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+        state,
+        &ZoneChangeAnnouncement::all(&targeted_objects, dest_zone),
+    );
+    let mut entrants =
+        crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
@@ -1710,10 +1972,16 @@ pub fn resolve(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
+        let owner = change_zone_member_owner(
+            logical_zone_change_group.logical_group_id,
+            anticipated_pause.as_ref(),
+        );
         match process_one_zone_move_with_terminal(
             state,
+            &mut entrants,
             &ctx,
             member,
+            owner,
             logical_zone_change_group.announced_members(),
             events,
         ) {
@@ -1785,22 +2053,19 @@ pub fn resolve(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
+                let paused_current = crate::game::zone_pipeline::parked_member_boundary(
+                    state,
+                    logical_zone_change_group.logical_group_id,
+                    anticipated_pause,
+                    &events[delivery_start..],
+                )
+                .expect("zone-change pause must retain its exact boundary");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
-                        paused_current: Some(
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("zone-change pause must retain its exact boundary"),
-                        ),
+                        paused_current: Some(paused_current),
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -2219,14 +2484,64 @@ pub(crate) fn process_one_zone_move(
     member: &ChangeZoneMemberEntry,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    // A single-object move belongs to no multi-member entry event.
-    process_one_zone_move_with_terminal(state, ctx, member, &[], events).into_zone_move_result()
+    // CR 508.4: its one caller, `search_outside_game.rs`, parks no logical owner,
+    // so a paused attacking entry is seated by a seat frame parked at the
+    // boundary captured here, before the move's operation pushes a frame.
+    let attack_seat = crate::game::zone_pipeline::PausedEntryAttackSeat::seat_frame(state);
+    process_one_zone_move_with_attack_seat(state, ctx, member, attack_seat, None, &[], events)
+        .into_zone_move_result()
 }
 
+/// CR 730.3 + CR 603.10a: the announcing owner of one ChangeZone-family
+/// member's move — the iteration's logical group and the member's pre-move
+/// incarnation. A merged member's component batch links to it.
+pub(crate) fn change_zone_member_owner(
+    group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    anticipated_pause: Option<&crate::types::game_state::PendingZoneChangeDelivery>,
+) -> Option<crate::game::zone_pipeline::MemberDeliveryOwner> {
+    anticipated_pause.map(|boundary| crate::game::zone_pipeline::MemberDeliveryOwner {
+        group,
+        member: boundary.member,
+        expected_event: None,
+    })
+}
+
+/// Its callers, the targeted loop, the drain's resume of `remaining` members and
+/// the two `EffectZoneChoice` member loops, each park a
+/// `PendingChangeZoneIteration` on `NeedsChoice`, whose resume takes an owed
+/// attacking seat (CR 508.4). Each owner waits beneath its member's complete
+/// child stack. CR 603.6a: each caller is the
+/// logical owner of a change, and the member is delivered with that change's
+/// prospective `entrants` published, which the caller collected once before its
+/// loop (`zone_pipeline::SimultaneousEntrants`).
 pub(crate) fn process_one_zone_move_with_terminal(
+    state: &mut GameState,
+    entrants: &mut crate::game::zone_pipeline::SimultaneousEntrants,
+    ctx: &ChangeZoneIterationCtx,
+    member: &ChangeZoneMemberEntry,
+    owner: Option<crate::game::zone_pipeline::MemberDeliveryOwner>,
+    event_members: &[ObjectIncarnationRef],
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
+    entrants.deliver_member(state, |state| {
+        process_one_zone_move_with_attack_seat(
+            state,
+            ctx,
+            member,
+            crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
+            owner,
+            event_members,
+            events,
+        )
+    })
+}
+
+fn process_one_zone_move_with_attack_seat(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
     member: &ChangeZoneMemberEntry,
+    attack_seat: crate::game::zone_pipeline::PausedEntryAttackSeat,
+    owner: Option<crate::game::zone_pipeline::MemberDeliveryOwner>,
     // CR 614.4 + CR 614.12: the announced members of the entry event this member belongs to
     // (`LogicalZoneChangeGroup::announced_members`).
     event_members: &[ObjectIncarnationRef],
@@ -2268,6 +2583,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enter_transformed,
         member.enter_tapped,
         member.enters_attacking,
+        attack_seat,
         ctx.enters_under_player,
         &member.enter_with_counters,
         ctx.face_down_profile.as_ref(),
@@ -2288,6 +2604,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
             performed_by: Some(ctx.performed_by),
             ownership_actor: Some(ctx.controller),
         },
+        owner,
         events,
     );
 
@@ -3349,6 +3666,9 @@ pub fn resolve_all(
         state.tracked_set_member_origins.remove(id);
     }
 
+    // CR 614.12 + CR 614.1c: the same snapshot also serves population-counting
+    // as-enters replacements (Ascendant Acolyte), which must not count a
+    // co-entrant's counters or presence.
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
     // simultaneously, snapshot the eligible pool BEFORE any co-entering member
     // enters — `state.objects` is unordered, so an ordinary co-arriver may be
@@ -3357,14 +3677,11 @@ pub fn resolve_all(
     // battlefield is still the pre-entry set) so every co-arriver is excluded.
     // `is_none`-gated so a nested/resumed pass doesn't re-capture; cleared on the
     // event-completion paths below.
-    if dest_zone == Zone::Battlefield
-        && state.active_devour_eligible_snapshot().is_none()
-        && matching
-            .iter()
-            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
-    {
-        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
-    }
+    crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
+        state,
+        matching.iter().copied(),
+        dest_zone,
+    );
 
     // CR 401.4: When multiple objects are placed at the same library position
     // simultaneously and `random_order` is false, the owner arranges their
@@ -3411,8 +3728,12 @@ pub fn resolve_all(
         .then(|| crate::game::zones::LibraryReorderOperation::begin(state, &matching));
 
     let mut moved_count: i32 = 0;
-    let mut logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
+    let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+        state,
+        &ZoneChangeAnnouncement::all(&matching, dest_zone),
+    );
+    let mut entrants =
+        crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
@@ -3446,37 +3767,45 @@ pub fn resolve_all(
         };
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
-            state,
-            obj_id,
-            per_object_origin,
-            dest_zone,
-            ability.source_id,
-            ability.duration.as_ref(),
-            false,
-            enter_tapped,
-            enters_attacking,
-            enters_under_player,
-            &enter_with_counters,
-            face_down_profile.as_ref(),
-            ability.context.face_down_in_exile,
-            with_entry_effect.as_deref(),
-            logical_zone_change_group.announced_members(),
-            track_exiled_by_source,
-            member_library_placement.clone(),
-            library_shuffle,
-            None,
-            // CR 610.3: the return duration remains relative to the resolving
-            // controller, independently of the subject performing the exile.
-            Some(ability.controller),
-            // CR 608.2c: the instruction's subject performs the move; entry
-            // ownership keeps reading the controller.
-            crate::game::zone_pipeline::MoveActors {
-                performed_by: Some(performer),
-                ownership_actor: Some(ability.controller),
-            },
-            events,
-        ) {
+        let owner = change_zone_member_owner(
+            logical_zone_change_group.logical_group_id,
+            anticipated_pause.as_ref(),
+        );
+        match entrants.deliver_member(state, |state| {
+            crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
+                state,
+                obj_id,
+                per_object_origin,
+                dest_zone,
+                ability.source_id,
+                ability.duration.as_ref(),
+                false,
+                enter_tapped,
+                enters_attacking,
+                crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
+                enters_under_player,
+                &enter_with_counters,
+                face_down_profile.as_ref(),
+                ability.context.face_down_in_exile,
+                with_entry_effect.as_deref(),
+                logical_zone_change_group.announced_members(),
+                track_exiled_by_source,
+                member_library_placement.clone(),
+                library_shuffle,
+                None,
+                // CR 610.3: the return duration remains relative to the resolving
+                // controller, independently of the subject performing the exile.
+                Some(ability.controller),
+                // CR 608.2c: the instruction's subject performs the move; entry
+                // ownership keeps reading the controller.
+                crate::game::zone_pipeline::MoveActors {
+                    performed_by: Some(performer),
+                    ownership_actor: Some(ability.controller),
+                },
+                owner,
+                events,
+            )
+        }) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(obj_id, completion)
@@ -3519,6 +3848,15 @@ pub fn resolve_all(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
+                let paused_current = (!entry_target_choice).then(|| {
+                    crate::game::zone_pipeline::parked_member_boundary(
+                        state,
+                        logical_zone_change_group.logical_group_id,
+                        anticipated_pause,
+                        &events[delivery_start..],
+                    )
+                    .expect("replacement pause must retain its exact boundary")
+                });
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         // CR 701.20d + CR 616.1: the whole-library reorder this
@@ -3527,17 +3865,7 @@ pub fn resolve_all(
                         library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
-                        paused_current: (!entry_target_choice).then(|| {
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("replacement pause must retain its exact boundary")
-                        }),
+                        paused_current,
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
                         // ChangeZoneAll carries no entry gate, so every member's
@@ -4285,8 +4613,19 @@ mod tests {
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
         };
-        let result =
-            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &[], &mut Vec::new());
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[card],
+            Zone::Battlefield,
+        ));
+        let result = process_one_zone_move_with_terminal(
+            &mut state,
+            &mut crate::game::zone_pipeline::SimultaneousEntrants::of(&group),
+            &ctx,
+            &member,
+            None,
+            group.announced_members(),
+            &mut Vec::new(),
+        );
         assert!(matches!(
             result,
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
@@ -10773,8 +11112,10 @@ mod tests {
         let hero = creature_in_graveyard(&mut state, 1, PlayerId(0));
         let soldier = creature_in_graveyard(&mut state, 2, PlayerId(0));
 
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[hero, soldier], Zone::Battlefield),
+        );
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
             library_reorder: None,
             pending_return_result_producer: None,
@@ -10949,6 +11290,62 @@ mod tests {
 
         assert!(!state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.objects[&obj_id].zone, Zone::Exile);
+    }
+
+    /// CR 400.7: Regenerations Restored sacrificed before its own trigger
+    /// resolves — "exile it" infers the source, which is now a new object in the
+    /// graveyard. The move does nothing: no zone scan, no failure flag, and the
+    /// effect still reports that it resolved.
+    #[test]
+    fn unresolved_parent_target_with_departed_source_moves_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Regenerations Restored".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                library_shuffle: Default::default(),
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        ability.trigger_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&obj_id],
+        ));
+        let mut setup = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut setup);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&obj_id].zone, Zone::Graveyard);
+        assert!(!state.cost_payment_failed_flag);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
     }
 
     /// CR 603.10a / Bronzehide Lion class: LTB self-return triggers where the
@@ -15728,6 +16125,256 @@ mod tests {
                 (Zone::Hand, Zone::Graveyard, Zone::Battlefield)
             );
         }
+    }
+
+    /// Nexus of Becoming's parsed exile node: "Then you may exile an artifact or
+    /// creature card from your hand." — an optional, untargeted
+    /// resolution-time pick from P0's hand.
+    fn nexus_exile_pick() -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                        ),
+                        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    ],
+                },
+                owner_library: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+                library_shuffle: Default::default(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    /// Aegis Sculptor's parsed exile node: "you may exile two cards from your
+    /// graveyard" — an optional exact-two resolution-time pick.
+    fn aegis_exile_pick(count: QuantityExpr) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        }]),
+                ),
+                owner_library: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+                library_shuffle: Default::default(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.multi_target = Some(MultiTargetSpec::exact(count));
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    /// CR 118.12 + CR 118.3 + CR 608.2d: an optional resolution-time zone pick
+    /// that must take at least one object is impossible exactly when its pool
+    /// holds nothing eligible, and for a single pick that verdict is the
+    /// resolver's own empty-pool failure. Every other shape keeps its owner.
+    ///
+    /// Real cards: no printed optional resolution-time pick has the shapes of
+    /// cases (e), (f) and (k). They are kept because conjuncts 7 and 8 and the
+    /// required minimum mirror `resolve`'s early returns, which complete without
+    /// `cost_payment_failed_flag`. Nearest printed cards: (e) Academy Rector's
+    /// search put-step, "When this creature dies, you may exile it. If you do,
+    /// search your library for an enchantment card, put that card onto the
+    /// battlefield, then shuffle." (CR 701.23b); (f) Goblin Welder's slot
+    /// return, "{T}: Choose target artifact a player controls and target
+    /// artifact card in that player's graveyard. If both targets are still legal
+    /// as this ability resolves, that player simultaneously sacrifices the
+    /// artifact and returns the artifact card to the battlefield." (CR 608.2b);
+    /// (k) Shigeki, Jukai Visionary's channel, "Return X target nonlegendary
+    /// cards from your graveyard to your hand." (CR 107.3 + CR 115.6).
+    #[test]
+    fn optional_zone_pick_is_infeasible_only_for_an_empty_exact_pick() {
+        // (a) P0's hand holds only a land: nothing to exile.
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let pick = nexus_exile_pick();
+        assert!(
+            optional_zone_pick_is_infeasible(&state, &pick),
+            "(a) a hand with no artifact or creature card can't supply the exile"
+        );
+        let mut resolved = state.clone();
+        resolve(&mut resolved, &pick, &mut Vec::new()).unwrap();
+        assert!(
+            resolved.cost_payment_failed_flag,
+            "(a) the same board reaches the resolver's empty-pool failure"
+        );
+        assert!(
+            !matches!(resolved.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "(a) the resolver opens no choice over the empty pool"
+        );
+        assert_eq!(resolved.objects[&land].zone, Zone::Hand);
+
+        // Positive control: an artifact card in hand makes the pick possible,
+        // and the resolver moves it (single-eligible branch).
+        let mut with_artifact = state.clone();
+        let artifact = create_object(
+            &mut with_artifact,
+            CardId(2),
+            PlayerId(0),
+            "Artifact Card".to_string(),
+            Zone::Hand,
+        );
+        with_artifact
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        assert!(
+            !optional_zone_pick_is_infeasible(&with_artifact, &pick),
+            "reach: an artifact card in hand can be exiled"
+        );
+        let mut moved = with_artifact.clone();
+        resolve(&mut moved, &pick, &mut Vec::new()).unwrap();
+        assert_eq!(moved.objects[&artifact].zone, Zone::Exile);
+        assert!(!moved.cost_payment_failed_flag);
+
+        // Each case below changes one input from (a); none is proven impossible.
+        // (b) An up-to pick may choose zero (Journey to the Oracle).
+        let mut up_to = nexus_exile_pick();
+        if let Effect::ChangeZone { up_to: flag, .. } = &mut up_to.effect {
+            *flag = true;
+        }
+        assert!(!optional_zone_pick_is_infeasible(&state, &up_to), "(b)");
+        // (c) "any number" may choose zero (Glorious Protector).
+        let mut any_number = nexus_exile_pick();
+        any_number.multi_target = Some(MultiTargetSpec::unlimited(0));
+        assert!(
+            !optional_zone_pick_is_infeasible(&state, &any_number),
+            "(c)"
+        );
+        // (d) An `optional_for` fan-out is decided per accepting player
+        // (Carrion Rats).
+        let mut fan_out = nexus_exile_pick();
+        fan_out.optional_for = Some(OpponentMayScope::AnyPlayer);
+        assert!(!optional_zone_pick_is_infeasible(&state, &fan_out), "(d)");
+        // (e) The fail-to-find put-step: `Library` + `Any`.
+        let mut put_step = nexus_exile_pick();
+        if let Effect::ChangeZone { origin, target, .. } = &mut put_step.effect {
+            *origin = Some(Zone::Library);
+            *target = TargetFilter::Any;
+        }
+        assert!(!optional_zone_pick_is_infeasible(&state, &put_step), "(e)");
+        // (f) A target-slot anaphor names a declared target, not a pool.
+        let mut slot = nexus_exile_pick();
+        if let Effect::ChangeZone { target, .. } = &mut slot.effect {
+            *target = TargetFilter::ParentTargetSlot { index: 0 };
+        }
+        assert!(!optional_zone_pick_is_infeasible(&state, &slot), "(f)");
+        // (g) A bound object is moved, not picked.
+        let mut bound = nexus_exile_pick();
+        bound.targets = vec![TargetRef::Object(land)];
+        assert!(!optional_zone_pick_is_infeasible(&state, &bound), "(g)");
+        // (h) A triggered ability evaluated with no trigger event bound abstains
+        // (Kodama of the East Tree's pick reads its event)...
+        let mut triggered = nexus_exile_pick();
+        triggered.set_test_trigger_source_recursive(0, CardId(100));
+        assert!(state.current_trigger_event.is_none());
+        assert!(
+            !optional_zone_pick_is_infeasible(&state, &triggered),
+            "(h) no trigger event is bound"
+        );
+        // ...and decides again once its event is bound: the abstention, not
+        // the scan, refused.
+        // The bound event is a creature spell resolving onto the battlefield.
+        let mut with_event = state.clone();
+        with_event.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: ObjectId(100),
+            from: Some(Zone::Stack),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(100),
+                Some(Zone::Stack),
+                Zone::Battlefield,
+            )),
+        });
+        assert!(
+            optional_zone_pick_is_infeasible(&with_event, &triggered),
+            "(h) the bound event lets the scan decide"
+        );
+        // (i) A cast-time target keeps target legality.
+        let mut stack_timed = nexus_exile_pick();
+        stack_timed.target_choice_timing = TargetChoiceTiming::Stack;
+        assert!(
+            !optional_zone_pick_is_infeasible(&state, &stack_timed),
+            "(i)"
+        );
+
+        // (j) Exact N (Aegis Sculptor, "exile two cards from your graveyard"):
+        // the required minimum is two whatever the graveyard holds, so an
+        // empty graveyard can't supply the exile.
+        let empty = GameState::new_two_player(42);
+        assert!(
+            optional_zone_pick_is_infeasible(
+                &empty,
+                &aegis_exile_pick(QuantityExpr::Fixed { value: 2 })
+            ),
+            "(j) two cards can't come from an empty graveyard"
+        );
+        // (k) X = 0 takes nothing: the resolved minimum, not the presence of an
+        // exact count, decides.
+        let mut zero = aegis_exile_pick(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        zero.chosen_x = Some(0);
+        assert!(
+            !optional_zone_pick_is_infeasible(&empty, &zero),
+            "(k) an X = 0 pick takes nothing and is always possible"
+        );
     }
 }
 

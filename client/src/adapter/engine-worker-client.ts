@@ -15,6 +15,7 @@ import type {
   GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
   LlmDecisionRequestResult,
   MatchConfig,
   ReplayHeader,
@@ -36,7 +37,11 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  BracketDeckRequest,
+  BracketEstimateRequest,
+} from "../types/bracketEstimate";
+import type { DeckSignals } from "../types/deckSignals";
 import type { EngineQueryArgs, EngineQueryName, EngineQueryResult } from "./engine-queries";
 import {
   STATE_CODEC_DECODE_TIMEOUT_MS,
@@ -536,9 +541,19 @@ export class EngineWorkerClient {
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null> {
     return this.request<LlmDecisionRequestResult | null>(
-      { type: "buildLlmDecisionRequest", difficulty, playerId, endpointJson, historyJson },
+      {
+        type: "buildLlmDecisionRequest",
+        difficulty,
+        playerId,
+        endpointJson,
+        historyJson,
+        settingsRevision,
+        clock,
+      },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -547,18 +562,22 @@ export class EngineWorkerClient {
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null> {
     return this.request<AiLlmProposalResult | null>(
       {
         type: "getAiActionProposalFromLlmResponse",
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,
+        clock,
       },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
@@ -713,8 +732,12 @@ export class EngineWorkerClient {
     return this.request<string | null>({ type: "takeLastPanic" });
   }
 
-  async estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", deck });
+  async estimateBracketForDeck(request: BracketEstimateRequest): Promise<unknown> {
+    return this.request<unknown>({ type: "estimateBracketForDeck", request });
+  }
+
+  async deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null> {
+    return this.request<DeckSignals | null>({ type: "deckSignalsForDeck", deck });
   }
 
   // ── Replay system ──────────────────────────────────────────────────────

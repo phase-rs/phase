@@ -66,6 +66,7 @@ fn answer_emissary(runner: &mut GameRunner, emissary: ObjectId, player: PlayerId
     // keyed to the entering permanent; answer Creature through production.
     let named_source = exact_named_choice_source(runner.state(), emissary);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player,
         choice_type: ChoiceType::card_type(),
@@ -656,14 +657,13 @@ fn redirected_damage_survives_original_recipient_conceding_at_replacement_pause(
                         .events,
                 );
                 assert!(runner.state().players[P1.0 as usize].is_eliminated);
-                let record = runner
-                    .state()
-                    .pending_combat_damage
-                    .as_ref()
-                    .expect("the surviving recipient's combat event remains parked");
                 assert!(
-                    !record.paused_entry_pruned,
-                    "the historical assignment to P1 cannot prune damage now owed to the host"
+                    runner
+                        .state()
+                        .pending_combat_lifelink
+                        .as_ref()
+                        .is_some_and(|record| record.replacement.is_some()),
+                    "the surviving recipient's combat event remains parked"
                 );
                 let WaitingFor::ReplacementChoice {
                     player, candidates, ..
@@ -697,7 +697,7 @@ fn redirected_damage_survives_original_recipient_conceding_at_replacement_pause(
         runner.state().phase,
         Phase::EndCombat | Phase::PostCombatMain
     ));
-    assert!(runner.state().pending_combat_damage.is_none());
+    assert!(runner.state().pending_combat_lifelink.is_none());
     assert!(runner.state().pending_replacement.is_none());
     assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
     assert_eq!(

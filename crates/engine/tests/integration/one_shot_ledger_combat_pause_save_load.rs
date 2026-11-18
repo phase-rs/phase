@@ -305,9 +305,10 @@ fn prevented_pairs(events: &[GameEvent]) -> Vec<(TargetRef, u32)> {
 fn record_len(runner: &GameRunner) -> usize {
     runner
         .state()
-        .pending_combat_damage
+        .pending_combat_lifelink
         .as_ref()
-        .expect("a parked combat record must exist at the pause")
+        .and_then(|record| record.replacement.as_ref())
+        .expect("a parked combat replacement pass must exist at the pause")
         .one_shot_applications
         .len()
 }
@@ -416,7 +417,7 @@ fn drive(save_load: bool) -> Outcome {
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "damage must finish, not suspend at an unanswered prompt"
     );
-    assert!(runner.state().pending_combat_damage.is_none());
+    assert!(runner.state().pending_combat_lifelink.is_none());
     assert_eq!(runner.life(P1), 20, "every portion was prevented");
     assert_eq!(
         runner.life(P0),
@@ -601,7 +602,7 @@ fn drive_matt_example(save_load: bool) -> Outcome {
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "damage must finish, not suspend at an unanswered prompt"
     );
-    assert!(runner.state().pending_combat_damage.is_none());
+    assert!(runner.state().pending_combat_lifelink.is_none());
     // THE assertion: portion 3's 2 trample doubled to 4 — pre-fix the
     // resumed batch loses the doubling and the player takes 2.
     assert_eq!(

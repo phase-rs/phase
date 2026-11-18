@@ -123,7 +123,7 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
-type SpellCopyOrderChoice = Extract<WaitingFor, { type: "SpellCopyOrderChoice" }>;
+type MemberOrderChoice = Extract<WaitingFor, { type: "MemberOrderChoice" }>;
 
 function selectionInteractionId(
   interaction: ViewerInteraction | null,
@@ -299,9 +299,9 @@ export function CardChoiceModal() {
     case "EmpowerJaceChoice":
       if (!canActForWaitingState) return null;
       return <EmpowerJaceChoiceModal data={waitingFor.data} />;
-    case "SpellCopyOrderChoice":
+    case "MemberOrderChoice":
       if (!canActForWaitingState) return null;
-      return <SpellCopyOrderChoiceModal data={waitingFor.data} />;
+      return <MemberOrderChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -588,9 +588,9 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               key={id}
               type="button"
               aria-label={obj.name}
-              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
+              className={`relative rounded-lg transition ${
                 isSelected
-                  ? "ring-2 ring-emerald-400/80"
+                  ? "z-10 ring-2 ring-emerald-400/80"
                   : "ring-1 ring-white/10 hover:ring-white/35"
               }`}
               initial={{ opacity: 0, y: 40, scale: 0.9 }}
@@ -601,17 +601,17 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage {...objectImageProps(obj)} size="normal" />
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  isSelected
-                    ? "bg-emerald-500/80 text-white"
-                    : "bg-slate-800/90 text-slate-300"
-                }`}
-              >
-                {isSelected
-                  ? t("cardChoice.badges.selected")
-                  : t("cardChoice.badges.choose")}
-              </span>
+              {/* Over the card, as every strip draws its selection: below lg
+                  the strip sizes its cards to fill its height, so anything
+                  stacked under a card would be cut off. The label wraps inside
+                  a narrow card rather than spilling onto its neighbours. */}
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-center text-xs font-bold text-white [overflow-wrap:anywhere]">
+                    {t("cardChoice.badges.selected")}
+                  </span>
+                </div>
+              )}
             </motion.button>
           );
         })}
@@ -1219,16 +1219,22 @@ function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
   );
 }
 
-// CR 405.3 + CR 707.10: the controller of a batch of spell copies picks the
-// spell whose copy goes on the stack next. Display-only: the engine supplies
-// `choices` and enforces legality; clicking a spell dispatches a single-object
+// CR 608.2f + CR 405.3: the controller of an ordered member loop picks which
+// member is processed next — a spell copy, or a per-member instruction whose
+// iterations pause for a payment. Display-only: the engine supplies `choices`
+// and enforces legality; clicking a member dispatches a single-object
 // SelectCards.
-function SpellCopyOrderChoiceModal({ data }: { data: SpellCopyOrderChoice["data"] }) {
+function MemberOrderChoiceModal({ data }: { data: MemberOrderChoice["data"] }) {
   const { t } = useTranslation("game");
+  const copyBatch = data.purpose === "SpellCopies";
   return (
     <SingleObjectPickModal
-      title={t("cardChoice.spellCopyOrder.title")}
-      subtitle={t("cardChoice.spellCopyOrder.subtitle")}
+      title={t(
+        copyBatch ? "cardChoice.spellCopyOrder.title" : "cardChoice.memberOrder.title",
+      )}
+      subtitle={t(
+        copyBatch ? "cardChoice.spellCopyOrder.subtitle" : "cardChoice.memberOrder.subtitle",
+      )}
       choices={data.choices}
     />
   );
@@ -2677,6 +2683,19 @@ function CollectEvidenceModal({
     return obj ? sum + manaValueOfObject(obj) : sum;
   }, 0);
   const isReady = total >= data.minimum_mana_value;
+  // CR 608.2d + CR 701.59b: evidence collected by a resolving ability is not a
+  // cost that can be backed out of; the engine rejects CancelCast for it.
+  const canCancel = data.resume.type !== "Resolution";
+  const confirm = (
+    <ConfirmButton
+      onClick={handleConfirm}
+      disabled={!isReady}
+      label={t("cardChoice.buttons.collectCount", {
+        total,
+        minimum: data.minimum_mana_value,
+      })}
+    />
+  );
 
   return (
     <ChoiceOverlay
@@ -2685,16 +2704,11 @@ function CollectEvidenceModal({
         minimum: data.minimum_mana_value,
       })}
       footer={
-        <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton
-            onClick={handleConfirm}
-            disabled={!isReady}
-            label={t("cardChoice.buttons.collectCount", {
-              total,
-              minimum: data.minimum_mana_value,
-            })}
-          />
-        </CostActionFooter>
+        canCancel ? (
+          <CostActionFooter onCancel={handleCancel}>{confirm}</CostActionFooter>
+        ) : (
+          confirm
+        )
       }
     >
       <ScrollableCardStrip>

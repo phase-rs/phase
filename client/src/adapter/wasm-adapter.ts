@@ -19,6 +19,7 @@ import type {
   GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
   LlmDecisionRequestResult,
   MatchConfig,
   ObjectId,
@@ -47,8 +48,14 @@ import {
   isStateLostMessage,
   nextSnapshotSeq,
 } from "./types";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  BracketDeckRequest,
+  BracketEstimate,
+  BracketEstimateRequest,
+} from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
+import type { DeckSignals } from "../types/deckSignals";
+import { isDeckSignals } from "../types/deckSignals";
 import { EngineWorkerClient } from "./engine-worker-client";
 import {
   ENGINE_QUERIES,
@@ -906,6 +913,8 @@ export class WasmAdapter
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null> {
     this.assertInitialized("buildLlmDecisionRequest");
     try {
@@ -915,6 +924,8 @@ export class WasmAdapter
           playerId,
           endpointJson,
           historyJson,
+          settingsRevision,
+          clock,
         );
       }
       return await this.fallback!.buildLlmDecisionRequest(
@@ -922,6 +933,8 @@ export class WasmAdapter
         playerId,
         endpointJson,
         historyJson,
+        settingsRevision,
+        clock,
       );
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -931,9 +944,11 @@ export class WasmAdapter
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null> {
     this.assertInitialized("getAiActionProposalFromLlmResponse");
     try {
@@ -941,17 +956,21 @@ export class WasmAdapter
         return await this.engine.getAiActionProposalFromLlmResponse(
           playerId,
           fingerprint,
+          threadTurn,
           provider,
           status,
           responseBody,
+          clock,
         );
       }
       return await this.fallback!.getAiActionProposalFromLlmResponse(
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,
+        clock,
       );
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
@@ -1267,12 +1286,24 @@ export class WasmAdapter
     this.invalidateAiDecisionDiagnostics();
   }
 
-  async estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    this.assertInitialized("estimateBracket");
+  async estimateBracket(request: BracketEstimateRequest): Promise<BracketEstimate | null> {
+    await this.initialize();
+    await this.requireCardDb();
+    const estimate = this.engine
+      ? await this.engine.estimateBracketForDeck(request)
+      : await this.fallback!.estimateBracketForDeck(request);
+    if (estimate === null || estimate === undefined) return null;
+    if (isBracketEstimate(estimate)) return estimate;
+    throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
+  }
+
+  async deckSignals(deck: BracketDeckRequest): Promise<DeckSignals | null> {
+    await this.initialize();
+    await this.requireCardDb();
     if (this.engine) {
-      return this.engine.estimateBracketForDeck(deck);
+      return this.engine.deckSignalsForDeck(deck);
     }
-    return this.fallback!.estimateBracketForDeck(deck);
+    return this.fallback!.deckSignalsForDeck(deck);
   }
 
   /**
@@ -1739,13 +1770,17 @@ interface MainThreadFallback {
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null>;
   getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null>;
   llmProviderCatalog(): Promise<unknown>;
   exportState(): Promise<string>;
@@ -1781,7 +1816,8 @@ interface MainThreadFallback {
     owner?: HostSessionOwner,
     draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult>;
-  estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
+  estimateBracketForDeck(request: BracketEstimateRequest): Promise<BracketEstimate | null>;
+  deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   evaluateDeckFormatGate(request: unknown): Promise<unknown>;
   checkDeckPrintingsBounds(printings: unknown): Promise<void>;
@@ -1976,28 +2012,42 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerId: number,
       endpointJson: string,
       historyJson: string,
+      settingsRevision: number,
+      clock: LlmClockReading,
     ) =>
       enqueue(
         () =>
-          (wasm.buildLlmDecisionRequest(difficulty, playerId, endpointJson, historyJson) ??
-            null) as LlmDecisionRequestResult | null,
+          (wasm.buildLlmDecisionRequest(
+            difficulty,
+            playerId,
+            endpointJson,
+            historyJson,
+            settingsRevision,
+            clock.wallMs,
+            clock.monotonicMs,
+          ) ?? null) as LlmDecisionRequestResult | null,
       ),
 
     getAiActionProposalFromLlmResponse: (
       playerId: number,
       fingerprint: string,
+      threadTurn: number | null,
       provider: string,
       status: number,
       responseBody: string,
+      clock: LlmClockReading,
     ) =>
       enqueue(
         () =>
           (wasm.getAiActionProposalFromLlmResponse(
             playerId,
             fingerprint,
+            threadTurn,
             provider,
             status,
             responseBody,
+            clock.wallMs,
+            clock.monotonicMs,
           ) ?? null) as AiLlmProposalResult | null,
       ),
 
@@ -2076,7 +2126,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     ping: () => wasm.ping(),
 
-    initializeGame: (
+    initializeGame: async (
       deckData: unknown | null,
       seed: number,
       formatConfig: FormatConfig | null,
@@ -2084,8 +2134,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       playerCount?: number,
       firstPlayer?: number,
       draftSessionMinDeckSize?: number,
-    ) =>
-      enqueue(() => {
+    ) => {
+      await mainThread.ensureComboTable();
+      return enqueue(() => {
         const r = draftSessionMinDeckSize === undefined
           ? wasm.initialize_game(
             deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
@@ -2096,9 +2147,10 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           );
         throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
-      }),
+      });
+    },
 
-    initializeMultiplayerHostGame: (
+    initializeMultiplayerHostGame: async (
       deckData: unknown | null,
       seed: number,
       formatConfig: FormatConfig | null,
@@ -2107,8 +2159,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       firstPlayer?: number,
       owner?: HostSessionOwner,
       draftSessionMinDeckSize?: number,
-    ) =>
-      enqueue(() => {
+    ) => {
+      await mainThread.ensureComboTable();
+      return enqueue(() => {
         const r = draftSessionMinDeckSize === undefined
           ? wasm.initialize_multiplayer_host_game(
             deckData, seed, formatConfig, matchConfig, playerCount ?? undefined, firstPlayer ?? undefined,
@@ -2126,14 +2179,21 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           events: r.events ?? [],
           log_entries: r.log_entries ?? [],
         };
-      }),
+      });
+    },
 
-    estimateBracketForDeck: (deck: BracketDeckRequest) =>
+    estimateBracketForDeck: async (request: BracketEstimateRequest) => {
+      await mainThread.ensureComboTable();
+      return enqueue(() => wasm.estimate_bracket_for_deck(request));
+    },
+
+
+    deckSignalsForDeck: (deck: BracketDeckRequest) =>
       enqueue(() => {
-        const r = wasm.estimate_bracket_for_deck(deck);
+        const r = wasm.deck_signals_for_deck(deck);
         if (r === null || r === undefined) return null;
-        if (isBracketEstimate(r)) return r;
-        throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
+        if (isDeckSignals(r)) return r;
+        throw new Error("deck_signals_for_deck returned invalid deck signals");
       }),
 
     // Card DB is loaded into this same `@wasm/engine` module singleton by

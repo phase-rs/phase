@@ -39,6 +39,24 @@ use engine::types::proposed_event::ProposedEvent;
 use engine::types::resolution::ResolutionFrame;
 use engine::types::zones::Zone;
 
+#[test]
+fn entry_event_replay_preserves_v14_saved_counter_plan() {
+    use engine::types::game_state::{CopyEntryPendingCounters, EntryEventReplay};
+
+    for (wire, policy) in [
+        (true, EntryEventReplay::Required),
+        (false, EntryEventReplay::AlreadyDelivered),
+    ] {
+        let legacy = serde_json::json!({
+            "exceptions": null,
+            "replay_entry_events": wire,
+        });
+        let plan: CopyEntryPendingCounters = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(plan.replay_entry_events, policy);
+        assert_eq!(serde_json::to_value(plan).unwrap(), legacy);
+    }
+}
+
 // Verbatim Oracle text (MTGJSON AtomicCards).
 const HUMILITY: &str = "All creatures lose all abilities and have base power and toughness 1/1.";
 const DRESS_DOWN: &str = "Flash\nWhen this enchantment enters, draw a card.\nCreatures lose all abilities.\nAt the beginning of the end step, sacrifice this enchantment.";
@@ -310,10 +328,16 @@ enum Prompt {
 
 /// A copy donor, as a `CopyTargetChoice` offers it and as a row picks it.
 #[derive(Clone, Debug, PartialEq)]
+enum CopyObjectKind {
+    Card,
+    Token,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct CopyPick {
     name: String,
     controller: PlayerId,
-    token: bool,
+    kind: CopyObjectKind,
 }
 
 impl CopyPick {
@@ -321,7 +345,7 @@ impl CopyPick {
         Self {
             name: name.to_string(),
             controller,
-            token: false,
+            kind: CopyObjectKind::Card,
         }
     }
 
@@ -329,7 +353,7 @@ impl CopyPick {
         Self {
             name: name.to_string(),
             controller,
-            token: true,
+            kind: CopyObjectKind::Token,
         }
     }
 
@@ -338,7 +362,11 @@ impl CopyPick {
         Self {
             name: obj.name.clone(),
             controller: obj.controller,
-            token: obj.is_token,
+            kind: if obj.is_token {
+                CopyObjectKind::Token
+            } else {
+                CopyObjectKind::Card
+            },
         }
     }
 }
@@ -437,7 +465,34 @@ fn parked_created_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
         .iter()
         .filter_map(|frame| match frame {
             ResolutionFrame::CopyToken(owner) => Some(owner.created_ids.clone()),
-            _ => None,
+            ResolutionFrame::AbilityContinuation(_)
+            | ResolutionFrame::RepeatFor(_)
+            | ResolutionFrame::RepeatUntil(_)
+            | ResolutionFrame::RepeatedOptionalPayment(_)
+            | ResolutionFrame::ChangeZone(_)
+            | ResolutionFrame::BatchDelivery(_)
+            | ResolutionFrame::CounterMoves(_)
+            | ResolutionFrame::CounterRemovals(_)
+            | ResolutionFrame::CounterAdditions(_)
+            | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::EachPlayerCopyChosen(_)
+            | ResolutionFrame::ChooseOneOf(_)
+            | ResolutionFrame::VoteBallot(_)
+            | ResolutionFrame::PerPlayerZoneChoice(_)
+            | ResolutionFrame::PerCategoryZoneChoice(_)
+            | ResolutionFrame::OptionalEffect(_)
+            | ResolutionFrame::CoinFlip(_)
+            | ResolutionFrame::DieRoll(_)
+            | ResolutionFrame::Proliferate(_)
+            | ResolutionFrame::MultiDraw(_)
+            | ResolutionFrame::Discard(_)
+            | ResolutionFrame::ConniveReentry(_)
+            | ResolutionFrame::LifeTotalAssignment(_)
+            | ResolutionFrame::SpellResolution(_)
+            | ResolutionFrame::MutateMerge(_)
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
+            | ResolutionFrame::PostReplacement(_) => None,
         })
         .last()
 }
@@ -563,7 +618,151 @@ fn drive_carried(
                     }),
                 )
             }
-            _ => panic!("unexpected prompt {}", runner.waiting_for_kind()),
+            WaitingFor::ResolveAllConsent { .. }
+            | WaitingFor::ResolveAllReady { .. }
+            | WaitingFor::MeldPairChoice { .. }
+            | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
+            | WaitingFor::MulliganDecision { .. }
+            | WaitingFor::OpeningHandBottomCards { .. }
+            | WaitingFor::ManaPayment { .. }
+            | WaitingFor::ManaSourceSelection { .. }
+            | WaitingFor::AssistChoosePlayer { .. }
+            | WaitingFor::AssistPayment { .. }
+            | WaitingFor::ChooseXValue { .. }
+            | WaitingFor::TargetSelection { .. }
+            | WaitingFor::DeclareAttackers { .. }
+            | WaitingFor::DeclareBlockers { .. }
+            | WaitingFor::UntapChoice { .. }
+            | WaitingFor::ChooseUntapSubset { .. }
+            | WaitingFor::ExertChoice { .. }
+            | WaitingFor::EnlistChoice { .. }
+            | WaitingFor::GameOver { .. }
+            | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::OrderTriggers { .. }
+            | WaitingFor::ExploreChoice { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::ChooseTokenHost { .. }
+            | WaitingFor::EquipTarget { .. }
+            | WaitingFor::CrewVehicle { .. }
+            | WaitingFor::StationTarget { .. }
+            | WaitingFor::SaddleMount { .. }
+            | WaitingFor::ScryChoice { .. }
+            | WaitingFor::RippleRevealChoice { .. }
+            | WaitingFor::RippleBottomOrder { .. }
+            | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
+            | WaitingFor::ArrangePlanarDeckTopChoice { .. }
+            | WaitingFor::RedistributeLifeTotals { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
+            | WaitingFor::DieKeepChoice { .. }
+            | WaitingFor::DigChoice { .. }
+            | WaitingFor::DigRestSplitChoice { .. }
+            | WaitingFor::SurveilChoice { .. }
+            | WaitingFor::RevealChoice { .. }
+            | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
+            | WaitingFor::OutsideGameChoice { .. }
+            | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::BeholdChoice { .. }
+            | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
+            | WaitingFor::ConniveDiscard { .. }
+            | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
+            | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
+            | WaitingFor::LearnChoice { .. }
+            | WaitingFor::ManifestDreadChoice { .. }
+            | WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::BetweenGamesSideboard { .. }
+            | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::ChooseStartingPlayer { .. }
+            | WaitingFor::OpponentGuess { .. }
+            | WaitingFor::SpellbookDraft { .. }
+            | WaitingFor::DamageSourceChoice { .. }
+            | WaitingFor::ModeChoice { .. }
+            | WaitingFor::DiscardToHandSize { .. }
+            | WaitingFor::OptionalCostChoice { .. }
+            | WaitingFor::ChooseGiftRecipient { .. }
+            | WaitingFor::SpliceOffer { .. }
+            | WaitingFor::DefilerPayment { .. }
+            | WaitingFor::OrderCostReductions { .. }
+            | WaitingFor::CastOffer { .. }
+            | WaitingFor::ModalFaceChoice { .. }
+            | WaitingFor::AlternativeCastChoice { .. }
+            | WaitingFor::MutateMergeChoice { .. }
+            | WaitingFor::CipherEncodeChoice { .. }
+            | WaitingFor::CastingVariantChoice { .. }
+            | WaitingFor::ChoosePermanentTypeSlot { .. }
+            | WaitingFor::MultiTargetSelection { .. }
+            | WaitingFor::AbilityModeChoice { .. }
+            | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::ResolutionOptionalPaymentChoice { .. }
+            | WaitingFor::PairChoice { .. }
+            | WaitingFor::TributeChoice { .. }
+            | WaitingFor::MiracleReveal { .. }
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::LoopShortcut { .. }
+            | WaitingFor::RespondToShortcut { .. }
+            | WaitingFor::PrecastCopyShortcutOffer { .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { .. }
+            | WaitingFor::UnlessPayment { .. }
+            | WaitingFor::UnlessPaymentChooseCost { .. }
+            | WaitingFor::WardDiscardChoice { .. }
+            | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBounceChoice { .. }
+            | WaitingFor::ChooseRingBearer { .. }
+            | WaitingFor::ChooseRoomDoor { .. }
+            | WaitingFor::ChooseDungeon { .. }
+            | WaitingFor::ChooseDungeonRoom { .. }
+            | WaitingFor::SpecializeColor { .. }
+            | WaitingFor::PayCost { .. }
+            | WaitingFor::ActivationCostOneOfChoice { .. }
+            | WaitingFor::CostTypeChoice { .. }
+            | WaitingFor::BlightChoice { .. }
+            | WaitingFor::PayManaAbilityMana { .. }
+            | WaitingFor::ManaAbilityManaPayment { .. }
+            | WaitingFor::ChooseManaColor { .. }
+            | WaitingFor::CollectEvidenceChoice { .. }
+            | WaitingFor::HarmonizeTapChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
+            | WaitingFor::TopOrBottomChoice { .. }
+            | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
+            | WaitingFor::ChooseAnnouncingOpponent { .. }
+            | WaitingFor::ClashCardPlacement { .. }
+            | WaitingFor::PhysicalContest { .. }
+            | WaitingFor::VoteChoice { .. }
+            | WaitingFor::SeparatePilesChooseOpponent { .. }
+            | WaitingFor::SeparatePilesPartition { .. }
+            | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
+            | WaitingFor::CompanionReveal { .. }
+            | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::CommanderZoneChoice { .. }
+            | WaitingFor::BattleProtectorChoice { .. }
+            | WaitingFor::ProliferateChoice { .. }
+            | WaitingFor::TimeTravelChoice { .. }
+            | WaitingFor::ChooseObjectsSelection { .. }
+            | WaitingFor::CategoryChoice { .. }
+            | WaitingFor::EachPlayerCopyChosenSelection { .. }
+            | WaitingFor::KeepWithinTotalPowerChoice { .. }
+            | WaitingFor::KeepExactPermanentsChoice { .. }
+            | WaitingFor::CopyRetarget { .. }
+            | WaitingFor::AssignCombatDamage { .. }
+            | WaitingFor::AssignBlockerDamage { .. }
+            | WaitingFor::DistributeAmong { .. }
+            | WaitingFor::MoveCountersDistribution { .. }
+            | WaitingFor::RemoveCountersChoice { .. }
+            | WaitingFor::RetargetChoice { .. }
+            | WaitingFor::CombatTaxPayment { .. }
+            | WaitingFor::PhyrexianPayment { .. } => {
+                panic!("unexpected prompt {}", runner.waiting_for_kind())
+            }
         };
         if let Some(prompt) = prompt {
             observe(runner, &prompt);
@@ -680,7 +879,7 @@ fn stolen_identity_triskelion_copy_under_a_remover_enters_without_its_counters()
         );
         let expected = match remover {
             Remover::Margle(_) => (Some(3), Some(3)),
-            _ => (Some(1), Some(1)),
+            Remover::Humility | Remover::DressDown | Remover::Splendor(_) => (Some(1), Some(1)),
         };
         assert_eq!(
             plus_counters(&runner, token),
@@ -1286,7 +1485,7 @@ fn copy_offers(prompts: &[Prompt]) -> Vec<&[CopyPick]> {
                 assert_eq!(*player, P0, "REACH-GUARD: P0 makes the copy choice");
                 Some(valid.as_slice())
             }
-            _ => None,
+            Prompt::Named { .. } | Prompt::Replacement | Prompt::PayAmount { .. } => None,
         })
         .collect()
 }
@@ -1664,7 +1863,10 @@ fn legacy_counter_pause_restores_the_owed_color_choice_without_repeating_counter
                     removed.1 += count.1;
                 }
             }
-            _ => {}
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
         }
         removed
     }
@@ -1798,7 +2000,23 @@ fn chosen_number(runner: &GameRunner, id: ObjectId) -> Option<u32> {
         .iter()
         .find_map(|attr| match attr {
             ChosenAttribute::Number(n) => Some(*n),
-            _ => None,
+            ChosenAttribute::Color(_)
+            | ChosenAttribute::CreatureType(_)
+            | ChosenAttribute::BasicLandType(_)
+            | ChosenAttribute::CardType(_)
+            | ChosenAttribute::OddOrEven(_)
+            | ChosenAttribute::CardName(_)
+            | ChosenAttribute::RevealedNumber(_)
+            | ChosenAttribute::Player(_)
+            | ChosenAttribute::TwoColors(_)
+            | ChosenAttribute::TributeOutcome(_)
+            | ChosenAttribute::Keyword(_)
+            | ChosenAttribute::Label(_)
+            | ChosenAttribute::Card(_)
+            | ChosenAttribute::Counter(_)
+            | ChosenAttribute::Direction(_)
+            | ChosenAttribute::CopiableSnapshot(_)
+            | ChosenAttribute::NotedManaSpent(_) => None,
         })
 }
 
@@ -3342,4 +3560,111 @@ fn clone_legion_copied_minion_payment_is_doubled_by_a_resident_throne() {
         |carry| minion_payment_trigger_doubling(carry, true, true),
         "copied Minion payment, resident Throne",
     );
+}
+
+/// CR 614.12: each doubled copy reads the same pre-event board. More copies
+/// require entrant layer passes, but must not rebuild that board per token.
+#[test]
+fn clone_legion_doubled_batches_reuse_pre_entry_board() {
+    use engine::game::filter::{reset_token_entry_projection_work, token_entry_projection_work};
+
+    for doublers in [1, 2, 3] {
+        let (runner, _) = clone_legion_carried(
+            &[TRISKELION_DONOR; 3],
+            |scenario| {
+                for _ in 0..doublers {
+                    scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+                }
+            },
+            |_| reset_token_entry_projection_work(),
+            PauseCarry::Live,
+            &Script::default(),
+            |_, _| {},
+        );
+        assert_settled(&runner, "projection work budget");
+        let tokens = battlefield_tokens(&runner, TRISKELION_NAME);
+        let count = 3 * (1 << doublers);
+        assert_eq!(tokens.len(), count, "all doubled copies were created");
+        assert!(tokens.iter().all(|id| plus_counters(&runner, *id) == 3));
+        let work = token_entry_projection_work();
+        assert_eq!(work.projections, count, "each entrant was projected");
+        assert_eq!(
+            work.pre_entry_state_clones, 3,
+            "one pre-entry clone per batch"
+        );
+        assert_eq!(
+            work.projection_state_clones, count,
+            "one scratch clone per entrant"
+        );
+        assert_eq!(
+            work.pre_entry_boards, 3,
+            "one board per donor batch: {work:?}"
+        );
+        assert_eq!(work.pre_entry_layer_passes, 3, "one board flush per batch");
+        eprintln!("{doublers} Parallel Lives: {count} tokens, {work:?}");
+    }
+}
+
+/// CR 614.12: resident Humility removes the Ghoul's own enters-tapped
+/// replacement when checking how it would exist on the battlefield. Without
+/// Humility, each copy retains that replacement and enters tapped.
+#[test]
+fn clone_legion_doubled_liminal_batches_reuse_pre_entry_board() {
+    use engine::game::filter::{reset_token_entry_projection_work, token_entry_projection_work};
+
+    // Oracle text and printed P/T verified against MTGJSON AtomicCards.
+    const GHOUL: Donor = Donor {
+        name: "Diregraf Ghoul",
+        oracle: "This creature enters tapped.",
+        power: 2,
+        toughness: 2,
+    };
+
+    for humility in [false, true] {
+        for doublers in [1, 2, 3] {
+            let (runner, _) = clone_legion_carried(
+                &[GHOUL; 3],
+                |scenario| {
+                    for _ in 0..doublers {
+                        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+                    }
+                    if humility {
+                        scenario.add_enchantment_from_oracle(P0, "Humility", HUMILITY);
+                    }
+                },
+                |_| reset_token_entry_projection_work(),
+                PauseCarry::Live,
+                &Script::default(),
+                |_, _| {},
+            );
+            assert_settled(&runner, "liminal projection work budget");
+            let tokens = battlefield_tokens(&runner, GHOUL.name);
+            let count = 3 * (1 << doublers);
+            assert_eq!(tokens.len(), count, "all doubled Ghoul copies were created");
+            for token in tokens {
+                assert_eq!(
+                    runner.state().objects[&token].tapped,
+                    !humility,
+                    "entry replacement for {token:?}, Humility={humility}, doublers={doublers}"
+                );
+            }
+            let work = token_entry_projection_work();
+            // Debug builds independently audit the indexed scan against the legacy
+            // scan, so each entrant has two projections. Assert the budget together:
+            // both rebuilding per token and withholding the supplied board must fail.
+            let projections_per_entrant = 1
+                + usize::from(cfg!(debug_assertions))
+                + usize::from(std::env::var_os("PHASE_REPLACEMENT_INDEX_AUDIT").is_some());
+            assert_eq!(
+                (
+                    work.pre_entry_boards,
+                    work.pre_entry_state_clones,
+                    work.projections,
+                    work.projection_state_clones,
+                ),
+                (3, 3, projections_per_entrant * count, projections_per_entrant * count),
+                "one liminal entry board per donor batch, Humility={humility}, doublers={doublers}: {work:?}"
+            );
+        }
+    }
 }

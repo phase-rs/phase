@@ -7,7 +7,7 @@ use engine::ai_support::{
     activates_mana_ability, build_decision_context, classify_payment_continuation,
     witness_payment_continuations, AiDecisionContext, CandidateAction,
     PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
-    TacticalClass,
+    TacticalClass, WitnessedStepTrace,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -149,6 +149,9 @@ pub(crate) struct PreparedCandidate {
     pub payment_successor: Option<GameState>,
     /// Whether the witnessed edge finalizes the payment root in its own step.
     pub payment_step: Option<PaymentContinuationStep>,
+    /// The witnessed edge's own reducer step (its events and the deferred-trigger
+    /// queue length before it), so a consumer can read the step it already ran.
+    pub payment_trace: Option<WitnessedStepTrace>,
 }
 
 /// Fail closed for affiliated payment states before ranking or width limits.
@@ -169,6 +172,7 @@ pub(crate) fn prepare_payment_candidates(
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             })
             .collect(),
         PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
@@ -189,6 +193,7 @@ pub(crate) fn prepare_payment_candidates(
                             candidate,
                             payment_successor: Some(accepted.state),
                             payment_step: Some(accepted.step),
+                            payment_trace: Some(accepted.trace),
                         })
                     })
                     .collect(),
@@ -204,6 +209,7 @@ pub(crate) fn prepare_payment_candidates(
                                     candidate,
                                     payment_successor: Some(accepted.state),
                                     payment_step: Some(accepted.step),
+                                    payment_trace: Some(accepted.trace),
                                 })
                             })
                             .collect()
@@ -218,6 +224,7 @@ pub(crate) fn prepare_payment_candidates(
                                         candidate,
                                         payment_successor: None,
                                         payment_step: None,
+                                        payment_trace: None,
                                     },
                                 )
                             })
@@ -1310,24 +1317,31 @@ impl<'a> PlannerServices<'a> {
         candidate: &CandidateAction,
         prompt_answers: PromptAnswerValidation,
     ) -> bool {
-        // PassPriority is always legal during Priority (skip simulation for perf),
+        // During Priority the candidate builder offers PassPriority only where
+        // `pass_priority_legality` admits it (skip simulation for perf),
         // but during ManaPayment it means "finalize payment" which can fail if the
         // player can't actually pay the cost (e.g., Thalia tax makes it unaffordable).
         let pass_always_valid = matches!(
             state.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         );
-        // DecideOptionalCost { pay: false } is always legal — declining an optional
-        // cost cannot fail since it just proceeds with the base cost.
-        let is_optional_cost = matches!(
+        // DecideOptionalCost { index: 1 } declines an Optional or Kicker cost,
+        // which is always legal because it just proceeds with the base cost.
+        // A Choice's index 1 is a real alternative and may be unpayable, so it
+        // goes through simulation like every other answer.
+        let is_skip_decision = matches!(
             state.waiting_for,
-            engine::types::game_state::WaitingFor::OptionalCostChoice { .. }
+            engine::types::game_state::WaitingFor::OptionalCostChoice {
+                cost: engine::types::ability::AdditionalCost::Optional { .. }
+                    | engine::types::ability::AdditionalCost::Kicker { .. },
+                ..
+            }
         );
         match &candidate.action {
             engine::types::actions::GameAction::PassPriority if pass_always_valid => true,
             engine::types::actions::GameAction::ChooseTarget { .. } => true,
-            engine::types::actions::GameAction::DecideOptionalCost { pay: false }
-                if is_optional_cost =>
+            engine::types::actions::GameAction::DecideOptionalCost { index: 1 }
+                if is_skip_decision =>
             {
                 true
             }
@@ -1335,11 +1349,12 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: a named-choice answer from the
-            // prompt's enumerated domain, a library search selection, or a loop-shortcut
-            // responder's answer is admitted by its submission guard without mutating the game;
-            // the engine decides that through the same authority `SimulationFilter` consults
-            // before its probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2a + CR 732.2b: a named-choice
+            // answer from the prompt's enumerated domain, a library search selection, or a
+            // loop-shortcut declaration or responder's answer is admitted by its submission guard
+            // without mutating the game; the engine decides that through the same authority
+            // `SimulationFilter` consults before its probe. Under
+            // `PromptAnswerValidation::AtSubmission` no state copy is
             // made here: the root search simulates the answers in its beam until one fails, and
             // the caller the one answer it submits. A shape
             // the authority declines (a scoped search, a card name, a free-entry
@@ -1353,6 +1368,7 @@ impl<'a> PlannerServices<'a> {
             // time — two takes where the unadmitted shape paid one.
             engine::types::actions::GameAction::ChooseOption { .. }
             | engine::types::actions::GameAction::SelectCards { .. }
+            | engine::types::actions::GameAction::DeclareShortcut { .. }
             | engine::types::actions::GameAction::RespondToShortcut { .. }
                 if prompt_answers.admits_without_simulation(state, &candidate.action) =>
             {
@@ -2107,7 +2123,7 @@ pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
     /// gate's verdict is final.
     EachCandidate,
-    /// Admit the answer without a state copy. The root search simulates such
+    /// Admit the answer without simulating it on a state copy. The root search simulates such
     /// answers in its beam on its first rung, in beam order, and returns the
     /// first that fails (`search::FailedAdmittedAnswer`) instead of scores,
     /// simulating no answer after it, and the root scorer scores the decision
@@ -2452,6 +2468,7 @@ where
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             }),
         |candidate| scorer(candidate),
         limit,
@@ -2689,6 +2706,7 @@ pub(crate) mod tests {
             &config.weights,
             &config.archetype_multipliers,
             PlayerId(0),
+            engine::game::bracket_estimate::EffectiveBracketTier::default(),
         );
         ctx_threat.opponent_threat = Some(ThreatProfile {
             probabilities: ThreatProbabilities {
@@ -2737,6 +2755,7 @@ pub(crate) mod tests {
             &config.weights,
             &config.archetype_multipliers,
             PlayerId(0),
+            engine::game::bracket_estimate::EffectiveBracketTier::default(),
         );
         let services_none = PlannerServices::new(PlayerId(0), &config, policies, ctx_none);
         let weights_none = services_none.context.adjusted_weights.for_turn(turn);
@@ -3718,7 +3737,7 @@ pub(crate) mod tests {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the behold cost must be accepted");
         let state = runner.state().clone();
         match &state.waiting_for {
@@ -4056,7 +4075,6 @@ pub(crate) mod tests {
                 shortened_by: None,
                 published_declaration: None,
                 leading_aims: Vec::new(),
-                road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },
@@ -6556,6 +6574,7 @@ pub(crate) mod tests {
         trigger_ability.trigger_source = record(powers[1]).trigger_source_context;
 
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0))),
             trigger_event: Some(optional_event),
             trigger_events: Vec::new(),

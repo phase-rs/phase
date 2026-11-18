@@ -30,9 +30,9 @@ use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, ChoiceType, Comparator,
-    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope,
-    QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement, TapCreaturesRequirement,
-    TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
+    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerFilter,
+    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement,
+    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
     REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
@@ -1055,16 +1055,22 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
                 )
                 .parse(after_n)
                 {
-                    if let Ok((_, qty)) =
-                        nom_quantity::parse_for_each_clause_ref_complete(for_each_clause)
-                    {
-                        return AbilityCost::PayLife {
+                    return match nom_quantity::parse_for_each_clause_ref_complete(for_each_clause) {
+                        Ok((_, qty)) => AbilityCost::PayLife {
                             amount: QuantityExpr::Multiply {
                                 factor: n as i32,
                                 inner: Box::new(QuantityExpr::Ref { qty }),
                             },
-                        };
-                    }
+                        },
+                        // CR 119.4 + CR 601.2f: a multiplier the quantity grammar
+                        // cannot read (a counter-kind census of a pronoun, whose
+                        // object this cost cannot bind, or any other unread
+                        // clause) is a gap — never the flat "Pay N life" with the
+                        // "for each" dropped, which would under-charge the cost.
+                        Err(_) => AbilityCost::Unimplemented {
+                            description: text.to_string(),
+                        },
+                    };
                 }
                 // Flat "Pay N life" — no " for each " tail.
                 // The cost word ends at end-of-text or a sentence boundary; a
@@ -1398,6 +1404,72 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
                 return AbilityCost::UnattachFrom { filter, count: 1 };
             }
         }
+    }
+
+    // CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" (Invigorate)
+    // and "have each other player gain N life" (Reverent Silence, Skyshroud Cutter)
+    // — an effect performed as a cost. "An opponent" is CHOSEN by the payer during
+    // payment, not targeted; "each other player" (CR 102.3: teammates included)
+    // reaches every player but the payer. This arm is the explicit, tested
+    // authority for the recipient-cost shapes `AbilityCost::player_recipient_cost`
+    // recognizes; the effect fallback below would lower "each other player" to a
+    // per-player scope the cost payer cannot perform.
+    if let Some(((recipient, amount), _)) = nom_on_lower(text, &lower, |i| {
+        let (i, recipient) = preceded(
+            tag("have "),
+            alt((
+                value(
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    tag("an opponent "),
+                ),
+                value(
+                    TargetFilter::PlayerMatching {
+                        player: Box::new(PlayerFilter::AllExcept {
+                            exclude: Box::new(PlayerFilter::Controller),
+                            relation: PlayerRelation::All,
+                        }),
+                    },
+                    tag("each other player "),
+                ),
+            )),
+        )
+        .parse(i)?;
+        let (i, _) = alt((tag("gains "), tag("gain "))).parse(i)?;
+        let (i, amount) = nom_primitives::parse_number(i)?;
+        let (i, _) = (tag(" life"), opt(tag(".")), eof).parse(i)?;
+        Ok((i, (recipient, amount)))
+    }) {
+        return AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed {
+                    value: amount as i32,
+                },
+                player: recipient,
+            }),
+        };
+    }
+
+    // CR 115.1 vs CR 115.10a: a targeted or all-opponents life-gain recipient is not
+    // the chosen-recipient cost above. The effect fallback would lower "have target
+    // opponent gain N life" to the SAME `GainLife { Typed(Opponent) }` value, silently
+    // turning a target into a payer's choice; refuse instead. Scoped to the gain-life
+    // verb so other "have target opponent <verb>" costs are untouched.
+    if nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            (
+                tag("have "),
+                alt((tag("target opponent "), tag("each opponent "))),
+                alt((tag("gains "), tag("gain "))),
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::Unimplemented {
+            description: text.to_string(),
+        };
     }
 
     // "reveal your hand" — reveal the controller's entire hand.
@@ -4353,6 +4425,36 @@ mod tests {
         );
     }
 
+    /// CR 119.4 + CR 601.2f: a "Pay N life for each <clause>" whose clause the
+    /// quantity grammar cannot read — here the counter-kind census of a
+    /// pronoun, whose object a cost cannot bind — is an explicit gap, never the
+    /// flat "Pay N life" with the multiplier dropped (which under-charges).
+    #[test]
+    fn cost_pay_life_with_an_unread_for_each_is_a_gap() {
+        // Reach guard: Hand of Vecna's printed multiplier still reads.
+        let (_, hand) = nom_quantity::parse_for_each_clause_ref_complete("card in your hand")
+            .expect("for-each clause");
+        assert_eq!(
+            parse_oracle_cost("Pay 1 life for each card in your hand"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 1,
+                    inner: Box::new(QuantityExpr::Ref { qty: hand }),
+                },
+            }
+        );
+        for text in [
+            "Pay 1 life for each kind of counter on it",
+            "Pay 2 life for each kind of counter on them",
+        ] {
+            assert!(
+                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),
+                "{text:?}: {:?}",
+                parse_oracle_cost(text)
+            );
+        }
+    }
+
     #[test]
     fn equip_pay_mana_or_discard_parses_as_one_of() {
         use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
@@ -5869,6 +5971,104 @@ mod tests {
         );
     }
 
+    /// CR 601.2f + CR 122.1: Deepwood Denizen — the rider counts +1/+1
+    /// counters summed over the controlled creature population.
+    #[test]
+    fn cost_reduction_for_each_counter_on_a_controlled_population() {
+        use crate::types::ability::{
+            ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::statics::CostModifyMode;
+
+        let reduction = try_parse_cost_reduction(
+            "This ability costs {1} less to activate for each +1/+1 counter on creatures you control.",
+        )
+        .expect("Deepwood Denizen discount should parse");
+        assert_eq!(reduction.mode, CostModifyMode::Reduce);
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        assert_eq!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CountersOnObjects {
+                    counter_type: Some(CounterType::Plus1Plus1),
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        );
+        // An unanchored population is declined: no cost reduction is produced.
+        assert!(
+            try_parse_cost_reduction(
+                "This ability costs {1} less to activate for each +1/+1 counter on creatures.",
+            )
+            .is_none(),
+            "an unanchored population must not produce a cost reduction"
+        );
+    }
+
+    /// CR 601.2c + CR 602.2b: Warrior's Blades — the equip discount counts the
+    /// +1/+1 counters on the creature the ability targets (Dragonfire Blade's
+    /// counter-kind sibling).
+    #[test]
+    fn cost_reduction_for_each_counter_on_creature_it_targets() {
+        use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef};
+        use crate::types::counter::CounterType;
+
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each +1/+1 counter on the creature it targets",
+        )
+        .expect("Warrior's Blades equip discount should parse");
+        assert_eq!(reduction.amount_per, 1);
+        assert_eq!(reduction.condition, None);
+        assert_eq!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Target,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                },
+            },
+        );
+    }
+
+    /// CR 122.1 + CR 601.2f: the activated-ability cost-modification rider
+    /// never reads a counter-kind census it cannot bind — the pronoun census,
+    /// the "different" and "of the kinds of" forms — as a type phrase: no
+    /// reduction is produced, so the sentence stays an explicit gap. The
+    /// census over a named population still reads.
+    #[test]
+    fn cost_reduction_declines_an_unbound_counter_kind_census() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+
+        let population = try_parse_cost_reduction(
+            "This ability costs {1} less to activate for each kind of counter among creatures \
+             you control.",
+        )
+        .expect("reach guard: the population census reads on this route");
+        assert_eq!(
+            population.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        );
+        for text in [
+            "This ability costs {1} less to activate for each kind of counter on it.",
+            "This ability costs {1} less to activate for each kind of counter on them.",
+            "This ability costs {1} more to activate for each kind of counter on it.",
+            "This ability costs {1} less to activate for each different kind of counter on it.",
+            "This ability costs {1} less to activate for each of the kinds of counters on it.",
+        ] {
+            assert_eq!(try_parse_cost_reduction(text), None, "{text:?}");
+        }
+    }
+
     /// #3223: the self cost-reduction *head* recognizer matches both the bare
     /// sentence and a sentence carrying a trailing "if [condition]" tail; it
     /// rejects unrelated effect sentences. Drives the upstream
@@ -6135,6 +6335,138 @@ mod tests {
         );
     }
 
+    fn opponent_gains(value: i32) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            }),
+        }
+    }
+
+    /// CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" is an
+    /// effect-as-cost with a payer-chosen opponent recipient (Invigorate).
+    #[test]
+    fn have_an_opponent_gain_life_cost_parses_to_recipient_effect_cost() {
+        for text in [
+            "have an opponent gain 3 life",
+            "Have an opponent gain 3 life.",
+            "have an opponent gains 3 life",
+            "have an opponent gain three life",
+        ] {
+            assert_eq!(parse_oracle_cost(text), opponent_gains(3), "{text}");
+        }
+    }
+
+    /// CR 118.3 + CR 119.3 + CR 102.3: "have each other player gain N life" is an
+    /// effect-as-cost reaching every player but the payer (Reverent Silence,
+    /// Skyshroud Cutter), teammates included.
+    #[test]
+    fn have_each_other_player_gain_life_cost_parses_to_each_recipient_cost() {
+        let expected = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 6 },
+                player: TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::Controller),
+                        relation: PlayerRelation::All,
+                    }),
+                },
+            }),
+        };
+        for text in [
+            "have each other player gain 6 life",
+            "Have each other player gain 6 life.",
+            "have each other player gain six life",
+        ] {
+            assert_eq!(parse_oracle_cost(text), expected, "{text}");
+        }
+        match expected.player_recipient_cost() {
+            Some(crate::types::ability::PlayerRecipientCost::GainLife {
+                amount,
+                selection,
+                ..
+            }) => {
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 6 });
+                assert_eq!(
+                    selection,
+                    crate::types::ability::CostRecipientSelection::Each
+                );
+            }
+            None => panic!("expected recipient cost, got {expected:?}"),
+        }
+    }
+
+    /// Only the chosen-opponent gain shape is a recipient cost. The positive
+    /// case is the reach-guard for every negative in this test.
+    #[test]
+    fn player_recipient_cost_recognizes_only_chosen_opponent_gain() {
+        let cost = parse_oracle_cost("have an opponent gain 3 life");
+        match cost.player_recipient_cost() {
+            Some(crate::types::ability::PlayerRecipientCost::GainLife {
+                amount,
+                recipient,
+                selection,
+            }) => {
+                assert_eq!(
+                    selection,
+                    crate::types::ability::CostRecipientSelection::ChosenOne
+                );
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 3 });
+                assert_eq!(
+                    recipient,
+                    &TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            None => panic!("expected recipient cost, got {cost:?}"),
+        }
+        // Unchanged: other payers keep refusing this shape.
+        assert!(!cost.supports_effect_cost_payment());
+        assert!(!cost.payability_verdict_is_resource_based());
+
+        // CR 115.1: a targeted recipient is not the payer's choice; each-opponent is
+        // not a single recipient. Both are refused rather than colliding.
+        for text in [
+            "have target opponent gain 3 life",
+            "have each opponent gain 3 life",
+        ] {
+            let parsed = parse_oracle_cost(text);
+            assert!(
+                matches!(parsed, AbilityCost::Unimplemented { .. }),
+                "{text} must stay unimplemented, got {parsed:?}"
+            );
+            assert_eq!(parsed.player_recipient_cost(), None, "{text}");
+        }
+
+        // Other effect-costs and life costs are not recipient costs.
+        assert_eq!(
+            parse_oracle_cost("reveal your hand").player_recipient_cost(),
+            None
+        );
+        let self_counter = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }),
+        };
+        assert_eq!(self_counter.player_recipient_cost(), None);
+        let you_gain = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            }),
+        };
+        assert_eq!(you_gain.player_recipient_cost(), None);
+        assert_eq!(
+            parse_oracle_cost("Pay 3 life").player_recipient_cost(),
+            None
+        );
+    }
     fn chosen_discard(filter: Option<TargetFilter>) -> AbilityCost {
         AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },

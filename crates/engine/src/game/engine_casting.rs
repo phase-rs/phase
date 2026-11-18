@@ -1825,10 +1825,10 @@ pub(super) fn handle_optional_cost_choice(
     player: PlayerId,
     pending_cast: PendingCast,
     cost: &AdditionalCost,
-    pay: bool,
+    index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, pay, events)
+    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, index, events)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1839,7 +1839,7 @@ pub(super) fn handle_defiler_payment(
     life_cost: u32,
     mana_reduction: &crate::types::mana::ManaCost,
     reach: crate::types::statics::CostReductionReach,
-    pay: bool,
+    index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting_costs::handle_defiler_payment(
@@ -1849,7 +1849,7 @@ pub(super) fn handle_defiler_payment(
         life_cost,
         mana_reduction,
         reach,
-        pay,
+        index == 0,
         events,
     )
 }
@@ -2227,6 +2227,16 @@ pub(super) fn handle_collect_evidence_cancel(
             .clone()
             .unwrap_or_else(|| pending_cast.clone());
         return cancel_pending_cast(state, player, &pending_cast, events);
+    }
+    // CR 608.2d + CR 701.59b + CR 117.2e: an effect's evidence prompt is a
+    // choice made while that ability resolves. The instruction is mandatory or
+    // was accepted as an option, which is offered only while it is payable, so
+    // there is no cast to back out of and no priority to return to: the prompt
+    // stays until evidence is chosen.
+    if matches!(resume, CollectEvidenceResume::Resolution { .. }) {
+        return Err(EngineError::ActionNotAllowed(
+            "Collect evidence was chosen while resolving; choose the evidence to exile".into(),
+        ));
     }
     Ok(WaitingFor::Priority { player })
 }

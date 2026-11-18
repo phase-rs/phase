@@ -209,6 +209,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "crew_activated_this_turn",
         "crew_resolved_this_turn",
         "crew_history_this_turn",
+        "creatures_fought_this_turn",
         "exerted_this_turn",
         "graveyard_cast_permissions_used",
         "graveyard_cast_permissions_used_per_type",
@@ -466,16 +467,31 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "HashMap",
         Classification::Canonical(HASH_MAP_ENTRIES),
     );
+    // CR 602.5c: the activation counters are keyed by the per-acquisition
+    // `AbilityUsageKey`, so they name the dedicated adapter (`tuple_key_map`
+    // stays with the index-keyed resolution tally). The departed-incarnation
+    // twins name their own adapter, which reuses the usage-key encoding under
+    // a leading incarnation segment.
     for (field, shape, adapter) in [
         (
             "activated_abilities_this_turn",
             "im::HashMap",
-            "with=\"tuple_key_map\"",
+            "with=\"ability_usage_key_map\"",
         ),
         (
             "activated_abilities_this_game",
             "im::HashMap",
-            "with=\"tuple_key_map\"",
+            "with=\"ability_usage_key_map\"",
+        ),
+        (
+            "departed_activated_abilities_this_turn",
+            "im::HashMap",
+            "with=\"departed_activation_tally_map\"",
+        ),
+        (
+            "departed_activated_abilities_this_game",
+            "im::HashMap",
+            "with=\"departed_activation_tally_map\"",
         ),
         (
             "ability_resolutions_this_turn",
@@ -618,6 +634,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             "replacement_applied",
             "HashSet",
             HASH_SET,
+        ),
+        (
+            "PendingBatchDeliveries",
+            None,
+            "pre_entry_battlefield",
+            "Option<HashSet>",
+            OPTION_HASH_SET,
         ),
         (
             "PendingBatchZoneChangeCause",

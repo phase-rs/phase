@@ -31,7 +31,6 @@
     "accept": "受け入れる",
     "shorten": "短縮",
     "decline": "ショートカットを拒否",
-    "untilLethal": "ゲームが終了するまで繰り返す。",
     "withoutEnd": "終わりなく繰り返す。すべてのプレイヤーが受け入れた場合、ゲームは引き分けになる。",
     "fixedCount_one": "最大1回繰り返す。",
     "fixedCount_other": "最大{{count}}回繰り返す。",
@@ -51,16 +50,13 @@
     "allocationSum": "{{total}}回中{{allocated}}回を割り当て済み。",
     "evenSplit": "均等分配に戻す",
     "customDistribution": "カスタム分配 — この分配はエンジンでプレビューされていません。",
-    "announceTitle": "各反復で宣言する対象を選択:",
-    "announce": "宣言",
-    "announceAria": "{{subject}}を宣言",
     "mayTitle": "任意能力{{group}} — 各反復でこの選択を繰り返しますか？",
     "mayTake": "実行",
     "mayDecline": "実行しない",
     "mayTakeAria": "任意能力{{group}}を実行",
     "mayDeclineAria": "任意能力{{group}}を実行しない",
     "winKind": {
-      "LethalDamage": "このループは致死ダメージを与えます。",
+      "LethalDamage": "このループは対戦相手のライフを0以下にします。",
       "PoisonLoss": "このループは致死量の毒カウンターを与えます。",
       "Decking": "このループは対戦相手をライブラリーアウトさせます。",
       "ImmediateWin": "このループはゲームに勝利します。",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "提案された宣言:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}の置換効果",
     "respondDecision": {
       "take": "{{subject}} — 各反復で実行",
       "decline": "{{subject}} — 各反復で実行しない"
@@ -164,6 +161,7 @@
     "flip": "反転",
     "report": "問題を報告",
     "reported": "報告済み ✓",
+    "reportNotSent": "未送信",
     "altParsedAbilities": "Alt: 解析済み能力",
     "debugId": "ID: {{id}}",
     "engineParse": "エンジン解析",
@@ -1853,6 +1851,10 @@
       "title": "コピーの順番",
       "subtitle": "次にコピーをスタックに置く呪文を選ぶ"
     },
+    "memberOrder": {
+      "title": "カードの順序",
+      "subtitle": "次に処理するカードを選んでください"
+    },
     "collectEvidence": {
       "title": "証拠収集",
       "subtitle": "あなたの墓地から、マナ総量の合計が{{minimum}}以上になるようにカードを追放"
@@ -2175,6 +2177,10 @@
   "giftRecipient": {
     "title": "贈り物の受け取り手を選択",
     "subtitle": "約束した贈り物を受け取る対戦相手を選択"
+  },
+  "costRecipient": {
+    "title": "対戦相手を選択",
+    "subtitle": "このコストで選ぶ対戦相手を選んでください：{{cost}}"
   },
   "entryController": {
     "title": "戦場に出る際のコントローラーを選択",
@@ -2530,6 +2536,8 @@
       "zoneHand": "あなたの手札",
       "discard": "{{count}}{{cards}}を捨てる",
       "exile": "{{zone}}から{{count}}{{cards}}を追放",
+      "haveOpponentGainLife": "対戦相手1人に{{amount}}点のライフを得させる",
+      "haveEachOtherPlayerGainLife": "他の各プレイヤーに{{amount}}点のライフを得させる",
       "reveal": "{{zone}}から{{count}}{{cards}}を公開する"
     }
   },
@@ -2586,7 +2594,7 @@
     "appliedLast": "最後に適用 — これが有効",
     "resultLabel": "結果：{{outcome}}",
     "confirmOrder": "順序を確認",
-    "dragHint": "ドラッグして並べ替えるか、矢印を使用。",
+    "dragHint": "<grip>⠿</grip> ハンドルをドラッグして並べ替えるか、矢印を使用。",
     "chooseSubtitle": "適用する置換効果を選択",
     "candidateFallback": "置換効果{{number}}",
     "orderSubtitleComposing": "これらの効果はすべてこのイベントの起こり方を変更します。適用順をドラッグで設定してください — すべて適用されるため順序で結果が変わります（CR 616.1）。",
@@ -2595,6 +2603,7 @@
     "composesNote": "すべての効果が適用され、順序によって組み合わせ方が変わります。",
     "moveUpNamed": "{{name}}を前へ移動",
     "moveDownNamed": "{{name}}を後へ移動",
+    "dragHandleNamed": "{{name}}をドラッグして並べ替え",
     "positionAnnounce": "{{total}}個中{{position}}番目"
   },
   "retargetChoice": {
@@ -2700,6 +2709,20 @@
     "EndCombat": "戦闘終了",
     "PostCombatMain": "メイン・フェイズ2",
     "End": "終了ステップ",
+    "Cleanup": "クリンナップ"
+  },
+  "phaseShortName": {
+    "Untap": "アンタップ",
+    "Upkeep": "アップキープ",
+    "Draw": "ドロー",
+    "PreCombatMain": "メイン1",
+    "BeginCombat": "戦闘開始",
+    "DeclareAttackers": "攻撃",
+    "DeclareBlockers": "ブロック",
+    "CombatDamage": "ダメージ",
+    "EndCombat": "戦闘終了",
+    "PostCombatMain": "メイン2",
+    "End": "終了",
     "Cleanup": "クリンナップ"
   },
   "counterMoveDistribution": {

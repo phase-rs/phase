@@ -578,7 +578,7 @@ fn consult_draw_instruction(
         frame.applied = applied;
         return ControlFlow::Continue(());
     }
-    let result = draw_through_replacement_with_applied(
+    let (result, substitute_prompt) = draw_through_replacement_with_applied(
         state,
         player,
         count,
@@ -587,7 +587,10 @@ fn consult_draw_instruction(
         events,
         |state, event, _events| settle_draw_instruction(state, event),
     );
+    // CR 614.11a + CR 121.6b: a replacing action that asks for a choice is
+    // completed before the sequence resumes.
     let resumable = !matches!(result, ReplacementResult::NeedsChoice(_))
+        && substitute_prompt.is_none()
         && state
             .active_draw_sequence()
             .is_some_and(|frame| frame.frame_id == frame_id);
@@ -737,7 +740,7 @@ fn resume_draw_sequence_outcome(
         let (player, applied) = frame.begin_next_unit();
 
         let mut unit_drawn: u32 = 0;
-        let result = draw_through_replacement_with_applied(
+        let (result, substitute_prompt) = draw_through_replacement_with_applied(
             state,
             player,
             1,
@@ -766,9 +769,16 @@ fn resume_draw_sequence_outcome(
                 if let Some(frame) = state.draw_sequence_frame_mut(frame_id) {
                     frame.accumulated += unit_drawn;
                 }
+                // CR 614.11a + CR 121.6b: when the action replacing this draw
+                // asks a player to choose ("each player returns a permanent they
+                // control … instead"), the whole replacement is completed before
+                // the sequence resumes. The frame stays parked with its cursor
+                // past this unit; the priority-time frame drain resumes it once
+                // the replacement has finished.
                 if state
                     .active_draw_sequence()
                     .is_none_or(|frame| frame.frame_id != frame_id)
+                    || substitute_prompt.is_some()
                 {
                     return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
                         state
@@ -1030,6 +1040,10 @@ fn settle_dealer_seat(
 /// draw sequences use this authority to resume replacement continuations.
 /// `stage` is which of the two draw proposals this is (CR 121.2a): the whole
 /// instruction, or one of its individual draws.
+///
+/// Alongside the replacement result it returns the prompt a substitute left
+/// open (`Some` when the replacing action itself asks a player to choose, e.g.
+/// "each player returns a permanent they control … instead").
 fn draw_through_replacement_with_applied(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
@@ -1038,7 +1052,10 @@ fn draw_through_replacement_with_applied(
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
-) -> replacement::ReplacementResult {
+) -> (
+    replacement::ReplacementResult,
+    Option<crate::types::game_state::WaitingFor>,
+) {
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
@@ -1046,13 +1063,15 @@ fn draw_through_replacement_with_applied(
         applied,
     };
     let result = replacement::replace_event(state, proposed, events);
+    let mut substitute_prompt = None;
     match &result {
         ReplacementResult::Execute(event) => {
             apply_executed(state, event.clone(), events);
             if state.has_post_replacement_drain() {
-                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    state, None, None, None, events,
-                );
+                substitute_prompt =
+                    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                        state, None, None, None, events,
+                    );
             }
         }
         ReplacementResult::Prevented => {}
@@ -1061,7 +1080,7 @@ fn draw_through_replacement_with_applied(
                 crate::game::replacement::replacement_choice_waiting_for(*player, state);
         }
     }
-    result
+    (result, substitute_prompt)
 }
 
 /// CR 121.1: Apply a post-replacement `ProposedEvent::Draw` to the game state.
@@ -1285,16 +1304,18 @@ fn enqueue_miracle_offer_for_first_draw(
     }
     // CR 702.94a: Static ability functions from hand — check the drawn object's
     // effective keywords (printed + continuous grants like Molecule Man's hand
-    // miracle). `effective_off_zone_keywords` is the object-scoped authority for
-    // non-battlefield zones; if layers remove miracle before draw resolution the
-    // offer simply never queues.
-    let miracle_cost =
-        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
-            .into_iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
-                _ => None,
-            });
+    // miracle). `effective_off_zone_keyword` is the object-scoped single-instance
+    // authority for non-battlefield zones; if layers remove miracle before draw
+    // resolution the offer simply never queues.
+    let miracle_cost = crate::game::off_zone_characteristics::effective_off_zone_keyword(
+        state,
+        object_id,
+        crate::types::keywords::KeywordKind::Miracle,
+    )
+    .and_then(|k| match k {
+        crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
+        _ => None,
+    });
     let Some(cost) = miracle_cost else {
         return;
     };

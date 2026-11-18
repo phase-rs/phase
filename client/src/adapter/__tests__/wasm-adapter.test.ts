@@ -35,6 +35,10 @@ const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const resumeRestoredGameState = vi.hoisted(() => vi.fn());
 const resumeMultiplayerHostState = vi.hoisted(() => vi.fn());
 const previewInteractionJs = vi.hoisted(() => vi.fn());
+const fallbackWasm = vi.hoisted(() => ({
+  init: vi.fn().mockResolvedValue(undefined),
+  initializeGame: vi.fn().mockReturnValue({ events: [], log_entries: [] }),
+}));
 const initializeMultiplayerHostGameJs = vi.hoisted(() =>
   vi.fn().mockReturnValue({ events: [], log_entries: [] }),
 );
@@ -46,14 +50,21 @@ const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 const stateCodecDecodeJs = vi.hoisted(() => vi.fn());
+const buildLlmDecisionRequestJs = vi.hoisted(() => vi.fn());
+const getAiActionProposalFromLlmResponseJs = vi.hoisted(() => vi.fn());
+
+const ensureComboTable = vi.hoisted(() => vi.fn());
 
 vi.mock("../main-thread-engine", () => ({
   ensureWasmInit,
+  ensureComboTable,
   ensureCardDatabase: vi.fn().mockResolvedValue(100),
   loadEngineModule: () => import("@wasm/engine"),
 }));
 
 vi.mock("@wasm/engine", () => ({
+  default: fallbackWasm.init,
+  initialize_game: fallbackWasm.initializeGame,
   resume_restored_game_state: resumeRestoredGameState,
   resume_multiplayer_host_state: resumeMultiplayerHostState,
   preview_interaction_js: previewInteractionJs,
@@ -66,6 +77,8 @@ vi.mock("@wasm/engine", () => ({
   clear_game_state: clearGameStateJs,
   canonicalCardNames: canonicalCardNamesJs,
   state_codec_decode: stateCodecDecodeJs,
+  buildLlmDecisionRequest: buildLlmDecisionRequestJs,
+  getAiActionProposalFromLlmResponse: getAiActionProposalFromLlmResponseJs,
 }));
 
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
@@ -80,6 +93,8 @@ const mockWorkerClient = {
       standard: { compatible: true, reasons: [] },
       color_distribution: [],
     }),
+  estimateBracketForDeck: vi.fn().mockResolvedValue(null),
+  deckSignalsForDeck: vi.fn().mockResolvedValue(null),
   evaluateDeckFormatGate: vi.fn().mockResolvedValue({ compatible: true, reasons: [] }),
   checkDeckPrintingsBounds: vi.fn().mockResolvedValue(undefined),
   customFormatFromLobbyConfig: vi.fn().mockResolvedValue({ label: "My Format" }),
@@ -110,6 +125,8 @@ const mockWorkerClient = {
   getAiActionProposalFromScoresWithDiagnostics: vi.fn(),
   getAiScoredCandidates: vi.fn(),
   submitAiActionProposal: vi.fn(),
+  buildLlmDecisionRequest: vi.fn(),
+  getAiActionProposalFromLlmResponse: vi.fn(),
   getState: vi.fn().mockResolvedValue(buildGameState({
     turn_number: 1,
     phase: "Untap",
@@ -144,6 +161,13 @@ describe("WasmAdapter", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    fallbackWasm.init.mockResolvedValue(undefined);
+    ensureComboTable.mockResolvedValue("loaded");
+    fallbackWasm.initializeGame.mockReturnValue({ events: [], log_entries: [] });
+    initializeMultiplayerHostGameJs.mockReturnValue({
+      events: [],
+      log_entries: [],
+    });
     adapter = new WasmAdapter();
     mockWorkerClient.getState.mockResolvedValue(buildGameState({
       turn_number: 1,
@@ -564,6 +588,62 @@ describe("WasmAdapter", () => {
         standard: { compatible: true, reasons: [] },
         color_distribution: [],
       });
+    });
+  });
+
+  describe("estimateBracket", () => {
+    it("rejects before delegating when the card database fails to load", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("card DB error"));
+      const request = {
+        deck: {
+          commander: ["Atraxa, Praetors' Voice"],
+          main_deck: ["Forest"],
+          sideboard: [],
+          companion: [],
+          signature_spell: [],
+          combo_declaration: { kind: "undeclared" as const },
+        },
+        declared_tier: null,
+      };
+
+      await expect(adapter.estimateBracket(request)).rejects.toThrow("card DB error");
+      expect(mockWorkerClient.estimateBracketForDeck).not.toHaveBeenCalled();
+    });
+
+    it("rejects an invalid worker payload at the shared adapter boundary", async () => {
+      mockWorkerClient.estimateBracketForDeck.mockResolvedValueOnce({ tier: "upgraded" });
+      const request = {
+        deck: {
+          commander: ["Atraxa, Praetors' Voice"],
+          main_deck: ["Forest"],
+          sideboard: [],
+          companion: [],
+          signature_spell: [],
+          combo_declaration: { kind: "undeclared" as const },
+        },
+        declared_tier: null,
+      };
+
+      await expect(adapter.estimateBracket(request)).rejects.toThrow(
+        "estimate_bracket_for_deck returned an invalid bracket estimate",
+      );
+    });
+  });
+
+  describe("deckSignals", () => {
+    it("deckSignals rejects and never calls the worker when the card DB is not loaded", async () => {
+      mockWorkerClient.loadCardDbFromUrl.mockRejectedValueOnce(new Error("card DB error"));
+      const deck = {
+        commander: ["Atraxa, Praetors' Voice"],
+        main_deck: ["Forest"],
+        sideboard: [],
+        companion: [],
+        signature_spell: [],
+        combo_declaration: { kind: "undeclared" as const },
+      };
+
+      await expect(adapter.deckSignals(deck)).rejects.toThrow("card DB error");
+      expect(mockWorkerClient.deckSignalsForDeck).not.toHaveBeenCalled();
     });
   });
 
@@ -1137,6 +1217,59 @@ describe("WasmAdapter", () => {
     });
   });
 
+  describe("main-thread fallback combo loading", () => {
+    async function fallbackAdapter(): Promise<WasmAdapter> {
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      const fallback = new WasmAdapter();
+      await fallback.initialize();
+      return fallback;
+    }
+
+    it("initializeGame awaits the combo table before calling the engine", async () => {
+      let tableLoaded!: (outcome: "loaded") => void;
+      ensureComboTable.mockReturnValue(new Promise((resolve) => {
+        tableLoaded = resolve;
+      }));
+      const fallback = await fallbackAdapter();
+
+      const started = fallback.initializeGame();
+      await vi.waitFor(() => expect(ensureComboTable).toHaveBeenCalled());
+      expect(fallbackWasm.initializeGame).not.toHaveBeenCalled();
+
+      tableLoaded("loaded");
+      await expect(started).resolves.toEqual({ events: [], log_entries: [] });
+      expect(fallbackWasm.initializeGame).toHaveBeenCalledOnce();
+    });
+
+    it("an unavailable combo table does not block initializeGame", async () => {
+      ensureComboTable.mockResolvedValue("unavailable");
+      const fallback = await fallbackAdapter();
+
+      await expect(fallback.initializeGame()).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(fallbackWasm.initializeGame).toHaveBeenCalledOnce();
+    });
+
+    it("initializeMultiplayerHostGame awaits the combo table before calling the engine", async () => {
+      let tableLoaded!: (outcome: "loaded") => void;
+      ensureComboTable.mockReturnValue(new Promise((resolve) => {
+        tableLoaded = resolve;
+      }));
+      const fallback = await fallbackAdapter();
+
+      const started = fallback.initializeMultiplayerHostGame();
+      await vi.waitFor(() => expect(ensureComboTable).toHaveBeenCalled());
+      expect(initializeMultiplayerHostGameJs).not.toHaveBeenCalled();
+
+      tableLoaded("loaded");
+      await expect(started).resolves.toEqual({ events: [], log_entries: [] });
+      expect(initializeMultiplayerHostGameJs).toHaveBeenCalledOnce();
+    });
+  });
+
   describe("getEngineClient", () => {
     it("returns null before initialization", () => {
       expect(adapter.getEngineClient()).toBeNull();
@@ -1399,6 +1532,48 @@ describe("WasmAdapter.getViewerTransitionSnapshot", () => {
     expect(mockWorkerClient.getViewerTransitionSnapshot).not.toHaveBeenCalled();
     expect(result.events).toEqual(viewerTransitionEvents);
     expect(result.state).toMatchObject(rawState);
+  });
+});
+
+describe("WasmAdapter LLM decisions", () => {
+  const clock = { wallMs: 1_700_000_000_000, monotonicMs: 4_321 };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("hands the worker the seat's settings revision and both clocks", async () => {
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    await adapter.buildLlmDecisionRequest("Medium", 1, "{}", "[]", 3, clock);
+    await adapter.getAiActionProposalFromLlmResponse(1, "fp", 7, "Anthropic", 200, "{}", clock);
+
+    expect(mockWorkerClient.buildLlmDecisionRequest).toHaveBeenCalledExactlyOnceWith(
+      "Medium", 1, "{}", "[]", 3, clock,
+    );
+    expect(mockWorkerClient.getAiActionProposalFromLlmResponse).toHaveBeenCalledExactlyOnceWith(
+      1, "fp", 7, "Anthropic", 200, "{}", clock,
+    );
+  });
+
+  it("main-thread fallback hands the engine the revision and each clock in order", async () => {
+    mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+    buildLlmDecisionRequestJs.mockReturnValue({ fingerprint: "fp" });
+    getAiActionProposalFromLlmResponseJs.mockReturnValue({ proposal: null });
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+
+    await adapter.buildLlmDecisionRequest("Medium", 1, "{}", "[]", 3, clock);
+    await adapter.getAiActionProposalFromLlmResponse(1, "fp", 7, "Anthropic", 200, "{}", clock);
+
+    expect(buildLlmDecisionRequestJs).toHaveBeenCalledExactlyOnceWith(
+      "Medium", 1, "{}", "[]", 3, clock.wallMs, clock.monotonicMs,
+    );
+    expect(getAiActionProposalFromLlmResponseJs).toHaveBeenCalledExactlyOnceWith(
+      1, "fp", 7, "Anthropic", 200, "{}", clock.wallMs, clock.monotonicMs,
+    );
+    expect(mockWorkerClient.buildLlmDecisionRequest).not.toHaveBeenCalled();
   });
 });
 

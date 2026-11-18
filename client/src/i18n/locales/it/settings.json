@@ -524,6 +524,10 @@
     "apiKeyMissing": "Inserisci di nuovo la tua chiave API. Le chiavi non vengono conservate dopo un ricaricamento e questo provider non viene usato per i posti IA o i bot del draft finché non lo fai.",
     "apiKeyStorage": "Conservata in memoria solo per questa sessione del browser. Le chiavi API non vengono mai scritte su disco e sono escluse dall'esportazione di backup e dalla sincronizzazione cloud: dopo un ricaricamento dovrai reinserirla. Una chiave API richiede inoltre un endpoint https://, a meno che il server non sia su localhost.",
     "apiKeyGet": "Ottieni una chiave",
+    "messageThreads": {
+      "label": "Ricorda le decisioni precedenti",
+      "hint": "I posti IA con difficoltà Media o superiore mantengono la partita in un thread di messaggi Anthropic, così il modello parte dal ragionamento precedente."
+    },
     "test": "Prova connessione",
     "testing": "Prova in corso…",
     "testOk": "Connesso.",

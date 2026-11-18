@@ -34,6 +34,18 @@ fn pool(runner: &GameRunner, player: PlayerId) -> usize {
     runner.state().players[player.0 as usize].mana_pool.total()
 }
 
+/// CR 602.5c: the activation counter is keyed by the resolved acquisition
+/// (provenance stamp + rules text + body fingerprint), not the index —
+/// derived through the production constructor so the fingerprint matches.
+fn usage_key(
+    state: &engine::types::game_state::GameState,
+    id: ObjectId,
+    idx: usize,
+) -> engine::types::game_state::AbilityUsageKey {
+    engine::game::restrictions::ability_usage_key(state, id, idx)
+        .expect("the tested slot resolves through the activation lookup")
+}
+
 fn mana(s: &mut GameScenario, player: PlayerId, n: usize) {
     s.with_mana_pool(
         player,
@@ -467,7 +479,7 @@ fn an_unaffordable_target_reversal_keeps_the_loop_period_and_mana_undo_window() 
         .id();
     mana(&mut s, P0, 1);
     let mut r = s.build();
-    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     tap_land_for_mana(&mut r, land);
     let before = state_without_revision(&r);
     let trace_before = trace_entries(r.state());
@@ -591,7 +603,7 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
         )
         .id();
     let mut r = s.build();
-    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     tap_land_for_mana(&mut r, land);
 
     act(
@@ -650,7 +662,7 @@ fn a_settlement_election_accepts_the_activation_once_on_its_resume() {
     mana(&mut s, P0, 5);
     let mut r = s.build();
     unsick(&mut r, src);
-    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     act(
         &mut r,
         GameAction::ActivateAbility {
@@ -1965,7 +1977,7 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
         "{2}: Engine deals 2 damage divided as you choose among one or two targets. Create a 1/1 white Soldier creature token.",
         true,
     );
-    b.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    b.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     let bear = b.bear.unwrap();
     start(&mut b);
     act(
@@ -3071,7 +3083,9 @@ fn mana_abilities_are_not_journaled_manual_or_automatic() {
     )
     .expect("color");
     assert_eq!(
-        r.state().activated_abilities_this_turn.get(&(prism, 0)),
+        r.state()
+            .activated_abilities_this_turn
+            .get(&usage_key(r.state(), prism, 0)),
         Some(&1),
         "reach guard: the manual mana ability completed and was counted"
     );

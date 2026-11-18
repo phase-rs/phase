@@ -40,9 +40,9 @@ describe("OptionalCostModalContent (issue #454)", () => {
   it("first prompt exposes three distinct affordances with the right actions", () => {
     const dispatch = renderModal(kickerWaitingFor(0));
 
-    // Pay → DecideOptionalCost { pay: true }
+    // Pay → DecideOptionalCost { index: 0 }
     const payButton = screen.getByRole("button", { name: /kick it/i });
-    // Decline → DecideOptionalCost { pay: false } — an explicit primary button.
+    // Decline → DecideOptionalCost { index: 1 } — an explicit primary button.
     const declineButton = screen.getByRole("button", { name: /cast without kicking/i });
     // Abort → CancelCast — the separate close affordance.
     const closeButton = screen.getByRole("button", { name: "Close" });
@@ -52,14 +52,14 @@ describe("OptionalCostModalContent (issue #454)", () => {
     fireEvent.click(declineButton);
     expect(dispatch).toHaveBeenCalledWith({
       type: "DecideOptionalCost",
-      data: { pay: false },
+      data: { index: 1 },
     });
 
     dispatch.mockClear();
     fireEvent.click(payButton);
     expect(dispatch).toHaveBeenCalledWith({
       type: "DecideOptionalCost",
-      data: { pay: true },
+      data: { index: 0 },
     });
 
     dispatch.mockClear();
@@ -78,7 +78,7 @@ describe("OptionalCostModalContent (issue #454)", () => {
     fireEvent.click(declineButton);
     expect(dispatch).toHaveBeenCalledWith({
       type: "DecideOptionalCost",
-      data: { pay: false },
+      data: { index: 1 },
     });
   });
 
@@ -110,13 +110,13 @@ describe("OptionalCostModalContent (issue #454)", () => {
     fireEvent.click(payButton);
     expect(dispatch).toHaveBeenCalledWith({
       type: "DecideOptionalCost",
-      data: { pay: true },
+      data: { index: 0 },
     });
     dispatch.mockClear();
     fireEvent.click(declineButton);
     expect(dispatch).toHaveBeenCalledWith({
       type: "DecideOptionalCost",
-      data: { pay: false },
+      data: { index: 1 },
     });
   });
 

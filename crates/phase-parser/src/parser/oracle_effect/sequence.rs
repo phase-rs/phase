@@ -19,7 +19,9 @@ use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_nom::target::controller_phrase_among;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_subtype, TextPair};
-use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
+use super::imperative::{
+    parse_same_name_reference, parse_subject_hand_owner, CHOOSER_DOMAIN_CONTROLLERS,
+};
 use super::lower::WhereXBinding;
 use super::{apply_where_x_to_filter, release_iteration_destination, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -31,9 +33,9 @@ use crate::parser::oracle_quantity::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
-    CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigRestRemainder, DigSource,
-    Duration, Effect, EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody,
+    CastingPermission, ChoiceAssignmentSide, ChoiceType, Chooser, ContinuousModification,
+    ControllerRef, CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigRestRemainder,
+    DigSource, Duration, Effect, EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody,
     FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
     MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
     QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
@@ -1366,18 +1368,26 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
-    let (rest, _) = (
+/// CR 701.20e + CR 608.2c: "[you may] put[s] [up to] one of them/those cards
+/// [back] on top [of <library>]" after a look `Dig` — keep one looked-at card
+/// on top of the library it came from. Returns how many are kept and the
+/// remainder order. "You may" / "up to" make the keep optional; the bare
+/// verb is mandatory (Ashnod's Cylix: "puts one of them back on top of their
+/// library"). The third-person "puts" is the same instruction carried by a
+/// player subject ("Target player looks at …, puts …").
+fn parse_put_one_dig_card_on_top(lower: &str) -> Option<(PutCount, DigRestOrder)> {
+    let (rest, (may, up_to, _, _, _, _)) = (
         alt((
-            tag::<_, _, OracleError<'_>>("you may put "),
-            tag("may put "),
-            tag("put "),
+            value(true, tag::<_, _, OracleError<'_>>("you may put ")),
+            value(true, tag("may put ")),
+            value(false, tag("puts ")),
+            value(false, tag("put ")),
         )),
         opt(tag("up to ")),
         alt((tag("one of those cards"), tag("one of them"))),
         opt(tag(" back")),
-        tag(" "),
-        alt((tag("on top of your library"), tag("on top"))),
+        tag(" on top"),
+        opt(preceded(tag(" of "), parse_split_library_owner)),
     )
         .parse(lower.trim())
         .ok()?;
@@ -1392,12 +1402,22 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
     terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(rest)
         .ok()?;
-    Some(order.unwrap_or(DigRestOrder::Preserve))
+    let count = if may || up_to.is_some() {
+        PutCount::up(1)
+    } else {
+        PutCount::exactly(1)
+    };
+    Some((count, order.unwrap_or(DigRestOrder::Preserve)))
 }
 
+/// "exile[s] the rest" — the third-person verb is the same instruction carried
+/// by a player subject (Ashnod's Cylix: "…, then exiles the rest").
 fn parse_exile_rest_clause(lower: &str) -> bool {
     (
-        tag::<_, _, OracleError<'_>>("exile the rest"),
+        alt((
+            tag::<_, _, OracleError<'_>>("exile the rest"),
+            tag("exiles the rest"),
+        )),
         opt(tag(".")),
         eof,
     )
@@ -1976,7 +1996,13 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || loses_all_other_card_types_continuation
                         || shared_equal_to_quantity_conjunct
                         || inside_prefix_comma_and_continuation;
-                        if !suppress && starts_bare_and_clause(remainder_trimmed) {
+                        if !suppress
+                            && (starts_bare_and_clause(remainder_trimmed)
+                                || reveal_hand_continues_with_conjugated_verb(
+                                    &before_lower,
+                                    remainder_trimmed,
+                                ))
+                        {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                             current.clear();
                             compound_subject_each_sticky = false;
@@ -2289,27 +2315,30 @@ fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 701.20a + CR 608.2c: true when the clause so far ends in "<subject> reveals
+/// their hand" and the remainder is a subject-elided conjugated verb ("… and exiles
+/// all cards …", "… and discards a creature card at random"). The revealing player
+/// also performs that next instruction, so it is its own clause carrying that
+/// subject. The split and the carry share one classifier, so a bare imperative or a
+/// new subject ("… and you choose a nonland card from it") stays fused for the
+/// reveal's own continuation grammar.
+fn reveal_hand_continues_with_conjugated_verb(before_lower: &str, remainder_trimmed: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(before_lower, |input| {
+        all_consuming(preceded(
+            tag::<_, _, OracleError<'_>>("reveals "),
+            parse_subject_hand_owner,
+        ))
+        .parse(input)
+    })
+    .is_some()
+        && super::chunk_continues_anchored_subject(remainder_trimmed)
+}
+
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
     let (rest, _) = alt((
-        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        parse_same_name_reference,
         value((), tag("with the chosen name")),
-        value(
-            (),
-            (
-                tag("with the same name as that "),
-                alt((
-                    tag("creature"),
-                    tag("permanent"),
-                    tag("planeswalker"),
-                    tag("artifact"),
-                    tag("enchantment"),
-                    tag("land"),
-                    tag("spell"),
-                    tag("card"),
-                )),
-            ),
-        ),
     ))
     .parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
@@ -3801,12 +3830,12 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // cluster over and trip the `Choice<...>` trait-bound check at compile
     // time.
     .or(value((), tag("puts ")))
-    // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
-    // not noun-phrase continuations. Keep the matcher narrow so name-based
-    // chains like "put counters on it and attach Fractal Harness to it" stay
-    // available to the token-counter attach rewriter. "That Equipment" is the
-    // selected-object anaphor used by Grip of Phyresis.
+    // CR 701.3a + CR 608.2c: an attach whose attachment is the source (`~`
+    // after self-reference normalization) or an Equipment anaphor is its own
+    // instruction, never a noun-phrase continuation; "that Equipment" is Grip
+    // of Phyresis's selected-object anaphor.
     .or(alt((
+        value((), tag("attach ~ ")),
         value((), tag("attach this equipment ")),
         value((), tag("attach that equipment ")),
         value((), tag("attach an equipment that was attached ")),
@@ -4014,19 +4043,32 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             )),
         ),
     ))
-    // CR 701.63: "<self-ref subject> endures N" as a conjunct ("you lose 1
-    // life and this creature endures 1" — Sinkhole Surveyor). The self-ref
-    // subject axis (it / this creature / ~) is composed with the "endures "
-    // verb as a single unit, not enumerated per permutation. A self-ref
-    // pronoun/phrase followed by the conjugated keyword-action verb is always
-    // a subject-predicate clause start, never a noun-phrase continuation.
+    // Self-ref subject (it / this creature / ~) + a conjugated predicate that
+    // the subject-clause path owns. The subject axis is composed once with the
+    // predicate axis, not enumerated per permutation. A self-ref pronoun/phrase
+    // followed by one of these predicates is always a subject-predicate clause
+    // start, never a noun-phrase continuation.
+    //
+    // - CR 701.63: "endures N" ("you lose 1 life and this creature endures 1"
+    //   — Sinkhole Surveyor).
+    // - CR 510.1a: "assigns no combat damage [this turn]" (Goblin Vandal:
+    //   "destroy target artifact defending player controls and this creature
+    //   assigns no combat damage this turn"; Rysorian Badger: "you gain 1 life
+    //   for each card exiled this way and this creature assigns no combat
+    //   damage this turn"). Without this split the conjunct stays glued to the
+    //   leading imperative, whose trailing-duration strip steals "this turn"
+    //   and whose imperative-only fallback has no subject-predicate path, so
+    //   the rider is lost (Vandal: `Unimplemented`; Badger: silently dropped,
+    //   the card reported as supported). Splitting routes it through
+    //   `parse_clause_ast` to the `assigns no combat damage` subject clause
+    //   (subject.rs).
     .or(preceded(
         alt((
             tag::<_, _, OracleError<'_>>("it "),
             tag("this creature "),
             tag("~ "),
         )),
-        value((), tag("endures ")),
+        value((), alt((tag("endures "), tag("assigns no combat damage")))),
     ))
     .or(alt((
         // CR 608.2c: Anaphoric back-reference subject + continuous-modification
@@ -5460,6 +5502,15 @@ fn dig_intervening_cost_host(
     })
 }
 
+/// Whether the `Dig` patch arm can carry a `DigFromAmong` continuation's kept-card
+/// entry faithfully: `Effect::Dig` has no controller or face-down field.
+pub(super) fn dig_patch_represents_from_among(
+    enters_under: &Option<ControllerRef>,
+    face_down_profile: &Option<FaceDownProfile>,
+) -> bool {
+    enters_under.is_none() && face_down_profile.is_none()
+}
+
 pub(super) fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
     continuation: ContinuationAst,
@@ -5804,6 +5855,27 @@ pub(super) fn apply_clause_continuation(
                     end_cost: None,
                 },
             ));
+        }
+        ContinuationAst::ChoiceAssignmentGainsControl => {
+            // CR 608.2c + CR 608.2f: the handoff is the instruction after the per-object
+            // choices — a following sibling of the repetition, so it runs once, after
+            // the last choice, and processes every assigned object at once. A pushed
+            // continuation step skips the boundary stamping of the clause loop, so the
+            // link is set here. No stated duration (CR 611.2a). It reads no
+            // `LastCreated`, so it keeps the "no SequentialSibling reads LastCreated" backstop.
+            let mut handoff = AbilityDefinition::new(
+                kind,
+                Effect::GiveControl {
+                    target: TargetFilter::ChoiceAssignment {
+                        side: ChoiceAssignmentSide::Objects,
+                    },
+                    recipient: TargetFilter::ChoiceAssignment {
+                        side: ChoiceAssignmentSide::PlayerForObject,
+                    },
+                },
+            );
+            handoff.sub_link = SubAbilityLink::SequentialSibling;
+            defs.push(handoff);
         }
         ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate { scope } => {
@@ -6219,7 +6291,7 @@ pub(super) fn apply_clause_continuation(
                     if let Some(sac_pos) = sac_pos {
                         // CR 608.2c + CR 701.20e: Birthing Ritual pattern.
                         debug_assert!(
-                            face_down_profile.is_none() && enters_under.is_none(),
+                            dig_patch_represents_from_among(&enters_under, &face_down_profile),
                             "Dig-source face-down from-among with intervening sacrifice \
                              is not yet supported"
                         );
@@ -6374,7 +6446,7 @@ pub(super) fn apply_clause_continuation(
                 // `ChangeZoneAll`/`ChangeZone { face_down_profile, enters_under }`
                 // reading `TrackedSetFiltered`, rather than patching the `Dig`.
                 debug_assert!(
-                    face_down_profile.is_none() && enters_under.is_none(),
+                    dig_patch_represents_from_among(&enters_under, &face_down_profile),
                     "Dig-source face-down/under-control from-among form is not yet \
                      supported; route via the tracked-set push (see Mill branch)"
                 );
@@ -7771,6 +7843,10 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
+        // Recognition was gated on a preceding player choice and admitted on its
+        // per-object shape (oracle_effect::mod), so the clause is always absorbed
+        // into its handoff.
+        ContinuationAst::ChoiceAssignmentGainsControl => true,
         ContinuationAst::CantRegenerate { .. } => true,
         // CR 116.2c: recognition was already gated on a preceding
         // continuous-effect-installing `GenericEffect`, so absorption is
@@ -9714,18 +9790,16 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
         Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
+            let (quantity, rest_order) =
+                parse_put_one_dig_card_on_top(&lower).expect("continuation guard just matched");
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::up(1),
+                quantity,
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                rest_destination: matches!(
-                    parse_put_one_dig_card_on_top(&lower),
-                    Some(DigRestOrder::Random)
-                )
-                .then_some(Zone::Library),
+                rest_destination: matches!(rest_order, DigRestOrder::Random)
+                    .then_some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: parse_put_one_dig_card_on_top(&lower)
-                    .expect("continuation guard just matched"),
+                rest_order,
                 rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
@@ -10361,6 +10435,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         {
             Some(continuation)
         }
+        // CR 608.2c + CR 608.2d: "Each opponent/player gains control of the <object> for
+        // which they were chosen" after a player choice. Guard-then-call: a declining
+        // recognizer leaves every later arm reachable.
+        Effect::Choose { choice_type, .. }
+            if let Some(continuation) =
+                try_parse_choice_assignment_gains_control(&lower, choice_type) =>
+        {
+            Some(continuation)
+        }
         Effect::ControlNextTurn { .. }
             if nom_primitives::scan_contains(&lower, "after that turn")
                 && nom_primitives::scan_contains(&lower, "takes an extra turn") =>
@@ -10556,6 +10639,46 @@ fn try_parse_tokens_goaded_continuation(lower: &str) -> Option<ContinuationAst> 
         return None;
     }
     Some(ContinuationAst::GoadLastCreated { duration })
+}
+
+/// CR 608.2c + CR 608.2d: "Each opponent gains control of the <object> for which
+/// they were chosen" / "Each player gains control of …" after a choice of a
+/// player. The singular "the <noun>" restates each repetition's own object and
+/// "they" the player chosen for it, so the clause is the handoff of the
+/// resolving ability's object→player assignment. The subject must agree with
+/// the choice's player set. Scrambleverse's plural "of each permanent" is a
+/// different grammar and declines at the singular determiner. Whether the
+/// choice records an assignment is the caller's admission
+/// (`oracle_effect::clause_records_choice_assignment`).
+fn try_parse_choice_assignment_gains_control(
+    lower: &str,
+    choice_type: &ChoiceType,
+) -> Option<ContinuationAst> {
+    let (_, (subject, _, _, _, _, _, _)) = (
+        alt((
+            value(
+                TargetFilter::Opponent,
+                tag::<_, _, OracleError<'_>>("each opponent"),
+            ),
+            value(TargetFilter::Player, tag("each player")),
+        )),
+        tag(" gains control of the "),
+        super::super::oracle_nom::target::parse_type_filter_word,
+        tag(" for which they were chosen"),
+        opt(tag(".")),
+        multispace0,
+        eof,
+    )
+        .parse(lower.trim())
+        .ok()?;
+    // The subject agrees with the choice's player set: an opponent choice with
+    // "each opponent", a player choice with "each player".
+    matches!(
+        (&subject, choice_type),
+        (TargetFilter::Opponent, ChoiceType::Opponent { .. })
+            | (TargetFilter::Player, ChoiceType::Player { .. })
+    )
+    .then_some(ContinuationAst::ChoiceAssignmentGainsControl)
 }
 
 pub(super) fn source_token_power_value() -> PtValue {
@@ -11598,6 +11721,39 @@ mod tests {
         }
     }
 
+    /// CR 701.20a + CR 608.2c: a subject-elided conjugated verb after an own-hand
+    /// reveal is the revealing player's next instruction and splits off. A new
+    /// subject, a bare noun conjunct, or another player's hand stays fused for the
+    /// reveal's own continuation grammar.
+    #[test]
+    fn reveal_hand_splits_only_a_conjugated_conjunct() {
+        for (text, head, tail) in [
+            (
+                "that player reveals their hand and exiles all cards with that name from their hand and graveyard",
+                "that player reveals their hand",
+                "exiles all cards with that name from their hand and graveyard",
+            ),
+            (
+                "Target opponent reveals their hand and discards a creature card at random",
+                "Target opponent reveals their hand",
+                "discards a creature card at random",
+            ),
+        ] {
+            let chunks = split_clause_sequence(text);
+            assert_eq!(chunks.len(), 2, "{text}: {chunks:?}");
+            assert_eq!(chunks[0].text, head, "{text}");
+            assert_eq!(chunks[1].text, tail, "{text}");
+        }
+        for text in [
+            "target opponent reveals their hand and you choose a nonland card from it",
+            "Target player reveals their hand and the top card of their library",
+        ] {
+            let chunks = split_clause_sequence(text);
+            assert_eq!(chunks.len(), 1, "{text}: {chunks:?}");
+            assert_eq!(chunks[0].text, text);
+        }
+    }
+
     /// CR 603.7b + CR 608.2c: an inline delayed trigger keeps the following
     /// sentences of its effect in its own chunk (The Last Ronin III), but a
     /// sentence opening another trigger or restricting the activation stays
@@ -12366,6 +12522,21 @@ mod tests {
     }
 
     #[test]
+    fn bare_and_splits_source_attach_after_counters_and_token() {
+        assert_eq!(
+            clause_texts("Put X +1/+1 counters on it and attach ~ to it"),
+            vec!["Put X +1/+1 counters on it", "attach ~ to it"]
+        );
+        assert_eq!(
+            clause_texts("create a 2/2 colorless Robot artifact creature token and attach ~ to it"),
+            vec![
+                "create a 2/2 colorless Robot artifact creature token",
+                "attach ~ to it"
+            ]
+        );
+    }
+
+    #[test]
     fn bare_and_keeps_chosen_name_search_exile_compound() {
         // CR 701.23a + CR 701.18a: "search ... with the chosen name and exile
         // them" is one search compound, not a SearchLibrary followed by a second
@@ -12897,12 +13068,15 @@ mod tests {
     }
 
     #[test]
-    fn bare_and_starts_equipment_attachment_anaphors_but_not_other_attachment_forms() {
-        for clause in ["attach this Equipment to it", "attach that Equipment to it"] {
+    fn bare_and_starts_source_and_equipment_attachment_anaphors_but_not_other_attachment_forms() {
+        for clause in [
+            "attach ~ to it",
+            "attach this Equipment to it",
+            "attach that Equipment to it",
+        ] {
             assert!(starts_bare_and_clause(clause), "must split: {clause}");
         }
         for clause in [
-            "attach ~ to it",
             "attach this Aura to it",
             "attach that Aura to it",
             "attach this Fortification to it",
@@ -18311,6 +18485,98 @@ mod tests {
                 "{unrepresented}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod choice_assignment_gains_control_tests {
+    use super::*;
+    use crate::types::ability::PlayerChoiceDistinctness;
+
+    const OPPONENT_SENTENCE: &str =
+        "each opponent gains control of the permanent for which they were chosen.";
+    const PLAYER_SENTENCE: &str =
+        "each player gains control of the permanent for which they were chosen.";
+
+    fn opponent_choice() -> ChoiceType {
+        ChoiceType::Opponent {
+            restriction: None,
+            distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
+        }
+    }
+
+    fn player_choice() -> ChoiceType {
+        ChoiceType::Player {
+            distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
+        }
+    }
+
+    /// A3.2 (SHAPE): CR 608.2c + CR 608.2d — the handoff after an opponent
+    /// choice ("each opponent") and after a player choice ("each player") is
+    /// the assignment handoff.
+    #[test]
+    fn agreeing_subject_recognizes_the_assignment_handoff() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(OPPONENT_SENTENCE, &opponent_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(PLAYER_SENTENCE, &player_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+    }
+
+    /// A3.2 (SHAPE, synthetic pair): Scrambleverse's plural "of each permanent"
+    /// is not this grammar and declines at the singular determiner. Paired
+    /// reach-guard: the singular "of the permanent" after the same player
+    /// choice is recognized.
+    #[test]
+    fn each_permanent_grammar_declines_and_the_permanent_is_recognized() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(
+                "each player gains control of each permanent for which they were chosen.",
+                &player_choice(),
+            ),
+            None
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(PLAYER_SENTENCE, &player_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+    }
+
+    /// A3.2: the subject must agree with the choice's player set. Reach-guard:
+    /// the agreeing subject after the same player choice is recognized.
+    #[test]
+    fn mismatched_subject_declines() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(OPPONENT_SENTENCE, &player_choice()),
+            None,
+            "an opponent subject after a player choice"
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(PLAYER_SENTENCE, &player_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+    }
+
+    /// A3.2: a trailing conjunct is not swallowed. Reach-guard: the plain
+    /// sentence is recognized.
+    #[test]
+    fn trailing_conjunct_declines() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(
+                "each opponent gains control of the permanent for which they were chosen and \
+                 draws a card.",
+                &opponent_choice(),
+            ),
+            None,
+            "a trailing conjunct is not swallowed"
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(OPPONENT_SENTENCE, &opponent_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
     }
 }
 

@@ -1028,16 +1028,23 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
         // CR 607.2a: cards exiled with the host. Optional card-type qualifier
         // narrows the granted set (Agatha grants creature cards only).
         grant_exiled_source,
-        // CR 201.2: "creatures you control that don't have the same name as
-        // it/~" (Marvin) — battlefield creatures you control, excluding ones
-        // sharing the recipient's name.
+        // CR 201.2 + CR 613.1f: "creatures you control that don't have the
+        // same name as it/~" (Marvin) — battlefield creatures you control,
+        // excluding ones sharing the recipient's name. The InZone pin keeps
+        // hand/graveyard/exile/library creatures from donating abilities
+        // (Drana-and-Linvala precedent).
         value(
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Not {
-                        prop: Box::new(FilterProp::SameName),
-                    }]),
+                    .properties(vec![
+                        FilterProp::Not {
+                            prop: Box::new(FilterProp::SameName),
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
             ),
             (
                 tag("creatures you control that don't have the same name as "),
@@ -1045,8 +1052,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ),
         ),
         // CR 613.1f: "each other creature with a +1/+1 counter on it"
-        // (Experiment Kraj) — all creatures except self with at least one
-        // +1/+1 counter.
+        // (Experiment Kraj) — battlefield creatures except self with at least
+        // one +1/+1 counter. The InZone pin keeps counter-bearing cards in
+        // other zones from donating abilities (Drana-and-Linvala precedent).
         value(
             TargetFilter::And {
                 filters: vec![
@@ -1055,6 +1063,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
                             counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                             comparator: Comparator::GE,
                             count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
                         },
                     ])),
                     TargetFilter::Not {
@@ -2001,21 +2012,6 @@ pub(crate) fn push_grant_clause_modifications(
 
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-        return;
-    }
-
-    // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
-    // Shroud (blanket) or Hexproof (opponents only). Emit the keyword so the
-    // existing targeting checks apply the correct controller scope, rather than a
-    // scope-less rule static.
-    if let Some(scope) =
-        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
-    {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
-        };
-        modifications.push(ContinuousModification::AddKeyword { keyword });
         return;
     }
 

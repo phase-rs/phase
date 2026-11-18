@@ -118,7 +118,49 @@ type SerializedCost = {
   cost?: { type: string; shards?: string[]; generic?: number };
   filter?: { type: string; type_filters?: unknown[] } | null;
   zone?: string | null;
+  effect?: {
+    type: string;
+    amount?: QuantityExpr | number;
+    player?: {
+      type: string;
+      controller?: string | null;
+      type_filters?: unknown[];
+      properties?: unknown[];
+      player?: { type: string; exclude?: { type: string }; relation?: string };
+    };
+  };
 };
+
+/**
+ * Display-only formatting of an engine `EffectCost` (precedent: `formatFilteredCard`).
+ * The engine is the authority on what the cost is; this only renders the
+ * recipient shapes it pays at cast time — "have an opponent gain N life"
+ * (Invigorate) and "have each other player gain N life" (Reverent Silence).
+ * Every other effect-cost has no rendering here (null), so `formatCost` keeps
+ * its generic "Activate" label and keyword detail shows nothing.
+ */
+function formatEffectCost(effect: SerializedCost["effect"]): string | null {
+  if (effect?.type !== "GainLife") return null;
+  const player = effect.player;
+  const amount = formatQuantity(effect.amount, 1);
+  if (
+    player?.type === "Typed" &&
+    player.controller === "Opponent" &&
+    (player.type_filters ?? []).length === 0 &&
+    (player.properties ?? []).length === 0
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveOpponentGainLife", { amount });
+  }
+  const scope = player?.type === "PlayerMatching" ? player.player : undefined;
+  if (
+    scope?.type === "AllExcept" &&
+    scope.exclude?.type === "Controller" &&
+    (scope.relation ?? "All") === "All"
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveEachOtherPlayerGainLife", { amount });
+  }
+  return null;
+}
 
 function formatTypeFilter(filter: unknown): string {
   if (typeof filter === "string") return filter;
@@ -378,6 +420,8 @@ export function formatKnownCost(cost: SerializedCost): string | null {
       return (cost.costs ?? []).map(formatCost).join(", ");
     case "OneOf":
       return (cost.costs ?? []).map(formatCost).join(" or ");
+    case "EffectCost":
+      return formatEffectCost(cost.effect);
     default:
       return null;
   }
@@ -674,12 +718,13 @@ export function formatAbilityCost(cost: SerializedAbilityCost): string {
 }
 
 /**
- * A single option in the OptionalCostChoice modal. `pay` maps to
- * `DecideOptionalCost { pay: true }`, `decline` to `{ pay: false }`. The two
- * `id`s are stable so `OptionalCostModal` can dispatch the right action.
+ * A single option in the OptionalCostChoice modal. `id` is the option's index
+ * in the engine's `optional_cost_options` order, so `Choice` (any number of
+ * alternatives), `Optional`, `Kicker` and `Required` all dispatch
+ * `DecideOptionalCost { index }` with the id they render.
  */
 export interface AdditionalCostOption {
-  id: "pay" | "decline";
+  id: string;
   label: string;
   description?: string;
 }
@@ -705,9 +750,9 @@ export function additionalCostChoices(
           return {
             title: `Additional cost — paid ${timesKicked}×. Pay ${label} again?`,
             options: [
-              { id: "pay", label: `Pay ${label} again` },
+              { id: "0", label: `Pay ${label} again` },
               {
-                id: "decline",
+                id: "1",
                 label: `Done — finish casting (paid ${timesKicked}×)`,
                 description: "Stop paying this additional cost and pay the total cost.",
               },
@@ -718,12 +763,12 @@ export function additionalCostChoices(
           title: `Pay additional cost: ${label}?`,
           options: [
             {
-              id: "pay",
+              id: "0",
               label: `Pay ${label}`,
               description: "You'll be asked again so you can pay it multiple times.",
             },
             {
-              id: "decline",
+              id: "1",
               label: "Cast without paying",
               description: "Finish casting now with 0 payments.",
             },
@@ -733,8 +778,8 @@ export function additionalCostChoices(
       return {
         title: `Pay additional cost: ${label}?`,
         options: [
-          { id: "pay", label: `Pay ${label}` },
-          { id: "decline", label: "Skip" },
+          { id: "0", label: `Pay ${label}` },
+          { id: "1", label: "Skip" },
         ],
       };
     }
@@ -747,9 +792,9 @@ export function additionalCostChoices(
         return {
           title: `Multikicker — kicked ${timesKicked}×. Pay ${label} again?`,
           options: [
-            { id: "pay", label: `Pay ${label} — kick again` },
+            { id: "0", label: `Pay ${label} — kick again` },
             {
-              id: "decline",
+              id: "1",
               label: `Done — finish casting (kicked ${timesKicked}×)`,
               description: "Stop kicking and pay the total cost.",
             },
@@ -764,36 +809,37 @@ export function additionalCostChoices(
           : `Kicker — pay ${label} to kick this spell?`,
         options: [
           {
-            id: "pay",
+            id: "0",
             label: `Pay ${label} — kick it`,
             description: repeatable
               ? "Adds a kicker. You'll be asked again so you can kick multiple times."
               : "Adds a kicker to this spell.",
           },
           {
-            id: "decline",
+            id: "1",
             label: "Cast without kicking",
             description: "Finish casting now with 0 kickers — the spell still resolves.",
           },
         ],
       };
     }
+    // A required cost has a single option (index 0); cancelling the cast is
+    // the modal's close affordance (`CancelCast`), not a `DecideOptionalCost`.
     case "Required":
       return {
         title: `Pay additional cost: ${formatAbilityCost(cost.data)}`,
-        options: [
-          { id: "pay", label: `Pay ${formatAbilityCost(cost.data)}` },
-          { id: "decline", label: "Cancel" },
-        ],
+        options: [{ id: "0", label: `Pay ${formatAbilityCost(cost.data)}` }],
       };
-    case "Choice":
+    case "Choice": {
+      const choiceOptions = cost.data.map((c, i) => ({
+        id: String(i),
+        label: formatAbilityCost(c),
+      }));
       return {
         title: "Choose additional cost",
-        options: [
-          { id: "pay", label: formatAbilityCost(cost.data[0]) },
-          { id: "decline", label: formatAbilityCost(cost.data[1]) },
-        ],
+        options: choiceOptions,
       };
+    }
   }
 }
 

@@ -240,6 +240,7 @@ describe("persisted store hydration", () => {
     expect(profile?.baseUrl).toBeNull();
     expect(profile?.maxOutputTokens).toBeNull();
     expect(profile?.temperature).toBeNull();
+    expect(profile?.decisionContext).toBe("selfContained");
     // It claimed to be enabled but has no model, so it cannot be usable.
     expect(profile?.enabled).toBe(false);
   });
@@ -255,6 +256,7 @@ describe("persisted store hydration", () => {
           model: ["gpt-5"],
           maxOutputTokens: "many",
           temperature: Number.NaN,
+          decisionContext: true,
           enabled: "yes",
         },
       ],
@@ -274,6 +276,7 @@ describe("persisted store hydration", () => {
       model: "",
       maxOutputTokens: null,
       temperature: null,
+      decisionContext: "selfContained",
       enabled: false,
     });
   });
@@ -333,6 +336,7 @@ describe("persisted store hydration", () => {
           model: "claude-sonnet-5",
           maxOutputTokens: 2048,
           temperature: 0.2,
+          decisionContext: "messageThread",
           enabled: true,
         },
       ],
@@ -352,8 +356,36 @@ describe("persisted store hydration", () => {
       model: "claude-sonnet-5",
       maxOutputTokens: 2048,
       temperature: 0.2,
+      decisionContext: "messageThread",
       enabled: true,
     });
+  });
+
+  it("keeps a profile saved before message threads existed on self-contained requests", async () => {
+    seed({
+      profiles: [
+        {
+          id: "older",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+        // Only the exact opt-in value enables threads.
+        { id: "odd", provider: "Anthropic", model: "m", decisionContext: "MessageThread" },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    const contexts = useLlmStore.getState().profiles.map((profile) => profile.decisionContext);
+    expect(contexts).toEqual(["selfContained", "selfContained"]);
   });
 
   // ── The rest of the persisted slice ──────────────────────────────────────

@@ -462,6 +462,18 @@ fn choose_action_with_session_inner(
         }
     }
 
+    if let WaitingFor::RespondToShortcut { player, .. }
+    | WaitingFor::RespondToPrecastCopyShortcut { player, .. } = &state.waiting_for
+    {
+        if *player == ai_player {
+            if let Some(action) = shortcut_answer(state, ai_player, config, rng, &issued_domain())
+                .and_then(&bind_specialist)
+            {
+                return direct(Some(action));
+            }
+        }
+    }
+
     // CR 118.5 + CR 118.12a: acknowledge a free Counter payment to protect
     // the spell. Other unless effects can make declining strategically useful.
     if zero_counter_payment_owed_by(state, ai_player) {
@@ -718,6 +730,7 @@ fn random_card_predicate_guess(
     use rand::seq::IndexedRandom;
 
     let WaitingFor::NamedChoice {
+        decision_subject_id: _,
         free_entry: _,
         player,
         choice_type,
@@ -793,6 +806,51 @@ impl<'a> RootPriorityDomain<'a> {
     }
 }
 
+/// CR 732.2b: the accepting answer at either shortcut responder window.
+pub(crate) fn is_shortcut_accept(action: &GameAction) -> bool {
+    matches!(
+        action,
+        GameAction::RespondToShortcut {
+            response: engine::analysis::loop_check::ShortcutResponse::Accept,
+        } | GameAction::PrecastCopyShortcut {
+            response: engine::types::actions::PrecastCopyShortcutResponse::Accept,
+            ..
+        }
+    )
+}
+
+/// CR 732.2b + CR 732.2c: the responder's answer from the issued `domain`: the issued shorten when
+/// `ai_player`'s own priority choice at the shortened place is not a pass, otherwise the accept.
+fn shortcut_answer(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    rng: &mut impl Rng,
+    domain: &[GameAction],
+) -> Option<GameAction> {
+    let acts_at_place = |shorten: &&GameAction| {
+        engine::ai_support::shortened_priority_state(state, ai_player, shorten)
+            .and_then(|place| choose_action(&place, ai_player, config, rng))
+            .is_some_and(|choice| choice != GameAction::PassPriority)
+    };
+    domain
+        .iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::RespondToShortcut {
+                    response: engine::analysis::loop_check::ShortcutResponse::Shorten { .. },
+                } | GameAction::PrecastCopyShortcut {
+                    response: engine::types::actions::PrecastCopyShortcutResponse::Shorten { .. },
+                    ..
+                }
+            )
+        })
+        .filter(acts_at_place)
+        .or_else(|| domain.iter().find(|action| is_shortcut_accept(action)))
+        .cloned()
+}
+
 fn fast_priority_action(
     domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
@@ -807,8 +865,9 @@ fn fast_priority_action(
         return None;
     }
 
+    let pass_authority = engine::game::priority::pass_priority_structurally_legal(state, ai_player);
     if large_board_main_phase_has_no_development_sources(state, ai_player) {
-        return (!has_certified_fetch_then_cast_route(state, ai_player))
+        return (pass_authority && !has_certified_fetch_then_cast_route(state, ai_player))
             .then_some(GameAction::PassPriority);
     }
 
@@ -823,7 +882,6 @@ fn fast_priority_action(
     // enumerating them a second time. Without that authority (a CR 723.5
     // submitter mismatch, a CR 732.2c divergence obligation, or a parked cost
     // resume) validation may drop the pass, so the validated list decides.
-    let pass_authority = engine::game::priority::pass_priority_structurally_legal(state, ai_player);
     let issued_pass = issued.filter(|_| pass_authority).and_then(|contract| {
         let issued_actions: Vec<GameAction> = contract
             .candidates
@@ -1766,41 +1824,9 @@ pub fn fallback_action(
                 }
             )
         }),
-        // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
-        // `smart_shortcut_response` — Shorten when the polled player has a meaningful
-        // way to break the loop, else Accept.
-        WaitingFor::RespondToShortcut { player, .. } => Some(GameAction::RespondToShortcut {
-            response: engine::ai_support::smart_shortcut_response(state, *player),
-        }),
-        // CR 732.2b/c: use the same meaningful-priority probe as the legacy
-        // responder. A finite route can only shorten at its engine-issued
-        // breakpoint, so translate a legacy-style Shorten to that concrete
-        // capability; if none is issued, accepting is the only legal fallback.
-        WaitingFor::RespondToPrecastCopyShortcut {
-            player,
-            epoch,
-            breakpoint_ids,
-            ..
-        } => {
-            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
-                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-                    breakpoint_ids.first().map_or(
-                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
-                        |breakpoint_id| {
-                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
-                                breakpoint_id: *breakpoint_id,
-                            }
-                        },
-                    )
-                }
-                engine::analysis::loop_check::ShortcutResponse::Accept => {
-                    engine::types::actions::PrecastCopyShortcutResponse::Accept
-                }
-            };
-            Some(GameAction::PrecastCopyShortcut {
-                epoch: *epoch,
-                response,
-            })
+        // CR 732.2b: accepting is the conservative answer to a shortcut proposal.
+        WaitingFor::RespondToShortcut { .. } | WaitingFor::RespondToPrecastCopyShortcut { .. } => {
+            issued(is_shortcut_accept)
         }
 
         // Combat declarations: an empty declaration is NOT always legal —
@@ -1925,8 +1951,8 @@ pub fn fallback_action(
         WaitingFor::EmpowerJaceChoice { choices, .. } => choices
             .first()
             .map(|&id| GameAction::SelectCards { cards: vec![id] }),
-        // CR 405.3 + CR 707.10: any offered spell may supply the next copy.
-        WaitingFor::SpellCopyOrderChoice { choices, .. } => choices
+        // CR 608.2f + CR 405.3: any offered member may be processed next.
+        WaitingFor::MemberOrderChoice { choices, .. } => choices
             .first()
             .map(|&id| GameAction::SelectCards { cards: vec![id] }),
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first
@@ -3256,14 +3282,23 @@ fn priority_action_is_allowed_by_loop_guards(
             ability_index,
             ..
         } => {
+            // CR 602.2a + CR 602.5c: fold the per-acquisition budget; the
+            // pending guard compares the announcement-bound usage key, not
+            // `(source_id, ability_index)` — layer recomputes shift indices,
+            // so an index-keyed entry would suppress the innocent ability
+            // that shifted into the recorded slot. An unresolvable slot
+            // matches no pending key and reads a missing tally entry as
+            // count 0.
+            let usage =
+                engine::game::restrictions::ability_usage_key(state, *source_id, *ability_index);
+            let pending_hit = usage
+                .as_ref()
+                .is_some_and(|key| state.pending_activations.contains(key));
             !state.cancelled_casts.contains(source_id)
-                && !state
-                    .pending_activations
-                    .contains(&(*source_id, *ability_index))
-                && state
-                    .activated_abilities_this_turn
-                    .get(&(*source_id, *ability_index))
-                    .copied()
+                && !pending_hit
+                && usage
+                    .as_ref()
+                    .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                     .unwrap_or(0)
                     < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
         }
@@ -4074,6 +4109,9 @@ fn score_candidates_core_for_root(
     }
 
     let prepared = prepare_payment_candidates(state, ctx.candidates.clone());
+    if let Some(seeds) = crate::policies::payment_surplus_seeds(state, &prepared) {
+        services.context.payment_surplus.seed(seeds);
+    }
     let prepared = services.validate_prepared_candidates(state, prepared);
     let gated = gate_prepared_candidates(
         state,
@@ -4548,6 +4586,7 @@ pub(crate) fn build_ai_context_with_session(
         session,
         player,
         deadline: engine::util::Deadline::none(),
+        payment_surplus: Default::default(),
     };
     // Compute opponent threat profile based on difficulty setting.
     ctx.opponent_threat = match config.search.threat_awareness {
@@ -5139,10 +5178,41 @@ pub(crate) fn deterministic_choice(
             }
             engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
-            engine::types::ability::AdditionalCost::Choice(_, _) => true,
+            engine::types::ability::AdditionalCost::Choice(_) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
         };
-        return Some(GameAction::DecideOptionalCost { pay });
+        // CR 601.2b + CR 601.2h: a Choice offers every alternative in printed
+        // order and the caster must pay exactly one. Commit to the first branch
+        // that is in the issued candidate domain, that the engine's payability
+        // gate (the authority cost resolution uses) accepts, and whose payment
+        // the engine's life-safety receipt does not prove lethal (CR 119.4 +
+        // CR 704.5a — the same authority the AntiSelfHarm veto consults, which
+        // this early return would otherwise skip). With no such branch, defer
+        // to scoring so the policy registry judges every branch.
+        if let engine::types::ability::AdditionalCost::Choice(costs) = additional_cost {
+            let issued = engine::ai_support::candidate_actions(state);
+            return costs.iter().enumerate().find_map(|(index, cost)| {
+                let action = GameAction::DecideOptionalCost { index };
+                if !actions.contains(&action)
+                    || !engine::game::cost_payability::AbilityCostPayability::is_payable_for_spell(
+                        cost,
+                        state,
+                        *player,
+                        pending_cast.object_id,
+                    )
+                {
+                    return None;
+                }
+                let candidate = issued.iter().find(|candidate| candidate.action == action)?;
+                matches!(
+                    engine::game::life_safety::preview_candidate_life_safety(state, candidate),
+                    engine::game::life_safety::CandidateLifeSafety::NotUnsafe
+                )
+                .then_some(action)
+            });
+        }
+        let index = if pay { 0 } else { 1 };
+        return Some(GameAction::DecideOptionalCost { index });
     }
 
     // CR 601.2b: Defiler — accept life payment when life cushion is sufficient.
@@ -5152,7 +5222,8 @@ pub(crate) fn deterministic_choice(
     {
         let life = state.players[player.0 as usize].life;
         let pay = life > (*life_cost as i32) * 3;
-        return Some(GameAction::DecideOptionalCost { pay });
+        let index = if pay { 0 } else { 1 };
+        return Some(GameAction::DecideOptionalCost { index });
     }
 
     // CR 514.1 + CR 701.9a: cleanup discard. The give-up order is
@@ -5808,17 +5879,26 @@ fn softmax_select_index_with(
             .map(|(index, _)| index);
     }
 
+    // Selection invariant: a zero-weight row (a policy Reject's −∞ score) is
+    // never selected while a positive-weight row exists. A zero draw lands on
+    // the first positive-weight row, and float shortfall at the top of the walk
+    // falls back to the last positive-weight row.
     let threshold: f64 = uniform() * total;
     let mut cumulative = 0.0;
+    let mut last_positive = None;
     for (i, w) in weights.iter().enumerate() {
+        if *w <= 0.0 {
+            continue;
+        }
+        last_positive = Some(i);
         cumulative += w;
         if cumulative >= threshold {
             return Some(i);
         }
     }
 
-    // Fallback to last
-    Some(scored.len() - 1)
+    // Fallback to the last selectable row
+    last_positive.or(Some(scored.len() - 1))
 }
 
 #[cfg(test)]
@@ -7807,6 +7887,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining,
+            affected_object: None,
             repeat: None,
         };
         state
@@ -8391,7 +8472,6 @@ mod tests {
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -11483,6 +11563,7 @@ mod tests {
             .collect();
         resolve_deck_list(
             db,
+            &engine::database::ComboTable::default(),
             &DeckList {
                 player: PlayerDeckList {
                     main_deck,
@@ -13307,6 +13388,50 @@ mod tests {
         );
     }
 
+    fn land(id: u64) -> GameAction {
+        GameAction::PlayLand {
+            object_id: ObjectId(id),
+            card_id: CardId(id),
+        }
+    }
+
+    #[test]
+    fn softmax_zero_draw_skips_a_leading_rejected_row() {
+        let scored = vec![
+            (land(1), f64::NEG_INFINITY),
+            (GameAction::PassPriority, 0.0),
+        ];
+        assert_eq!(
+            softmax_select_index_with(&scored, 1.0, || 0.0),
+            Some(1),
+            "a zero uniform draw must not select a −∞ row while a finite row exists"
+        );
+    }
+
+    #[test]
+    fn softmax_top_draw_stays_on_a_finite_row() {
+        let scored = vec![
+            (GameAction::PassPriority, 0.0),
+            (land(1), f64::NEG_INFINITY),
+        ];
+        assert_eq!(
+            softmax_select_index_with(&scored, 1.0, || 1.0 - f64::EPSILON),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn softmax_all_rejected_keeps_the_stable_argmax_fallback() {
+        let scored = vec![(land(2), f64::NEG_INFINITY), (land(1), f64::NEG_INFINITY)];
+        let first = softmax_select_index_with(&scored, 1.0, || 0.5);
+        assert_eq!(
+            first,
+            softmax_select_index_with(&scored, 1.0, || 0.0),
+            "all-rejected rows take the deterministic fallback regardless of the draw"
+        );
+        assert!(first.is_some());
+    }
+
     #[test]
     fn budget_limits_stop_search() {
         let mut budget = SearchBudget::new(3);
@@ -13321,11 +13446,29 @@ mod tests {
     fn score_candidates_filters_activation_pending_on_stack() {
         // CR 117.1b + pending_activations guard: when an activated ability's
         // prior activation is still on the stack, the AI filter rejects the
-        // same (source_id, ability_index) from the candidate list to prevent
-        // softmax re-pick loops.
+        // same usage key from the candidate list to prevent softmax re-pick
+        // loops. A bare `add_creature` object carries no abilities, so a real
+        // parsed ability is attached at slot 0 (mirroring the per-turn-cap
+        // test) and the pending entry is the announcement-bound key the
+        // placement path records.
         let mut state = make_state();
         let creature = add_creature(&mut state, PlayerId(0), 1, 1);
-        state.pending_activations.push((creature, 0));
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            "{T}: Add {G}.",
+            "Creature",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "tap ability parses to a definition"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&creature).unwrap().abilities)
+            .extend(parsed.abilities);
+        let pending = engine::game::restrictions::ability_usage_key(&state, creature, 0)
+            .expect("slot 0 resolves after attaching the ability");
+        state.pending_activations.push(pending);
 
         // Construct a candidate for ActivateAbility on the pending pair.
         let blocked = CandidateAction {
@@ -13353,14 +13496,23 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.2a + CR 602.5c: fold the per-acquisition
+                    // budget; the pending guard compares usage keys (see
+                    // `priority_action_is_allowed_by_loop_guards`); an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
+                    let pending_hit = usage
+                        .as_ref()
+                        .is_some_and(|key| state.pending_activations.contains(key));
                     !state.cancelled_casts.contains(source_id)
-                        && !state
-                            .pending_activations
-                            .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && !pending_hit
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }
@@ -13383,9 +13535,30 @@ mod tests {
         // source, further activations are rejected regardless of stack state.
         let mut state = make_state();
         let creature = add_creature(&mut state, PlayerId(0), 1, 1);
+        // CR 602.5c: the per-turn budget is keyed by the resolved acquisition
+        // (provenance stamp + rules text), and an unresolvable slot reads
+        // count 0 — so the bare `add_creature` object (no abilities) cannot
+        // carry a budget. Attach a real printed ability at slot 0 and derive
+        // the insert key with the same helper the filter reads, instead of
+        // hand-building the key and duplicating the helper's binding.
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            "{T}: Add {G}.",
+            "Creature",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(
+            !parsed.abilities.is_empty(),
+            "tap ability parses to a definition"
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&creature).unwrap().abilities)
+            .extend(parsed.abilities);
+        let usage = engine::game::restrictions::ability_usage_key(&state, creature, 0)
+            .expect("slot 0 resolves after attaching the ability");
         state
             .activated_abilities_this_turn
-            .insert((creature, 0), MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
+            .insert(usage, MAX_ACTIVATIONS_PER_SOURCE_PER_TURN);
 
         let blocked = CandidateAction {
             action: GameAction::ActivateAbility {
@@ -13404,14 +13577,23 @@ mod tests {
                     ability_index,
                     ..
                 } => {
+                    // CR 602.2a + CR 602.5c: fold the per-acquisition
+                    // budget; the pending guard compares usage keys (see
+                    // `priority_action_is_allowed_by_loop_guards`); an
+                    // unresolvable slot reads a missing entry as count 0.
+                    let usage = engine::game::restrictions::ability_usage_key(
+                        &state,
+                        *source_id,
+                        *ability_index,
+                    );
+                    let pending_hit = usage
+                        .as_ref()
+                        .is_some_and(|key| state.pending_activations.contains(key));
                     !state.cancelled_casts.contains(source_id)
-                        && !state
-                            .pending_activations
-                            .contains(&(*source_id, *ability_index))
-                        && state
-                            .activated_abilities_this_turn
-                            .get(&(*source_id, *ability_index))
-                            .copied()
+                        && !pending_hit
+                        && usage
+                            .as_ref()
+                            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                             .unwrap_or(0)
                             < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
                 }
@@ -13423,6 +13605,128 @@ mod tests {
             gated.is_empty(),
             "activation at per-turn cap should be filtered"
         );
+    }
+
+    /// CR 602.2a: the real loop guard compares announcement-bound usage
+    /// keys, not slot indices. A recorded key still suppresses its own
+    /// activation, but an ability that shifted into the recorded slot after
+    /// a grant withdrawal carries a different key and stays offered.
+    /// Reverting the guard to index comparison suppresses the shifted
+    /// ability (RED).
+    #[test]
+    fn pending_key_guard_still_offers_ability_shifted_into_recorded_slot() {
+        fn parse_tap_mana(color: &str) -> Vec<engine::types::ability::AbilityDefinition> {
+            let text = format!("{{T}}: Add {color}.");
+            let parsed = engine::parser::oracle::parse_oracle_text(
+                &text,
+                "Creature",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            assert!(
+                !parsed.abilities.is_empty(),
+                "tap ability parses to a definition"
+            );
+            parsed.abilities
+        }
+
+        let mut state = make_state();
+        let holder = add_creature(&mut state, PlayerId(0), 1, 1);
+        let mut green = parse_tap_mana("{G}");
+        let mut red = parse_tap_mana("{R}");
+        // Twins share the description so only the fingerprint tells the
+        // recorded key from the shifted ability apart.
+        for def in green.iter_mut().chain(red.iter_mut()) {
+            def.description = Some("Twin shift ability".to_string());
+        }
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).extend(green);
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).extend(red);
+
+        let recorded = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("slot 0 resolves");
+        let shifted = engine::game::restrictions::ability_usage_key(&state, holder, 1)
+            .expect("slot 1 resolves");
+        assert_ne!(
+            recorded, shifted,
+            "the twins must carry different keys for the shift to discriminate"
+        );
+        state.pending_activations.push(recorded);
+
+        let candidate = |index: usize| GameAction::ActivateAbility {
+            source_id: holder,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        };
+        // Paired guard: its own activation is still suppressed.
+        assert!(
+            !priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &candidate(0)),
+            "the recorded activation must stay suppressed"
+        );
+
+        // The recompute shift: the slot-0 grant is withdrawn and the slot-1
+        // ability moves into the recorded slot.
+        Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities).remove(0);
+        let now_at_zero = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("the shifted ability resolves at slot 0");
+        assert_eq!(
+            now_at_zero, shifted,
+            "slot 0 must now carry the shifted ability"
+        );
+
+        // The next AI decision still offers it: the pending key names the
+        // withdrawn activation, not the survivor.
+        assert!(
+            priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &candidate(0)),
+            "the shifted ability must stay offered after moving into the recorded slot"
+        );
+    }
+
+    /// The F5 finding's "preserve separate identical printed entries"
+    /// sub-claim is REJECTED: identical printed natives share one key by
+    /// approved contract (the index is not in the key), so one pending entry
+    /// suppresses every identical slot.
+    #[test]
+    fn pending_key_suppresses_identical_twins_sharing_one_key() {
+        let mut state = make_state();
+        let holder = add_creature(&mut state, PlayerId(0), 1, 1);
+        for _ in 0..2 {
+            let parsed = engine::parser::oracle::parse_oracle_text(
+                "{T}: Add {G}.",
+                "Creature",
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            assert!(
+                !parsed.abilities.is_empty(),
+                "tap ability parses to a definition"
+            );
+            Arc::make_mut(&mut state.objects.get_mut(&holder).unwrap().abilities)
+                .extend(parsed.abilities);
+        }
+
+        let first = engine::game::restrictions::ability_usage_key(&state, holder, 0)
+            .expect("slot 0 resolves");
+        let second = engine::game::restrictions::ability_usage_key(&state, holder, 1)
+            .expect("slot 1 resolves");
+        assert_eq!(
+            first, second,
+            "identical printed bodies share one usage key by contract"
+        );
+        state.pending_activations.push(first);
+
+        for index in [0, 1] {
+            let action = GameAction::ActivateAbility {
+                source_id: holder,
+                ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
+            };
+            assert!(
+                !priority_action_is_allowed_by_loop_guards(&state, PlayerId(0), &action),
+                "identical slot {index} must stay suppressed under the shared key"
+            );
+        }
     }
 
     #[test]
@@ -14638,6 +14942,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
@@ -14738,6 +15043,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicate {
@@ -14776,6 +15082,7 @@ mod tests {
         );
         state.all_card_names = vec!["Forest".to_string(), "Island".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -14796,6 +15103,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = vec!["Forest".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: P0,
             choice_type: ChoiceType::card_name(),
@@ -14829,6 +15137,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = Vec::new().into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -15200,7 +15509,7 @@ mod tests {
             .expect("deterministic_choice must decide the kicker prompt");
         assert_eq!(
             action,
-            GameAction::DecideOptionalCost { pay: false },
+            GameAction::DecideOptionalCost { index: 1 },
             "AI must decline a multikick that over-commits its mana"
         );
     }
@@ -15216,8 +15525,122 @@ mod tests {
             .expect("deterministic_choice must decide the kicker prompt");
         assert_eq!(
             action,
-            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { index: 0 },
             "AI must pay a multikick when it has mana to spare"
+        );
+    }
+
+    // --- Additional-cost Choice branch selection (issue #10442) ---
+
+    /// Verbatim Oracle text (Scryfall, 2026-11-16).
+    const FINAL_PAYMENT_ORACLE: &str = "As an additional cost to cast this spell, pay 5 life or sacrifice a creature or enchantment.\nDestroy target creature.";
+
+    /// P0 at `life` controls a Grizzly Bears (sacrifice fodder) and casts
+    /// Final Payment at P1's Grizzly Bears, stopping at the additional-cost
+    /// prompt where both printed branches are payable.
+    fn final_payment_choice_state(life: i32) -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, life);
+        scenario.add_basic_land(P0, ManaColor::White);
+        scenario.add_basic_land(P0, ManaColor::Black);
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        let target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let final_payment = scenario
+            .add_spell_to_hand_from_oracle(P0, "Final Payment", true, FINAL_PAYMENT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::Black],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&final_payment].card_id;
+        let result = runner
+            .act(GameAction::CastSpell {
+                object_id: final_payment,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("announcing Final Payment must succeed");
+        if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+            runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(target)],
+                })
+                .expect("P1's Grizzly Bears is a legal target");
+        }
+        let WaitingFor::OptionalCostChoice {
+            cost: engine::types::ability::AdditionalCost::Choice(costs),
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "Final Payment must prompt for its additional cost, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(
+            matches!(
+                costs.as_slice(),
+                [AbilityCost::PayLife { .. }, AbilityCost::Sacrifice(_)]
+            ),
+            "Final Payment's printed branches: pay 5 life or sacrifice, got {costs:?}"
+        );
+        runner.state().clone()
+    }
+
+    /// CR 119.4 + CR 704.5a: paying 5 life at 5 life is payable but lethal.
+    /// The deterministic chooser must not commit to it ahead of the payable
+    /// sacrifice branch — both through `deterministic_choice` (the planner's
+    /// quiescence route) and through `choose_action` (the root route that
+    /// returns before policy scoring).
+    #[test]
+    fn choice_cost_skips_a_lethal_first_life_branch() {
+        let state = final_payment_choice_state(5);
+        let actions = issued_actions(&state, P0);
+        assert!(
+            actions.contains(&GameAction::DecideOptionalCost { index: 0 }),
+            "reach guard: the lethal life branch is issued"
+        );
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &actions, None),
+            Some(GameAction::DecideOptionalCost { index: 1 }),
+        );
+        assert_eq!(
+            choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(7)),
+            Some(GameAction::DecideOptionalCost { index: 1 }),
+        );
+    }
+
+    /// Control: at 20 life the life branch is safe, so the chooser keeps the
+    /// first payable branch in printed order.
+    #[test]
+    fn choice_cost_keeps_a_safe_first_life_branch() {
+        let state = final_payment_choice_state(20);
+        let actions = issued_actions(&state, P0);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &actions, None),
+            Some(GameAction::DecideOptionalCost { index: 0 }),
+        );
+    }
+
+    /// A branch outside the issued domain is never committed: with only the
+    /// sacrifice answer issued, the chooser picks it even though the life
+    /// branch is first and safe.
+    #[test]
+    fn choice_cost_only_commits_to_an_issued_branch() {
+        let state = final_payment_choice_state(20);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let actions = vec![
+            GameAction::DecideOptionalCost { index: 1 },
+            GameAction::CancelCast,
+        ];
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &actions, None),
+            Some(GameAction::DecideOptionalCost { index: 1 }),
         );
     }
 
@@ -18549,6 +18972,7 @@ mod tests {
             Zone::Battlefield,
         );
         guess.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
@@ -19354,9 +19778,11 @@ mod tests {
                     rules_execution_node: None,
                     ability_snapshot: Some(ability),
                     announced_source_incarnation: None,
+                    announced_usage_key: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
+                    selected_taps_for_mana: Vec::new(),
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
@@ -20247,14 +20673,13 @@ one on the bottom of your library.";
         );
     }
 
-    /// P1 at priority under a CR 732.2c divergence obligation: P0 casts Chain of
-    /// Smog with Witherbloom Apprentice in play, proposes the pre-cast copy
-    /// shortcut, and P1 shortens it at P1's breakpoint.
-    fn divergence_latched_priority_state() -> GameState {
+    /// P1 polled at the pre-cast copy window: P0 casts Chain of Smog at itself
+    /// with Witherbloom Apprentice in play and proposes the pre-cast copy shortcut.
+    fn precast_responder_window(mut scenario: GameScenario) -> GameRunner {
         use std::path::Path;
 
         use engine::database::card_db::CardDatabase;
-        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::game::scenario::{P0, P1};
         use engine::game::scenario_db::GameScenarioDbExt;
         use engine::types::actions::PrecastCopyShortcutResponse;
         use engine::types::game_state::CastPaymentMode;
@@ -20267,7 +20692,6 @@ one on the bottom of your library.";
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json"),
         )
         .expect("test fixture must contain Witherbloom Apprentice");
-        let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, &db);
         let chain = scenario
@@ -20300,14 +20724,33 @@ one on the bottom of your library.";
                 response: PrecastCopyShortcutResponse::Propose { route_id: epoch },
             })
             .expect("P0 proposes the route");
-        let breakpoint_id = match &runner.state().waiting_for {
-            WaitingFor::RespondToPrecastCopyShortcut {
-                player,
-                breakpoint_ids,
-                ..
-            } if *player == P1 => *breakpoint_ids.first().expect("P1 is issued a breakpoint"),
-            other => panic!("expected P1's shortcut response, got {other:?}"),
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::RespondToPrecastCopyShortcut { player, .. } if player == P1
+            ),
+            "expected P1's shortcut response, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+    }
+
+    /// P1 at priority under a CR 732.2c divergence obligation: P1 shortens the
+    /// pre-cast copy shortcut at P1's breakpoint.
+    fn divergence_latched_priority_state() -> GameState {
+        use engine::game::scenario::P1;
+        use engine::types::actions::PrecastCopyShortcutResponse;
+
+        let mut runner = precast_responder_window(GameScenario::new());
+        let WaitingFor::RespondToPrecastCopyShortcut {
+            epoch,
+            ref breakpoint_ids,
+            ..
+        } = runner.state().waiting_for
+        else {
+            unreachable!("precast_responder_window stops at the response window");
         };
+        let breakpoint_id = *breakpoint_ids.first().expect("P1 is issued a breakpoint");
         runner
             .act(GameAction::PrecastCopyShortcut {
                 epoch,
@@ -20323,10 +20766,8 @@ one on the bottom of your library.";
     }
 
     /// CR 732.2c: the player who shortened a pre-cast copy shortcut must diverge,
-    /// so the reducer rejects their pass and the validated list omits it, while
-    /// the issued contract still carries `PassPriority`. Answering the low-value
-    /// pass from the contract would propose an illegal action. Fails on revert of
-    /// the pass-authority guard.
+    /// so the reducer rejects their pass, and neither the issued contract nor the
+    /// validated list carries it; the priority shortcut never answers with it.
     #[test]
     fn priority_shortcut_never_passes_through_a_divergence_obligation() {
         let state = divergence_latched_priority_state();
@@ -20341,11 +20782,11 @@ one on the bottom of your library.";
         );
         let contract = AiDecisionContract::issue(&state, p1);
         assert!(
-            contract
+            !contract
                 .candidates
                 .iter()
                 .any(|candidate| matches!(candidate.action, GameAction::PassPriority)),
-            "reach-guard: the issued contract still carries the pass"
+            "the builder issues no pass the latch refuses"
         );
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let session = AiSession::arc_from_game(&state);
@@ -24727,6 +25168,387 @@ one on the bottom of your library.";
             assert!(
                 (got - gap).abs() < 1e-9,
                 "the hint does not time {name}: {gap} over the instant's 0.3, got {got}"
+            );
+        }
+    }
+
+    /// The AI's answer at a CR 732.2b responder window, decided by its own priority choice at the
+    /// place it would shorten at, on the Cauldron Familiar board: P0 loops Cauldron Familiar ("When
+    /// this creature enters, each opponent loses 1 life and you gain 1 life. / Sacrifice a Food:
+    /// Return this card from your graveyard to the battlefield.") through Carrion Feeder and Samwise
+    /// Gamgee against P1 at 12 holding Relic of Progenitus.
+    mod shortcut_responder {
+        use super::*;
+        use engine::analysis::decision_template::IterationCount;
+        use engine::analysis::loop_check::ShortcutResponse;
+        use engine::game::engine::apply;
+        use engine::types::actions::PrecastCopyShortcutResponse;
+
+        /// The player's dump, restored at P0's offer. Regenerating it requires re-gzipping it.
+        fn familiar_offer_state() -> GameState {
+            use std::io::Read;
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../engine/tests/fixtures/familiar_relic_turn5_2p.json.gz");
+            let mut json = String::new();
+            flate2::read::GzDecoder::new(File::open(path).expect("the Familiar dump opens"))
+                .read_to_string(&mut json)
+                .expect("the Familiar dump inflates");
+            let json = engine::types::game_state::record_captured_onsets_json(&json);
+            let document: serde_json::Value =
+                serde_json::from_str(&json).expect("the Familiar dump is JSON");
+            serde_json::from_value::<engine::types::game_state::PersistedGameState>(
+                document["gameState"].clone(),
+            )
+            .expect("the Familiar dump decodes")
+            .into_game_state()
+            .expect("the Familiar dump restores")
+        }
+
+        /// P0 declares `count` on the Familiar offer after `board` adjusts it; P1 is polled.
+        fn familiar_window(count: u32, board: impl FnOnce(&mut GameState)) -> GameState {
+            let mut state = familiar_offer_state();
+            board(&mut state);
+            apply(
+                &mut state,
+                P0,
+                GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(count),
+                    template: None,
+                },
+            )
+            .expect("P0 declares the shortcut");
+            assert!(
+                matches!(state.waiting_for, WaitingFor::RespondToShortcut { player, .. } if player == P1),
+                "P1 answers the proposal, got {:?}",
+                state.waiting_for
+            );
+            state
+        }
+
+        /// Lightning Bolt ("Lightning Bolt deals 3 damage to any target.") in P1's hand and an
+        /// untapped Mountain under P1's control.
+        fn arm_bolt(state: &mut GameState) {
+            let db = shared_integration_card_db();
+            for (name, zone) in [
+                ("Lightning Bolt", Zone::Hand),
+                ("Mountain", Zone::Battlefield),
+            ] {
+                let face = db
+                    .get_face_by_name(name)
+                    .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+                let id = engine::game::deck_loading::create_object_from_card_face(state, face, P1);
+                engine::game::zones::move_to_zone(state, id, zone, &mut Vec::new());
+            }
+            state.layers_dirty = engine::types::game_state::LayersDirty::full();
+        }
+
+        fn tap_relic(state: &mut GameState) {
+            let relic = state
+                .battlefield
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Relic of Progenitus")
+                .expect("P1's Relic of Progenitus is on the battlefield");
+            state.objects.get_mut(&relic).expect("present").tapped = true;
+        }
+
+        fn accept() -> GameAction {
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            }
+        }
+
+        fn shorten_at(at_iteration: u32) -> GameAction {
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Shorten { at_iteration },
+            }
+        }
+
+        fn contract_actions(state: &GameState, seat: PlayerId) -> Vec<GameAction> {
+            AiDecisionContract::issue(state, seat)
+                .candidates
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect()
+        }
+
+        fn answer(state: &GameState, difficulty: AiDifficulty, seed: u64) -> Option<GameAction> {
+            let config = create_config(difficulty, Platform::Native).into_measurement(seed);
+            choose_action(state, P1, &config, &mut SmallRng::seed_from_u64(seed))
+        }
+
+        fn life(state: &GameState, seat: PlayerId) -> i32 {
+            state.players[seat.0 as usize].life
+        }
+
+        /// R1. P1's own choice at place 1 passes — Relic of Progenitus's {T} has the targeted
+        /// player choose the card (CR 608.2d) and its {1} ability is unaffordable — so P1 accepts,
+        /// and the twelve repetitions drain P1 from 12 to 0 (CR 119.3 + CR 704.5a) while P0 goes
+        /// 22 → 34 and wins the game (CR 104.2a).
+        #[test]
+        fn a_seat_whose_place_choice_passes_accepts_and_the_loop_lands() {
+            let mut state = familiar_window(12, |_| {});
+            assert_eq!(
+                contract_actions(&state, P1),
+                vec![accept(), shorten_at(1)],
+                "reach-guard: the Shorten is issued, so the Accept is chosen, not forced"
+            );
+            assert!(
+                engine::ai_support::shortened_priority_state(&state, P1, &shorten_at(1)).is_some(),
+                "reach-guard: the shortened place is reached"
+            );
+            for difficulty in [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard] {
+                for seed in 0..3 {
+                    assert_eq!(
+                        answer(&state, difficulty, seed),
+                        Some(accept()),
+                        "{difficulty:?} seed {seed}"
+                    );
+                }
+            }
+
+            apply(&mut state, P1, accept()).expect("the Accept takes the shortcut");
+            assert_eq!(life(&state, P1), 0);
+            assert!(state.players[1].is_eliminated);
+            assert_eq!(life(&state, P0), 34);
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::BetweenGamesSideboard { game_number: 2, ref score, .. }
+                        if score.p0_wins == 1 && score.p1_wins == 0
+                ),
+                "P0 wins game 1, got {:?}",
+                state.waiting_for
+            );
+        }
+
+        /// R2. With Lightning Bolt castable, P1's answer follows its own choice at place 1: Medium
+        /// seed 3 passes there and accepts; the other seeds cast and shorten, and the take leaves P1
+        /// at 11 with priority after one repetition (CR 732.2c).
+        #[test]
+        fn a_seat_shortens_exactly_when_its_place_choice_acts() {
+            let state = familiar_window(12, arm_bolt);
+            assert_eq!(contract_actions(&state, P1), vec![accept(), shorten_at(1)]);
+            assert_eq!(answer(&state, AiDifficulty::Medium, 3), Some(accept()));
+            for seed in [0, 1, 2, 4, 5] {
+                assert_eq!(
+                    answer(&state, AiDifficulty::Medium, seed),
+                    Some(shorten_at(1)),
+                    "seed {seed}"
+                );
+            }
+
+            let mut shortened = state;
+            apply(&mut shortened, P1, shorten_at(1)).expect("the Shorten is admitted");
+            assert_eq!(life(&shortened, P1), 11);
+            assert_eq!(shortened.waiting_for, WaitingFor::Priority { player: P1 });
+        }
+
+        /// R3. With Relic of Progenitus tapped P1 has no different choice at place 1. Legality
+        /// reads the proposal alone, so the Shorten is issued; the committed Shorten is refused
+        /// (CR 732.2b) with P1's window kept, and the chooser accepts.
+        #[test]
+        fn a_seat_with_no_different_choice_is_refused_the_shorten_and_accepts() {
+            let mut state = familiar_window(12, tap_relic);
+            assert_eq!(contract_actions(&state, P1), vec![accept(), shorten_at(1)]);
+            assert_eq!(answer(&state, AiDifficulty::Medium, 0), Some(accept()));
+            let mut refused = state.clone();
+            assert!(apply(&mut refused, P1, shorten_at(1)).is_err());
+            assert_eq!(refused.waiting_for, state.waiting_for);
+            assert_eq!(contract_actions(&refused, P1), vec![accept()]);
+            apply(&mut state, P1, accept()).expect("the Accept takes the shortcut");
+            assert!(state.players[1].is_eliminated);
+        }
+
+        /// P0's declaration on its own offer passes the planner's legality gate from the offer's
+        /// measured evidence, without a state copy.
+        #[test]
+        fn the_planner_gate_admits_the_proposers_declaration_without_a_state_copy() {
+            use crate::planner::{
+                prepare_payment_candidates, PlannerServices, PromptAnswerValidation,
+            };
+            let state = familiar_offer_state();
+            let config = create_config(AiDifficulty::Medium, Platform::Native);
+            let policies = PolicyRegistry::default();
+            let mut services = PlannerServices::new_default(P0, &config, &policies);
+            services.prompt_answers = PromptAnswerValidation::AtSubmission;
+            let ctx = services.build_decision_context(&state);
+            let declarations: Vec<_> = prepare_payment_candidates(&state, ctx.candidates.clone())
+                .into_iter()
+                .filter(|entry| {
+                    matches!(entry.candidate.action, GameAction::DeclareShortcut { .. })
+                })
+                .collect();
+            assert_eq!(
+                declarations.len(),
+                1,
+                "reach-guard: the offer issues its declaration"
+            );
+            engine::game::perf_counters::reset();
+            let validated = services.validate_prepared_candidates(&state, declarations);
+            assert_eq!(validated.len(), 1, "the gate keeps the declaration");
+            assert_eq!(
+                engine::game::perf_counters::snapshot().state_clone_for_legality,
+                0
+            );
+        }
+
+        /// R4. A one-repetition proposal admits only place 0 (CR 732.2b), where the AI never
+        /// shortens: the issued domain is the Accept alone even with Lightning Bolt castable.
+        #[test]
+        fn a_one_repetition_proposal_is_accepted() {
+            let state = familiar_window(1, arm_bolt);
+            let WaitingFor::RespondToShortcut { ref proposal, .. } = state.waiting_for else {
+                unreachable!("familiar_window stops at P1's window");
+            };
+            assert_eq!(
+                proposal.shortening_places(),
+                0..=0,
+                "reach-guard: the range is {{0}}"
+            );
+            assert_eq!(contract_actions(&state, P1), vec![accept()]);
+            assert_eq!(answer(&state, AiDifficulty::Medium, 0), Some(accept()));
+        }
+
+        /// R5. The same rule at the pre-cast window with three seats: P1 is polled with P2
+        /// queued, and shortens at its breakpoint exactly when it holds Lightning Bolt to cast.
+        #[test]
+        fn the_precast_responder_shortens_exactly_when_its_place_choice_acts() {
+            for bolt in [false, true] {
+                let mut scenario = GameScenario::new_n_player(3, 42);
+                if bolt {
+                    let db = shared_integration_card_db();
+                    scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, db);
+                    scenario.add_real_card(P1, "Mountain", Zone::Battlefield, db);
+                }
+                let runner = precast_responder_window(scenario);
+                let state = runner.state();
+                let WaitingFor::RespondToPrecastCopyShortcut {
+                    epoch,
+                    ref breakpoint_ids,
+                    ref remaining_players,
+                    ..
+                } = state.waiting_for
+                else {
+                    unreachable!("precast_responder_window stops at the response window");
+                };
+                assert_eq!(
+                    remaining_players,
+                    &vec![PlayerId(2)],
+                    "reach-guard: P2 is queued"
+                );
+                let [breakpoint_id] = breakpoint_ids[..] else {
+                    panic!("P1 is issued one breakpoint, got {breakpoint_ids:?}");
+                };
+                let accept = GameAction::PrecastCopyShortcut {
+                    epoch,
+                    response: PrecastCopyShortcutResponse::Accept,
+                };
+                let shorten = GameAction::PrecastCopyShortcut {
+                    epoch,
+                    response: PrecastCopyShortcutResponse::Shorten { breakpoint_id },
+                };
+                assert_eq!(
+                    contract_actions(state, P1),
+                    vec![accept.clone(), shorten.clone()]
+                );
+                let expected = if bolt { shorten } else { accept };
+                for seed in 0..3 {
+                    assert_eq!(
+                        answer(state, AiDifficulty::Medium, seed),
+                        Some(expected.clone()),
+                        "bolt={bolt} seed {seed}"
+                    );
+                }
+            }
+        }
+
+        /// R6. The conservative paths take the Accept although the Shorten is issued.
+        #[test]
+        fn the_conservative_paths_accept() {
+            let state = familiar_window(12, |_| {});
+            let contract = AiDecisionContract::issue(&state, P1);
+            assert!(
+                contract.contains_action(&state, &shorten_at(1)),
+                "reach-guard: the Shorten is issued"
+            );
+            let config = create_config(AiDifficulty::Medium, Platform::Native);
+            assert_eq!(fallback_action(&state, &config, &contract), Some(accept()));
+
+            let runner = precast_responder_window(GameScenario::new());
+            let precast = runner.state();
+            let contract = AiDecisionContract::issue(precast, P1);
+            assert_eq!(
+                contract.candidates.len(),
+                2,
+                "reach-guard: Accept and Shorten are issued"
+            );
+            assert!(matches!(
+                fallback_action(precast, &config, &contract),
+                Some(GameAction::PrecastCopyShortcut {
+                    response: PrecastCopyShortcutResponse::Accept,
+                    ..
+                })
+            ));
+        }
+
+        /// R7. After P1 shortens at place 1, one repetition is taken (P1 11) and P1 holds
+        /// priority under CR 732.2c's obligation, so passing is not issued and the AI activates
+        /// Relic of Progenitus, the only legal action, which the reducer takes.
+        #[test]
+        fn a_latched_seat_is_never_issued_a_pass() {
+            let mut state = familiar_window(12, |_| {});
+            apply(&mut state, P1, shorten_at(1)).expect("the Relic seat may shorten at 1");
+            assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+            assert_eq!(life(&state, P1), 11);
+            let legal = engine::ai_support::legal_actions(&state);
+            assert!(
+                !legal.is_empty() && !legal.contains(&GameAction::PassPriority),
+                "reach-guard: the latch refuses the pass and leaves an action, got {legal:?}"
+            );
+            assert!(!contract_actions(&state, P1).contains(&GameAction::PassPriority));
+            for difficulty in [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard] {
+                for seed in 0..2 {
+                    let choice = answer(&state, difficulty, seed).expect("an answer");
+                    assert!(
+                        matches!(choice, GameAction::ActivateAbility { source_id, .. }
+                            if state.objects[&source_id].name == "Relic of Progenitus"),
+                        "{difficulty:?} seed {seed}: {choice:?}"
+                    );
+                    assert!(legal.contains(&choice));
+                    apply(&mut state.clone(), P1, choice).expect("the reducer takes it");
+                }
+            }
+        }
+
+        /// CR 723.5: at a large inert board the priority shortcut passes only where the reducer's
+        /// pass guard holds; a priority window whose live submitter is another seat gets no pass.
+        #[test]
+        fn the_large_board_pass_needs_the_pass_authority() {
+            let mut state = large_board_state(FormatConfig::standard(), P0);
+            state.priority_player = P1;
+            assert!(
+                large_board_main_phase_has_no_development_sources(&state, P0),
+                "reach-guard: the board takes the large-board early return"
+            );
+            assert!(!engine::game::priority::pass_priority_structurally_legal(
+                &state, P0
+            ));
+            let fast = |state: &GameState| {
+                fast_priority_action(
+                    &RootPriorityDomain::new(state, P0),
+                    &AiConfig::default(),
+                    &AiSession::arc_from_game(state),
+                    None,
+                )
+            };
+            assert_eq!(fast(&state), None);
+
+            state.priority_player = P0;
+            assert_eq!(
+                fast(&state),
+                Some(GameAction::PassPriority),
+                "control: with the submitter restored the early return passes"
             );
         }
     }

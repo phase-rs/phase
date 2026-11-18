@@ -54,7 +54,7 @@ fn cast_promised_coiling(
         let (action, why) = match &runner.state().waiting_for {
             WaitingFor::ManaPayment { .. } => (GameAction::PassPriority, "complete mana payment"),
             WaitingFor::OptionalCostChoice { .. } => (
-                GameAction::DecideOptionalCost { pay: true },
+                GameAction::DecideOptionalCost { index: 0 },
                 "promise Gift a card",
             ),
             WaitingFor::ChooseGiftRecipient { candidates, .. } => (

@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} répétitions sur {{total}} réparties.",
     "evenSplit": "Rétablir la répartition équitable",
     "customDistribution": "Répartition personnalisée — le moteur n'a pas prévisualisé ce partage.",
-    "announceTitle": "Choisissez la cible que chaque répétition annonce :",
-    "announce": "Annoncer",
-    "announceAria": "Annoncer {{subject}}",
     "mayTitle": "Capacité optionnelle {{group}} — répéter ce choix à chaque itération ?",
     "mayTake": "L'utiliser",
     "mayDecline": "La refuser",
     "mayTakeAria": "Utiliser la capacité optionnelle {{group}}",
     "mayDeclineAria": "Refuser la capacité optionnelle {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Déclaration proposée :",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Effet de remplacement de {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — utilisation à chaque itération",
       "decline": "{{subject}} — refus à chaque itération"
@@ -164,6 +161,7 @@
     "flip": "Pivoter",
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
+    "reportNotSent": "Non envoyé",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -1815,6 +1813,10 @@
       "title": "Ordonner les copies",
       "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
     },
+    "memberOrder": {
+      "title": "Ordonnez les cartes",
+      "subtitle": "Choisissez la carte traitée ensuite"
+    },
     "collectEvidence": {
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"
@@ -2137,6 +2139,10 @@
   "giftRecipient": {
     "title": "Choisir le destinataire du cadeau",
     "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
+  },
+  "costRecipient": {
+    "title": "Choisir un adversaire",
+    "subtitle": "Choisissez l'adversaire pour ce coût : {{cost}}."
   },
   "entryController": {
     "title": "Choisir le contrôleur à l'arrivée",
@@ -2492,6 +2498,8 @@
       "zoneHand": "votre main",
       "discard": "Défaussez-vous de {{count}} {{cards}}",
       "exile": "Exilez {{count}} {{cards}} depuis {{zone}}",
+      "haveOpponentGainLife": "Faites gagner {{amount}} points de vie à un adversaire",
+      "haveEachOtherPlayerGainLife": "Faites gagner {{amount}} points de vie à chaque autre joueur",
       "reveal": "Révélez {{count}} {{cards}} de {{zone}}"
     }
   },
@@ -2548,7 +2556,7 @@
     "appliedLast": "Appliqué en dernier — celui-ci l'emporte",
     "resultLabel": "Résultat : {{outcome}}",
     "confirmOrder": "Confirmer l'ordre",
-    "dragHint": "Faites glisser pour réordonner, ou utilisez les flèches.",
+    "dragHint": "Faites glisser la poignée <grip>⠿</grip> pour réordonner, ou utilisez les flèches.",
     "chooseSubtitle": "Choisissez quel effet de remplacement appliquer.",
     "candidateFallback": "Effet de remplacement {{number}}",
     "orderSubtitleComposing": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : chacun s'applique, donc l'ordre change le résultat (CR 616.1).",
@@ -2557,6 +2565,7 @@
     "composesNote": "Chaque effet s'applique — l'ordre change leur combinaison.",
     "moveUpNamed": "Déplacer {{name}} plus tôt",
     "moveDownNamed": "Déplacer {{name}} plus tard",
+    "dragHandleNamed": "Faites glisser {{name}} pour réordonner",
     "positionAnnounce": "Position {{position}} sur {{total}}"
   },
   "retargetChoice": {
@@ -2682,6 +2691,20 @@
     "EndCombat": "Fin de combat",
     "PostCombatMain": "Phase principale 2",
     "End": "Étape de fin",
+    "Cleanup": "Nettoyage"
+  },
+  "phaseShortName": {
+    "Untap": "Dégagement",
+    "Upkeep": "Entretien",
+    "Draw": "Pioche",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attaquants",
+    "DeclareBlockers": "Bloqueurs",
+    "CombatDamage": "Blessures",
+    "EndCombat": "Fin combat",
+    "PostCombatMain": "Principale 2",
+    "End": "Fin",
     "Cleanup": "Nettoyage"
   },
   "counterMoveDistribution": {

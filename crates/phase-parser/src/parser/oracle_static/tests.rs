@@ -5,6 +5,9 @@ use super::restriction::*;
 use super::support::*;
 use super::test_helpers::P3_SEG;
 use super::*;
+use crate::parser::oracle_keyword::{
+    classify_cant_be_targeted, is_source_qualified_cant_be_targeted, CantBeTargetedScope,
+};
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     BlockPairDirection, CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef,
@@ -3165,54 +3168,159 @@ fn cant_be_attached_static_splits_both_prohibitions() {
     );
 }
 
-/// CR 702.18a: Spectral Shield — "Enchanted creature gets +0/+2 and can't be the
-/// target of spells." must decompose into BOTH the +0/+2 grant AND a
-/// `CantBeTargeted` static sharing the first conjunct's `affected` set.
-/// Previously the targeting restriction was dropped, so the enchanted creature
-/// could still be targeted — the Aura's entire protection was lost.
+/// CR 115.1a + CR 115.1c: Spectral Shield — "Enchanted creature gets +0/+2 and
+/// can't be the target of spells." prohibits only SPELLS. `CantBeTargeted { who }`
+/// cannot name the prohibited sources, so the clause fails closed: the +0/+2 grant
+/// is preserved and the targeting clause surfaces as an inert `StaticMode::Other`
+/// carrying the printed text, never a blanket `CantBeTargeted` (which would stop
+/// Royal Assassin's activated ability from targeting the enchanted creature).
 #[test]
-fn cant_be_targeted_static_splits_from_grant() {
+fn spectral_shield_spells_only_targeting_fails_closed() {
     let defs =
         parse_static_line_multi("Enchanted creature gets +0/+2 and can't be the target of spells.");
-    let targeting = defs
-        .iter()
-        .find(|d| d.mode == StaticMode::CantBeTargeted)
-        .expect("expected a CantBeTargeted static");
     assert!(
-        targeting.affected.is_some(),
-        "CantBeTargeted companion must share the first clause's affected set"
+        !defs
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeTargeted { .. })),
+        "a spells-only restriction must not become a blanket CantBeTargeted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    let gap = defs
+        .iter()
+        .find(|d| matches!(&d.mode, StaticMode::Other(text) if text.contains("can't be the target of spells")))
+        .expect("expected an honest unsupported StaticMode::Other for the qualified clause");
+    assert!(
+        gap.affected.is_some(),
+        "the unsupported clause keeps the enchanted-creature affected set"
     );
     assert!(
-        defs.iter()
-            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)
+            && d.modifications
+                .contains(&ContinuousModification::AddToughness { value: 2 })),
         "the +0/+2 grant must be preserved, got {:?}",
         defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
     );
 }
 
-/// CR 702.11a: the opponents-only targeting scope in a compound static must
-/// become Hexproof (controller can still target), NOT blanket Shroud — mirroring
-/// the standalone dispatch so the "your opponents control" qualifier is not lost.
+/// CR 115.1 + CR 702.18a: the UNQUALIFIED "spells or abilities" form keeps the
+/// blanket `CantBeTargeted { AllPlayers }` companion.
 #[test]
-fn cant_be_targeted_opponents_scope_splits_as_hexproof() {
+fn cant_be_targeted_unqualified_spells_or_abilities_splits_from_grant() {
     let defs = parse_static_line_multi(
-        "Enchanted creature gets +1/+1 and can't be the target of spells your opponents control.",
+        "Enchanted creature gets +0/+2 and can't be the target of spells or abilities.",
+    );
+    let targeting = defs
+        .iter()
+        .find(|d| {
+            matches!(
+                d.mode,
+                StaticMode::CantBeTargeted {
+                    who: ProhibitionScope::AllPlayers
+                }
+            )
+        })
+        .expect("expected a CantBeTargeted(AllPlayers) static");
+    assert!(targeting.affected.is_some());
+    assert!(defs
+        .iter()
+        .any(|d| matches!(d.mode, StaticMode::Continuous)));
+}
+
+/// CR 702.11b + CR 109.5: the unqualified opponents-only scope in a compound
+/// static produces `CantBeTargeted { Opponents }` alongside the +1/+1 boost.
+#[test]
+fn cant_be_targeted_opponents_scope_splits_as_opponents_restriction() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be the target of spells or abilities your opponents control.",
     );
     assert!(
         defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)
             && d.modifications
-                .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Hexproof
-                })),
-        "expected a Hexproof grant (opponents-only scope), got {:?}",
+                .contains(&ContinuousModification::AddPower { value: 1 })
+            && d.modifications
+                .contains(&ContinuousModification::AddToughness { value: 1 })),
+        "expected a +1/+1 grant, got {:?}",
         defs.iter()
             .map(|d| (&d.mode, &d.modifications))
             .collect::<Vec<_>>()
     );
     assert!(
-        !defs.iter().any(|d| d.mode == StaticMode::CantBeTargeted),
-        "opponents-only scope must NOT collapse into blanket Shroud"
+        defs.iter().any(|d| matches!(
+            d.mode,
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::Opponents
+            }
+        )),
+        "expected a CantBeTargeted(Opponents) static companion"
     );
+}
+
+/// CR 115.1: every source-kind / source-quality qualifier fails closed on the
+/// standalone self-referential route — Fiendslayer Paladin (black or red spells
+/// your opponents control) and Shanna, Sisay's Legacy (abilities your opponents
+/// control). Neither may become a blanket `CantBeTargeted`.
+#[test]
+fn source_qualified_self_targeting_prohibitions_fail_closed() {
+    for text in [
+        "Fiendslayer Paladin can't be the target of black or red spells your opponents control.",
+        "Shanna can't be the target of abilities your opponents control.",
+        "~ can't be the target of spells or abilities from nongreen sources.",
+    ] {
+        let defs = parse_static_line_multi(text);
+        assert!(
+            !defs
+                .iter()
+                .any(|d| matches!(d.mode, StaticMode::CantBeTargeted { .. })),
+            "{text}: must not emit CantBeTargeted, got {:?}",
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+        assert!(
+            defs.iter().any(
+                |d| matches!(&d.mode, StaticMode::Other(t) if t.contains("can't be the target"))
+            ),
+            "{text}: must surface an unsupported StaticMode::Other, got {:?}",
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// CR 115.1: the qualifier detection is a typed grammar, not a phrase list.
+#[test]
+fn classify_cant_be_targeted_separates_qualified_from_unqualified() {
+    assert_eq!(
+        classify_cant_be_targeted("can't be the target of spells or abilities"),
+        Some(CantBeTargetedScope::AnyPlayer)
+    );
+    assert_eq!(
+        classify_cant_be_targeted(
+            "can't be the target of spells or abilities your opponents control."
+        ),
+        Some(CantBeTargetedScope::OpponentsOnly)
+    );
+    assert_eq!(
+        classify_cant_be_targeted(
+            "creatures you control can't be the targets of spells or abilities your opponents control this turn"
+        ),
+        Some(CantBeTargetedScope::OpponentsOnly)
+    );
+    assert_eq!(
+        classify_cant_be_targeted("can't be targeted"),
+        Some(CantBeTargetedScope::AnyPlayer)
+    );
+    for qualified in [
+        "can't be the target of spells",
+        "can't be the target of abilities",
+        "can't be the target of spells your opponents control",
+        "can't be the target of black or red spells your opponents control",
+        "can't be the target of spells or abilities from nongreen sources",
+    ] {
+        assert_eq!(classify_cant_be_targeted(qualified), None, "{qualified}");
+        assert!(
+            is_source_qualified_cant_be_targeted(qualified),
+            "{qualified}"
+        );
+    }
+    assert!(!is_source_qualified_cant_be_targeted("flying"));
 }
 
 /// CR 602.5: Viper's Kiss — "Enchanted creature gets -1/-1, and its activated
@@ -9689,32 +9797,143 @@ fn static_lands_you_control_have() {
 
 #[test]
 fn static_cant_be_the_target() {
-    // CR 702.11a: "can't be the target of spells or abilities your opponents
-    // control" (Sphinx of the Final Word) IS Hexproof — the permanent's controller
-    // can still target it — so it is modeled as a Hexproof keyword grant (which the
-    // targeting check already enforces with the correct controller scope) rather
-    // than a scope-less blanket static.
+    // CR 702.11b / CR 109.5: "can't be the target of spells or abilities your opponents
+    // control" (Sphinx of the Final Word) is modeled as the CantBeTargeted { who: Opponents } static
+    // and enforced in `targeting.rs::can_target`.
+    let def =
+        parse_static_line("~ can't be the target of spells or abilities your opponents control.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_enchanted_creature_cant_be_targeted_by_opponents() {
+    // CR 109.5 + CR 303.4: "Enchanted creature can't be the target of spells or
+    // abilities your opponents control." (Shielding Plax) restricts targeting by
+    // the Aura controller's opponents.
     let def = parse_static_line(
-            "Sphinx of the Final Word can't be the target of spells or abilities your opponents control.",
-        )
-        .unwrap();
-    assert_eq!(def.mode, StaticMode::Continuous);
-    assert!(def
+        "Enchanted creature can't be the target of spells or abilities your opponents control.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents
+        }
+    );
+    let expected_filter =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+    assert_eq!(def.affected, Some(expected_filter));
+}
+
+#[test]
+fn static_enchanted_creature_gets_pt_and_cant_be_targeted_by_opponents() {
+    // CR 109.5 + CR 613.4c: Compound static preserving both P/T boost and CantBeTargeted.
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be the target of spells or abilities your opponents control.",
+    );
+    assert_eq!(defs.len(), 2);
+    let expected_filter =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert_eq!(defs[0].affected, Some(expected_filter.clone()));
+    assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddKeyword {
-            keyword: Keyword::Hexproof,
-        }));
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert_eq!(
+        defs[1].mode,
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents
+        }
+    );
+    assert_eq!(defs[1].affected, Some(expected_filter));
 }
 
 #[test]
 fn static_cant_be_targeted_blanket_is_shroud_static() {
     // CR 702.18a: the unqualified "can't be the target of spells or abilities"
     // (no controller qualifier) is blanket Shroud — untargetable by any player,
-    // including the controller — modeled as the CantBeTargeted static and enforced
+    // including the controller — modeled as the CantBeTargeted { who: AllPlayers } static and enforced
     // in `targeting.rs::can_target`.
-    let def =
-        parse_static_line("Guardian Idol can't be the target of spells or abilities.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantBeTargeted);
+    let def = parse_static_line("~ can't be the target of spells or abilities.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::AllPlayers
+        }
+    );
+}
+
+/// CR 611.3a: synthetic attached-subject grammar controls; these sentences
+/// do not claim a printed card. The same condition governs the prohibition
+/// and every companion, while unavailable payment gates remain honest gaps.
+#[test]
+fn attached_targeting_restrictions_retain_conditions_and_companions() {
+    for subject in ["Enchanted creature", "Equipped creature"] {
+        let affected = TargetFilter::Typed(TypedFilter::creature().properties(vec![if subject
+            == "Enchanted creature"
+        {
+            FilterProp::EnchantedBy
+        } else {
+            FilterProp::EquippedBy
+        }]));
+        let plain = parse_static_line(&format!(
+            "{subject} can't be the target of spells or abilities your opponents control."
+        ))
+        .unwrap();
+        assert_eq!(
+            plain.mode,
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::Opponents
+            }
+        );
+        assert_eq!(plain.affected, Some(affected.clone()));
+        assert!(plain.condition.is_none());
+
+        let gated = parse_static_line(&format!("{subject} can't be the target of spells or abilities your opponents control as long as you control an Island.")).unwrap();
+        assert_eq!(gated.mode, plain.mode);
+        assert_eq!(gated.affected, Some(affected.clone()));
+        let condition = gated
+            .condition
+            .expect("a reached targeting prohibition must retain its gate");
+        assert!(!condition.contains_unrecognized());
+
+        let composed = parse_static_line_multi(&format!("{subject} can't be the target of spells or abilities your opponents control and has flying as long as you control an Island."));
+        assert_eq!(
+            composed.len(),
+            2,
+            "{subject}: restriction and keyword companion must both survive"
+        );
+        assert!(composed.iter().any(|def| def.mode == plain.mode));
+        assert!(composed.iter().any(|def| def.modifications.contains(
+            &ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }
+        )));
+        for def in &composed {
+            assert_eq!(def.affected, Some(affected.clone()));
+            assert_eq!(def.condition, Some(condition.clone()));
+        }
+
+        let deferred = parse_static_line(&format!("{subject} can't be the target of spells or abilities your opponents control unless its controller pays {{1}}.")).unwrap();
+        assert_eq!(deferred.mode, plain.mode);
+        assert!(
+            deferred
+                .condition
+                .as_ref()
+                .is_some_and(StaticCondition::contains_unrecognized),
+            "{subject}: no targeting-payment continuation may be silently discarded"
+        );
+    }
 }
 
 #[test]
@@ -11449,17 +11668,26 @@ fn land_cards_exiled_grant_declines_mis_scoped_sets() {
 
 /// CR 613.1f + CR 201.2: "all activated abilities of creatures you control that
 /// don't have the same name as it/~" (Marvin, Murderous Mimic) — battlefield
-/// creatures you control, excluding ones sharing the recipient's name.
+/// creatures you control, excluding ones sharing the recipient's name. The
+/// expected vec pins BOTH conjuncts: dropping the name exclusion (Marvin
+/// gains same-named abilities) or the zone pin (hand creatures donate) flips
+/// this test.
 #[test]
 fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Not {
-                    prop: Box::new(FilterProp::SameName),
-                }]),
+                .properties(vec![
+                    FilterProp::Not {
+                        prop: Box::new(FilterProp::SameName),
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                ]),
         ),
         cap: None,
         kind: None,
@@ -11478,11 +11706,15 @@ fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
 }
 
 /// CR 613.1f: "each other creature with a +1/+1 counter on it" (Experiment Kraj)
-/// — all creatures with at least one +1/+1 counter, excluding self.
+/// — battlefield creatures with at least one +1/+1 counter, excluding self.
+/// The expected vec pins BOTH conjuncts: dropping the counter requirement
+/// (Kraj gains counterless creatures) or the zone pin (graveyard cards with
+/// counters donate) flips this test.
 #[test]
 fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
     use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: TargetFilter::And {
             filters: vec![
@@ -11491,6 +11723,9 @@ fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
                         counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                         comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
                     },
                 ])),
                 TargetFilter::Not {
@@ -30920,6 +31155,42 @@ fn combat_tax_sphere_of_safety_per_affected_and_ref() {
     ));
 }
 
+/// CR 508.1h differential: the printed Ghostly Prison sentence (for-each tail
+/// → `PerAffectedCreature`) vs the printed Brainwash sentence (no tail →
+/// `Flat`), asserted through the same helper in one test so a scaling-table
+/// mutation in either direction fails exactly one half. (Both halves also
+/// exist as class coverage at `combat_tax_ghostly_prison_per_affected_creature`
+/// and `combat_tax_brainwash_flat_aura` — this test is the discriminator.)
+/// REVERT-FAIL (tail lattice `(true, None)` arm → `Flat`): the Ghostly half
+/// fails. REVERT-FAIL (no-tail default → `PerAffectedCreature`): the
+/// Brainwash half fails. The two arms return an identical per-creature
+/// contribution at `compute_attack_tax`, so no runtime row can distinguish a
+/// Flat↔PerAffectedCreature mutation — this typed parser test is the only
+/// discriminator (verified load-bearing fact, §Step 2).
+#[test]
+fn combat_tax_scaling_distinguishes_per_affected_from_flat() {
+    let ghostly = parse_static_line(
+        "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.",
+    )
+    .expect("Ghostly Prison should parse");
+    let (ghostly_cost, ghostly_scaling) = extract_unless_pay(&ghostly);
+    assert_eq!(ghostly_cost.mana_value(), 2);
+    assert!(
+        matches!(ghostly_scaling, UnlessPayScaling::PerAffectedCreature),
+        "the written for-each tail must scale, got {ghostly_scaling:?}"
+    );
+
+    let brainwash =
+        parse_static_line("Enchanted creature can't attack unless its controller pays {3}.")
+            .expect("Brainwash should parse");
+    let (brainwash_cost, brainwash_scaling) = extract_unless_pay(&brainwash);
+    assert_eq!(brainwash_cost.mana_value(), 3);
+    assert!(
+        matches!(brainwash_scaling, UnlessPayScaling::Flat),
+        "the tailless sentence must stay flat, got {brainwash_scaling:?}"
+    );
+}
+
 /// CR 118.12a: Cowed by Wisdom — aura combat tax scaled by a game-state
 /// quantity without multiplying by the number of affected creatures.
 #[test]
@@ -31172,6 +31443,58 @@ fn combat_tax_self_ref_subject_cant_attack_only() {
     assert!(matches!(scaling, UnlessPayScaling::PerQuantityRef { .. }));
 }
 
+/// CR 118.12a + CR 508.1h / CR 509.1d + CR 608.2k: a combat tax reads the
+/// counter-kind census of "it" only when the tax is on the source permanent
+/// itself, whose pronoun names that one object (`SelfRef`). A tax on other
+/// creatures ("each creature with …", "enchanted creature") leaves the tail
+/// unconsumed, so no combat-tax static is produced from it, and a plural
+/// pronoun on a self tax declines likewise.
+#[test]
+fn combat_tax_kinds_census_pronoun_binds_only_a_self_tax() {
+    use super::evasion::parse_combat_tax_static;
+    use crate::parser::oracle_util::TextPair;
+
+    let self_tax = parse_static_line(
+        "~ can't attack or block unless you pay {1} for each kind of counter on it.",
+    )
+    .expect("self-referential kinds tax should parse");
+    assert_eq!(self_tax.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        extract_unless_pay(&self_tax).1,
+        UnlessPayScaling::PerQuantityRef {
+            quantity: QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::SelfRef,
+            },
+        }
+    );
+
+    // Reach guard: the per-recipient subject is a combat tax without the tail.
+    assert!(parse_combat_tax_static(
+        &TextPair::new(
+            "Each creature with one or more counters on it can't attack you unless its controller pays {1}.",
+            "each creature with one or more counters on it can't attack you unless its controller pays {1}.",
+        ),
+        "",
+    )
+    .is_some());
+    for text in [
+        "Each creature with one or more counters on it can't attack you unless its controller pays {1} for each kind of counter on it.",
+        "Enchanted creature can't attack unless its controller pays {1} for each kind of counter on it.",
+        "~ can't attack or block unless you pay {1} for each kind of counter on them.",
+    ] {
+        let lower = text.to_lowercase();
+        assert!(
+            parse_combat_tax_static(&TextPair::new(text, &lower), text).is_none(),
+            "{text:?}: no combat tax may read this census"
+        );
+        let serialized = serde_json::to_string(&parse_static_line(text)).unwrap();
+        assert!(
+            !serialized.contains("DistinctCounterKindsAmong"),
+            "{text:?}: {serialized}"
+        );
+    }
+}
+
 /// CR 506.3 + CR 508.1d: Propaganda — `defended` field captures the
 /// "you" attack-target scope so the runtime tax only applies to attacks
 /// targeting the static's controller. Regression for issue #302
@@ -31237,7 +31560,7 @@ fn combat_tax_onakke_oathkeeper_defended_planeswalker_only() {
     };
     assert_eq!(
         defended.as_ref(),
-        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker),
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None }),
         "Onakke Oathkeeper must defend only planeswalkers controlled by its controller",
     );
 }
@@ -31252,7 +31575,7 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
         .expect("subject combat rule should parse");
     assert_eq!(
         subject.attack_defended,
-        Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+        Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     );
 
     let split = parse_static_line_multi(
@@ -31260,7 +31583,8 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     );
     assert!(split.iter().any(|def| {
         def.mode == StaticMode::CantAttack
-            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+            && def.attack_defended
+                == Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     }));
 
     let combined = parse_static_line_multi(
@@ -31268,7 +31592,8 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     );
     assert!(combined.iter().any(|def| {
         def.mode == StaticMode::CantAttack
-            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+            && def.attack_defended
+                == Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     }));
 }
 
@@ -31288,7 +31613,7 @@ fn mixed_case_planeswalker_only_combat_tax_preserves_scaling() {
     };
     assert_eq!(
         defended.as_ref(),
-        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker)
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     );
 }
 
@@ -31628,7 +31953,9 @@ fn cant_be_blocked_fallback_arm_defers_unenforceable_payment_gate() {
 
 /// Chained Throatseeker's defending-player poison gate is preserved as an
 /// undecomposed unless rider until attack legality can evaluate the candidate
-/// defending player before attackers are committed.
+/// defending player before attackers are committed. CR 508.5 defines the
+/// defending player in the context of a specific attack, which does not exist
+/// at static-ability evaluation time.
 #[test]
 fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
     let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
@@ -31638,9 +31965,12 @@ fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
         panic!("expected Not(Unrecognized), got {:?}", def.condition);
     };
     let StaticCondition::Unrecognized { text } = condition.as_ref() else {
-        panic!("expected preserved unrecognized rider, got {condition:?}");
+        panic!("expected Unrecognized, got {condition:?}");
     };
-    assert_eq!(text, "unless defending player is poisoned");
+    assert_eq!(
+        text, "unless defending player is poisoned",
+        "the unless rider must be preserved verbatim"
+    );
 }
 
 /// Arboria's turn-history rider is preserved in the AST, but not yet decomposed
@@ -42936,6 +43266,63 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
             json.contains("Unknown") || json.contains("Unimplemented"),
             "{name} must stay an explicit gap: {json}"
         );
+    }
+}
+
+/// CR 109.2a + CR 115.1: a targeting prohibition binds the subject it names,
+/// never the source. Tomik's conjoined two-zone subject is not typed by any
+/// building block, so the line is an explicit inert gap with no `SelfRef`.
+#[test]
+fn cant_be_targeted_unparsed_subject_is_inert_gap_not_self_ref() {
+    let def = parse_static_line(
+        "Lands on the battlefield and land cards in graveyards can't be the targets of spells or abilities your opponents control.",
+    )
+    .unwrap();
+    assert!(
+        matches!(def.mode, StaticMode::Other(_)),
+        "Tomik's subject must stay an unsupported gap, got {:?}",
+        def.mode
+    );
+    assert_ne!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 109.2a + CR 115.1: a non-self subject is scoped to its parsed filter.
+#[test]
+fn cant_be_targeted_non_self_subject_uses_parsed_filter() {
+    let def = parse_static_line(
+        "Creatures you control can't be the targets of spells or abilities your opponents control.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+}
+
+/// CR 115.1 + CR 702.11b: a true self-subject still binds the source.
+#[test]
+fn cant_be_targeted_self_subject_stays_self_ref() {
+    for line in [
+        "~ can't be the target of spells or abilities your opponents control.",
+        "This creature can't be the target of spells or abilities your opponents control.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::Opponents
+            },
+            "{line}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
     }
 }
 

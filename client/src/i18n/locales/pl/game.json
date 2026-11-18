@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "Przydzielono {{allocated}} z {{total}} powtórzeń.",
     "evenSplit": "Przywróć równy podział",
     "customDistribution": "Własny podział — silnik nie przygotował podglądu tego podziału.",
-    "announceTitle": "Wybierz cel ogłaszany w każdym powtórzeniu:",
-    "announce": "Ogłoś",
-    "announceAria": "Ogłoś {{subject}}",
     "mayTitle": "Zdolność opcjonalna {{group}} — powtórzyć ten wybór w każdej iteracji?",
     "mayTake": "Skorzystaj",
     "mayDecline": "Odrzuć",
     "mayTakeAria": "Skorzystaj ze zdolności opcjonalnej {{group}}",
     "mayDeclineAria": "Odrzuć zdolność opcjonalną {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Proponowana deklaracja:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Efekt zastępujący: {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — wykorzystanie w każdej iteracji",
       "decline": "{{subject}} — odrzucenie w każdej iteracji"
@@ -164,6 +161,7 @@
     "flip": "Odwróć",
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
+    "reportNotSent": "Nie wysłano",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -1815,6 +1813,10 @@
       "title": "Ustal kolejność kopii",
       "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
     },
+    "memberOrder": {
+      "title": "Ustal kolejność kart",
+      "subtitle": "Wybierz kartę, która zostanie rozpatrzona jako następna"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
@@ -2137,6 +2139,10 @@
   "giftRecipient": {
     "title": "Wybierz odbiorcę prezentu",
     "subtitle": "Wybierz przeciwnika, który otrzyma obiecany prezent."
+  },
+  "costRecipient": {
+    "title": "Wybierz przeciwnika",
+    "subtitle": "Wybierz przeciwnika dla tego kosztu: {{cost}}."
   },
   "entryController": {
     "title": "Wybierz kontrolującego przy wejściu",
@@ -2492,6 +2498,8 @@
       "zoneHand": "twojej ręki",
       "discard": "Odrzuć {{count}} {{cards}}",
       "exile": "Wygnaj {{count}} {{cards}} z {{zone}}",
+      "haveOpponentGainLife": "Pozwól przeciwnikowi zyskać {{amount}} życia",
+      "haveEachOtherPlayerGainLife": "Pozwól każdemu innemu graczowi zyskać {{amount}} życia",
       "reveal": "Ujawnij {{count}} {{cards}} z {{zone}}"
     }
   },
@@ -2548,7 +2556,7 @@
     "appliedLast": "Zastosowany ostatni — ten zadziała",
     "resultLabel": "Wynik: {{outcome}}",
     "confirmOrder": "Potwierdź kolejność",
-    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "dragHint": "Przeciągnij uchwyt <grip>⠿</grip>, aby zmienić kolejność, lub użyj strzałek.",
     "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
     "candidateFallback": "Efekt zastępujący {{number}}",
     "orderSubtitleComposing": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustawić kolejność ich zastosowania — każdy zostanie zastosowany, więc kolejność zmienia wynik (CR 616.1).",
@@ -2557,6 +2565,7 @@
     "composesNote": "Każdy efekt zostaje zastosowany — kolejność zmienia sposób ich połączenia.",
     "moveUpNamed": "Przenieś {{name}} wcześniej",
     "moveDownNamed": "Przenieś {{name}} później",
+    "dragHandleNamed": "Przeciągnij {{name}}, aby zmienić kolejność",
     "positionAnnounce": "Pozycja {{position}} z {{total}}"
   },
   "retargetChoice": {
@@ -2682,6 +2691,20 @@
     "EndCombat": "Koniec walki",
     "PostCombatMain": "Główna faza 2",
     "End": "Krok końcowy",
+    "Cleanup": "Sprzątanie"
+  },
+  "phaseShortName": {
+    "Untap": "Odwracanie",
+    "Upkeep": "Utrzymanie",
+    "Draw": "Dobieranie",
+    "PreCombatMain": "Główna 1",
+    "BeginCombat": "Walka",
+    "DeclareAttackers": "Atakujący",
+    "DeclareBlockers": "Blokujący",
+    "CombatDamage": "Obrażenia",
+    "EndCombat": "Koniec walki",
+    "PostCombatMain": "Główna 2",
+    "End": "Koniec",
     "Cleanup": "Sprzątanie"
   },
   "counterMoveDistribution": {

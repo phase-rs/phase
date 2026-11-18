@@ -8,7 +8,7 @@ use crate::types::game_state::{
     GameState, PendingCounterAddition, PendingEffectResolved, UnrepresentablePolicy,
 };
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 /// The replacement-aware outcome of attempting to add player counters.
@@ -47,6 +47,7 @@ pub fn add_player_counter_with_replacement(
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> PlayerCounterAdditionOutcome {
     life::ordinary_settlement(
@@ -56,6 +57,7 @@ pub fn add_player_counter_with_replacement(
             player_id,
             counter_kind,
             count,
+            cause,
             UnrepresentablePolicy::IgnoreImpossible,
             events,
         ),
@@ -76,21 +78,33 @@ pub(crate) fn try_add_player_counter_with_replacement(
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
     life::within_rejecting_ingress_window(state, |state, policy| {
-        add_player_counter_core(state, actor, player_id, counter_kind, count, policy, events)
+        add_player_counter_core(
+            state,
+            actor,
+            player_id,
+            counter_kind,
+            count,
+            cause,
+            policy,
+            events,
+        )
     })
 }
 
 /// The policy-parameterized player-counter add pipeline: replacement, then the
 /// shared settle step (`apply_player_counter_addition`).
+#[allow(clippy::too_many_arguments)]
 fn add_player_counter_core(
     state: &mut GameState,
     actor: PlayerId,
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
 ) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
@@ -100,12 +114,15 @@ fn add_player_counter_core(
 
     // CR 122.1 + CR 614.17: Player-counter additions pass through the
     // replacement pipeline so "players can't get counters" effects can prevent
-    // the event before any player state is mutated.
+    // the event before any player state is mutated. The caller stamps the CR
+    // 614.16 cause: only it knows whether this is a resolving effect, a
+    // replacement or prevention, or neither (cost / turn-based action).
     let proposed = ProposedEvent::AddCounter {
         placement: CounterPlacement::Player {
             actor,
             player_id,
             counter_kind,
+            cause,
         },
         count,
         applied: HashSet::new(),
@@ -213,6 +230,7 @@ pub fn preview_player_counter_addition(
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
 ) -> PlayerCounterAdditionPreview {
     if count == 0 {
         return PlayerCounterAdditionPreview::Applied { count };
@@ -223,6 +241,7 @@ pub fn preview_player_counter_addition(
             actor,
             player_id,
             counter_kind,
+            cause,
         },
         count,
         applied: HashSet::new(),
@@ -381,6 +400,8 @@ pub fn resolve(
             player_id: *player_id,
             counter_kind: *counter_kind,
             count: amount,
+            // CR 614.16: resolving-effect placements are eligible.
+            cause: CounterCause::ResolvingEffect,
         })
         .collect();
     let completion = PendingEffectResolved::new(EffectKind::GivePlayerCounter, ability.source_id);
@@ -390,12 +411,20 @@ pub fn resolve(
             player_id,
             counter_kind,
             count,
+            cause,
         } = addition
         else {
             continue;
         };
-        if add_player_counter_with_replacement(state, actor, player_id, counter_kind, count, events)
-            == PlayerCounterAdditionOutcome::NeedsChoice
+        if add_player_counter_with_replacement(
+            state,
+            actor,
+            player_id,
+            counter_kind,
+            count,
+            cause,
+            events,
+        ) == PlayerCounterAdditionOutcome::NeedsChoice
         {
             super::counters::stash_pending_counter_additions(
                 state,
@@ -637,11 +666,13 @@ mod tests {
             target_reads: Default::default(),
             entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
@@ -857,11 +888,13 @@ mod tests {
             target_reads: Default::default(),
             entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
@@ -1042,6 +1075,7 @@ mod tests {
             PlayerId(0),
             PlayerCounterKind::Experience,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -1067,6 +1101,7 @@ mod tests {
             PlayerId(0),
             PlayerCounterKind::Experience,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
         assert_eq!(experience(&state, PlayerId(0)), 3);
@@ -1092,6 +1127,7 @@ mod tests {
                 PlayerId(0),
                 PlayerCounterKind::Poison,
                 2,
+                CounterCause::ResolvingEffect,
             ),
             PlayerCounterAdditionPreview::Unsupported
         );
@@ -1109,6 +1145,7 @@ mod tests {
                 PlayerId(0),
                 PlayerCounterKind::Poison,
                 2,
+                CounterCause::ResolvingEffect,
             ),
             PlayerCounterAdditionPreview::Transformed { count: 4 }
         );

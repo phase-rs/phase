@@ -429,7 +429,7 @@ rather than pay this spell's mana cost.\nYou gain X life.";
             });
             cast(&mut runner, bears, CastPaymentMode::Manual);
             println!("defiler-life wf {:?}", runner.state().waiting_for);
-            runner.act(GameAction::DecideOptionalCost { pay: true }).expect("2 life");
+            runner.act(GameAction::DecideOptionalCost { index: 0 }).expect("2 life");
             write("leyline_prayers_defiler_life_paid", runner.state().clone());
         }
         // Borne Upon a Wind
@@ -536,7 +536,7 @@ rather than pay this spell's mana cost.\nYou gain X life.";
                 .with_subtypes(vec!["Centaur", "Warrior"]);
             let mut runner = scenario.build();
             cast(&mut runner, shoal, CastPaymentMode::Auto);
-            runner.act(GameAction::DecideOptionalCost { pay: true }).expect("pitch");
+            runner.act(GameAction::DecideOptionalCost { index: 0 }).expect("pitch");
             write("shoal_pitch_prompt", runner.state().clone());
         }
     }

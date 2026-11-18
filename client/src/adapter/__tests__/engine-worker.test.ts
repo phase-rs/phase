@@ -22,6 +22,8 @@ const wasm = vi.hoisted(() => ({
   pending_takeback_js: vi.fn(),
   // The decoder binding the worker's real `StateCodecRuntime` wraps.
   state_codec_decode: vi.fn(),
+  buildLlmDecisionRequest: vi.fn(),
+  getAiActionProposalFromLlmResponse: vi.fn(),
 }));
 vi.mock("@wasm/engine", () => ({ default: vi.fn(), ...wasm }));
 
@@ -152,6 +154,46 @@ describe("engine worker — requests", () => {
       });
       expect(responseTo(964)).toEqual({ type: "result", id: 964, data: null });
       expect(responseTo(965)).toEqual({ type: "result", id: 965, data: { requester: 1, voters: [0, 2] } });
+    });
+  });
+
+  describe("LLM decisions", () => {
+    const send = async (data: Record<string, unknown>) =>
+      (fakeSelf.onmessage as (e: unknown) => unknown)({ data });
+    const clock = { wallMs: 1_700_000_000_000, monotonicMs: 4_321 };
+
+    it("hands the engine the settings revision and each clock in order", async () => {
+      wasm.buildLlmDecisionRequest.mockReturnValue({ fingerprint: "fp" });
+      wasm.getAiActionProposalFromLlmResponse.mockReturnValue({ proposal: null });
+
+      await send({
+        type: "buildLlmDecisionRequest",
+        id: 971,
+        difficulty: "Medium",
+        playerId: 1,
+        endpointJson: "{}",
+        historyJson: "[]",
+        settingsRevision: 3,
+        clock,
+      });
+      await send({
+        type: "getAiActionProposalFromLlmResponse",
+        id: 972,
+        playerId: 1,
+        fingerprint: "fp",
+        threadTurn: 7,
+        provider: "Anthropic",
+        status: 200,
+        responseBody: "{}",
+        clock,
+      });
+
+      expect(wasm.buildLlmDecisionRequest).toHaveBeenCalledExactlyOnceWith(
+        "Medium", 1, "{}", "[]", 3, clock.wallMs, clock.monotonicMs,
+      );
+      expect(wasm.getAiActionProposalFromLlmResponse).toHaveBeenCalledExactlyOnceWith(
+        1, "fp", 7, "Anthropic", 200, "{}", clock.wallMs, clock.monotonicMs,
+      );
     });
   });
 

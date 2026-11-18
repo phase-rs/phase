@@ -10,8 +10,9 @@
 //! `DeclareBlockers` / `PassPriority` / `CastSpell` / `ActivateAbility` actions.
 
 use engine::game::combat::AttackTarget;
+use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -29,6 +30,7 @@ const PLAGUE_WIGHT: &str =
     "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.";
 const BANECLAW_MARAUDER: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
 const CROMAT: &str = "{W}{B}: Destroy target creature blocking or blocked by Cromat.\n{U}{R}: Cromat gains flying until end of turn.\n{B}{G}: Regenerate Cromat.\n{R}{W}: Cromat gets +1/+1 until end of turn.\n{G}{U}: Put Cromat on top of its owner's library.";
+const STEADFAST_ARMASAUR: &str = "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.";
 const ALMS_BEAST: &str = "Creatures blocking or blocked by this creature have lifelink.";
 const LABYRINTH_OF_SKOPHOS: &str =
     "{T}: Add {C}.\n{4}, {T}: Remove target attacking or blocking creature from combat.";
@@ -851,6 +853,104 @@ fn cromat_on_library_still_destroys_its_blocker() {
     );
     assert_zone(&runner, &[b], Zone::Graveyard, "blocking Cromat's LKI");
     assert_zone(&runner, &[h], Zone::Battlefield, "never targeted");
+}
+
+/// Reach guard for the #10948 tests: the printed activated ability must have
+/// parsed into a damage effect. Without it a negative activation assertion can
+/// pass on an unrelated parse failure rather than on target legality.
+fn assert_armasaur_deals_damage(runner: &GameRunner, armasaur: ObjectId) {
+    let object = &runner.state().objects[&armasaur];
+    let ability = object
+        .abilities
+        .first()
+        .unwrap_or_else(|| panic!("Steadfast Armasaur has a parsed activated ability"));
+    let mut cursor = Some(ability);
+    let mut effects = Vec::new();
+    while let Some(link) = cursor {
+        effects.push(&link.effect);
+        cursor = link.sub_ability.as_deref();
+    }
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect.as_ref(), Effect::DealDamage { .. })),
+        "Steadfast Armasaur's ability must deal damage, got {effects:#?}"
+    );
+}
+
+/// Steadfast Armasaur (#10948): "target creature blocking or blocked by it"
+/// restricts the damage recipient to its block partner. With a blocker and an
+/// unrelated bystander on the board, the activation targets only the blocker
+/// and deals damage equal to Armasaur's toughness (3) to it.
+#[test]
+fn steadfast_armasaur_damages_only_its_blocker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let armasaur = scenario
+        .add_creature(P0, "Steadfast Armasaur", 2, 3)
+        .from_oracle_text_with_keywords(&["Vigilance"], STEADFAST_ARMASAUR)
+        .id();
+    let blocker = scenario.add_creature(P1, "Blocker", 1, 5).id();
+    let bystander = scenario.add_creature(P1, "Bystander", 1, 5).id();
+    let mut runner = scenario.build();
+    assert_armasaur_deals_damage(&runner, armasaur);
+
+    attack_and_block(&mut runner, &[armasaur], &[(blocker, armasaur)]);
+    seed(&mut runner, P0, &[ManaType::Colorless, ManaType::White]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: armasaur,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Steadfast Armasaur's ability activates");
+    assert_eq!(top_targets(&runner), vec![TargetRef::Object(blocker)]);
+    drain_stack(&mut runner, "Steadfast Armasaur's ability resolves");
+
+    assert_eq!(runner.state().objects[&blocker].damage_marked, 3);
+    assert_eq!(
+        runner.state().objects[&bystander].damage_marked,
+        0,
+        "an unrelated creature is never a legal target"
+    );
+}
+
+/// Steadfast Armasaur (#10948): with no creature blocking or blocked by it,
+/// the ability has no legal target and cannot be activated at all.
+#[test]
+fn steadfast_armasaur_cannot_target_unrelated_creatures() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let armasaur = scenario
+        .add_creature(P0, "Steadfast Armasaur", 2, 3)
+        .from_oracle_text_with_keywords(&["Vigilance"], STEADFAST_ARMASAUR)
+        .id();
+    let bystander = scenario.add_creature(P1, "Bystander", 1, 5).id();
+    let mut runner = scenario.build();
+    assert_armasaur_deals_damage(&runner, armasaur);
+
+    seed(&mut runner, P0, &[ManaType::Colorless, ManaType::White]);
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: armasaur,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(
+        matches!(
+            result,
+            Err(EngineError::ActionNotAllowed(ref message))
+                if message == "No legal targets available"
+        ),
+        "no blocking/blocked creature means no legal target, got {:?} (waiting: {:?})",
+        result.map(|_| ()),
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        0,
+        "reach guard: the rejected activation never reached the stack"
+    );
+    assert_eq!(runner.state().objects[&bystander].damage_marked, 0);
 }
 
 /// AB0 (preservation): Alms Beast's static grants lifelink only to the creature

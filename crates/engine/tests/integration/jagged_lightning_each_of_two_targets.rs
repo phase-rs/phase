@@ -19,11 +19,14 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::EngineError;
+use engine::types::ability::TargetRef;
 use engine::types::actions::AlternativeCastDecision;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+use super::support::{assert_damage_dealt, assert_no_damage_to};
 
 // Verbatim Oracle text (client/public/card-data.json, verified 2026-07-26).
 const JAGGED_LIGHTNING: &str = "Jagged Lightning deals 3 damage to each of two target creatures.";
@@ -71,24 +74,11 @@ fn t1_jagged_lightning_damages_only_the_two_chosen_creatures() {
         .target_objects(&[first, second])
         .resolve();
 
-    assert_eq!(
-        damage_on(&outcome, first),
-        3,
-        "the first chosen target must take 3"
-    );
-    assert_eq!(
-        damage_on(&outcome, second),
-        3,
-        "the second chosen target must take 3"
-    );
-    assert_eq!(
-        damage_on(&outcome, bystander),
-        0,
-        "CR 601.2c: an unchosen creature is not a target and takes no damage — \
-         a `DamageAll` parse would read 3 here"
-    );
-    // CR 704.5g: 3 damage on a 3-toughness creature is lethal. The bystander
-    // must still be on the battlefield.
+    assert_damage_dealt(outcome.events(), spell, TargetRef::Object(first), 3, false);
+    assert_damage_dealt(outcome.events(), spell, TargetRef::Object(second), 3, false);
+    assert_no_damage_to(outcome.events(), TargetRef::Object(bystander));
+    // CR 704.5g: 3 damage on each 3-toughness creature is lethal. The bystander
+    // takes no damage and remains on the battlefield.
     outcome.assert_zone(&[bystander], Zone::Battlefield);
     outcome.assert_zone(&[first, second], Zone::Graveyard);
 }
@@ -195,13 +185,10 @@ fn t4_meteor_blast_x_is_the_target_count() {
         .target_objects(&[first, second])
         .resolve();
 
-    assert_eq!(damage_on(&outcome, first), 4);
-    assert_eq!(damage_on(&outcome, second), 4);
-    assert_eq!(
-        damage_on(&outcome, bystander),
-        0,
-        "only the X announced targets are damaged"
-    );
+    assert_damage_dealt(outcome.events(), spell, TargetRef::Object(first), 4, false);
+    assert_damage_dealt(outcome.events(), spell, TargetRef::Object(second), 4, false);
+    assert_no_damage_to(outcome.events(), TargetRef::Object(bystander));
+    outcome.assert_zone(&[first, second], Zone::Graveyard);
     outcome.assert_zone(&[bystander], Zone::Battlefield);
 }
 

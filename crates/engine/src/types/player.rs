@@ -180,6 +180,15 @@ pub struct Player {
     #[serde(default)]
     pub turns_taken: u32,
 
+    /// CR 103.2a: Card count of this player's submitted starting deck
+    /// (library + command-zone decklist cards, single-counted; sideboard and
+    /// companion excluded per CR 103.2a / CR 702.139b). Latched once at deck
+    /// load by `load_deck_into_state` and never mutated mid-game — the rules
+    /// past tense in Whtz, the Bibliophile's "if you had 200 or more cards in
+    /// your starting deck" reads this snapshot, not the live library.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub starting_deck_size: u32,
+
     // Elimination tracking (N-player support)
     #[serde(default)]
     pub is_eliminated: bool,
@@ -282,6 +291,7 @@ impl Default for Player {
             can_look_at_top_of_library: false,
             commander_color_identity: Vec::new(),
             status: PlayerStatus::Active,
+            starting_deck_size: 0,
         }
     }
 }
@@ -406,5 +416,28 @@ mod tests {
         let json = serde_json::to_value(&live).expect("serialize");
         assert_eq!(json["cards_drawn_last_turn"], 3);
         assert_eq!(json["opponent_spells_cast_since_own_last_turn"], 1);
+    }
+
+    /// CR 103.2a: the latched starting-deck count omits the default zero on
+    /// the wire (old saves without the key load as 0), while a live nonzero
+    /// latch round-trips. Whtz, the Bibliophile's "if you had 200 or more
+    /// cards in your starting deck" reads this snapshot.
+    #[test]
+    fn starting_deck_size_latch_skips_zero_on_the_wire() {
+        let rest = Player::default();
+        let json = serde_json::to_value(&rest).expect("serialize");
+        let object = json.as_object().expect("object");
+        assert!(!object.contains_key("starting_deck_size"));
+        let back: Player = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.starting_deck_size, 0);
+
+        let live = Player {
+            starting_deck_size: 200,
+            ..Player::default()
+        };
+        let json = serde_json::to_value(&live).expect("serialize");
+        assert_eq!(json["starting_deck_size"], 200);
+        let back: Player = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.starting_deck_size, 200);
     }
 }

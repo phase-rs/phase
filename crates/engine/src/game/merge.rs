@@ -192,6 +192,10 @@ pub fn merge_object_onto(
         // When a face-down permanent becomes face up as a result of merging, other
         // effects don't count it as turned face up, so no `GameEvent::TurnedFaceUp`
         // is pushed here.
+        // CR 730.2e: the survivor keeps its own status as a component.
+        if survivor.component_face_down.is_none() && survivor.face_down != topmost_is_face_down {
+            survivor.component_face_down = Some(survivor.face_down);
+        }
         survivor.face_down = topmost_is_face_down;
     }
 
@@ -228,6 +232,18 @@ fn merged_copiable_values(
     topmost_id: ObjectId,
 ) -> Option<(CopiableValues, DisplayIdentity)> {
     let topmost = state.objects.get(&topmost_id)?;
+    let values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
+        .unwrap_or_else(|| intrinsic_copiable_values(topmost));
+    merged_copiable_values_from(state, ordered, topmost_id, values)
+}
+
+fn merged_copiable_values_from(
+    state: &GameState,
+    ordered: &[ObjectId],
+    topmost_id: ObjectId,
+    mut values: CopiableValues,
+) -> Option<(CopiableValues, DisplayIdentity)> {
+    let topmost = state.objects.get(&topmost_id)?;
     let printed_ref = topmost
         .base_printed_ref
         .clone()
@@ -239,8 +255,6 @@ fn merged_copiable_values(
         printed_ref,
         ..topmost.display_identity()
     };
-    let mut values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
-        .unwrap_or_else(|| intrinsic_copiable_values(topmost));
     let mut abilities = Vec::new();
     let mut triggers = Vec::new();
     let mut trigger_printed_origins = Vec::new();
@@ -309,6 +323,58 @@ fn merged_copiable_values(
     values.replacement_definitions = Arc::new(replacements);
     values.keywords = keywords;
     Some((values, display))
+}
+
+/// CR 730.2i + CR 730.2a + CR 702.140e: a turned component changes the pile's
+/// characteristics and ability union. CR 613.2a + CR 613.7: derive at the merge
+/// effect's own layer position, retaining its merge-time timestamp.
+pub(crate) fn rederive_merge_layer_effect(state: &mut GameState, survivor_id: ObjectId) {
+    use crate::game::game_object::MergeKind;
+
+    let Some(survivor) = state.objects.get(&survivor_id) else {
+        return;
+    };
+    match survivor.merge_kind {
+        Some(MergeKind::Mutate) => {}
+        Some(MergeKind::Meld | MergeKind::Augment) | None => return,
+    }
+    let Some(effect_id) = survivor.merge_layer_effect_id else {
+        return;
+    };
+    let ordered = survivor.merged_components.clone();
+    let Some(&topmost_id) = ordered.first() else {
+        return;
+    };
+    let Some(effect) = state
+        .transient_continuous_effects
+        .iter()
+        .find(|e| e.id == effect_id)
+    else {
+        return;
+    };
+    let Some(values) = crate::game::layers::compute_copiable_values_preceding(
+        state,
+        topmost_id,
+        effect_id,
+        effect.timestamp,
+    ) else {
+        return;
+    };
+    let Some((values, display)) = merged_copiable_values_from(state, &ordered, topmost_id, values)
+    else {
+        return;
+    };
+    if let Some(effect) = state
+        .transient_continuous_effects
+        .iter_mut()
+        .find(|e| e.id == effect_id)
+    {
+        effect.modifications = vec![ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display,
+        }];
+    }
+    crate::game::layers::mark_layers_full(state);
 }
 
 pub(crate) fn remove_merge_layer_effect(state: &mut GameState, target_id: ObjectId) {
@@ -488,12 +554,11 @@ pub fn split_merged_permanent_on_leave(
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
 ///
-/// CR 701.24a + CR 730.3: a library position reaches the components only when
-/// the move is the move component of a terminal-shuffle operation, where the
-/// position is transient and the chained `Shuffle` randomizes the library
-/// once. Any other library placement leaves each component at the zone
-/// default; the owner's CR 730.3a arrangement of an ordered placement is not
-/// modeled here.
+/// CR 701.24a + CR 730.3: every component inherits the approved library
+/// position. For a terminal-shuffle operation the position is transient and
+/// the chained `Shuffle` randomizes the library once. The owner's CR 730.3a
+/// arrangement of the components is not modeled here.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
@@ -503,6 +568,31 @@ pub(crate) fn move_merged_permanent_on_leave(
     library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
     performed_by: Option<crate::types::player::PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_merged_permanent_for_parent(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        library_shuffle,
+        applied,
+        performed_by,
+        None,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // main's placement pair plus the announcing owner link.
+pub(crate) fn move_merged_permanent_for_parent(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+    applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
+    parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
@@ -538,9 +628,11 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            let placement = match library_shuffle {
-                LibraryShuffleMode::TerminalShuffle => library_placement.cloned(),
-                LibraryShuffleMode::PerObject => None,
+            // CR 730.3: every component inherits the final approved destination
+            // and position; its own replacement consult may redirect it again.
+            let placement = match (dest, library_placement) {
+                (Zone::Library, Some(position)) => Some(position.clone()),
+                _ => None,
             };
             ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
@@ -556,7 +648,7 @@ pub(crate) fn move_merged_permanent_on_leave(
         })
         .collect();
 
-    zone_pipeline::move_objects_simultaneously_then(state, requests, None, events)
+    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness

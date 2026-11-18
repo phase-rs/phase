@@ -53,6 +53,7 @@ fn test_attraction_face(name: &str, oracle: &str, lights: Vec<u8>) -> CardFace {
         is_commander: false,
         is_oathbreaker: false,
         deck_copy_limit: None,
+        deck_size_override: None,
         parse_warnings: vec![],
         metadata: Default::default(),
         rarities: Default::default(),
@@ -132,10 +133,14 @@ fn attraction_leaving_for_graveyard_redirects_to_command_junkyard() {
         .contains(&attraction_id));
 }
 
+/// CR 703.4g + CR 717.4 + CR 603.3: rolling to visit is a turn-based action as the
+/// precombat main phase begins, and it doesn't use the stack. The visit ability it
+/// triggers (CR 702.159a) is put on the stack once, with the phase's first batch,
+/// before the active player receives priority.
 #[test]
 fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+    scenario.at_phase(Phase::Draw);
     let mut runner = scenario.build();
 
     for i in 0..10 {
@@ -148,8 +153,11 @@ fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
         );
     }
 
+    // Information Booth, verified verbatim against MTGJSON: "Visit — Draw a card."
+    // Setup only: every number is lit (its printings light 2–5 and 6), so the roll
+    // visits whatever comes up and the row is deterministic.
     let face = test_attraction_face(
-        "Prize Booth",
+        "Information Booth",
         "Visit — Draw a card.",
         vec![1, 2, 3, 4, 5, 6],
     );
@@ -159,43 +167,44 @@ fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
 
     let hand_before = runner.state().players[0].hand.len();
     let mut events = Vec::new();
-    roll_to_visit_attractions(runner.state_mut(), P0, &mut events);
+    for _ in 0..4 {
+        if runner.state().phase == Phase::PreCombatMain {
+            break;
+        }
+        events.extend(
+            runner
+                .act(engine::types::actions::GameAction::PassPriority)
+                .expect("passing into the precombat main phase must succeed")
+                .events,
+        );
+    }
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
     // CR 701.52a: ONE turn-based action emits ONE roll-to-visit event carrying
     // every surviving result. With no count-raising replacement in play there is
     // exactly one survivor.
-    let rolls = events
-        .iter()
-        .find_map(|e| {
-            if let GameEvent::AttractionsRolledToVisit { rolls, .. } = e {
-                Some(rolls.clone())
-            } else {
-                None
-            }
-        })
-        .expect("roll-to-visit event");
+    let rolls = rolled_to_visit(&events).expect("roll-to-visit event");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::AttractionsRolledToVisit { .. }))
+            .count(),
+        1
+    );
     assert_eq!(
         rolls.len(),
         1,
         "CR 701.52a: an unreplaced roll-to-visit has exactly one surviving result"
     );
     let roll = rolls[0];
-
     assert!(events.iter().any(|e| matches!(
         e,
         GameEvent::DieRolled {
             player_id: P0,
             sides: 6,
             result,
+            ..
         } if *result == Some(roll)
     )));
-
-    assert!(
-        !runner.state().stack.is_empty(),
-        "Visit trigger should be on the stack after rolling to visit"
-    );
-    let mut resolve_events = Vec::new();
-    stack::resolve_top(runner.state_mut(), &mut resolve_events);
-
     assert!(events.iter().any(|e| matches!(
         e,
         GameEvent::AttractionVisited {
@@ -203,10 +212,35 @@ fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
             ..
         } if *id == attraction_id
     )));
-    assert!(
-        runner.state().players[0].hand.len() > hand_before,
-        "Visit — Draw a card should have resolved"
+    // CR 603.3b: the visit trigger is put on the stack exactly once.
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == attraction_id)
+            .count(),
+        1,
+        "the visit trigger is on the stack once"
     );
+    for _ in 0..4 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(engine::types::actions::GameAction::PassPriority)
+            .expect("resolving the visit trigger must succeed");
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before + 1,
+        "Visit — Draw a card should have resolved once"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        engine::types::game_state::WaitingFor::Priority { player: P0 }
+    ));
 }
 
 /// Barbarian Class level 1, verified verbatim against Scryfall:
@@ -272,7 +306,8 @@ fn roll_to_visit_applies_count_raising_die_roll_replacement() {
     let (mut runner, attraction_id) = runner_with_all_lights_attraction(scenario);
 
     let mut events = Vec::new();
-    roll_to_visit_attractions(runner.state_mut(), P0, &mut events);
+    let roll_pause = roll_to_visit_attractions(runner.state_mut(), P0, &mut events);
+    assert_eq!(roll_pause, None);
 
     // Reach-guard: the turn-based action must have happened at all — the failure
     // value on this path is "no event", which would pass a length assertion
@@ -324,7 +359,16 @@ fn roll_to_visit_resumes_after_replacement_ordering_choice() {
     let (mut runner, attraction_id) = runner_with_all_lights_attraction(scenario);
 
     let mut events = Vec::new();
-    roll_to_visit_attractions(runner.state_mut(), P0, &mut events);
+    let roll_pause = roll_to_visit_attractions(runner.state_mut(), P0, &mut events);
+    assert!(matches!(
+        &roll_pause,
+        Some(engine::types::game_state::WaitingFor::ReplacementChoice {
+            player: P0,
+            candidate_count: 2,
+            ..
+        })
+    ));
+    assert_eq!(roll_pause.as_ref(), Some(&runner.state().waiting_for));
 
     // Reach-guard: without a real CR 616.1 suspension the rest of this test
     // would assert against the ordinary inline path and prove nothing.

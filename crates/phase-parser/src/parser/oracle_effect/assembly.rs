@@ -28,10 +28,10 @@ use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
     Comparator, ControllerRef, DamageChannel, DigRestOrder, DigRestRemainder, DigSource, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, LibraryPosition, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality,
-    SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    Effect, EffectOutcomeSignal, EffectScope, FilterProp, InstructionJoin, LibraryPosition,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
+    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -1874,6 +1874,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -2018,6 +2019,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
@@ -3187,6 +3189,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
         def.sibling_condition = clause_ir.sibling_condition;
+        // CR 608.2c: a chunk the chunk loop stamped as a further target slot
+        // keeps that identity; a clause parse's own list marker (a splitter
+        // product on the clause head) is never `ListSlot`, so this only adds.
+        if clause_ir.instruction_join == InstructionJoin::ListSlot {
+            def.instruction_join = InstructionJoin::ListSlot;
+        }
         // CR 608.2c + CR 614.1a: carry the clause seam's deferred guard verdict onto the
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
@@ -3432,6 +3440,11 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
+            // CR 118.12 + CR 115.10a: the shell's subject is the responder, so
+            // bind an offered payment's possessive to them here, where that is
+            // known, rather than leaving the runtime to infer it from a target
+            // slot the triggering event can also populate.
+            super::super::clause_shell::bind_offered_payment_possessive(&mut def);
         }
         // CR 608.2c + CR 608.2d: Propagate a clause-local "may" modal, and the player
         // it NAMES.
@@ -4022,16 +4035,21 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 .fragment()
                 .unwrap_or_default()
                 .to_lowercase();
-            // CR 608.2c: a plural subject anaphor ("those creatures") names the
+            // CR 608.2c: a subject anaphor ("those creatures", "it") names the
             // population of the clause immediately before it — written order,
             // not a search of older history. `AntecedentSelector::LastEmitted`
-            // binds that antecedent through `AssemblyEnv::resolve`.
-            if starts_with_plural_subject_anaphor(&source_text_lower) {
+            // binds that antecedent through `AssemblyEnv::resolve`. The Radiance
+            // fan-out is a plural referent only; the mass tap/untap guard reads
+            // both grammatical numbers.
+            let plural_subject = starts_with_plural_subject_anaphor(&source_text_lower);
+            if plural_subject || starts_with_singular_subject_anaphor(&source_text_lower) {
                 if let Some(bound_index) =
                     env.resolve(&defs, AntecedentSelector::LastEmitted, None, OnMiss::Ignore)
                 {
                     let antecedent = &defs[bound_index];
-                    if let Some(population) = radiance_fanout_population(&antecedent.effect) {
+                    if let Some(population) =
+                        radiance_fanout_population(&antecedent.effect).filter(|_| plural_subject)
+                    {
                         // CR 207.2c: after a Radiance fan-out, "those creatures" is
                         // the target AND every other object the fan-out reached, so
                         // the rider fans out over the same population.
@@ -4042,9 +4060,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                         current_defs.extend(fanout_riders);
                     } else if mass_tap_state_population(&antecedent.effect) {
                         // CR 608.2c: the antecedent is a mass tap/untap population
-                        // that no `ParentTarget` binding can represent. Pumping only
-                        // the chosen target would silently name the wrong creatures,
-                        // so the rider fails closed.
+                        // that no `ParentTarget` Pump binding can represent, whether
+                        // the rider's subject is 'they'/'those …' or the singular
+                        // 'it'/'that …' (a grant binds it through the published
+                        // selection; a pump does not), so the rider fails closed.
                         for current in &mut current_defs {
                             if matches!(
                                 &*current.effect,
@@ -6561,6 +6580,48 @@ mod arena_tests {
             effects
                 .iter()
                 .any(|effect| effect.unimplemented_description().is_some()),
+            "the unrepresentable referent must fail honestly: {effects:?}"
+        );
+    }
+
+    /// CR 608.2c: a singular "it gets +N/+M" rider whose nearest antecedent is a
+    /// mass tap names the tapped population, which no `ParentTarget` Pump can
+    /// represent, so it fails closed exactly like its plural twin. Synthetic
+    /// text: no printed card has the shape; Triton Tactics' delayed payload (a
+    /// "doesn't untap" grant, which binds) is the nearest printed card.
+    #[test]
+    fn singular_rider_after_mass_tap_population_fails_closed() {
+        let text = "Tap each creature your opponents control and it gets -1/-0 until end of turn.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Singular Probe",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let effects = chain_effects(&parsed.abilities[0]);
+        assert!(
+            matches!(
+                effects.first(),
+                Some(Effect::SetTapState {
+                    scope: EffectScope::All,
+                    ..
+                })
+            ),
+            "reach guard: the head is the mass tap: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Pump { .. })),
+            "no pump may name the wrong creatures: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                // allow-noncombinator: test assertion over a parsed result, not parsing dispatch
+                Effect::Unimplemented { name, .. } if name == "plural_rider_after_mass_tap_population"
+            )),
             "the unrepresentable referent must fail honestly: {effects:?}"
         );
     }

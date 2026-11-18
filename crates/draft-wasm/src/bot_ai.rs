@@ -1096,6 +1096,222 @@ mod tests {
         }
     }
 
+    /// A printed Champions of Kamigawa card, built through the production
+    /// MTGJSON → Oracle parser → synthesis path from its verbatim Oracle text.
+    struct PrintedChk {
+        name: &'static str,
+        mana_cost: &'static str,
+        mana_value: u8,
+        type_line: &'static str,
+        core_type: &'static str,
+        subtypes: &'static [&'static str],
+        power_toughness: Option<(&'static str, &'static str)>,
+        keywords: &'static [&'static str],
+        text: &'static str,
+    }
+
+    impl PrintedChk {
+        fn face(&self) -> CardFace {
+            let mut json = serde_json::json!({
+                "name": self.name,
+                "manaCost": self.mana_cost,
+                "manaValue": f64::from(self.mana_value),
+                "colors": ["B"],
+                "colorIdentity": ["B"],
+                "layout": "normal",
+                "type": self.type_line,
+                "types": [self.core_type],
+                "subtypes": self.subtypes,
+                "keywords": self.keywords,
+                "identifiers": {},
+                "text": self.text,
+            });
+            if let Some((power, toughness)) = self.power_toughness {
+                json["power"] = power.into();
+                json["toughness"] = toughness.into();
+            }
+            let atomic: engine::database::mtgjson::AtomicCard =
+                serde_json::from_value(json).expect("valid AtomicCard fixture");
+            engine::database::synthesis::build_oracle_face(&atomic, None)
+        }
+
+        fn instance(&self, id: &str) -> DraftCardInstance {
+            DraftCardInstance {
+                instance_id: id.to_string(),
+                name: self.name.to_string(),
+                set_code: "CHK".to_string(),
+                collector_number: "1".to_string(),
+                rarity: "common".to_string(),
+                colors: vec!["B".to_string()],
+                cmc: self.mana_value,
+                type_line: self.type_line.to_string(),
+                draft_effect: None,
+            }
+        }
+    }
+
+    const BEFOUL: PrintedChk = PrintedChk {
+        name: "Befoul",
+        mana_cost: "{2}{B}{B}",
+        mana_value: 4,
+        type_line: "Sorcery",
+        core_type: "Sorcery",
+        subtypes: &[],
+        power_toughness: None,
+        keywords: &[],
+        text: "Destroy target land or nonblack creature. It can't be regenerated.",
+    };
+    const WICKED_AKUBA: PrintedChk = PrintedChk {
+        name: "Wicked Akuba",
+        mana_cost: "{B}{B}",
+        mana_value: 2,
+        type_line: "Creature — Spirit",
+        core_type: "Creature",
+        subtypes: &["Spirit"],
+        power_toughness: Some(("2", "2")),
+        keywords: &[],
+        text: "{B}: Target player dealt damage by this creature this turn loses 1 life.",
+    };
+    const REND_FLESH: PrintedChk = PrintedChk {
+        name: "Rend Flesh",
+        mana_cost: "{2}{B}",
+        mana_value: 3,
+        type_line: "Instant — Arcane",
+        core_type: "Instant",
+        subtypes: &["Arcane"],
+        power_toughness: None,
+        keywords: &[],
+        text: "Destroy target non-Spirit creature.",
+    };
+    const PULL_UNDER: PrintedChk = PrintedChk {
+        name: "Pull Under",
+        mana_cost: "{5}{B}",
+        mana_value: 6,
+        type_line: "Instant — Arcane",
+        core_type: "Instant",
+        subtypes: &["Arcane"],
+        power_toughness: None,
+        keywords: &[],
+        text: "Target creature gets -5/-5 until end of turn.",
+    };
+    const CURSED_RONIN: PrintedChk = PrintedChk {
+        name: "Cursed Ronin",
+        mana_cost: "{3}{B}",
+        mana_value: 4,
+        type_line: "Creature — Human Samurai",
+        core_type: "Creature",
+        subtypes: &["Human", "Samurai"],
+        power_toughness: Some(("1", "1")),
+        keywords: &["Bushido"],
+        text: "Bushido 1 (Whenever this creature blocks or becomes blocked, it gets +1/+1 until end of turn.)\n{B}: This creature gets +1/+1 until end of turn.",
+    };
+    const VILLAINOUS_OGRE: PrintedChk = PrintedChk {
+        name: "Villainous Ogre",
+        mana_cost: "{2}{B}",
+        mana_value: 3,
+        type_line: "Creature — Ogre Warrior",
+        core_type: "Creature",
+        subtypes: &["Ogre", "Warrior"],
+        power_toughness: Some(("3", "2")),
+        keywords: &[],
+        text: "This creature can't block.\nAs long as you control a Demon, this creature has \"{B}: Regenerate this creature.\"",
+    };
+
+    #[test]
+    fn kamigawa_guide_changes_the_production_pick_as_the_pool_changes() {
+        let printed = [
+            &BEFOUL,
+            &WICKED_AKUBA,
+            &REND_FLESH,
+            &PULL_UNDER,
+            &CURSED_RONIN,
+            &VILLAINOUS_OGRE,
+        ];
+        let entries: serde_json::Map<String, serde_json::Value> = printed
+            .iter()
+            .map(|card| {
+                let face = card.face();
+                (
+                    face.name.to_lowercase(),
+                    serde_json::to_value(&face).expect("a face serializes"),
+                )
+            })
+            .collect();
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(entries).to_string())
+            .expect("the fixture export loads");
+        assert_eq!(
+            DraftProfile::for_set("CHK").map(|p| p.id.as_str()),
+            Some("kamigawa-block-cbs"),
+            "positive guard: the bot selects the Kamigawa guide for CHK"
+        );
+
+        // Five black picks already made: a pool of creatures with no
+        // removal, and a pool of removal spells with no creatures.
+        let creature_pool: Vec<DraftCardInstance> = [
+            &CURSED_RONIN,
+            &VILLAINOUS_OGRE,
+            &CURSED_RONIN,
+            &VILLAINOUS_OGRE,
+            &CURSED_RONIN,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, card)| card.instance(&format!("pool-{i}")))
+        .collect();
+        let removal_pool: Vec<DraftCardInstance> =
+            [&REND_FLESH, &BEFOUL, &PULL_UNDER, &REND_FLESH, &BEFOUL]
+                .iter()
+                .enumerate()
+                .map(|(i, card)| card.instance(&format!("pool-{i}")))
+                .collect();
+
+        // Pick 6 of pack 2 for both pools: the stage, the pack and the colors
+        // are identical, so only the pool can move the pick.
+        let pick = |pack: &[DraftCardInstance],
+                    pool: &[DraftCardInstance],
+                    enhancement: PickEnhancement| {
+            let mut rng = ChaCha20Rng::seed_from_u64(7);
+            let shape = PackShape {
+                pack_number: 1,
+                cards_in_pack: (pack.len() + 5) as u8,
+            };
+            let index = bot_pick(
+                pack,
+                AiDifficulty::Medium,
+                pool,
+                Some(&db),
+                enhancement,
+                shape,
+                &mut rng,
+            );
+            pack[index].name.clone()
+        };
+        let befoul = BEFOUL.instance("pack-befoul");
+        let akuba = WICKED_AKUBA.instance("pack-akuba");
+        // Both insertion orders, so neither answer rides on a tie-break.
+        for pack in [
+            vec![befoul.clone(), akuba.clone()],
+            vec![akuba.clone(), befoul.clone()],
+        ] {
+            assert_eq!(
+                pick(&pack, &creature_pool, PickEnhancement::DraftGuides),
+                "Befoul",
+                "a creature pool with no removal takes the removal spell"
+            );
+            assert_eq!(
+                pick(&pack, &removal_pool, PickEnhancement::DraftGuides),
+                "Wicked Akuba",
+                "a pool whose removal need is met takes the Spirit creature"
+            );
+            // Control: without the guide, the base heuristic does not read
+            // the pool's roles, so it makes the same pick for both pools.
+            assert_eq!(
+                pick(&pack, &creature_pool, PickEnhancement::Off),
+                pick(&pack, &removal_pool, PickEnhancement::Off),
+            );
+        }
+    }
+
     #[test]
     fn draft_guides_do_nothing_outside_the_sets_they_cover() {
         // Cube cards are all printed as set "CUBE", which no profile covers.

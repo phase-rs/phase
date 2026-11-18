@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Détecteur de combos (expérimental)",
-    "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires et afficher les ressources ∞ (désactivé par défaut)",
+    "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires, proposer des raccourcis pour les boucles qu'un joueur contrôle et afficher les ressources ∞ (désactivé par défaut)",
     "off": "Désactivé",
     "interactive": "Interactif"
   },

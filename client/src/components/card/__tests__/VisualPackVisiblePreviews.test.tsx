@@ -19,7 +19,7 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useCardParseDetails: vi.fn(() => []),
 }));
 vi.mock("../../../hooks/useCardReport.ts", () => ({
-  useCardReport: vi.fn(() => ({ sent: false, report: vi.fn() })),
+  useCardReport: vi.fn(() => ({ status: "idle", report: vi.fn() })),
 }));
 
 const mockUseCardImage = vi.mocked(useCardImage);

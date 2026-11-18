@@ -2,12 +2,15 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::Effect;
+use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -137,41 +140,166 @@ fn torch_the_tower_exiles_a_target_that_dies_to_combat_later_that_turn() {
     );
 }
 
+/// CR 514.2 + CR 700.4 + CR 701.8a: a generated-database Torch installs the
+/// target-bound replacement for this turn, then that same rider expires at
+/// cleanup.
 #[test]
-fn torch_the_tower_replacement_expires_from_the_layer_baseline_at_cleanup() {
+fn torch_the_tower_replacement_expires_at_cleanup_through_production_actions() {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_basic_land(P0, ManaColor::Red);
-    let target = scenario.add_creature(P1, "Surviving Target", 2, 4).id();
-    let spell = scenario
-        .add_spell_to_hand(P0, "Torch the Tower", true)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
-            generic: 0,
-        })
-        .from_oracle_text_with_keywords(&["bargain"], TORCH)
-        .id();
+    scenario.with_library_top(P0, &["P0 cleanup fixture"; 12]);
+    scenario.with_library_top(P1, &["P1 cleanup fixture"; 12]);
+    let hit_before_cleanup = scenario.add_creature(P1, "Torch Hit Before", 2, 4).id();
+    let hit_after_cleanup = scenario.add_creature(P1, "Torch Hit After", 2, 4).id();
+    let torch_before_cleanup = scenario.add_real_card(P0, "Torch the Tower", Zone::Hand, db);
+    let torch_after_cleanup = scenario.add_real_card(P0, "Torch the Tower", Zone::Hand, db);
+    let murder_before_cleanup = scenario.add_real_card(P0, "Murder", Zone::Hand, db);
+    let murder_after = scenario.add_real_card(P0, "Murder", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Red,
+            ManaType::Red,
+            ManaType::Black,
+            ManaType::Black,
+            ManaType::Black,
+            ManaType::Black,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+        .collect(),
+    );
     let mut runner = scenario.build();
-    runner
-        .cast(spell)
-        .target_object(target)
-        .decline_optional()
-        .resolve();
+    for (torch, host) in [
+        (torch_before_cleanup, hit_before_cleanup),
+        (torch_after_cleanup, hit_after_cleanup),
+    ] {
+        let outcome = runner
+            .cast(torch)
+            .target_object(host)
+            .decline_optional()
+            .resolve();
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: engine::types::ability::TargetRef::Object(target),
+                    amount: 2,
+                    is_combat: false,
+                    ..
+                } if *source_id == torch && *target == host
+            )),
+            "reach guard: generated Torch {torch:?} must deal 2 damage to host {host:?}"
+        );
+        assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&host].damage_marked, 2);
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 
-    assert!(
-        !runner.state().objects[&target]
-            .base_replacement_definitions
-            .is_empty(),
-        "the turn-bound replacement must survive layer recalculation"
+    let before_cleanup = runner
+        .cast(murder_before_cleanup)
+        .target_object(hit_before_cleanup)
+        .resolve();
+    assert!(before_cleanup.events().iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Exile,
+            ..
+        } if *object_id == hit_before_cleanup
+    )));
+    assert_eq!(
+        runner.state().objects[&hit_before_cleanup].zone,
+        Zone::Exile
     );
-    let mut events = Vec::new();
-    engine::game::turns::execute_cleanup(runner.state_mut(), &mut events);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    let ending_turn = runner.state().turn_number;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[])
+        .expect("P0 declares no attackers before cleanup");
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the active player passes the End step priority window");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("both players pass and the real cleanup step executes");
     assert!(
-        runner.state().objects[&target]
-            .base_replacement_definitions
-            .is_empty(),
-        "the turn-bound replacement must not survive cleanup"
+        runner.state().turn_number > ending_turn,
+        "the End-step passes must cross the real cleanup boundary"
     );
+    assert_eq!(
+        runner.state().objects[&hit_after_cleanup].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(runner.state().objects[&hit_after_cleanup].damage_marked, 0);
+
+    // The next player's priority passes to P0 so the second real Murder tests
+    // the other hit host after CR 514.2 ends its turn-bound replacement.
+    runner.advance_to_phase(Phase::PreCombatMain);
+    if !matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the active player passes so P0 receives priority");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    // CR 106.4: Mana pools empty at the end of every step and phase. Re-seed
+    // the Murder cost after crossing cleanup before testing the expired rider.
+    for mana in [ManaType::Black, ManaType::Black, ManaType::Colorless] {
+        runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|player| player.id == P0)
+            .unwrap()
+            .mana_pool
+            .add(ManaUnit::new(mana, ObjectId(0), false, vec![]));
+    }
+    let hit_outcome = runner
+        .cast(murder_after)
+        .target_object(hit_after_cleanup)
+        .resolve();
+    assert!(hit_outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Graveyard,
+            ..
+        } if *object_id == hit_after_cleanup
+    )));
+    assert_eq!(
+        runner.state().objects[&hit_after_cleanup].zone,
+        Zone::Graveyard
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 #[test]

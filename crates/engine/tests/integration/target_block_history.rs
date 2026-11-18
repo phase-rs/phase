@@ -13,13 +13,19 @@
 //!   creature this turn." (CR 509.1g, CR 603.7b, CR 608.2h).
 //! - Ride Down: "Creatures that were blocked by that creature this combat gain
 //!   trample until end of turn." (CR 509.1h, CR 511.3, CR 611.2c).
+//! - Triton Tactics: "tap each creature that was blocked by one of those creatures
+//!   this turn and it doesn't untap …"; an illegal target answers nothing
+//!   (CR 608.2b, CR 608.2c, CR 608.2i, CR 502.3).
 //! - Heal the Scars and its class: "You gain life equal to that creature's
 //!   toughness." after an instruction that leaves no event naming its target
 //!   (CR 608.2c).
 
+use engine::database::card_db::CardDatabase;
 use engine::game::combat::{AttackTarget, BlockHistoryPair};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, CombatRelationSubject, Effect, EffectKind, FilterProp, TargetFilter,
     TargetRef,
@@ -37,6 +43,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use std::sync::Arc;
+
+use crate::support::shared_card_db;
 
 const GAZE: &str = "({B/G} can be paid with either {B} or {G}.)\nRegenerate target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.";
 const BREATH: &str = "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.";
@@ -2280,28 +2288,797 @@ fn breath_cast_during_end_of_combat_waits_for_the_next() {
     assert_eq!(zone(&runner, b2), Zone::Graveyard);
 }
 
-// ── V27: Triton Tactics does not widen ─────────────────────────────────
+// ── Triton Tactics: "one of those creatures" and the "it" after a mass tap ──
 
-/// CR 608.2c: Triton Tactics' clause names a partner no subject word covers, so
-/// its delayed instruction fails closed instead of tapping every creature. On the
-/// default board, with Triton on B, B2 is untapped after end of combat.
+/// Triton Tactics' board, from fixture creatures. P0 attacks with A (Affa
+/// Protector, vigilance), A2 and A3 (two more Affa Protectors) and A4 (Alaborn
+/// Trooper, no vigilance); P1 blocks with three
+/// Armored Whirl Turtles B, B2 and B3. Toughness keeps every creature alive
+/// through combat. P0 holds Triton Tactics, a Murder, an Icy Manipulator and a
+/// Forest; P1 holds Mirror Match, Ephemerate and Blossoming Defense. Both players
+/// have a library.
+struct TritonBoard {
+    runner: GameRunner,
+    a: ObjectId,
+    a2: ObjectId,
+    a3: ObjectId,
+    a4: ObjectId,
+    b: ObjectId,
+    b2: ObjectId,
+    b3: ObjectId,
+    triton: ObjectId,
+    murder: ObjectId,
+    mirror: ObjectId,
+    ephemerate: ObjectId,
+    defense: ObjectId,
+    icy: ObjectId,
+    forest: ObjectId,
+}
+
+fn triton_board(db: &CardDatabase) -> TritonBoard {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let a = s.add_real_card(P0, "Affa Protector", Zone::Battlefield, db);
+    let a2 = s.add_real_card(P0, "Affa Protector", Zone::Battlefield, db);
+    let a3 = s.add_real_card(P0, "Affa Protector", Zone::Battlefield, db);
+    let a4 = s.add_real_card(P0, "Alaborn Trooper", Zone::Battlefield, db);
+    let b = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let b2 = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let b3 = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let triton = free_spell(&mut s, P0, "Triton Tactics", TRITON);
+    let murder = free_spell(&mut s, P0, "Murder", MURDER);
+    let mirror = free_spell(&mut s, P1, "Mirror Match", MIRROR_MATCH);
+    let ephemerate = free_spell(&mut s, P1, "Ephemerate", EPHEMERATE);
+    let defense = s.add_real_card(P1, "Blossoming Defense", Zone::Hand, db);
+    let icy = s.add_artifact_from_oracle(P0, "Icy Manipulator", ICY).id();
+    let forest = s.add_basic_land(P0, ManaColor::Green);
+    s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    TritonBoard {
+        runner: s.build(),
+        a,
+        a2,
+        a3,
+        a4,
+        b,
+        b2,
+        b3,
+        triton,
+        murder,
+        mirror,
+        ephemerate,
+        defense,
+        icy,
+        forest,
+    }
+}
+
+/// The Triton board in combat: all four attack, B blocks A, B2 blocks A2, B3
+/// blocks A3, A4 is unblocked; P0 holds priority in the declare blockers step.
+fn triton_blocked_board(db: &CardDatabase) -> TritonBoard {
+    let mut x = triton_board(db);
+    attack_block(
+        &mut x.runner,
+        &[x.a, x.a2, x.a3, x.a4],
+        &[(x.b, x.a), (x.b2, x.a2), (x.b3, x.a3)],
+    );
+    x
+}
+
+/// CR 115.6 + CR 608.2c + CR 611.2c + CR 701.26b: zero, one, or two
+/// targets get the pump and untap immediately; an unchosen tapped creature
+/// receives neither. Every cast still creates the delayed ability.
 #[test]
-fn triton_tactics_does_not_widen() {
-    let mut x = blocked_board(TRITON, 1);
-    x.runner.cast(x.spell).target_objects(&[x.b]).resolve();
+fn triton_tactics_untaps_zero_one_or_two_tapped_targets() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    for target_count in 0..=2 {
+        let mut x = triton_board(db);
+        let candidates = [x.b, x.b3];
+        for id in [x.b, x.b3, x.b2] {
+            x.runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+            assert!(tapped(&x.runner, id), "reach: starts tapped");
+            assert_eq!(x.runner.state().objects[&id].power, Some(0));
+            assert_eq!(x.runner.state().objects[&id].toughness, Some(5));
+        }
+        let targets = &candidates[..target_count];
+        x.runner.cast(x.triton).target_objects(targets).resolve();
+        drain(&mut x.runner);
+        assert_eq!(
+            zone(&x.runner, x.triton),
+            Zone::Graveyard,
+            "reach: cast resolved"
+        );
+        assert!(x.runner.state().stack.is_empty());
+        assert!(matches!(
+            x.runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(
+            x.runner.state().delayed_triggers.len(),
+            1,
+            "reach: delayed ability created"
+        );
+        for id in candidates {
+            let chosen = targets.contains(&id);
+            assert_eq!(
+                tapped(&x.runner, id),
+                !chosen,
+                "{target_count} targets: immediate untap for {id:?}"
+            );
+            assert_eq!(x.runner.state().objects[&id].power, Some(0));
+            assert_eq!(
+                x.runner.state().objects[&id].toughness,
+                Some(if chosen { 8 } else { 5 }),
+                "{target_count} targets: pump for {id:?}"
+            );
+        }
+        assert!(tapped(&x.runner, x.b2), "non-target stays tapped");
+        assert_eq!(x.runner.state().objects[&x.b2].power, Some(0));
+        assert_eq!(x.runner.state().objects[&x.b2].toughness, Some(5));
+    }
+}
+
+/// CR 608.2c + CR 611.2c + CR 701.26b: Colossal Heroics shares the pump-to-
+/// untap binding. One target needs no additional strive payment; a non-target
+/// remains tapped and unmodified.
+#[test]
+fn colossal_heroics_untaps_its_tapped_target_after_pumping() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    const COLOSSAL_HEROICS: &str = "Strive — This spell costs {1}{G} more to cast for each target beyond the first.\nAny number of target creatures each get +2/+2 until end of turn. Untap those creatures.";
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let target = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let control = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let spell = free_spell(&mut s, P0, "Colossal Heroics", COLOSSAL_HEROICS);
+    let mut runner = s.build();
+    for id in [target, control] {
+        runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        assert!(tapped(&runner, id), "reach: starts tapped");
+        assert_eq!(runner.state().objects[&id].power, Some(0));
+        assert_eq!(runner.state().objects[&id].toughness, Some(5));
+    }
+    runner.cast(spell).target_objects(&[target]).resolve();
+    drain(&mut runner);
+    assert_eq!(
+        zone(&runner, spell),
+        Zone::Graveyard,
+        "reach: cast resolved"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner.state().objects[&target].power,
+        Some(2),
+        "reach: target pumped"
+    );
+    assert_eq!(runner.state().objects[&target].toughness, Some(7));
+    assert!(!tapped(&runner, target), "pumped target untaps immediately");
+    assert!(tapped(&runner, control), "non-target stays tapped");
+    assert_eq!(runner.state().objects[&control].power, Some(0));
+    assert_eq!(runner.state().objects[&control].toughness, Some(5));
+}
+
+/// CR 509.1g + CR 608.2c + CR 608.2i: at this turn's next end of combat Triton
+/// Tactics taps exactly the creatures one of its targets was declared to block
+/// this turn. Targets B and B3: A (blocked by B) and A3 (blocked by B3) are
+/// tapped; A2, blocked only by the non-target B2, is not, and neither is any
+/// target or blocker. A3 is the plural discriminator: a subject read as the first
+/// target only leaves it untapped.
+#[test]
+fn triton_tactics_taps_the_creatures_its_targets_blocked() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut x = triton_blocked_board(db);
+    x.runner
+        .cast(x.triton)
+        .target_objects(&[x.b, x.b3])
+        .resolve();
     drain(&mut x.runner);
     assert_eq!(
         x.runner.state().delayed_triggers.len(),
         1,
         "reach: the delayed ability exists"
     );
-    assert!(!tapped(&x.runner, x.b2), "reach: blockers stay untapped");
+    assert!(
+        !tapped(&x.runner, x.a) && !tapped(&x.runner, x.a3),
+        "reach: the vigilant attackers are untapped before end of combat"
+    );
     past_end_of_combat(&mut x.runner);
     assert!(
         x.runner.state().delayed_triggers.is_empty(),
         "reach: it fired"
     );
-    assert!(!tapped(&x.runner, x.b2), "no widened tap");
+    assert!(tapped(&x.runner, x.a), "A was blocked by the target B");
+    assert!(tapped(&x.runner, x.a3), "A3 was blocked by the target B3");
+    assert!(
+        !tapped(&x.runner, x.a2),
+        "A2 was blocked only by the non-target B2"
+    );
+    for (label, id) in [("B", x.b), ("B2", x.b2), ("B3", x.b3)] {
+        assert!(
+            !tapped(&x.runner, id),
+            "{label}: a blocker is not blocked by a target"
+        );
+    }
+    assert!(x.runner.state().stack.is_empty());
+    assert!(matches!(
+        x.runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 502.3 + CR 500.4 + CR 608.2c + CR 611.2a: each creature Triton Tactics
+/// tapped doesn't untap during its controller's next untap step and untaps
+/// during the one after; the spell's targets are not restricted. P0 taps the
+/// target B with Icy Manipulator after combat: B untaps in P1's next untap step.
+/// A and A3 stay tapped through P0's next untap step, while the unblocked,
+/// non-vigilant A4 untaps there, and both untap in P0's untap step after that.
+#[test]
+fn triton_tactics_tapped_creatures_skip_one_untap_step() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut x = triton_blocked_board(db);
+    x.runner
+        .cast(x.triton)
+        .target_objects(&[x.b, x.b3])
+        .resolve();
+    drain(&mut x.runner);
+    past_end_of_combat(&mut x.runner);
+    assert!(
+        tapped(&x.runner, x.a) && tapped(&x.runner, x.a3),
+        "reach: the delayed ability tapped A and A3"
+    );
+    assert!(tapped(&x.runner, x.a4), "reach: A4 tapped to attack");
+    x.runner
+        .act(GameAction::ActivateAbility {
+            source_id: x.forest,
+            ability_index: 0,
+            payment_mode: Default::default(),
+        })
+        .expect("produce mana in the postcombat main phase");
+    x.runner.activate(x.icy, 0).target_objects(&[x.b]).resolve();
+    drain(&mut x.runner);
+    assert!(tapped(&x.runner, x.b), "reach: Icy Manipulator tapped B");
+
+    let turn = x.runner.state().turn_number;
+    pass_until(&mut x.runner, "P1's next upkeep", |state| {
+        state.active_player == P1 && state.phase == Phase::Upkeep
+    });
+    assert!(
+        !tapped(&x.runner, x.b),
+        "the target B is not restricted: it untaps in P1's untap step"
+    );
+    pass_until(&mut x.runner, "P0's next upkeep", |state| {
+        state.active_player == P0 && state.phase == Phase::Upkeep && state.turn_number == turn + 2
+    });
+    assert!(
+        !tapped(&x.runner, x.a4),
+        "reach: P0's untap step ran and untapped A4"
+    );
+    assert!(
+        tapped(&x.runner, x.a),
+        "A doesn't untap during its controller's next untap step"
+    );
+    assert!(
+        tapped(&x.runner, x.a3),
+        "A3 doesn't untap during its controller's next untap step"
+    );
+    pass_until(&mut x.runner, "P0's following upkeep", |state| {
+        state.active_player == P0 && state.phase == Phase::Upkeep && state.turn_number == turn + 4
+    });
+    assert!(
+        !tapped(&x.runner, x.a) && !tapped(&x.runner, x.a3),
+        "the restriction ends after one untap step"
+    );
+    assert!(x.runner.state().stack.is_empty());
+    assert!(matches!(
+        x.runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 502.3 + CR 608.2c + CR 611.2a: the defender's use. P1 casts Triton Tactics
+/// on its blocker B. P0's attackers T and T2 (Alaborn Troopers, no vigilance) are
+/// already tapped from attacking. At end of combat T, blocked by B, is tapped again
+/// and doesn't untap during P0's next untap step; P1's own untap step before it
+/// does not use up the restriction. T2, blocked only by the non-target B2, untaps
+/// there. T untaps in P0's untap step after that.
+#[test]
+fn triton_tactics_cast_by_the_defender_restricts_the_attackers_controller() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let t = s.add_real_card(P0, "Alaborn Trooper", Zone::Battlefield, db);
+    let t2 = s.add_real_card(P0, "Alaborn Trooper", Zone::Battlefield, db);
+    let b = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let b2 = s.add_real_card(P1, "Armored Whirl Turtle", Zone::Battlefield, db);
+    let triton = free_spell(&mut s, P1, "Triton Tactics", TRITON);
+    s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let mut runner = s.build();
+    attack_block(&mut runner, &[t, t2], &[(b, t), (b2, t2)]);
+    assert!(
+        tapped(&runner, t) && tapped(&runner, t2),
+        "reach: the attackers tapped to attack"
+    );
+    pass_priority_to(&mut runner, P1);
+    runner.cast(triton).target_objects(&[b]).resolve();
+    drain(&mut runner);
+    assert_eq!(
+        zone(&runner, triton),
+        Zone::Graveyard,
+        "reach: cast resolved"
+    );
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    past_end_of_combat(&mut runner);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "reach: it fired"
+    );
+    assert!(tapped(&runner, t) && tapped(&runner, t2));
+
+    let turn = runner.state().turn_number;
+    pass_until(&mut runner, "P1's next upkeep", |state| {
+        state.active_player == P1 && state.phase == Phase::Upkeep
+    });
+    pass_until(&mut runner, "P0's next upkeep", |state| {
+        state.active_player == P0 && state.phase == Phase::Upkeep && state.turn_number == turn + 2
+    });
+    assert!(
+        !tapped(&runner, t2),
+        "reach: P0's untap step ran and untapped T2"
+    );
+    assert!(
+        tapped(&runner, t),
+        "T doesn't untap during its controller's next untap step"
+    );
+    pass_until(&mut runner, "P0's following upkeep", |state| {
+        state.active_player == P0 && state.phase == Phase::Upkeep && state.turn_number == turn + 4
+    });
+    assert!(
+        !tapped(&runner, t),
+        "the restriction ends after one untap step"
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 115.6 + CR 608.2c: Triton Tactics cast with zero targets leaves a delayed
+/// ability with no referent, which taps nothing. No row of the board is tapped
+/// by it: A, which a target-bound cast would tap (the targets row above), stays
+/// untapped. The delayed ability carries no object target, so no event-context
+/// fallback supplies one.
+#[test]
+fn triton_tactics_with_no_targets_taps_nothing() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut x = triton_blocked_board(db);
+    x.runner.cast(x.triton).target_objects(&[]).resolve();
+    drain(&mut x.runner);
+    assert_eq!(
+        x.runner.state().delayed_triggers.len(),
+        1,
+        "reach: the delayed ability exists"
+    );
+    assert!(
+        !x.runner.state().delayed_triggers[0]
+            .ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_))),
+        "no referent: {:?}",
+        x.runner.state().delayed_triggers[0].ability.targets
+    );
+    past_end_of_combat(&mut x.runner);
+    assert!(
+        x.runner.state().delayed_triggers.is_empty(),
+        "reach: it fired"
+    );
+    assert!(!tapped(&x.runner, x.a), "nothing is tapped");
+    assert!(!tapped(&x.runner, x.a3), "nothing is tapped");
+    assert!(x.runner.state().stack.is_empty());
+    assert!(matches!(
+        x.runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 608.2i (Gaze of the Gorgon's ruling): a target that left the battlefield
+/// after Triton Tactics resolved still answers from its history. Murder on B
+/// before end of combat: A, which B blocked, is still tapped.
+#[test]
+fn triton_tactics_reads_a_target_that_left() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut x = triton_blocked_board(db);
+    x.runner
+        .cast(x.triton)
+        .target_objects(&[x.b, x.b3])
+        .resolve();
+    drain(&mut x.runner);
+    x.runner.cast(x.murder).target_objects(&[x.b]).resolve();
+    drain(&mut x.runner);
+    assert_eq!(
+        zone(&x.runner, x.b),
+        Zone::Graveyard,
+        "reach: the target left"
+    );
+    past_end_of_combat(&mut x.runner);
+    assert!(tapped(&x.runner, x.a), "the departed target B blocked A");
+    assert!(!tapped(&x.runner, x.a2));
+    assert!(x.runner.state().stack.is_empty());
+    assert!(matches!(
+        x.runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 608.2b + CR 400.7: B3 left the battlefield before Triton Tactics resolved.
+/// It is an illegal target, recorded as such, and the object in the graveyard is
+/// a new object that never blocked. A, blocked by the legal target B, is tapped;
+/// A3 is not. Removing the creation-illegality reader alone leaves this row's
+/// behavior green through CR 400.7; the hexproof row below discriminates it.
+#[test]
+fn triton_tactics_ignores_a_target_illegal_on_resolution() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut x = triton_blocked_board(db);
+    x.runner
+        .cast(x.triton)
+        .target_objects(&[x.b, x.b3])
+        .commit();
+    let blocked_as = x.runner.state().objects[&x.b3].incarnation;
+    x.runner.cast(x.murder).target_objects(&[x.b3]).resolve();
+    drain(&mut x.runner);
+    assert_eq!(
+        zone(&x.runner, x.b3),
+        Zone::Graveyard,
+        "reach: B3 left before Triton resolved"
+    );
+    assert_eq!(
+        x.runner.state().delayed_triggers.len(),
+        1,
+        "reach: Triton resolved for B"
+    );
+    let delayed = &x.runner.state().delayed_triggers[0].ability;
+    assert_eq!(
+        delayed.targets,
+        vec![TargetRef::Object(x.b), TargetRef::Object(x.b3)],
+        "the snapshot preserves announced membership and order"
+    );
+    assert!(
+        delayed
+            .context
+            .creation_illegal_referents
+            .contains(&ObjectIncarnationRef::from_object(
+                &x.runner.state().objects[&x.b3]
+            )),
+        "CR 608.2b: the illegal target is recorded"
+    );
+    assert!(
+        !delayed
+            .target_incarnations
+            .iter()
+            .any(|pin| pin.object_id == x.b3 && pin.incarnation == blocked_as),
+        "no referent names the B3 that blocked"
+    );
+    past_end_of_combat(&mut x.runner);
+    assert!(
+        tapped(&x.runner, x.a),
+        "reach: the legal target B blocked A"
+    );
+    assert!(
+        !tapped(&x.runner, x.a3),
+        "the illegal target B3 answers nothing"
+    );
+    assert!(x.runner.state().stack.is_empty());
+    assert!(matches!(
+        x.runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 608.2b + CR 702.11b: P1 gives B3 hexproof in response, so B3 is an
+/// illegal target when Triton Tactics resolves, though it remains the same
+/// object. The delayed ability keeps B3 in its referent list but determines no
+/// history from it: A (blocked by B) is tapped, A3 (blocked by B3) is not.
+/// Both the in-memory and current trusted-persistence continuations retain the
+/// exact creation-time record and declared-block history before firing.
+/// A3 is a 1/4 Affa Protector: it survives the defended Turtle's two damage
+/// (CR 704.5g), keeping the forbidden tap observable.
+#[test]
+fn triton_tactics_ignores_a_target_given_hexproof_in_response() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    for persisted in [false, true] {
+        let mut x = triton_blocked_board(db);
+        // Both targets start tapped, so "Untap those creatures" is observable.
+        for id in [x.b, x.b3] {
+            x.runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        }
+        x.runner
+            .cast(x.triton)
+            .target_objects(&[x.b, x.b3])
+            .commit();
+        let blocked_as = x.runner.state().objects[&x.b3].incarnation;
+        assert!(
+            !x.runner.state().stack.is_empty(),
+            "Triton awaits resolution"
+        );
+        assert!(matches!(
+            x.runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        x.runner
+            .act(GameAction::PassPriority)
+            .expect("offer P1 the response window");
+        assert!(!x.runner.state().stack.is_empty());
+        assert!(matches!(
+            x.runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        x.runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|player| player.id == P1)
+            .expect("P1")
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+        x.runner.cast(x.defense).target_objects(&[x.b3]).resolve();
+        drain(&mut x.runner);
+        let state = x.runner.state();
+        assert!(state.stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&x.b3].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&x.b3].incarnation, blocked_as);
+        assert!(state.objects[&x.b3].has_keyword(&Keyword::Hexproof));
+        assert_eq!(state.objects[&x.b].toughness, Some(8), "Triton affected B");
+        assert_eq!(
+            state.objects[&x.b3].toughness,
+            Some(7),
+            "only Defense affected B3"
+        );
+        assert!(
+            !state.objects[&x.b].tapped,
+            "Triton untapped the legal target B"
+        );
+        assert!(
+            state.objects[&x.b3].tapped,
+            "CR 608.2b: Triton does not untap the illegal target B3"
+        );
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "Triton created its delayed ability"
+        );
+        let expected_illegal = vec![ObjectIncarnationRef::of(x.b3, blocked_as)];
+        let delayed = &state.delayed_triggers[0].ability;
+        assert_eq!(
+            delayed.targets,
+            vec![TargetRef::Object(x.b), TargetRef::Object(x.b3)]
+        );
+        assert_eq!(
+            delayed.target_incarnations,
+            vec![
+                ObjectIncarnationRef::from_object(&state.objects[&x.b]),
+                ObjectIncarnationRef::of(x.b3, blocked_as),
+            ]
+        );
+        assert_eq!(delayed.context.creation_illegal_referents, expected_illegal);
+        let b_to_a = history_pair(state, x.b, x.a);
+        let b3_to_a3 = history_pair(state, x.b3, x.a3);
+        assert!(state.creature_blocked_attackers_this_turn.contains(&b_to_a));
+        assert!(state
+            .creature_blocked_attackers_this_turn
+            .contains(&b3_to_a3));
+        let combat = state.combat.as_ref().expect("combat before EndCombat");
+        assert!(combat
+            .creature_blocked_attackers_this_combat
+            .contains(&b_to_a));
+        assert!(combat
+            .creature_blocked_attackers_this_combat
+            .contains(&b3_to_a3));
+        if persisted {
+            let turn_history = state.creature_blocked_attackers_this_turn.clone();
+            let combat_history = combat.creature_blocked_attackers_this_combat.clone();
+            let encoded = serde_json::to_string(&PersistedGameState::capture(state.clone()))
+                .expect("capture the current trusted envelope");
+            let envelope: serde_json::Value =
+                serde_json::from_str(&encoded).expect("inspect envelope");
+            assert!(
+                envelope.get("state").is_some(),
+                "retain the trusted envelope"
+            );
+            assert_eq!(
+                envelope["block_history_format"], 1,
+                "retain declared-block provenance"
+            );
+            let decoded: PersistedGameState =
+                serde_json::from_str(&encoded).expect("decode trusted save");
+            assert_eq!(
+                serde_json::to_value(&decoded).expect("encode decoded envelope")
+                    ["block_history_format"],
+                1
+            );
+            let restored = decoded
+                .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                .expect("prepare trusted restore")
+                .finalize_after_rehydration(|_| Ok(()))
+                .expect("finalize trusted restore");
+            assert_eq!(restored.delayed_triggers.len(), 1);
+            let restored_delayed = &restored.delayed_triggers[0].ability;
+            assert_eq!(
+                restored_delayed.context.creation_illegal_referents,
+                expected_illegal
+            );
+            assert_eq!(restored_delayed.targets, delayed.targets);
+            assert_eq!(
+                restored_delayed.target_incarnations,
+                delayed.target_incarnations
+            );
+            assert_eq!(restored.objects[&x.b3].zone, Zone::Battlefield);
+            assert_eq!(restored.objects[&x.b3].incarnation, blocked_as);
+            assert!(restored.objects[&x.b3].has_keyword(&Keyword::Hexproof));
+            assert_eq!(restored.objects[&x.b].toughness, Some(8));
+            assert_eq!(restored.objects[&x.b3].toughness, Some(7));
+            assert_eq!(restored.creature_blocked_attackers_this_turn, turn_history);
+            assert_eq!(
+                restored
+                    .combat
+                    .as_ref()
+                    .expect("restored combat")
+                    .creature_blocked_attackers_this_combat,
+                combat_history
+            );
+            assert!(restored.stack.is_empty());
+            assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+            x.runner = GameRunner::from_state(restored);
+        }
+        past_end_of_combat(&mut x.runner);
+        assert_eq!(
+            zone(&x.runner, x.a3),
+            Zone::Battlefield,
+            "reach: A3 survived combat; persisted={persisted}"
+        );
+        assert!(
+            tapped(&x.runner, x.a),
+            "legal B blocked A; persisted={persisted}"
+        );
+        assert!(
+            !tapped(&x.runner, x.a3),
+            "illegal B3 supplies no history; persisted={persisted}"
+        );
+        assert!(
+            !tapped(&x.runner, x.a2),
+            "non-target B2; persisted={persisted}"
+        );
+        assert!(
+            x.runner.state().delayed_triggers.is_empty(),
+            "the delayed ability was consumed"
+        );
+        assert!(x.runner.state().stack.is_empty());
+        assert!(matches!(
+            x.runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 509.4 (Ride Down's ruling): a creature put onto the battlefield blocking
+/// never "blocked". A and A2 attack and B2 blocks A2; P1's Mirror Match puts a
+/// token onto the battlefield blocking each attacker; Triton Tactics targets the
+/// token blocking A and B2. A2 (B2's declared block) is tapped; A is not.
+/// P0 destroys the token blocking A2 before damage, so each attacker has one blocker.
+#[test]
+fn triton_tactics_ignores_a_token_put_onto_the_battlefield_blocking() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut x = triton_board(db);
+    attack_block(&mut x.runner, &[x.a, x.a2], &[(x.b2, x.a2)]);
+    pass_priority_to(&mut x.runner, P1);
+    x.runner.cast(x.mirror).resolve();
+    drain(&mut x.runner);
+    let token = mirror_token(&x.runner, x.a);
+    assert_ne!(token, x.b2, "reach: the token blocks A");
+    x.runner
+        .cast(x.triton)
+        .target_objects(&[token, x.b2])
+        .resolve();
+    drain(&mut x.runner);
+    let non_target_token = mirror_token(&x.runner, x.a2);
+    assert_ne!(
+        non_target_token, token,
+        "A2 has a different, non-target token"
+    );
+    x.runner
+        .cast(x.murder)
+        .target_objects(&[non_target_token])
+        .resolve();
+    drain(&mut x.runner);
+    // CR 704.5d: after Murder, the token also ceases to exist as a state-based action.
+    assert!(x
+        .runner
+        .state()
+        .objects
+        .get(&non_target_token)
+        .is_none_or(|object| object.zone != Zone::Battlefield));
+    assert_eq!(
+        x.runner
+            .state()
+            .combat
+            .as_ref()
+            .expect("combat")
+            .blocker_assignments[&x.a2],
+        vec![x.b2],
+        "reach: A2 has exactly its declared blocker before damage"
+    );
+    // Mirror Match's own end-of-combat exile is a second delayed ability, so the
+    // reach for this one is A2's tap below.
+    past_end_of_combat(&mut x.runner);
+    assert!(tapped(&x.runner, x.a2), "B2 was declared blocking A2");
+    assert!(
+        !tapped(&x.runner, x.a),
+        "the token put onto the battlefield blocking A never blocked"
+    );
+    assert!(x.runner.state().stack.is_empty());
+    assert!(matches!(
+        x.runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 400.7 + CR 603.7c + CR 608.2i: each target answers by its own announced
+/// incarnation. P1 blinks the target B3 after Triton Tactics resolved: the
+/// announced B3 blocked A3, so A3 is still tapped; a per-member lookup of the live
+/// (new) B3 would find no block.
+#[test]
+fn triton_tactics_reads_each_targets_announced_incarnation() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut x = triton_blocked_board(db);
+    x.runner
+        .cast(x.triton)
+        .target_objects(&[x.b, x.b3])
+        .resolve();
+    drain(&mut x.runner);
+    let before = x.runner.state().objects[&x.b3].incarnation;
+    pass_priority_to(&mut x.runner, P1);
+    x.runner
+        .cast(x.ephemerate)
+        .target_objects(&[x.b3])
+        .resolve();
+    drain(&mut x.runner);
+    assert_eq!(zone(&x.runner, x.b3), Zone::Battlefield, "reach");
+    assert_ne!(
+        x.runner.state().objects[&x.b3].incarnation,
+        before,
+        "reach: B3 is a new object"
+    );
+    past_end_of_combat(&mut x.runner);
+    assert!(tapped(&x.runner, x.a3), "the announced B3 blocked A3");
+    assert!(tapped(&x.runner, x.a), "B blocked A");
+    assert!(x.runner.state().stack.is_empty());
+    assert!(matches!(
+        x.runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// Synthetic: Ride Down with its grant spelled "each creature that was blocked by a

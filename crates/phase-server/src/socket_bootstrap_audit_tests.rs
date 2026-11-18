@@ -220,7 +220,7 @@ fn full_spectator_bootstrap_precedes_a_concurrent_action() {
                 main_deck: vec!["Network Test Land".to_string(); 60],
                 ..Default::default()
             };
-            let deck = crate::resolve_deck(&app.db, &names).unwrap();
+            let deck = crate::resolve_deck(&app.db, &app.combos, &names).unwrap();
             let (_, _, key, _) = start_draft_match_with_deck(
                 &app,
                 deck,

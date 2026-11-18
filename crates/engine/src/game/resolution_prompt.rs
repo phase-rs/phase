@@ -89,7 +89,7 @@ pub(crate) fn probe_resolution(
         return ResolutionProbe::Prompted;
     }
     // The SAME re-entrancy guard `apply_confirmed_shortcut` holds across its own
-    // clone-and-drive. It suppresses ring accumulation and shortcut detection
+    // clone-and-drive. It suppresses play-trace recording and shortcut detection
     // inside the probe, which is exactly the recursion hazard a speculative
     // resolve would otherwise open.
     let _probe = SimulationProbeGuard::enter();
@@ -667,9 +667,11 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
         entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -791,7 +793,7 @@ mod tests {
     use crate::types::game_state::DistributionUnit;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::{CounterPlacement, DrawEventStage};
+    use crate::types::proposed_event::{CounterCause, CounterPlacement, DrawEventStage};
     use crate::types::zones::Zone;
     use std::collections::BTreeMap;
 
@@ -1581,6 +1583,7 @@ mod tests {
                         actor: PlayerId(0),
                         object_id: victim,
                         counter_type: CounterType::Plus1Plus1,
+                        cause: CounterCause::Other,
                     },
                     count,
                     applied: Default::default(),

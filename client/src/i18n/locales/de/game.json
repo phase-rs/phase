@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} von {{total}} Wiederholungen verteilt.",
     "evenSplit": "Auf die gleichmäßige Verteilung zurücksetzen",
     "customDistribution": "Eigene Verteilung — die Engine hat für diese Aufteilung keine Vorschau berechnet.",
-    "announceTitle": "Wähle das Ziel, das jede Wiederholung ansagt:",
-    "announce": "Ansagen",
-    "announceAria": "{{subject}} ansagen",
     "mayTitle": "Optionale Fähigkeit {{group}} — diese Wahl in jeder Iteration wiederholen?",
     "mayTake": "Nutzen",
     "mayDecline": "Ablehnen",
     "mayTakeAria": "Optionale Fähigkeit {{group}} nutzen",
     "mayDeclineAria": "Optionale Fähigkeit {{group}} ablehnen",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Vorgeschlagene Deklaration:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Ersatzeffekt von {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — in jeder Iteration genutzt",
       "decline": "{{subject}} — in jeder Iteration abgelehnt"
@@ -164,6 +161,7 @@
     "flip": "Umdrehen",
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
+    "reportNotSent": "Nicht gesendet",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -1815,6 +1813,10 @@
       "title": "Kopien ordnen",
       "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
     },
+    "memberOrder": {
+      "title": "Karten sortieren",
+      "subtitle": "Wähle, welche Karte als Nächstes behandelt wird"
+    },
     "collectEvidence": {
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"
@@ -2137,6 +2139,10 @@
   "giftRecipient": {
     "title": "Geschenk-Empfänger wählen",
     "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
+  },
+  "costRecipient": {
+    "title": "Gegner wählen",
+    "subtitle": "Wähle den Gegner für diese Kosten: {{cost}}."
   },
   "entryController": {
     "title": "Kontrolleur beim Eintreten wählen",
@@ -2492,6 +2498,8 @@
       "zoneHand": "deiner Hand",
       "discard": "Wirf {{count}} {{cards}} ab",
       "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil",
+      "haveOpponentGainLife": "Lass einen Gegner {{amount}} Lebenspunkte dazugewinnen",
+      "haveEachOtherPlayerGainLife": "Lass jeden anderen Spieler {{amount}} Lebenspunkte dazugewinnen",
       "reveal": "Zeige {{count}} {{cards}} aus {{zone}} vor"
     }
   },
@@ -2548,7 +2556,7 @@
     "appliedLast": "Zuletzt angewendet — dieser gilt",
     "resultLabel": "Ergebnis: {{outcome}}",
     "confirmOrder": "Reihenfolge bestätigen",
-    "dragHint": "Zum Umsortieren ziehen oder die Pfeile benutzen.",
+    "dragHint": "Zum Umsortieren am Griff <grip>⠿</grip> ziehen oder die Pfeile benutzen.",
     "chooseSubtitle": "Wähle, welcher Ersatzeffekt angewendet wird.",
     "candidateFallback": "Ersatzeffekt {{number}}",
     "orderSubtitleComposing": "Diese Effekte ändern alle, wie dieses Ereignis geschieht. Ziehe, um die Reihenfolge festzulegen — jeder wird angewendet, die Reihenfolge ändert das Ergebnis (CR 616.1).",
@@ -2557,6 +2565,7 @@
     "composesNote": "Jeder Effekt wird angewendet — die Reihenfolge ändert ihre Kombination.",
     "moveUpNamed": "{{name}} nach vorne verschieben",
     "moveDownNamed": "{{name}} nach hinten verschieben",
+    "dragHandleNamed": "{{name}} zum Umsortieren ziehen",
     "positionAnnounce": "Position {{position}} von {{total}}"
   },
   "retargetChoice": {
@@ -2682,6 +2691,20 @@
     "EndCombat": "Kampfende",
     "PostCombatMain": "Hauptphase 2",
     "End": "Endschritt",
+    "Cleanup": "Aufräumen"
+  },
+  "phaseShortName": {
+    "Untap": "Enttappen",
+    "Upkeep": "Versorgung",
+    "Draw": "Ziehen",
+    "PreCombatMain": "Haupt 1",
+    "BeginCombat": "Kampf",
+    "DeclareAttackers": "Angreifer",
+    "DeclareBlockers": "Blocker",
+    "CombatDamage": "Schaden",
+    "EndCombat": "Kampfende",
+    "PostCombatMain": "Haupt 2",
+    "End": "Ende",
     "Cleanup": "Aufräumen"
   },
   "counterMoveDistribution": {
