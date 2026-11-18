@@ -104,10 +104,13 @@ impl ComposedDeclaration {
     /// They do when there is one line. Otherwise the engine's candidates
     /// decide, with one addition. They hold the empty declaration and each
     /// single pair, every one completed to a legal declaration, so more than
-    /// one candidate is a choice. One candidate is a forced move unless a line
-    /// outside it joins it in a declaration the engine accepts as chosen: a
-    /// creature joining a block a requirement forces is never a candidate of
-    /// its own.
+    /// one candidate is a choice. One candidate is a forced move unless
+    /// changing one creature's assignment in it, by a line it does not hold,
+    /// makes another declaration the engine accepts as chosen: a creature
+    /// joining a block a requirement forces, or one of two creatures that must
+    /// block moving to the other attacker, is never a candidate of its own.
+    /// A declaration two or more such changes away is not looked for, as the
+    /// candidates never sample it.
     pub(crate) fn is_forced(&self, state: &GameState, candidates: &[CandidateAction]) -> bool {
         if self.lines.len() < 2 {
             return true;
@@ -115,7 +118,7 @@ impl ComposedDeclaration {
         let [only] = candidates else {
             return false;
         };
-        !self.pairs.any_joins(state, &only.action)
+        !self.pairs.any_one_creature_change(state, &only.action)
     }
 
     /// The engine-authored instruction stated outside the data block: the
@@ -170,14 +173,33 @@ impl ComposedDeclaration {
     }
 }
 
-/// `declared` with each pair of `pairs` it does not hold added to it, one
-/// declaration per pair.
-fn joined<Pair: Copy + PartialEq>(pairs: &[Pair], declared: &[Pair]) -> Vec<Vec<Pair>> {
-    pairs
-        .iter()
-        .filter(|pair| !declared.contains(pair))
-        .map(|&pair| declared.iter().copied().chain([pair]).collect())
-        .collect()
+/// The declarations a change to one creature's assignment makes of
+/// `declared`: for each pair of `pairs` it does not hold, that pair added, and,
+/// when the pair's creature is already declared, that pair in place of the
+/// creature's own.
+fn one_creature_changes<Target: Copy + PartialEq>(
+    pairs: &[(ObjectId, Target)],
+    declared: &[(ObjectId, Target)],
+) -> Vec<Vec<(ObjectId, Target)>> {
+    let mut changes = Vec::new();
+    for &pair in pairs.iter().filter(|pair| !declared.contains(pair)) {
+        let (creature, _) = pair;
+        changes.push(declared.iter().copied().chain([pair]).collect());
+        if declared
+            .iter()
+            .any(|(declared_creature, _)| *declared_creature == creature)
+        {
+            changes.push(
+                declared
+                    .iter()
+                    .copied()
+                    .filter(|(declared_creature, _)| *declared_creature != creature)
+                    .chain([pair])
+                    .collect(),
+            );
+        }
+    }
+    changes
 }
 
 /// The pairs one pending combat declaration is composed from, in the order
@@ -291,21 +313,21 @@ impl DeclarationPairs {
         }
     }
 
-    /// Whether a pair `declared` does not hold joins it in a declaration the
-    /// engine accepts as chosen. Every such declaration is completed in one
-    /// batch, as the engine completes its own candidates.
-    fn any_joins(&self, state: &GameState, declared: &GameAction) -> bool {
+    /// Whether changing one creature's assignment in `declared`, by a line it
+    /// does not hold, makes a declaration the engine accepts as chosen. Every
+    /// such declaration is completed in one batch, as the engine completes
+    /// its own candidates.
+    fn any_one_creature_change(&self, state: &GameState, declared: &GameAction) -> bool {
         match (self, declared) {
             (Self::Attacks { attacks, .. }, GameAction::DeclareAttackers { attacks: base, .. }) => {
-                let proposals = joined(attacks, base);
+                let proposals = one_creature_changes(attacks, base);
                 complete_attacker_proposals(state, &proposals, CombatTaxPosture::Refuse)
                     .iter()
                     .zip(&proposals)
                     .any(|(completed, proposal)| {
                         matches!(
                             completed,
-                            GameAction::DeclareAttackers { attacks: kept, bands }
-                                if kept == proposal && bands.is_empty()
+                            GameAction::DeclareAttackers { attacks: kept, .. } if kept == proposal
                         )
                     })
             }
@@ -315,7 +337,7 @@ impl DeclarationPairs {
                 },
                 GameAction::DeclareBlockers { assignments: base },
             ) => {
-                let proposals = joined(blocks, base);
+                let proposals = one_creature_changes(blocks, base);
                 complete_blocker_proposals(state, *defender, &proposals, CombatTaxPosture::Refuse)
                     .iter()
                     .zip(&proposals)
@@ -326,7 +348,7 @@ impl DeclarationPairs {
                         )
                     })
             }
-            // A candidate of another kind joins no pair of this declaration.
+            // A candidate of another kind is no declaration of these pairs.
             _ => false,
         }
     }
@@ -1114,9 +1136,8 @@ mod tests {
     }
 
     /// A block beside one a requirement forces: the engine's candidates hold
-    /// only the Razorgrass Screen's block, which used to make the decision
-    /// look forced, but the Gray Ogre may join it and the two kill the Hill
-    /// Giant.
+    /// only the Razorgrass Screen's block, but the Gray Ogre may join it and
+    /// the two kill the Hill Giant.
     #[test]
     fn a_block_beside_a_required_block_is_offered() {
         let mut scenario = GameScenario::new();
@@ -1155,6 +1176,61 @@ mod tests {
         let mut both = vec![screen, ogre];
         both.sort_unstable();
         assert_eq!(blockers_of(&runner, giant), both);
+    }
+
+    /// CR 509.1c: two Razorgrass Screens must each block if able. The engine's
+    /// one candidate puts both on the Hill Giant, but each attacker blocked by
+    /// one Screen obeys both requirements too, so the declaration is offered,
+    /// and the split block, which is no candidate, is declared.
+    #[test]
+    fn two_creatures_that_must_block_may_split_between_attackers() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let screens = [
+            scenario
+                .add_creature(P1, "Razorgrass Screen", 2, 1)
+                .from_oracle_text_with_keywords(&["Defender"], RAZORGRASS_SCREEN)
+                .id(),
+            scenario
+                .add_creature(P1, "Razorgrass Screen", 2, 1)
+                .from_oracle_text_with_keywords(&["Defender"], RAZORGRASS_SCREEN)
+                .id(),
+        ];
+        let mut runner = scenario.build();
+        attack_player_one(&mut runner, &[giant, bears]);
+
+        let (contract, request) = decision(&runner, P1);
+        assert_eq!(contract.candidates.len(), 1, "{:?}", contract.candidates);
+        let declared = answer(
+            &runner,
+            &contract,
+            &request,
+            &[
+                option_number(
+                    &request,
+                    "Razorgrass Screen (controlled by You) #1 blocks Hill Giant (controlled by \
+                     Player 0); it must block if able",
+                ),
+                option_number(
+                    &request,
+                    "Razorgrass Screen (controlled by You) #2 blocks Grizzly Bears (controlled \
+                     by Player 0); it must block if able",
+                ),
+            ],
+        )
+        .expect("one Screen on each attacker obeys both requirements");
+        assert!(!offered_as_candidate(&contract, &declared));
+
+        apply(&mut runner, &contract, declared);
+        let mut blocking = blockers_of(&runner, giant);
+        assert_eq!(blocking.len(), 1, "one Screen blocks the Giant");
+        blocking.extend(blockers_of(&runner, bears));
+        blocking.sort_unstable();
+        let mut both = screens.to_vec();
+        both.sort_unstable();
+        assert_eq!(blocking, both, "and the other blocks the Bears");
     }
 
     /// Two attackers and two blockers that read alike on the board are
@@ -1255,6 +1331,9 @@ mod tests {
         // Reach guard: the engine's prompt lists the block, so the lines are
         // the empty declaration and that block.
         assert_eq!(valid_block_targets(&runner)[&bears], vec![brute]);
+        let declaration = ComposedDeclaration::pending(runner.state(), runner.state(), P1)
+            .expect("a declaration");
+        assert_eq!(declaration.lines().len(), 2, "{:?}", declaration.lines());
         assert!(is_forced_move(&runner, P1));
     }
 
@@ -1273,6 +1352,9 @@ mod tests {
         attack_player_one(&mut runner, &[giant]);
 
         assert_eq!(valid_block_targets(&runner)[&flunkies], vec![giant]);
+        let declaration = ComposedDeclaration::pending(runner.state(), runner.state(), P1)
+            .expect("a declaration");
+        assert_eq!(declaration.lines().len(), 2, "{:?}", declaration.lines());
         assert!(is_forced_move(&runner, P1));
     }
 
