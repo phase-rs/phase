@@ -10089,6 +10089,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &AbilityUsageKey
 mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::types::events::GameEvent;
+    use crate::types::proposed_event::CounterCause;
 
     /// The window enumerator over `state.stack` alone.
     fn stack_pin_slots(
@@ -23406,6 +23407,7 @@ mod tests {
                     actor: PlayerId(0),
                     object_id: ObjectId(CHURN_SRC),
                     counter_type: crate::types::counter::CounterType::Loyalty,
+                    cause: CounterCause::Other,
                 },
                 count: 0,
                 applied: Default::default(),
