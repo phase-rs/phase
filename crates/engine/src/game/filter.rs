@@ -10974,15 +10974,7 @@ fn matches_filter_prop(
         // journal lookup also rejects coordinates left over from earlier turns.
         FilterProp::CastThisTurn { caster } => obj.cast_occurrence.is_some_and(|occurrence| {
             owned_axis_admits(state, source, caster, occurrence.caster)
-                && usize::try_from(occurrence.turn_journal_index)
-                    .ok()
-                    .and_then(|index| {
-                        state
-                            .spells_cast_this_turn_by_player
-                            .get(&occurrence.caster)
-                            .and_then(|records| records.get(index))
-                    })
-                    .is_some_and(|record| record.spell_object_id == Some(object_id))
+                && crate::game::ledger::cast_occurrence_is_current(state, occurrence, object_id)
         }),
         // CR 508.1b: Attacking creatures may be scoped by defending player
         // relation ("attacking", "attacking you", "attacking your opponents").

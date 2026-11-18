@@ -104186,7 +104186,26 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
 // by Domri, Anarch of Bolas, Determined, and Veil of Summer.
 #[test]
 fn counter_prohibition_spell_subject_grammar() {
-    for qualifier in ["", "Creature ", "Green ", "Green creature ", "Artifact "] {
+    let rows: [(&str, Vec<TypeFilter>, Vec<FilterProp>); 5] = [
+        ("", vec![], vec![]),
+        ("Creature ", vec![TypeFilter::Creature], vec![]),
+        (
+            "Green ",
+            vec![],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        (
+            "Green creature ",
+            vec![TypeFilter::Creature],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        ("Artifact ", vec![TypeFilter::Artifact], vec![]),
+    ];
+    for (qualifier, type_filters, qualifier_props) in rows {
         for other in ["", "Other "] {
             for cast in [false, true] {
                 let relative = if cast { "cast this turn" } else { "control" };
@@ -104209,21 +104228,39 @@ fn counter_prohibition_spell_subject_grammar() {
                     target.is_none(),
                     "broadcast subjects do not declare a target"
                 );
-                let affected = static_abilities[0].affected.as_ref().unwrap();
-                let rendered = format!("{affected:?}");
-                assert!(rendered.contains("StackSpell"), "{text}: {affected:?}");
-                assert_eq!(rendered.contains("CastThisTurn"), cast, "{text}");
-                assert_eq!(rendered.contains("Another"), !other.is_empty(), "{text}");
-                assert!(
-                    static_abilities
-                        .iter()
-                        .any(|sd| sd.modifications.iter().any(|m| matches!(
-                            m,
-                            ContinuousModification::AddStaticMode {
-                                mode: StaticMode::CantBeCountered
-                            }
-                        ))),
-                    "{text}: {def:#?}"
+                // CR 109.5 + CR 601.2i: "you control" reads the current
+                // controller; "you cast this turn" reads the cast journal.
+                let mut properties = qualifier_props.clone();
+                if !other.is_empty() {
+                    properties.push(FilterProp::Another);
+                }
+                if cast {
+                    properties.push(FilterProp::CastThisTurn {
+                        caster: ControllerRef::You,
+                    });
+                }
+                let expected = TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: type_filters.clone(),
+                            controller: (!cast).then_some(ControllerRef::You),
+                            properties,
+                        }),
+                    ],
+                };
+                assert_eq!(static_abilities.len(), 1, "{text}");
+                assert_eq!(
+                    static_abilities[0].affected.as_ref(),
+                    Some(&expected),
+                    "{text}"
+                );
+                assert_eq!(
+                    static_abilities[0].modifications,
+                    vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeCountered
+                    }],
+                    "{text}"
                 );
             }
         }
