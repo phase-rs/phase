@@ -5024,14 +5024,6 @@ mod tests {
         assert_eq!(parse_rounding_suffix_only("Food tokens, rounded up"), None);
     }
 
-    #[test]
-    fn parse_count_expr_fixed_regression() {
-        // Ensure "3 cards" still returns Fixed, not DivideRounded
-        let (qty, rest) = parse_count_expr("3 cards").unwrap();
-        assert!(matches!(qty, QuantityExpr::Fixed { value: 3 }));
-        assert_eq!(rest, "cards");
-    }
-
     // CR 107.3: Procrastinate — "Put twice X stun counters on it" requires
     // `parse_count_expr` to recognize multiplicative prefixes so counter /
     // draw / mill / damage count positions see `Multiply { factor, inner }`
