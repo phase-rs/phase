@@ -69,7 +69,8 @@ use super::object_map::ObjectMap;
 use super::phase::{Phase, PhaseStop, TurnDirection, TurnSegment};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
-    AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenBatch, TokenSpec,
+    AppliedReplacementKey, CopyTokenSpec, CounterCause, ProposedEvent, ReplacementId, TokenBatch,
+    TokenSpec,
 };
 use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
@@ -3519,6 +3520,47 @@ pub enum DamagePostLossStage {
     /// replacement owns the gain); the value survives only for in-flight
     /// records, never for a re-stash.
     LifelinkGain,
+}
+
+/// CR 120.3d + CR 702.2b + CR 702.15b + CR 120.1 + CR 510.2 + CR 616.1:
+/// post-counter work a wither/infect-to-creature leg still owes after its
+/// `-1/-1` counter placement paused on co-applicable counter replacements
+/// (Doubling Season + Constrictor modification forces a CR 616.1 order).
+/// Stashed by `apply_damage_after_replacement` on the pause. A non-combat leg
+/// drains through `drain_pending_damage_post_counter` once the counter event
+/// fully settles; a combat leg (`is_combat`) instead rides the combat batch's
+/// Phase C remnant — the combat resume consumes it core-only (the paused leg's
+/// lifelink share was already folded into `lifelink_by_source` at park time),
+/// so the post-replacement funnel never drains it directly. The snapshot
+/// carries source identity/incarnation (CR 400.7), controller (CR 702.15b),
+/// keywords, and `lifelink_bonus`; the pre-damage loyalty/defense below ride
+/// alongside it (CR 120.10 measures planeswalker/battle excess against the
+/// values *before* the damage was dealt, and loyalty removal already ran by
+/// park time). Creature excess still recomputes from post-counter state at
+/// resume (toughness/`damage_marked` are untouched by the counter placement),
+/// so the resumed record matches the never-paused path on both axes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDamagePostCounter {
+    /// CR 400.7: the damage context at pause time (source identity/incarnation,
+    /// controller, keywords, `excess_recipient`, `lifelink_bonus`).
+    pub ctx: DamageContextSnapshot,
+    /// The damaged creature.
+    pub target: TargetRef,
+    /// The post-replacement damage amount.
+    pub actual_amount: u32,
+    /// CR 120.10: the target's loyalty *before* the damage was dealt, captured
+    /// before loyalty removal (which runs ahead of the wither arm). `None`
+    /// when the target is not a planeswalker (or has no loyalty field).
+    #[serde(default)]
+    pub loyalty_before: Option<u32>,
+    /// CR 120.10: the target's defense *before* the damage was dealt, captured
+    /// before defense removal. `None` when the target is not a battle.
+    #[serde(default)]
+    pub defense_before: Option<u32>,
+    /// CR 510.2: a combat leg's post-counter work, owned by the batch remnant
+    /// rather than the shared drain (see the struct docs).
+    #[serde(default)]
+    pub is_combat: bool,
 }
 
 /// CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
@@ -7962,6 +8004,9 @@ pub struct PendingCounterMove {
     pub counter_type: CounterType,
     pub remove_count: u32,
     pub add_count: u32,
+    /// CR 614.16 provenance of the initiating placement; inert until gate.
+    #[serde(default)]
+    pub cause: CounterCause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9863,17 +9908,26 @@ pub enum PendingCounterAddition {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Player {
         actor: PlayerId,
         player_id: PlayerId,
         counter_kind: PlayerCounterKind,
         count: u32,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Energy {
         actor: PlayerId,
         player_id: PlayerId,
         count: u32,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
 }
 
@@ -28410,6 +28464,13 @@ declare_game_state! {
     /// post-replacement funnel once the loss fully settles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_damage_post_loss: Option<Box<PendingDamagePostLoss>>,
+    /// CR 120.3d + CR 120.1 + CR 616.1: post-counter work a wither/infect
+    /// leg still owes after its `-1/-1` placement paused. Boxed like its
+    /// `pending_damage_post_loss` sibling — populated only during the pause;
+    /// drained by `deal_damage::drain_pending_damage_post_counter` through the
+    /// post-replacement funnel (non-combat) or the combat remnant (combat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_damage_post_counter: Option<Box<PendingDamagePostCounter>>,
     /// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
     /// learn rummage) paused by a replacement choice. See [`PendingSingleDiscard`].
     ///
@@ -37928,6 +37989,7 @@ impl GameState {
             pending_hero_event: None,
             pending_horde_reveal: None,
             pending_damage_post_loss: None,
+            pending_damage_post_counter: None,
             pending_single_discard: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
@@ -41598,6 +41660,7 @@ impl GameState {
             // Pin-bearing damage/discard pauses drain before Priority is restored;
             // see their existing classification in `_gamestate_partition_is_total`.
             pending_damage_post_loss: _,
+            pending_damage_post_counter: _,
             pending_single_discard: _,
             // NOT THIS CLASS — no incarnation id, a stable `ObjectId`/`PlayerId` only, or an
             // unbounded ledger that grows every cycle, so ranking it cannot equalize a loop:
@@ -43636,6 +43699,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_hero_event: _,
         pending_horde_reveal: _,
         pending_damage_post_loss: _,
+        pending_damage_post_counter: _,
         // `pending_single_discard`: COMPARED (hand-written `impl PartialEq` conjunct) — the
         // single-card sibling of `pending_discard_batch`, `None` outside a pause, so COMPARING
         // it can never suppress a legitimate loop's detection.
@@ -44162,6 +44226,7 @@ impl PartialEq for GameState {
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_damage_post_loss == other.pending_damage_post_loss
+            && self.pending_damage_post_counter == other.pending_damage_post_counter
             && self.pending_hero_event == other.pending_hero_event
             && self.pending_single_discard == other.pending_single_discard
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
@@ -70662,5 +70727,83 @@ mod spell_cast_reversal_equality {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_counter_cause_backcompat_tests {
+    use super::*;
+    use crate::types::counter::CounterType;
+
+    /// P1-1 (pending tail): every `cause` on `PendingCounterAddition` ×3 and
+    /// `PendingCounterMove` defaults to fail-closed `Other`, and a pre-cause
+    /// save (no `cause` key) loads with `Other`.
+    #[test]
+    fn pending_counter_cause_default_and_backcompat() {
+        let additions = [
+            PendingCounterAddition::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                cause: CounterCause::Other,
+            },
+            PendingCounterAddition::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                count: 1,
+                cause: CounterCause::Other,
+            },
+            PendingCounterAddition::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                count: 1,
+                cause: CounterCause::Other,
+            },
+        ];
+        for addition in additions {
+            let mut wire = serde_json::to_value(&addition).unwrap();
+            let entry = wire.as_object_mut().expect("addition is an object");
+            let variant = entry.keys().next().cloned().expect("one variant");
+            let payload = entry.get_mut(&variant).expect("variant payload");
+            // Reach-guard: a fresh save actually carries the new field.
+            assert_eq!(payload["cause"], serde_json::json!("Other"));
+            payload
+                .as_object_mut()
+                .expect("variant payload is an object")
+                .remove("cause");
+            let legacy: PendingCounterAddition =
+                serde_json::from_value(wire).expect("legacy addition loads");
+            assert!(matches!(
+                legacy,
+                PendingCounterAddition::Object {
+                    cause: CounterCause::Other,
+                    ..
+                } | PendingCounterAddition::Player {
+                    cause: CounterCause::Other,
+                    ..
+                } | PendingCounterAddition::Energy {
+                    cause: CounterCause::Other,
+                    ..
+                }
+            ));
+        }
+        let queued = PendingCounterMove {
+            actor: PlayerId(0),
+            source_id: ObjectId(1),
+            destination_id: ObjectId(2),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            cause: CounterCause::Other,
+        };
+        let mut wire = serde_json::to_value(&queued).unwrap();
+        assert_eq!(wire["cause"], serde_json::json!("Other"));
+        wire.as_object_mut()
+            .expect("move is an object")
+            .remove("cause");
+        let legacy: PendingCounterMove = serde_json::from_value(wire).expect("legacy move loads");
+        assert_eq!(legacy.cause, CounterCause::Other);
     }
 }

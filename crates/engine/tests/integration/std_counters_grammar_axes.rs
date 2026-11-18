@@ -362,6 +362,8 @@ fn toph_additional_qualifier_parses_second_plus_one_counter() {
         land,
         CounterType::Plus1Plus1,
         1,
+        // The placement the parsed effect drives: a resolving effect.
+        engine::types::proposed_event::CounterCause::ResolvingEffect,
         &mut events,
     );
     assert_eq!(

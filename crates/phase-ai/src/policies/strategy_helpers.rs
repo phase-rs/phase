@@ -873,6 +873,8 @@ pub(crate) fn can_pay_ward_cost(
                 ctx.ai_player,
                 *counter_kind,
                 *count,
+                // CR 614.16: this preview projects a cost payment — fail closed.
+                engine::types::proposed_event::CounterCause::Other,
             ),
             engine::game::effects::player_counter::PlayerCounterAdditionPreview::Applied { .. }
                 | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Transformed { .. }

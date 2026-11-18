@@ -6,6 +6,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction};
+use crate::types::proposed_event::CounterCause;
 
 /// CR 701.37a: Monstrosity N.
 ///
@@ -45,6 +46,8 @@ pub fn resolve(
             source_id,
             CounterType::Plus1Plus1,
             n,
+            // CR 614.16: monstrosity's counters are placed by a resolving ability.
+            CounterCause::ResolvingEffect,
             events,
         )
     {

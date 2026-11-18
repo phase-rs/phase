@@ -22,6 +22,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 const SOUL_SCAR_ORACLE: &str = "If a source you control would deal noncombat damage to a \
 creature an opponent controls, put that many -1/-1 counters on that creature instead.";
@@ -1139,4 +1140,68 @@ fn optional_substitution_accept_puts_counters_and_decline_deals_damage() {
             assert_eq!(ogre_state.damage_marked, 3, "declined: the damage is dealt");
         }
     }
+}
+
+/// CR 614.1a + CR 614.16 second clause (V3): P1's Soul-Scar Mage replaces the
+/// bolt damage to P0's wall with -1/-1 counters, and P0's Doubling Season —
+/// recipient-scoped ("a permanent you control"), so it sees P0's wall —
+/// doubles the substitute to 6. The substitute executes as the replacement
+/// effect's own instruction through the `resolve_add` continuation (the
+/// `is_damage_substitution` path), which CR 614.16's "as modified by
+/// replacement effects" clause keeps eligible. Single candidate: no CR 616.1
+/// prompt opens.
+///
+/// Preservation pin: 6 both pre- and post-tag — a cause slip on the
+/// substitute (stamping `Other`) un-doubles it to 3 with no other row
+/// catching it. (No combat row: Soul-Scar's Oracle scopes to noncombat
+/// damage.)
+#[test]
+fn soul_scar_substitute_counters_are_doubled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    let wall = scenario.add_creature(P0, "High Wall", 0, 10).id();
+    let bolt = scenario.add_bolt_to_hand(P1);
+    scenario.with_mana_pool(P1, red_mana());
+
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P1);
+    let outcome = runner.cast(bolt).target_object(wall).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the cast must settle to priority with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after the cast resolves"
+    );
+    assert_eq!(
+        outcome.zone_of(bolt),
+        Zone::Graveyard,
+        "reach-guard: the bolt resolved to the graveyard"
+    );
+    // Reach-guard: the substitution observably ran (CR 614.6 — the damage
+    // event never happens), so only the count discriminates eligibility.
+    assert_eq!(
+        outcome.damage_marked(wall),
+        0,
+        "reach-guard: replaced damage is never dealt"
+    );
+    assert!(
+        !outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::DamageDealt { target, .. }
+                if *target == engine::types::ability::TargetRef::Object(wall)
+        )),
+        "reach-guard: no damage is dealt to the wall"
+    );
+    assert_eq!(
+        runner.state().objects[&wall].zone,
+        Zone::Battlefield,
+        "reach-guard: the wall survives its counters"
+    );
+    outcome.assert_counters(wall, CounterType::Minus1Minus1, 6);
 }

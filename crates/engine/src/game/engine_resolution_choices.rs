@@ -8498,6 +8498,9 @@ pub(super) fn handle_resolution_choice(
                             blighted,
                             crate::types::counter::CounterType::Minus1Minus1,
                             count_param,
+                            // CR 614.16: blight's counters are placed by a
+                            // resolving effect.
+                            crate::types::proposed_event::CounterCause::ResolvingEffect,
                             events,
                         )
                     {

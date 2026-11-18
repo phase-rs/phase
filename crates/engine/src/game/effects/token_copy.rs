@@ -23,7 +23,8 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedDoubleFaces, CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopiedDoubleFaces, CopyTokenSpec, CounterCause, EtbTapState, ProposedEvent,
+    TokenCharacteristics,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -1940,6 +1941,9 @@ fn finish_non_liminal_copy_token_entry(
                 token_id,
                 counter_type.clone(),
                 *counter_count,
+                // CR 614.16: entering-with-counters placements are
+                // replacement-driven entry modifications.
+                CounterCause::ReplacementOrPrevention,
                 events,
             )
         {
@@ -1953,6 +1957,9 @@ fn finish_non_liminal_copy_token_entry(
                         object_id: token_id,
                         counter_type: counter_type.clone(),
                         count: *count,
+                        // CR 614.16: entering-with-counters placements are
+                        // replacement-driven entry modifications.
+                        cause: CounterCause::ReplacementOrPrevention,
                     }
                 })
                 .collect();
@@ -2459,6 +2466,9 @@ fn apply_token_modifications(
                     token_id,
                     counter_type.clone(),
                     n,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    CounterCause::ReplacementOrPrevention,
                     events,
                 ) {
                     super::counters::stash_pending_counter_post_actions(
