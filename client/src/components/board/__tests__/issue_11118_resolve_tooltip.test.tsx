@@ -16,9 +16,8 @@ import { ActionButton } from "../ActionButton.tsx";
 // to a button that appears under a pointer that has not moved, a phone's
 // browser keeps the mouse it emulates for touch where the last tap was, and
 // Resolve appears in the same slot as the button the player taps to pass
-// priority. A tap on Resolve also
-// focuses it, and that focus outlives the tap. These tests drive both paths
-// through the real Resolve button.
+// priority. A tap on Resolve also focuses it, and that focus outlives the tap.
+// These tests drive both paths through the real Resolve button.
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),

@@ -212,13 +212,7 @@ describe("issue #11118: informational tooltips open on a tap and close on the ne
   });
 
   it("the creature overview's power summary shows its totals", () => {
-    // As BattlefieldZoneOverflow.test.tsx sets up the overview: its rows
-    // measure themselves, and it lays out for a desktop-sized window.
-    globalThis.ResizeObserver = class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    } as unknown as typeof ResizeObserver;
+    // A desktop-sized window, as BattlefieldZoneOverflow.test.tsx lays it out.
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
     renderCreatureOverview();

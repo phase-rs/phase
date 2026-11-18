@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { GameplayTooltip } from "../GameplayTooltip.tsx";
+import { GameplayTooltip, type TooltipTouch } from "../GameplayTooltip.tsx";
 
 // happy-dom matches `:focus-visible` for every focused element. A browser
 // matches it mainly for keyboard focus, and not for the focus a tap or a click
@@ -23,22 +23,27 @@ function renderTooltip() {
 
 // Shaped like CardPreview's keyword reminder: a focusable span described by
 // its tooltip, beside another control a tap can land on.
-function renderReminderTooltip() {
-  render(
+function ReminderTooltip({ touch }: { touch: TooltipTouch }) {
+  return (
     <div>
       <span tabIndex={0} className="group relative" aria-describedby="flying-reminder">
         Flying
-        <GameplayTooltip id="flying-reminder" touch="toggle">
+        <GameplayTooltip id="flying-reminder" touch={touch}>
           This creature can't be blocked except by creatures with flying or reach.
         </GameplayTooltip>
       </span>
       <button type="button">Elsewhere</button>
-    </div>,
+    </div>
   );
+}
+
+function renderReminderTooltip() {
+  const { rerender } = render(<ReminderTooltip touch="toggle" />);
   return {
     trigger: screen.getByText("Flying"),
     elsewhere: screen.getByRole("button", { name: "Elsewhere" }),
     tooltip: screen.getByRole("tooltip", { hidden: true }),
+    rerender,
   };
 }
 
@@ -232,6 +237,17 @@ describe("GameplayTooltip", () => {
       fireEvent.click(trigger);
       fireEvent.pointerLeave(trigger, { pointerType: "mouse" });
 
+      expect(tooltip).not.toBeVisible();
+    });
+
+    it("closes a tap's tooltip when its trigger stops opting in", () => {
+      const { trigger, tooltip, rerender } = renderReminderTooltip();
+      tap(trigger);
+      expect(tooltip).toBeVisible();
+
+      rerender(<ReminderTooltip touch="ignore" />);
+
+      expect(tooltip).toBeInTheDocument();
       expect(tooltip).not.toBeVisible();
     });
 

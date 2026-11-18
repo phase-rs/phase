@@ -24,9 +24,9 @@ interface GameplayTooltipProps {
    *   keyword's reminder text: a tap opens the tooltip, and the next tap, on
    *   the trigger or anywhere else, closes it.
    *
-   * Only a finger's tap toggles. A pen is treated as a hovering pointer, as in
-   * every other hover check in the client, so a pen that cannot hover shows the
-   * tooltip only while it moves on the trigger.
+   * Only a finger's tap toggles. A pen counts as a hovering pointer, as in
+   * `useCardHover` and `useInspectHoverProps`, so a pen that cannot hover shows
+   * the tooltip from its first move on the trigger until it lifts.
    */
   touch?: TooltipTouch;
 }
@@ -54,8 +54,9 @@ export function GameplayTooltip({
   const anchorRef = useRef<HTMLSpanElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<Element | null>(null);
-  // Hover and keyboard focus drive `visible`; a touch tap drives `tapOpen`, so
-  // neither can close or flip what the other opened.
+  // Hover and keyboard focus drive `visible`; a touch tap drives `tapOpen`. A
+  // pointer leaving cannot close a tap's tooltip and focus cannot flip it;
+  // focus leaving the trigger closes both.
   const [visible, setVisible] = useState(false);
   const [tapOpen, setTapOpen] = useState(false);
   const open = visible || tapOpen;
