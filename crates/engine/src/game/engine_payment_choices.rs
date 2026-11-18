@@ -3221,7 +3221,7 @@ fn settle_ward_sacrifice_payment_unpaid(
     let ability = pending_effect.as_ref().clone();
     clear_echo_due_for_echo_payment(state, &ability);
     set_active_priority(state);
-    // CR 608.2k + CR 603.7c: the Ward counter reads "that spell" from the
+    // CR 608.2k: the Ward counter reads "that spell" from the
     // trigger event the prompt carried (the resolving trigger has left the
     // stack by answer time, and the ambient event is gone once the payer
     // elects to pay). Fall back to ambient for prompts constructed without
