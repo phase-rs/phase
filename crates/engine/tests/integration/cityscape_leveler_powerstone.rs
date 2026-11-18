@@ -14,6 +14,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+const INVOKE_THE_WINDS: &str = "Gain control of target artifact or creature. Untap it.";
+
 const CITYSCAPE_LEVELER: &str = "Trample\nWhen you cast this spell and whenever this creature attacks, destroy up to one target nonland permanent. Its controller creates a tapped Powerstone token.\nUnearth {8}";
 
 fn powerstones(runner: &GameRunner) -> Vec<(PlayerId, bool)> {
@@ -27,7 +29,7 @@ fn powerstones(runner: &GameRunner) -> Vec<(PlayerId, bool)> {
 }
 
 fn opponent_creature(scenario: &mut GameScenario) -> ObjectId {
-    scenario.add_creature(P1, "Opposing Bear", 2, 2).id()
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2).id()
 }
 
 /// The cast trigger resolves above the Leveler spell: the opponent's creature is destroyed
@@ -107,14 +109,14 @@ fn attack_trigger_gives_the_destroyed_permanents_controller_a_tapped_powerstone(
 }
 
 /// "Its controller" is the destroyed permanent's controller, not its owner: P0 steals P1's
-/// Bear, then the Leveler destroys it, and the Powerstone goes to P0.
+/// Bear with Invoke the Winds, then the Leveler destroys it, and the Powerstone goes to P0.
 #[test]
 fn powerstone_goes_to_the_destroyed_permanents_controller_not_its_owner() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let bear = opponent_creature(&mut scenario);
     let steal = scenario
-        .add_spell_to_hand_from_oracle(P0, "Steal", false, "Gain control of target creature.")
+        .add_spell_to_hand_from_oracle(P0, "Invoke the Winds", false, INVOKE_THE_WINDS)
         .id();
     let leveler = scenario
         .add_creature_to_hand(P0, "Cityscape Leveler", 8, 8)
