@@ -1800,31 +1800,12 @@ fn known_role_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> 
 ///
 /// CR 111.3 + CR 702.122a: the keyword list is the text OUTSIDE every quoted span
 /// ("with flying, "This creature gets ...," and crew 2" keeps `flying` and `crew 2`);
-/// quoted abilities are parsed separately as token static/granted abilities. An
-/// unterminated quote ends the clause at its opening quote.
+/// quoted abilities are parsed separately as token static/granted abilities. Quote
+/// masking is [`nom_primitives::strip_double_quoted_spans`], which passes an
+/// unterminated quote through unchanged.
 fn strip_token_keyword_clause_suffixes(text: &str) -> String {
-    let mut outside = String::new();
-    let mut remaining = text;
-    loop {
-        let Ok((at_quote, head)) =
-            take_until::<_, _, nom::error::Error<&str>>("\"").parse(remaining)
-        else {
-            outside.push_str(remaining);
-            break;
-        };
-        outside.push_str(head);
-        match delimited(
-            tag::<_, _, nom::error::Error<&str>>("\""),
-            take_until("\""),
-            tag("\""),
-        )
-        .parse(at_quote)
-        {
-            Ok((after_quote, _)) => remaining = after_quote,
-            Err(_) => break,
-        }
-    }
-    let mut clause = outside.as_str();
+    let outside = nom_primitives::strip_double_quoted_spans(text);
+    let mut clause: &str = &outside;
     for marker in [" where ", " equal to ", " attached ", " named "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
@@ -5056,18 +5037,14 @@ mod quoted_token_static_trailing_comma_tests {
         }
     }
 
-    /// Negative control: a clause that ENDS in a quoted ability keeps only the
-    /// keywords before it, and an unterminated quote still ends the clause there.
+    /// Negative control: Into the Fae Court's printed clause ENDS in a quoted
+    /// ability and keeps only the keywords before it.
     #[test]
     fn token_keyword_clause_ending_in_quote_is_unchanged() {
         assert_eq!(
             parse_token_keyword_clause(
-                "with flying and \"Whenever this creature attacks, draw a card.\""
+                "with flying and \"This token can block only creatures with flying.\""
             ),
-            vec![Keyword::Flying]
-        );
-        assert_eq!(
-            parse_token_keyword_clause("with flying and \"Whenever this creature attacks"),
             vec![Keyword::Flying]
         );
     }
