@@ -2749,6 +2749,9 @@ pub enum DamageRedirectTarget {
 /// `expiry` tells them apart.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShieldKind {
+    /// No shield. Continuous damage modifications (Furnace of Rath) and CR 614.1a damage
+    /// substitutions (Soul-Scar Mage, Phytohydra) keep this kind; the engine recognizes a
+    /// substitution by its shape.
     #[default]
     None,
     /// CR 701.19a: Regeneration shield — consumed on use, expires at cleanup.
@@ -11652,6 +11655,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
             ..
         }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -16594,6 +16598,7 @@ impl Effect {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }
@@ -16901,6 +16906,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -21969,6 +21975,27 @@ pub struct DamageContextSnapshot {
     pub lifelink_bonus: u32,
 }
 
+/// CR 120.4b + CR 120.4c: a portion of a paused two-phase damage batch that has been through
+/// replacement and prevention and waits for delivery. Internal to `Effect::ResumeDamageBatch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacedDamagePortion {
+    pub context: DamageContextSnapshot,
+    pub target: TargetRef,
+    pub amount: u32,
+    #[serde(default)]
+    pub is_combat: bool,
+}
+
+/// CR 120.1 + CR 120.4b: a portion of a paused two-phase damage batch still to go through
+/// replacement and prevention: its own source (CR 120.1), recipient and amount. Internal to
+/// `Effect::ResumeDamageBatch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawDamagePortion {
+    pub source: ObjectId,
+    pub target: TargetRef,
+    pub amount: u32,
+}
+
 /// A single conjured card entry: card source + quantity.
 /// Used by `Effect::Conjure` to support multi-card conjure patterns
 /// (e.g., "conjure a card named X and a card named Y into your hand")
@@ -23290,6 +23317,21 @@ pub enum Effect {
         amount: u32,
         #[serde(default)]
         is_combat: bool,
+    },
+    /// CR 120.4b + CR 120.4c + CR 608.2c: Internal continuation for a two-phase damage batch
+    /// (each source to its recipient) that paused for a player's answer: a rider's prompt or a
+    /// CR 616.1 order choice in replacement, or a choice in delivery. It owns the rest of the
+    /// batch: the `remaining` portions go through replacement first, then every `replaced`
+    /// portion is delivered, and the instruction's `EffectResolved` (`kind`) follows the last.
+    /// `awaiting` names the portion whose CR 616.1 order choice is pending: once answered, its
+    /// replaced event joins `replaced` instead of being dealt at once. Must not be emitted by
+    /// the parser.
+    ResumeDamageBatch {
+        kind: EffectKind,
+        replaced: Vec<ReplacedDamagePortion>,
+        remaining: Vec<RawDamagePortion>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        awaiting: Option<RawDamagePortion>,
     },
     /// CR 120.1 + CR 120.3: "Team-up" damage — each of up to two chosen source
     /// creatures (controlled by the caster / their team) deals damage equal to
@@ -31716,6 +31758,7 @@ impl Effect {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }
@@ -31973,6 +32016,7 @@ impl Effect {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }
@@ -32502,6 +32546,7 @@ impl Effect {
             // concrete target already chosen by an earlier effect; no new target
             // slot is exposed.
             Effect::ApplyPostReplacementDamage { .. } => None,
+            Effect::ResumeDamageBatch { .. } => None,
 
             // CR 701.26a/b: `SetTapState` exposes its target only for the
             // single-permanent scope (legacy `Tap`/`Untap`). The `All` scope
@@ -33065,6 +33110,7 @@ impl Effect {
             }),
 
             Effect::ApplyPostReplacementDamage { .. } => None,
+            Effect::ResumeDamageBatch { .. } => None,
 
             Effect::SetTapState {
                 scope: EffectScope::Single,
@@ -33858,6 +33904,7 @@ impl Effect {
             | Effect::Animate { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::ApplySticker { .. }
             | Effect::AssembleContraptionOnSprocket { .. }
             | Effect::Attach { .. }
@@ -34083,6 +34130,7 @@ impl Effect {
             | Effect::Animate { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::ApplySticker { .. }
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::AssembleContraptionOnSprocket { .. }
@@ -34842,6 +34890,7 @@ macro_rules! define_effect_quantity_walk {
             }
             Effect::StartYourEngines { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::PairWith { .. }
             | Effect::Destroy { .. }
@@ -35143,6 +35192,7 @@ impl Effect {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }
@@ -35465,6 +35515,7 @@ impl Effect {
             // CR 608.2d: the counter-kind CHOICE carries no magnitude.
             | Effect::ChooseCounterKind { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
             | Effect::Destroy { .. }
@@ -35739,6 +35790,7 @@ impl Effect {
             // CR 608.2d: the counter-kind CHOICE carries no magnitude.
             | Effect::ChooseCounterKind { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
             | Effect::Destroy { .. }
@@ -35938,6 +35990,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ChangeSpeed { .. } => "ChangeSpeed",
         Effect::DealDamage { .. } => "DealDamage",
         Effect::ApplyPostReplacementDamage { .. } => "ApplyPostReplacementDamage",
+        Effect::ResumeDamageBatch { .. } => "ResumeDamageBatch",
         Effect::EachDealsDamageEqualToPower { .. } => "EachDealsDamageEqualToPower",
         Effect::EachSourceDealsDamage { .. } => "EachSourceDealsDamage",
         Effect::Draw { .. } => "Draw",
@@ -36209,6 +36262,7 @@ pub enum EffectKind {
     ChangeSpeed,
     DealDamage,
     ApplyPostReplacementDamage,
+    ResumeDamageBatch,
     EachDealsDamageEqualToPower,
     EachSourceDealsDamage,
     Draw,
@@ -36476,6 +36530,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChangeSpeed { .. } => EffectKind::ChangeSpeed,
             Effect::DealDamage { .. } => EffectKind::DealDamage,
             Effect::ApplyPostReplacementDamage { .. } => EffectKind::ApplyPostReplacementDamage,
+            Effect::ResumeDamageBatch { .. } => EffectKind::ResumeDamageBatch,
             Effect::EachDealsDamageEqualToPower { .. } => EffectKind::EachDealsDamageEqualToPower,
             Effect::EachSourceDealsDamage { .. } => EffectKind::EachSourceDealsDamage,
             Effect::Draw { .. } => EffectKind::Draw,
@@ -41262,6 +41317,11 @@ pub enum ReplacementCondition {
         minimum: u32,
         filter: TargetFilter,
     },
+    /// CR 604.2 + CR 611.3a: a printed "while <state>" gate read live by the static
+    /// condition authority. Admitted only through `replacement_condition_from_static`.
+    /// Jared Carthalion, True Heir: "If damage would be dealt to Jared Carthalion while
+    /// you're the monarch, prevent that damage and put that many +1/+1 counters on it."
+    OnlyIfStatic { condition: Box<StaticCondition> },
     /// CR 716.2a: Replacement effect granted by a Class enchantment level —
     /// applies only while the source Class is at `level` or higher. Parallels
     /// `StaticCondition::ClassLevelGE`. Innkeeper's Talent level 3 (the

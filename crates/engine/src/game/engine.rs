@@ -24,10 +24,10 @@ use crate::types::game_state::{
     DistributionScope, DistributionUnit, GameState, LandPlayRecord, ManaAbilityResume,
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
     PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
-    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, UntapStepProgress, WaitingFor,
+    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
+    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
+    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+    StackResolutionSession, UntapStepProgress, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -36,7 +36,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::{ResolutionFrame, ResolutionStack};
+use crate::types::resolution::ResolutionFrame;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -8893,9 +8893,9 @@ pub(super) fn resume_pending_continuation_if_priority(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     loop {
-        let before = SubtreePosition::at(&state.resolution_stack);
+        let before = state.resolution_stack.position();
         resume_pending_continuation_pass(state, events)?;
-        let after = SubtreePosition::at(&state.resolution_stack);
+        let after = state.resolution_stack.position();
         // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
         // leaves a copy owner or a post-replacement drain on top has exposed it (a
         // substitute's drain retired, or an inner copy owner completed). The work
@@ -8936,38 +8936,6 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
             return Ok(());
         }
-    }
-}
-
-/// The loop's progress measure: stack depth, then the drain count of the active
-/// post-replacement frame. Positional on purpose: it only has to be
-/// well-founded, not to name the subtree (that is `ReplacementSubtreeBoundary`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SubtreePosition {
-    resolution_depth: usize,
-    enclosing_post_replacement_drains: usize,
-}
-
-impl SubtreePosition {
-    fn at(stack: &ResolutionStack) -> Self {
-        Self {
-            resolution_depth: stack.len(),
-            enclosing_post_replacement_drains: stack
-                .active_post_replacement_or_paired_parent()
-                .map_or(0, PostReplacementDrainStack::len),
-        }
-    }
-
-    /// Strictly less of the subtree remains: the stack is lower, or as high
-    /// with fewer drains in the enclosing frame (lexicographic on ℕ×ℕ).
-    fn is_strictly_inside(&self, before: &Self) -> bool {
-        (
-            self.resolution_depth,
-            self.enclosing_post_replacement_drains,
-        ) < (
-            before.resolution_depth,
-            before.enclosing_post_replacement_drains,
-        )
     }
 }
 
@@ -23971,6 +23939,7 @@ mod stage2_injector_tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: asked,

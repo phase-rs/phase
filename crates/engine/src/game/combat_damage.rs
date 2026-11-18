@@ -288,6 +288,15 @@ fn finish_combat_damage_sub_step(
     damage_events: &[GameEvent],
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    // CR 104.1: a rider ended the game inside the batch ("A game ends immediately when a player
+    // wins"), so nothing after the batch happens: no sub-step bookkeeping, no state-based
+    // actions, no ability put on the stack, and no later combat damage step. A rider's drain
+    // restored the caller's wait over the batch's `GameOver`, so restore it from `game_end`.
+    if state.game_end.is_some() {
+        crate::game::elimination::ensure_game_over_if_terminal(state, events);
+        return pending_combat_damage_waiting(state);
+    }
+
     // CR 500.6: "at the beginning of that step" abilities trigger when the step
     // begins. `process_combat_damage_triggers` synthesizes the PhaseChanged
     // marker for that batch, so the FIRST-STRIKE sub-step always carries it, and
@@ -2186,7 +2195,8 @@ pub(crate) fn apply_combat_damage(
         replacement: None,
         phase_c_remnant: None,
     };
-    let pass = replacement::CombatDamageReplacementPass::new(proposed_events);
+    // CR 608.2f + CR 700.1: the pass reads the printed guards once, as the batch opens.
+    let pass = replacement::CombatDamageReplacementPass::new(state, proposed_events);
     run_combat_damage_replacements(state, record, entries, pass, None)
 }
 
@@ -2214,6 +2224,11 @@ fn run_combat_damage_replacements(
         resume,
     ) {
         replacement::CombatDamageReplacementOutcome::Complete => {
+            // CR 104.1: a game that ended inside the pass ends the batch: nothing is dealt,
+            // gained or prevented after it.
+            if state.game_end.is_some() {
+                return CombatDamageBatch::Complete(record.batch_events);
+            }
             apply_combat_damage_survivors(state, record, entries, pass)
         }
         replacement::CombatDamageReplacementOutcome::Paused { waiting_for } => {
@@ -2222,7 +2237,9 @@ fn run_combat_damage_replacements(
             // and reinstalled on resume. CR 615.8: the one-shot application
             // ledger is parked with it, so a "next time" shield that already
             // applied to an earlier portion still covers the source's portions
-            // proposed after the pause. The tally is sorted so a parked state
+            // proposed after the pause, and the printed guards' reading the pass
+            // opened with is parked too, so every later portion meets that one
+            // reading (CR 608.2f). The tally is sorted so a parked state
             // serializes identically however the map iterated.
             let mut prevention_tally: Vec<_> = pass.tally.into_iter().collect();
             prevention_tally.sort_unstable();
@@ -2231,6 +2248,7 @@ fn run_combat_damage_replacements(
                 entries,
                 resolved: pass.resolved,
                 one_shot_applications: pass.one_shot_applications,
+                settled_guards: pass.settled_guards,
             });
             state.waiting_for = (*waiting_for).clone();
             let events = record.batch_events.clone();
@@ -2262,6 +2280,7 @@ fn resume_combat_damage_replacements(
             .into_iter()
             .collect(),
         one_shot_applications: parked.one_shot_applications,
+        settled_guards: parked.settled_guards,
     };
     run_combat_damage_replacements(state, record, parked.entries, pass, Some(resume))
 }
@@ -2412,7 +2431,13 @@ fn drain_combat_lifelink(
     mut record: PendingCombatLifelink,
 ) -> CombatDamageBatch {
     let waiting_before = state.waiting_for.clone();
-    while let Some(gain) = record.remaining.pop_front() {
+    // CR 104.1: "A game ends immediately when a player wins". An earlier gain's
+    // replacement (Nefarious Lich's draw, then Laboratory Maniac's win) can end
+    // the game inside the batch; no later source's gain is applied after that.
+    while state.game_end.is_none() {
+        let Some(gain) = record.remaining.pop_front() else {
+            break;
+        };
         match crate::game::effects::life::apply_life_gain(
             state,
             gain.controller,
@@ -2449,18 +2474,32 @@ fn drain_combat_lifelink(
             // `mark_phase_transition_awaiting_post_replacement` only for the
             // substitution variant), so the divergence here is deliberate, not an
             // oversight.
+            //
+            // CR 104.1: a substitute that ended the game (Laboratory Maniac's win)
+            // left `GameOver`; the earlier wait is never restored over it.
             Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
-                state.waiting_for = waiting_before.clone();
+                if state.game_end.is_some() {
+                    crate::game::elimination::ensure_game_over_if_terminal(
+                        state,
+                        &mut record.batch_events,
+                    );
+                } else {
+                    state.waiting_for = waiting_before.clone();
+                }
             }
         }
     }
     // CR 510.2: the per-player aggregate, emitted after the gains exactly as it
-    // is on a batch that never paused.
+    // is on a batch that never paused. It records damage already dealt in Phase
+    // C, before any gain could end the game, so it is kept on a terminal batch.
     record.batch_events.append(&mut record.damage_to_players);
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
+    if state.game_end.is_none() {
+        fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    }
     CombatDamageBatch::Complete(record.batch_events)
 }
 
@@ -2482,6 +2521,11 @@ fn fire_combat_prevention_riders(
     events: &mut Vec<GameEvent>,
 ) {
     for &(key, total_prevented) in prevention_tally {
+        // CR 104.1: a rider that ended the game (New Way Forward's damage meeting an empty
+        // Nefarious Lich graveyard) ends the batch; no later shield's rider runs.
+        if state.game_end.is_some() {
+            break;
+        }
         let rid = key.as_replacement_id();
         if total_prevented <= 0 {
             continue;
@@ -2563,9 +2607,8 @@ fn fire_combat_prevention_riders(
                 drain.event_source = Some(source);
             }
         }
-        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-            state, None, None, None, events,
-        );
+        // CR 510.2: Phase D settles every pause the rider raises, as the per-portion drain does.
+        replacement::drain_combat_damage_rider(state, events);
     }
 }
 

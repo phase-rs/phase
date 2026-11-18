@@ -46,6 +46,7 @@ mod alania_divergent_storm;
 mod alchemists_gift_pump_modal_keyword_choice;
 mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
+mod altcast_plural_instances;
 mod alternative_cost_defiler_offers;
 mod amass_the_components;
 mod ambitious_augmenter;

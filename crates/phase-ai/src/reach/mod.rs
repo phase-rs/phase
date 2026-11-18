@@ -55,7 +55,7 @@ use engine::game::players;
 use engine::game::static_abilities::player_has_cant_lose_life;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, PendingCast, WaitingFor};
+use engine::types::game_state::{CastingVariantChoiceOption, GameState, PendingCast, WaitingFor};
 use engine::types::player::PlayerId;
 
 use driver::{DriveOutcome, DriveStop};
@@ -77,13 +77,16 @@ const MAX_SIMULATED_ANSWERS: usize = 10;
 pub(crate) type ActionAdmission<'a> = &'a dyn Fn(&GameState, &GameAction) -> bool;
 
 /// One engine action of a lethal line, plus the mode it commits to when the
-/// action opens a modal spell (CR 700.2a) and the X it announces when its
-/// cost has one (CR 107.3a).
+/// action opens a modal spell (CR 700.2a), the X it announces when its
+/// cost has one (CR 107.3a), and the casting option it answers when the cast
+/// opens a casting-method menu (CR 601.2b: one alternative cost per keyword
+/// instance, CR 113.2c).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LineStep {
     pub(crate) action: GameAction,
     pub(crate) mode: Option<usize>,
     pub(crate) x: Option<u32>,
+    pub(crate) casting_option: Option<CastingVariantChoiceOption>,
 }
 
 /// A reducer-certified sequence of actions that wins the game from the state
@@ -442,7 +445,7 @@ fn certify_cheapest(
     if !scales_with_x && fixed < opponent_life {
         return None;
     }
-    let sources: Vec<_> = sources
+    let baseline: Vec<_> = sources
         .iter()
         .filter_map(|source| source.priced(priced, ai_player))
         .collect();
@@ -451,15 +454,49 @@ fn certify_cheapest(
         controller_life: life_of(priced, ai_player),
         mana: sources::mana_capacity(priced, ai_player),
     };
+    // Default-first, add-only (see `ReachSource::priced`): the baseline pass
+    // is exactly the search as it was, budget included; other keyword
+    // instances' options only extend it, in a second pass with its own budget.
     certify_combinations(
         origin,
         ai_player,
         opponent,
-        &sources,
-        solver::lethal_combinations(&sources, &budget),
+        &baseline,
+        solver::lethal_combinations(&baseline, &budget),
         admission,
         attempted,
+        MAX_CERTIFIED_LINES,
     )
+    .or_else(|| {
+        let extended = extended_sources(&baseline, sources, priced, ai_player)?;
+        let mut extension_attempted = attempted.clone();
+        let limit = extension_attempted.len() + MAX_CERTIFIED_LINES;
+        certify_combinations(
+            origin,
+            ai_player,
+            opponent,
+            &extended,
+            solver::lethal_combinations(&extended, &budget),
+            admission,
+            &mut extension_attempted,
+            limit,
+        )
+    })
+}
+
+/// The baseline sources plus every source's other keyword-instance options
+/// (`ReachSource::alternatives`), or `None` when there are none.
+fn extended_sources(
+    baseline: &[sources::PricedSource],
+    sources: &[ReachSource],
+    priced: &GameState,
+    ai_player: PlayerId,
+) -> Option<Vec<sources::PricedSource>> {
+    let alternatives: Vec<_> = sources
+        .iter()
+        .flat_map(|source| source.alternatives(priced, ai_player))
+        .collect();
+    (!alternatives.is_empty()).then(|| baseline.iter().cloned().chain(alternatives).collect())
 }
 
 /// Certify the AI's responses to work already on the stack: every affordable
@@ -473,27 +510,44 @@ fn certify_responses(
     admission: ActionAdmission<'_>,
     attempted: &mut Vec<Vec<LineStep>>,
 ) -> Option<LethalLine> {
-    let priced: Vec<_> = sources
+    let mana = sources::mana_capacity(origin, ai_player);
+    let baseline: Vec<_> = sources
         .iter()
         .filter_map(|source| source.priced(origin, ai_player))
         .collect();
-    let combinations =
-        solver::response_combinations(&priced, sources::mana_capacity(origin, ai_player));
+    // Default-first, add-only, as in `certify_cheapest`.
     certify_combinations(
         origin,
         ai_player,
         opponent,
-        &priced,
-        combinations,
+        &baseline,
+        solver::response_combinations(&baseline, mana),
         admission,
         attempted,
+        MAX_CERTIFIED_LINES,
     )
+    .or_else(|| {
+        let extended = extended_sources(&baseline, sources, origin, ai_player)?;
+        let mut extension_attempted = attempted.clone();
+        let limit = extension_attempted.len() + MAX_CERTIFIED_LINES;
+        certify_combinations(
+            origin,
+            ai_player,
+            opponent,
+            &extended,
+            solver::response_combinations(&extended, mana),
+            admission,
+            &mut extension_attempted,
+            limit,
+        )
+    })
 }
 
 /// Play each combination's steps through the reducer from `origin`, in order,
 /// and return the first that wins. Copies of one repeatable activation make
 /// many combinations that play out identically; each distinct step sequence is
-/// certified once.
+/// certified once. `attempted` holds no more than `limit` sequences.
+#[allow(clippy::too_many_arguments)]
 fn certify_combinations(
     origin: &GameState,
     ai_player: PlayerId,
@@ -502,13 +556,14 @@ fn certify_combinations(
     combinations: Vec<solver::Combination>,
     admission: ActionAdmission<'_>,
     attempted: &mut Vec<Vec<LineStep>>,
+    limit: usize,
 ) -> Option<LethalLine> {
     for combination in combinations {
         let steps = solver::line_steps(sources, &combination);
         if attempted.contains(&steps) {
             continue;
         }
-        if attempted.len() == MAX_CERTIFIED_LINES {
+        if attempted.len() >= limit {
             break;
         }
         if matches!(
@@ -588,8 +643,9 @@ fn pass_to_resolve_stack(state: &GameState, issued: &[GameAction]) -> Option<Gam
         .then_some(GameAction::PassPriority)
 }
 
-/// The issued target and mode answers to the AI's own pending cast prompt
-/// that a lethal line could use, in issued order. X is [`x_answer`]'s.
+/// The issued target, mode and casting-option answers to the AI's own pending
+/// cast prompt that a lethal line could use, in issued order. X is
+/// [`x_answer`]'s.
 fn prompt_answers(
     state: &GameState,
     ai_player: PlayerId,
@@ -616,6 +672,13 @@ fn prompt_answers(
             .filter(|action| matches!(action, GameAction::SelectModes { .. }))
             .cloned()
             .collect(),
+        // CR 601.2b + CR 113.2c: any offered alternative cost may be the one
+        // the mana left over still covers.
+        WaitingFor::CastingVariantChoice { player, .. } if *player == ai_player => issued
+            .iter()
+            .filter(|action| matches!(action, GameAction::ChooseCastingVariant { .. }))
+            .cloned()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -624,8 +687,12 @@ fn prompt_answers(
 /// whose prompt is pending must be able to take life from `opponent`. How much
 /// is the simulation's to read (CR 608.2h).
 fn pending_source_could_finish(state: &GameState, ai_player: PlayerId, opponent: PlayerId) -> bool {
-    pending_cast(state)
-        .and_then(|pending| state.objects.get(&pending.object_id))
+    let pending_object = match &state.waiting_for {
+        WaitingFor::CastingVariantChoice { object_id, .. } => Some(*object_id),
+        _ => pending_cast(state).map(|pending| pending.object_id),
+    };
+    pending_object
+        .and_then(|object_id| state.objects.get(&object_id))
         .is_some_and(|object| sources::object_reaches(state, ai_player, opponent, object))
 }
 
