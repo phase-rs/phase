@@ -425,8 +425,8 @@ fn teammate_doomskar_foretell_accepted_on_team_priority() {
     );
 }
 
-/// CR 805.5b: `pass_holding_team` skips already-passed seats and keeps the
-/// remaining passes' events.
+/// CR 805.5b: `pass_holding_team` skips already-passed teammates (never the
+/// holder) and keeps the remaining passes' events.
 #[test]
 fn pass_holding_team_skips_passed_members_and_keeps_events() {
     let sc = team_turn_board();
@@ -453,8 +453,12 @@ fn pass_holding_team_skips_passed_members_and_keeps_events() {
         "the teammate's pass events must be retained, got {events:?}"
     );
 
-    // Hostile: every member already passed — Ok with empty events, not an
-    // `AlreadyPassed`-class error.
+    // Hostile: the team still holds priority with every member's pass recorded
+    // (CR 117.5: a trigger put on the stack hands priority back without
+    // clearing them). The holder still holds priority, so its pass is
+    // submitted (CR 117.3d) — a no-op here would leave every drain loop
+    // spinning on an unchanged window. The team's pass completes and priority
+    // leaves for the opposing team, without an error.
     let sc = team_turn_board();
     let mut runner = sc.build();
     runner.state_mut().active_player = P0;
@@ -464,10 +468,20 @@ fn pass_holding_team_skips_passed_members_and_keeps_events() {
     runner.state_mut().priority_passes.insert(P1);
     let events = runner
         .pass_holding_team()
-        .expect("an all-passed call must be a no-op Ok");
+        .expect("a fully recorded team still passes without error");
     assert!(
-        events.is_empty(),
-        "no passes are owed, so no events may be produced, got {events:?}"
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PriorityPassed { .. })),
+        "the holder's pass must be submitted, got {events:?}"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player != P0 && player != P1
+        ),
+        "the window must leave the holding team, got {:?}",
+        runner.state().waiting_for
     );
 }
 
