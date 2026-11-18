@@ -31,7 +31,7 @@ fn kilo_tapping_proliferates_dreamtide_whales_time_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let kilo = scenario
-        .add_creature_from_oracle(P0, "Kilo, Apogee Mind", 1, 3, KILO)
+        .add_creature_from_oracle(P0, "Kilo, Apogee Mind", 3, 3, KILO)
         .id();
     // MTGJSON lists the Whale's keyword as "Vanishing"; the hint lets the parser read
     // the reminder-texted keyword line the way the card-data build does.
