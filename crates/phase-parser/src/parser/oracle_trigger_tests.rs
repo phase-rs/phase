@@ -38960,7 +38960,7 @@ fn dealt_damage_lolth_emblem_quantified_source_parses() {
 
 #[test]
 fn dealt_damage_attacking_creature_source_parses() {
-    // CR 509.1g: "by an attacking creature" carries the combat status on the
+    // CR 508.1k: "by an attacking creature" carries the combat status on the
     // damage source filter. Verbatim Oracle text (Glyph of Life).
     let def = parse_trigger_line(
         "Whenever that creature is dealt damage by an attacking creature this turn, you gain that much life.",
