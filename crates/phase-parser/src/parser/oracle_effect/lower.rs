@@ -2455,43 +2455,37 @@ impl PrintedTargetWord {
 /// (`targeting::bind_resolution_attachment_hosts`).
 ///
 /// Applied to the card's own fully composed ability (after every document
-/// relation). Ordinarily the host instruction must be the whole ability:
-/// arbitrary followers can depend on a binding this conversion cannot prove.
-/// The bounded owner-library move plus terminal owner shuffle is also admitted:
-/// the single-object move binds the host, and its owner is the shuffle subject.
-/// Donor shapes ("becomes a copy of", "gains all activated abilities of" the
-/// host) retain stack timing.
+/// relation), when the host instruction heads the ability and every
+/// instruction after it is a host follower (`is_parent_anaphor_follower`):
+/// one that acts on that host or its controller or owner through "it", "that
+/// permanent" or "that land's controller", and through nothing else (a later
+/// sentence that only modifies the head, "That creature can't be
+/// regenerated.", folds into the same node). CR 608.2c: those followers read
+/// the host the head bound. When the head cannot act on the host (departed or
+/// phased out) it does nothing; CR 608.2h: followers that read only the host's
+/// controller or owner read its information (last known for a departed host),
+/// and followers that need the host itself do nothing
+/// (`effects::resolve_chain_body`). A chain with any other follower, one that
+/// acts on its own subject or reads the host some other way (as a damage
+/// source, or as a number through an object scope), keeps its stack-time
+/// target, as do donor shapes ("becomes a copy of", "gains all activated
+/// abilities of" the host). A host read through a filter-embedded
+/// `ObjectCount { controller: ParentTargetController }` is not seen here;
+/// Observed Stasis keeps its stack-time target because its follower's operand (the
+/// drawing player) is not a host anaphor (`is_parent_anaphor_follower`).
 pub(crate) fn convert_terminal_attachment_host_reference(
     def: &mut AbilityDefinition,
     printed: PrintedTargetWord,
 ) {
-    // The printed owner-shuffle class has one determined host followed only
-    // by its owner's shuffle. Do not admit arbitrary host-dependent chains.
-    let owner_shuffle = matches!(
-        def.effect.as_ref(),
-        Effect::ChangeZone {
-            destination: Zone::Library,
-            owner_library: true,
-            target,
-            ..
-        } if target.contains_source_attachment_host()
-    ) && def.sub_ability.as_deref().is_some_and(|sub| {
-        matches!(
-            sub.effect.as_ref(),
-            Effect::Shuffle {
-                target: TargetFilter::ParentTargetOwner
-            }
-        ) && sub.sub_ability.is_none()
-            && sub.else_ability.is_none()
-            && sub.modal.is_none()
-            && sub.mode_abilities.is_empty()
-    });
-    if (def.sub_ability.is_some() && !owner_shuffle)
-        || def.else_ability.is_some()
+    if def.else_ability.is_some()
         || def.modal.is_some()
         || !def.mode_abilities.is_empty()
         || def.target_choice_timing != TargetChoiceTiming::Stack
         || def.effect.attachment_host_slot() != crate::types::ability::AttachmentHostSlot::Operand
+        || !std::iter::successors(def.sub_ability.as_deref(), |node| {
+            node.sub_ability.as_deref()
+        })
+        .all(is_parent_anaphor_follower)
     {
         return;
     }
@@ -2503,6 +2497,100 @@ pub(crate) fn convert_terminal_attachment_host_reference(
     {
         def.target_choice_timing = TargetChoiceTiming::Resolution;
     }
+}
+
+/// CR 608.2c: a node after a host instruction that announces no choice of its
+/// own and names exactly the host — "it" / "that permanent" (`ParentTarget`),
+/// "its controller" / "that land's controller" (`ParentTargetController`) or
+/// "its owner" (`ParentTargetOwner`) — in its operand slot and in every slot
+/// `effect_parent_ref_slots` surfaces, and reads no object some other way
+/// (`reads_object_beyond_slots`).
+fn is_parent_anaphor_follower(node: &AbilityDefinition) -> bool {
+    node.else_ability.is_none()
+        && node.modal.is_none()
+        && node.mode_abilities.is_empty()
+        && node.target_choice_timing == TargetChoiceTiming::Stack
+        && node.effect.target_filter().is_some_and(is_host_anaphor)
+        && crate::types::ability::effect_parent_ref_slots(&node.effect)
+            .into_iter()
+            .all(is_host_anaphor)
+        && !reads_object_beyond_slots(node)
+}
+
+/// CR 120.1 + CR 608.2c + CR 608.2h: whether a node reads an object other than
+/// through its object slots: as the source of the damage it deals ("It deals
+/// damage equal to its power to its controller": the object that deals damage
+/// is its source), or as a number in its effect or its condition that reads an
+/// object the chain's targets supply ("equal to its power", "where X is its
+/// mana value", "equal to that creature's power"). The host binding fills only
+/// the node's slots, so such a node keeps its stack-time target.
+fn reads_object_beyond_slots(node: &AbilityDefinition) -> bool {
+    if matches!(
+        *node.effect,
+        Effect::DealDamage {
+            damage_source: Some(_),
+            ..
+        }
+    ) {
+        return true;
+    }
+    let mut reads = false;
+    node.effect.for_each_quantity_expr(&mut |quantity| {
+        reads |= quantity_reads_chain_target_object(quantity);
+    });
+    reads
+        || node.condition.as_ref().is_some_and(|condition| {
+            condition.any_quantity_expr(&quantity_reads_chain_target_object)
+        })
+}
+
+/// Whether `quantity` reads an object through a scope that the chain's targets,
+/// or the object an earlier instruction handed the chain, can supply
+/// (`object_scope_reads_chain_target`), or through a target slot of its own.
+fn quantity_reads_chain_target_object(quantity: &QuantityExpr) -> bool {
+    quantity.any_ref(&mut |qty| {
+        crate::types::ability::quantity_ref_target_slot_spec(qty).is_some()
+            || match crate::types::ability::quantity_ref_object_scope_read(qty) {
+                crate::types::ability::ObjectScopeRead::ObjectInformation(scope)
+                | crate::types::ability::ObjectScopeRead::CounterCount(scope) => {
+                    object_scope_reads_chain_target(scope)
+                }
+                crate::types::ability::ObjectScopeRead::Unscoped => false,
+            }
+    })
+}
+
+/// CR 115.1 + CR 608.2c: the object scopes that resolve to the ability's
+/// first object target, its recipient, its chain root's target or the object
+/// an earlier instruction referred to. The source, event, batch, exile-pile and
+/// fixed-object scopes name something else.
+fn object_scope_reads_chain_target(scope: ObjectScope) -> bool {
+    match scope {
+        ObjectScope::Target
+        | ObjectScope::Recipient
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::ChainRootTarget => true,
+        ObjectScope::Source
+        | ObjectScope::EventSource
+        | ObjectScope::EventTarget
+        | ObjectScope::CostPaidObject
+        | ObjectScope::AmassedArmy
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => false,
+    }
+}
+
+fn is_host_anaphor(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+    )
 }
 
 /// CR 115.10a + CR 608.2d: the timing of one node of the clause's own sub chain
@@ -5833,6 +5921,27 @@ pub(crate) fn strip_for_each_prefix_with_difference(
         if let Ok((remainder, clause)) =
             terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest_lower)
         {
+            // CR 608.2c: "for each of those cards, <effect> that card" iterates the
+            // chain's tracked set one member at a time — the body's "that card"
+            // anaphor binds the per-iteration member (Sword-Point Diplomacy).
+            // Gated on the body naming "that card" so the distributive-but-not-
+            // per-member readings ("its owner may play it", "pay N life or ...")
+            // keep their own lowerings.
+            if tag::<_, _, OracleError<'_>>("of those cards")
+                .parse(clause)
+                .is_ok_and(|(clause_rest, _)| clause_rest.is_empty())
+                && nom_primitives::scan_contains(remainder, "that card")
+            {
+                if let Some(body) = TextPair::new(text, &lower).original_remainder(remainder) {
+                    return (
+                        Some(QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        }),
+                        None,
+                        body.to_string(),
+                    );
+                }
+            }
             let parsed_comparison = nom_quantity::parse_for_each_clause_ref_with_difference(clause)
                 .ok()
                 .and_then(|(rest, parsed)| rest.is_empty().then_some(parsed));
@@ -8470,18 +8579,18 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
-        // turn granted by the parent clause (the controller's next turn), so
-        // the controller's next end step. Suffix companion of the prefix arm
-        // in `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
+        // CR 603.7a + CR 500.7: anaphoric "that turn's end step" — the extra
+        // turn granted by an earlier clause of the chain. The parser leaves the
+        // turn unbound (`turn: None`); `delayed_trigger::resolve` binds it to
+        // the turn that instruction granted, and the chain seam only keeps this
+        // reading when such a clause precedes it (`temporal_antecedent_is_proven`).
+        // Suffix companion of the prefix arm in `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
         // Warrior's Oath / Chance for Glory.
         (
             " at the beginning of that turn's end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
+            DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                 phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                turn: None,
             },
         ),
         // CR 514.3a + CR 603.7a: "at the beginning of the next cleanup step"
@@ -8651,21 +8760,18 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of the end step on your next turn, "),
             ),
-            // CR 603.7a + CR 104.3e: "at the beginning of that turn's end step"
+            // CR 603.7a + CR 500.7: "at the beginning of that turn's end step"
             // is the anaphoric form used by the extra-turn-with-a-cost cards
             // (Final Fortune, Last Chance, Warrior's Oath, Chance for Glory):
             // "Take an extra turn after this one. At the beginning of that
-            // turn's end step, you lose the game." "That turn" is the just-
-            // granted extra turn — the controller's next turn — so this is the
-            // controller's next end step, identical to the "your next end step"
-            // arm above. PlayerId(0) is rewritten to ability.controller at
-            // resolve time.
+            // turn's end step, you lose the game." "That turn" is the extra turn
+            // the earlier clause granted. The turn is bound at resolve time
+            // (`turn: None` here) and the chain seam only keeps this reading when
+            // an extra-turn clause precedes it.
             value(
-                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                     phase: Phase::End,
-                    player: crate::types::player::PlayerId(0),
-                    gate: crate::types::ability::TurnGate::None,
-                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    turn: None,
                 },
                 tag("at the beginning of that turn's end step, "),
             ),
@@ -16660,17 +16766,15 @@ mod tests {
         );
     }
 
-    /// CR 603.7a + CR 104.3e: the anaphoric "at the beginning of that turn's end
+    /// CR 603.7a + CR 500.7: the anaphoric "at the beginning of that turn's end
     /// step" (extra-turn-with-a-cost cards) is recognized by both temporal
-    /// recognizers, mapping to the controller's next end step — identical to the
-    /// existing "your next end step" arm.
+    /// recognizers as the end step of a granted turn, left unbound (`turn: None`)
+    /// until the delayed trigger is created.
     #[test]
-    fn that_turns_end_step_temporal_resolves_to_controller_next_end_step() {
-        let expected = DelayedTriggerCondition::AtNextPhaseForPlayer {
+    fn that_turns_end_step_temporal_names_the_granted_turn() {
+        let expected = DelayedTriggerCondition::AtBeginningOfGrantedTurn {
             phase: Phase::End,
-            player: crate::types::player::PlayerId(0),
-            gate: crate::types::ability::TurnGate::None,
-            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            turn: None,
         };
 
         let (rest, cond) =
@@ -16845,9 +16949,9 @@ mod tests {
                 matches!(
                     e,
                     Effect::CreateDelayedTrigger {
-                        condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                        condition: DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                             phase: Phase::End,
-                            ..
+                            turn: None,
                         },
                         effect,
                         ..
@@ -17134,6 +17238,128 @@ mod tests {
             &frame(tap(you()), TargetChoiceTiming::Resolution),
             &conditioned,
         ));
+    }
+
+    /// The nodes after the head of a parsed chain.
+    fn followers(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        std::iter::successors(def.sub_ability.as_deref(), |node| {
+            node.sub_ability.as_deref()
+        })
+        .collect()
+    }
+
+    /// Building block (CR 608.2c): a host follower names the parent's object only
+    /// through its object slots. Followers that act on "it" / "that permanent" /
+    /// "that land's controller" and nothing else are admitted; a follower whose
+    /// slots also name only the parent's object but which reads an object as the
+    /// source of its damage (CR 120.1) or as a number (CR 608.2h) is refused.
+    /// Every text is a printed card's Oracle text.
+    #[test]
+    fn parent_anaphor_follower_refuses_damage_source_and_object_quantity_reads() {
+        use super::{is_host_anaphor, is_parent_anaphor_follower};
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::effect_parent_ref_slots;
+        let admitted = [
+            // Wellspring
+            "Untap enchanted land. You gain control of that land until end of turn.",
+            // Frenzied Fugue
+            "Gain control of enchanted permanent until end of turn. Untap that permanent. It gains haste until end of turn.",
+            // Venarian Gold
+            "Tap enchanted creature and put X sleep counters on it.",
+            // Stunning Strike
+            "Tap enchanted creature and remove it from combat.",
+        ];
+        for text in admitted {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let followers = followers(&def);
+            assert!(!followers.is_empty(), "reach: {text} has followers");
+            for follower in followers {
+                assert!(
+                    is_parent_anaphor_follower(follower),
+                    "{text}: {:?} should be a host follower",
+                    follower.effect
+                );
+            }
+        }
+        // (text, axis guard): each guard pins the read the refusal rests on.
+        // Named so the array's element type stays readable (clippy::type_complexity).
+        type RefusalGuard = Box<dyn Fn(&Effect) -> bool>;
+        let damage_source = |effect: &Effect| {
+            matches!(
+                effect,
+                Effect::DealDamage {
+                    damage_source: Some(_),
+                    ..
+                }
+            )
+        };
+        let reads_scope = |scope: ObjectScope| {
+            move |effect: &Effect| {
+                let mut found = false;
+                effect.for_each_quantity_expr(&mut |quantity| {
+                    found |= crate::types::ability::quantity_expr_contains_scope(quantity, scope);
+                });
+                found
+            }
+        };
+        let refused: [(&str, &str, RefusalGuard); 5] = [
+            (
+                "Asmoranomardicadaistinaculdacar",
+                "Target creature deals 6 damage to itself.",
+                Box::new(move |effect| {
+                    damage_source(effect)
+                        && !reads_scope(ObjectScope::Target)(effect)
+                        && !reads_scope(ObjectScope::Anaphoric)(effect)
+                }),
+            ),
+            (
+                "Phthisis",
+                "Destroy target creature. Its controller loses life equal to its power plus its toughness.",
+                Box::new(move |effect| {
+                    !damage_source(effect) && reads_scope(ObjectScope::Anaphoric)(effect)
+                }),
+            ),
+            (
+                "Grisly Spectacle",
+                "Destroy target nonartifact creature. Its controller mills cards equal to that creature's power.",
+                Box::new(reads_scope(ObjectScope::Demonstrative)),
+            ),
+            (
+                "Subdue",
+                "Prevent all combat damage that would be dealt by target creature this turn. That creature gets +0/+X until end of turn, where X is its mana value.",
+                Box::new(reads_scope(ObjectScope::Recipient)),
+            ),
+            (
+                "Traitor's Roar",
+                "Tap target untapped creature. It deals damage equal to its power to its controller.",
+                Box::new(move |effect| {
+                    damage_source(effect) && reads_scope(ObjectScope::Anaphoric)(effect)
+                }),
+            ),
+        ];
+        for (card, text, guard) in refused {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let follower = *followers(&def)
+                .last()
+                .unwrap_or_else(|| panic!("reach: {card} has a follower"));
+            assert!(
+                follower.effect.target_filter().is_some_and(is_host_anaphor)
+                    && effect_parent_ref_slots(&follower.effect)
+                        .into_iter()
+                        .all(is_host_anaphor),
+                "reach: {card}'s follower names only the parent's object in its slots: {:?}",
+                follower.effect
+            );
+            assert!(
+                guard(&follower.effect),
+                "reach: {card}'s follower has the read under test: {:?}",
+                follower.effect
+            );
+            assert!(
+                !is_parent_anaphor_follower(follower),
+                "{card}: a follower that reads an object beyond its slots is not a host follower"
+            );
+        }
     }
 }
 #[cfg(test)]

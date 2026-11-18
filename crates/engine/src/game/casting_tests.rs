@@ -38043,7 +38043,7 @@ mod remove_counter_cost {
                 GameEvent::CounterRemoved {
                     object_id,
                     counter_type: CounterType::Plus1Plus1,
-                    count: 2,
+                    count: 2, ..
                 } if *object_id == source
             )),
             "CounterRemoved event for 2 P1P1 should be emitted, got {events:?}"
@@ -38129,6 +38129,7 @@ mod remove_counter_cost {
                     object_id,
                     counter_type: CounterType::Plus1Plus1,
                     count,
+                    ..
                 } if *object_id == source => Some(*count),
                 _ => None,
             })
@@ -62780,23 +62781,22 @@ fn tracked_set_member_filter_participates_in_chosen_target_deps() {
 /// CR 116.2m + CR 605.4a + CR 608.2d: a continuation-carrying special action
 /// (Room unlock) pays through `pay_special_action_mana_cost_with_resume`. Its
 /// affordability probe admits a bonus-dependent cost, and the live payment
-/// settles the choice-owing echo BEFORE spending: it suspends on that choice
-/// with the pool untouched instead of failing at affordability or committing a
-/// mana prefix.
+/// settles its selected echo before spending and returns Paid inline. Public
+/// delayed-echo Room/foretell tests separately cover genuine continuation pauses.
 #[test]
-fn resumable_special_action_payment_settles_echo_before_spending() {
+fn resumable_special_action_payment_settles_selected_echo_before_spending() {
     use crate::game::scenario::{GameScenario, P0};
     fn floating_colorless(n: usize) -> Vec<ManaUnit> {
         (0..n)
             .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
             .collect()
     }
-    const MIRARI_ORACLE: &str =
+    const HEARTBEAT_ORACLE: &str =
         "Whenever a player taps a land for mana, that player adds one mana of any type that land produced.";
     const CHAMBER_ORACLE: &str = "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.";
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_enchantment_from_oracle(P0, "Mirari's Wake", MIRARI_ORACLE);
+    scenario.add_enchantment_from_oracle(P0, "Heartbeat of Spring", HEARTBEAT_ORACLE);
     scenario.add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER_ORACLE);
     // Two floating colorless plus the chamber's base {G}{U} is 4 mana; the
     // cost needs 5, so only the owed echo bonus can fund it.
@@ -62816,7 +62816,7 @@ fn resumable_special_action_payment_settles_echo_before_spending() {
             crate::types::mana::SpecialAction::UnlockDoor,
             PausedManaPayment::Resumable,
         ),
-        "a continuation-carrying live payment suspends for the echo choice, so its preview counts the bonus"
+        "the continuation-capable preview counts the selected echo bonus"
     );
 
     let resume = crate::types::game_state::ManaAbilityResume::RoomUnlock {
@@ -62826,7 +62826,7 @@ fn resumable_special_action_payment_settles_echo_before_spending() {
         cost: cost.clone(),
     };
     let mut events = Vec::new();
-    let paused = pay_special_action_mana_cost_with_resume(
+    let payment = pay_special_action_mana_cost_with_resume(
         runner.state_mut(),
         P0,
         None,
@@ -62835,35 +62835,28 @@ fn resumable_special_action_payment_settles_echo_before_spending() {
         Some(&resume),
         &mut events,
     )
-    .expect("a resumable special-action payment must suspend, not fail");
+    .expect("the selected echo must fund the complete special-action payment");
+    assert_eq!(payment, SpecialActionManaPayment::Paid);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
     assert_eq!(
-        paused,
-        SpecialActionManaPayment::Paused,
-        "the owed echo choice suspends the payment before any mana is spent"
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "2C plus base GU plus exactly one selected bonus funds 3GU"
     );
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::ChooseManaColor { .. }
-        ),
-        "the live prompt must be the echo choice, got {:?}",
-        runner.state().waiting_for
-    );
-    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert!(runner.state().stack.is_empty());
+    assert!(!runner.state().withholds_priority());
     assert_eq!(
-        pool.count_color(ManaType::Green),
+        events
+            .iter()
+            .filter(|event| matches!(event,
+        GameEvent::ManaAdded { source_id, .. }
+            if runner.state().objects[source_id].name == "Heartbeat of Spring"))
+            .count(),
         1,
-        "the chamber's base {{G}} is still unspent while the choice is pending"
-    );
-    assert_eq!(
-        pool.count_color(ManaType::Blue),
-        1,
-        "the chamber's base {{U}} is still unspent while the choice is pending"
-    );
-    assert_eq!(
-        pool.count_color(ManaType::Colorless),
-        2,
-        "floating mana is still unspent while the choice is pending"
+        "the selected producer resolves exactly once"
     );
 }
 

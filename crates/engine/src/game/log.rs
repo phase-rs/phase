@@ -1745,6 +1745,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             counter_type,
             count,
+            ..
         } => vec![
             exact_u32_segment(*count),
             text(" "),
@@ -2005,6 +2006,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id,
             sides,
             result,
+            ..
         } => match result {
             // CR 706: a numeric die roll renders its face value.
             Some(r) => vec![
@@ -3376,6 +3378,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: Some(17),
+                pre_entry_source: None,
             },
             GameEvent::StartingPlayerContest {
                 rounds: vec![crate::types::events::ContestRound {
@@ -4255,6 +4258,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count,
+            instruction_lead: None,
         };
         let segments = format_segments(&removed(1 << 31), &state);
         assert_eq!(segments[0], LogSegment::Text("2147483648".into()));
@@ -4310,6 +4314,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 3,
+            instruction_lead: None,
         };
         let segments = format_segments(&three, &state);
         assert_eq!(segments[0], LogSegment::Number(3));
@@ -4318,6 +4323,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 1,
+            instruction_lead: None,
         };
         assert_eq!(
             format_segments(&one, &state)[3],

@@ -332,7 +332,21 @@ fn run_post_action_pipeline_core(
     // action may have already handled ordinary zone-event triggers, but its
     // just-emitted `SpellCast` still has to join the terminal batch before B's
     // parked trigger drains.
+    //
+    // CR 603.3 + CR 603.3b + CR 603.6d: a handler that processed its triggers
+    // inline set `skip_trigger_scan`; a settled, un-owned as-enters entry it
+    // left parked is released into the queue here, ahead of this pass's SBA
+    // loop, so the drain below places it.
+    if skip_trigger_scan {
+        crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
+    }
     if !skip_trigger_scan || state.pending_resolution_completion.is_some() {
+        if !skip_trigger_scan {
+            // CR 603.2 + CR 613.1b: control changes the layer pass derived during
+            // this action join this scan, so they are collected with the action's
+            // other events as one CR 603.3b batch.
+            super::layers::publish_layer_control_changes(state, events);
+        }
         // A paused logical zone-change owner has already Segment-collected its
         // retained ZoneChanged occurrences into deferred trigger contexts. Do
         // not rediscover those records through the generic post-action scan;
@@ -347,39 +361,49 @@ fn run_post_action_pipeline_core(
         // `filter_already_collected_trigger_events_from` is the single authority
         // for both (CR 603.2c), shared with the search-delivery park family so
         // the two collectors cannot drift.
-        let unconsumed_events = triggers::filter_already_collected_trigger_events_from(
+        let mut unconsumed_events = triggers::uncollected_trigger_events_from(
             state,
             events,
             event_start,
             &consumed_trigger_events,
         );
-        let mut filtered_events: Vec<_> = unconsumed_events
-            .iter()
-            .filter(|event| {
-                !matches!(event, GameEvent::PhaseChanged { .. })
-                    && !state.deferred_entry_events.contains(event)
-                    && !retained_logical_zone_events.contains(event)
-            })
-            .cloned()
-            .collect();
+        unconsumed_events.retain(|event| {
+            !matches!(event, GameEvent::PhaseChanged { .. })
+                && !crate::game::engine_replacement::entry_event_is_parked(state, event)
+                && !retained_logical_zone_events.contains(event)
+        });
         delayed_trigger_events = events[event_start..]
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
-                    && !state.deferred_entry_events.contains(event)
+                    && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                     && !retained_logical_zone_events.contains(event)
             })
             .cloned()
             .collect();
         if skip_trigger_scan {
-            filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
+            unconsumed_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
             delayed_trigger_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
         } else {
             // CR 603.6a + CR 611.3c: entries of an entering instruction that is
             // still suspended wait for it; entries held from earlier answers of
             // one that has completed join this scan ahead of this action's own.
-            filtered_events = triggers::settle_entry_batch_scan(state, filtered_events);
+            unconsumed_events = unconsumed_events.settle_entry_batch(state);
+            unconsumed_events.prepend_released_entries(
+                crate::game::engine_replacement::release_settled_entry_continuation(state),
+            );
         }
+        // CR 603.10 + CR 608.2c: the action's battlefield departures, found in
+        // its whole raw list. A departure an earlier collector claimed is
+        // absent from the slice below, yet its object observed every event of
+        // the action before it.
+        let action_departures = triggers::ActionDepartures::from_positions(
+            events,
+            event_start,
+            unconsumed_events.positions(),
+            unconsumed_events.leading(),
+        );
+        let filtered_events = unconsumed_events.events;
         // CR 603.3b: If the resolution step that just ran paused for a player
         // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
         // abilities it generated (e.g. "whenever you scry, ...") must NOT be
@@ -443,11 +467,19 @@ fn run_post_action_pipeline_core(
             || payment_owned
             || completed_resolution_batch
         {
-            triggers::collect_triggers_into_deferred(state, &filtered_events);
+            triggers::collect_triggers_into_deferred_observing(
+                state,
+                &filtered_events,
+                Some(action_departures),
+            );
         } else if announced_cast_batch && state.game_end.is_none() {
             // The action's delayed observers join the batch in the single
             // delayed scan before the combined drain below.
-            triggers::collect_triggers_into_deferred(state, &filtered_events);
+            triggers::collect_triggers_into_deferred_observing(
+                state,
+                &filtered_events,
+                Some(action_departures),
+            );
         } else if state.game_end.is_none() {
             // CR 104.1: only while the game is still going. Once this action
             // has recorded a result on `GameState::game_end` (e.g. a CR 104.4b
@@ -455,9 +487,13 @@ fn run_post_action_pipeline_core(
             // abilities that triggered on the action's events never go on the
             // stack.
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                hold_pass_triggers(state, &filtered_events);
+                hold_pass_triggers(state, &filtered_events, Some(action_departures));
             } else {
-                triggers::process_triggers(state, &filtered_events);
+                triggers::process_triggers_observing(
+                    state,
+                    &filtered_events,
+                    Some(action_departures),
+                );
             }
         }
     }
@@ -642,6 +678,13 @@ fn run_post_action_pipeline_core(
     // inert with it rather than needing a second guard.
     if state.game_end.is_none() {
         check_exile_returns(state, events);
+        // CR 117.5 + CR 603.2: a control change derived since the scan above
+        // (an exile return re-attaching an Aura) joins this boundary's batch
+        // through the collection below, before placement. Under any other wait
+        // the action-return drain collects it.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::layers::publish_layer_control_changes(state, events);
+        }
     }
     if events.len() > events_before_exile_returns {
         let exile_return_events: Vec<_> = events[events_before_exile_returns..].to_vec();
@@ -704,6 +747,11 @@ fn run_post_action_pipeline_core(
         // CR 117.5 + CR 603.3b: the boundary's own partition joins ungated, and
         // its ownership is consumed before any whole-queue take below.
         batch.append(&mut triggers::take_priority_boundary_batch(state));
+        // CR 603.3 + CR 603.3b: release a settled, un-owned as-enters entry into
+        // the queue before the gate reads it, so it shares this drain with the
+        // triggers already queued. Collecting is safe under every gate; only
+        // placement is gated.
+        crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
         let queue_drains = if completion_settled {
             triggers::stack_object_announcement_drain_allowed(state)
         } else {
@@ -886,7 +934,7 @@ pub(super) fn unclaimed_delayed_trigger_input(
         retained.extend(retained_cost_events(state));
         input.retain(|event| {
             !matches!(event, GameEvent::PhaseChanged { .. })
-                && !state.deferred_entry_events.contains(event)
+                && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                 && !retained.contains(event)
         });
     }
@@ -989,8 +1037,19 @@ pub(crate) fn parked_batch_origin(
 
 /// CR 117.5 + CR 603.3b: hold a pass's triggers for the boundary's one batch.
 /// A resolving spell that still owes its final part owns their placement.
-fn hold_pass_triggers(state: &mut GameState, events: &[GameEvent]) {
-    triggers::collect_parked_triggers_into_deferred(state, events, pass_hold_origin(state));
+/// `action_departures` carries the action's raw-list battlefield departures
+/// (CR 603.10 + CR 608.2c); `None` derives them from `events`.
+fn hold_pass_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    action_departures: Option<triggers::ActionDepartures>,
+) {
+    triggers::collect_parked_triggers_into_deferred_observing(
+        state,
+        events,
+        pass_hold_origin(state),
+        action_departures,
+    );
 }
 
 /// A resolving spell that still owes its final part owns their placement.

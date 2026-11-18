@@ -15,7 +15,7 @@ use crate::types::game_state::{
     LoopCollapseAxis, PayableResource, PendingCounterAddition, PendingEffectResolved,
     PendingEmptyPoolLifeLoss, StepEntryResume, TurnBoundary, UntapStepProgress, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ExtraTurnId, ObjectId};
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -1544,11 +1544,21 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.priority_player = turn_control::turn_decision_maker(state);
     priority::clear_priority_passes(state);
     state.players_attacked_this_step.clear();
-    // CR 400.7: LKI persists within a step but is invalidated on step transition.
+    // Engine policy (not a CR rule): step-scoped LKI tables are cleared on step
+    // transition; the incarnation-keyed tables keep what a pending copy can
+    // still read (below).
+    //
+    // CR 608.2h + CR 707.2 + CR 603.7e: a copy effect that reads its own departed
+    // source in a later step (Esoteric Duplicator's delayed copy of "that artifact")
+    // uses the source's last known copiable values and its departure snapshot's
+    // token image, so the step clear keeps exactly the incarnations a pending
+    // carrier can still read as its own copy source (the collector loop
+    // normalisation uses), read before either table is pruned; every other
+    // entry is history.
+    let readable = state.readable_own_copy_sources();
     state.lki_cache.clear();
     state.lki_copiable_values.clear();
-    state.lki_by_incarnation.clear();
-    state.lki_copiable_values_by_incarnation.clear();
+    state.retain_own_copy_source_lki(&readable);
     state.clear_departed_stack_records();
     // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
@@ -1597,32 +1607,64 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
 }
 
 /// CR 500.7: Enqueue an extra turn for `player` after the specified turn
-/// represented by `anchor`. Both ids are team-normalized (CR 805.8).
+/// represented by `anchor`. Both ids are team-normalized (CR 805.8). Returns
+/// the identity minted for the granted turn (CR 603.7a: "that turn").
 pub(crate) fn enqueue_extra_turn(
     state: &mut GameState,
     player: PlayerId,
     anchor: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> ExtraTurnId {
     let player = super::topology::normalize_shared_turn_recipient(state, player);
     let anchor = super::topology::normalize_shared_turn_recipient(state, anchor);
-    state.extra_turns.push(ExtraTurn { player, anchor });
+    let id = state.mint_extra_turn_id();
+    state.extra_turns.push(ExtraTurn { player, anchor, id });
     events.push(GameEvent::ExtraTurnCreated {
         player_id: player,
         anchor,
     });
+    id
+}
+
+/// CR 603.7a + CR 500.7: remove every delayed trigger bound to the granted
+/// extra turn `turn` ("at the beginning of that turn's end step"). Called when
+/// that turn is skipped (CR 614.10a: a skipped turn is never begun, so its end
+/// step never occurs) or ends without the trigger having fired; either way the
+/// trigger can never fire. A default id names no minted turn and retires
+/// nothing.
+fn retire_granted_turn_triggers(state: &mut GameState, turn: ExtraTurnId) {
+    if turn == ExtraTurnId::default() {
+        return;
+    }
+    let (expired, survivors): (Vec<_>, Vec<_>) = std::mem::take(&mut state.delayed_triggers)
+        .into_iter()
+        .partition(|trigger| {
+            matches!(
+                trigger.condition,
+                DelayedTriggerCondition::AtBeginningOfGrantedTurn { turn: Some(bound), .. }
+                    if bound == turn
+            )
+        });
+    state.delayed_triggers = survivors;
+    for trigger in expired {
+        super::lifecycle::record_delayed_terminal(
+            trigger.provenance.firing(),
+            super::lifecycle::DelayedTerminalDisposition::CleanupExpired,
+        );
+    }
 }
 
 /// CR 500.7: Select the next active player after `completed_player`'s turn ends.
 ///
-/// Returns `(next_active, is_extra_turn)`. When the extra-turn queue drains,
+/// Returns `(next_active, extra_turn)`, where `extra_turn` names the popped
+/// queue entry's identity (`None` for a natural turn). When the extra-turn queue drains,
 /// natural order resumes after the latched specified-turn anchor rather than
 /// after the last extra-turn taker — so an out-of-sequence extra turn during
 /// player C's turn resumes with the player after C, not after the beneficiary.
 pub(crate) fn select_next_turn_after_completion(
     state: &mut GameState,
     completed_player: PlayerId,
-) -> (PlayerId, bool) {
+) -> (PlayerId, Option<ExtraTurnId>) {
     if let Some(entry) = state.extra_turns.pop() {
         // First pop in a chain: latch the specified turn (nested extras must not
         // overwrite the outer CR 500.7 anchor).
@@ -1630,16 +1672,16 @@ pub(crate) fn select_next_turn_after_completion(
             state.extra_turn_sequence_anchor = Some(entry.anchor);
         }
         let active = super::topology::normalize_shared_turn_recipient(state, entry.player);
-        (active, true)
+        (active, Some(entry.id))
     } else if let Some(anchor) = state.extra_turn_sequence_anchor.take() {
         (
             super::topology::next_turn_representative(state, anchor),
-            false,
+            None,
         )
     } else {
         (
             super::topology::next_turn_representative(state, completed_player),
-            false,
+            None,
         )
     }
 }
@@ -1745,8 +1787,9 @@ pub fn projected_turn_order(state: &GameState, max_slots: usize) -> Vec<PlayerId
         scratch.turn_number += 1;
 
         // CR 500.7: extra turns are LIFO; resume after the specified-turn anchor.
-        let (next_active, is_extra_turn) =
+        let (next_active, extra_turn) =
             select_next_turn_after_completion(&mut scratch, completed_player);
+        let is_extra_turn = extra_turn.is_some();
         scratch.active_player = next_active;
 
         // CR 614.10: a skipped turn never emits a display slot. Leave the
@@ -1860,6 +1903,13 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         turn_control::recompute_active_player_control(state);
     }
 
+    // CR 500.7 + CR 603.7a: the granted extra turn that just ended (if any) is
+    // over; a trigger still bound to it never reached its step and can never
+    // fire. Retired before the skip recursion below re-enters this function.
+    if let Some(ended) = state.current_extra_turn.take() {
+        retire_granted_turn_triggers(state, ended);
+    }
+
     state.turn_number += 1;
 
     // CR 500.7: Determine the active player and whether this turn is an *extra*
@@ -1868,7 +1918,8 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // (not after the last extra-turn taker). `is_extra_turn` flows into the
     // replacement pipeline so condition-gated skip effects (e.g., Stranglehold)
     // can observe it.
-    let (next_active, is_extra_turn) = select_next_turn_after_completion(state, completed_player);
+    let (next_active, extra_turn) = select_next_turn_after_completion(state, completed_player);
+    let is_extra_turn = extra_turn.is_some();
     expire_departed_last_turn_attack_records(state, completed_player, next_active, is_extra_turn);
     state.active_player = next_active;
 
@@ -1879,6 +1930,11 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let idx = skip_player.0 as usize;
     if idx < state.turns_to_skip.len() && state.turns_to_skip[idx] > 0 {
         state.turns_to_skip[idx] -= 1;
+        // CR 614.10a + CR 603.7a: a skipped granted turn is never begun, so a
+        // trigger bound to it can never fire.
+        if let Some(skipped) = extra_turn {
+            retire_granted_turn_triggers(state, skipped);
+        }
         // Recursively start the next turn (skipping this one entirely).
         return begin_next_turn(state, events);
     }
@@ -1891,6 +1947,11 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Prevented => {
             // CR 614.10: Turn skipped entirely — restart for the next player.
+            // CR 614.10a + CR 603.7a: as with the counter skip above, a trigger
+            // bound to the skipped granted turn can never fire.
+            if let Some(skipped) = extra_turn {
+                retire_granted_turn_triggers(state, skipped);
+            }
             return begin_next_turn(state, events);
         }
         ReplacementResult::Execute(_) => {
@@ -1907,6 +1968,11 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
             );
         }
     }
+
+    // CR 500.7 + CR 603.7a: the turn has committed (past both skip returns), so
+    // a granted extra turn is now the turn in progress. A legacy entry saved
+    // without an id names no minted turn and binds nothing.
+    state.current_extra_turn = extra_turn.filter(|id| *id != ExtraTurnId::default());
 
     // CR 500: Track per-player turn count for "your Nth turn of the game" conditions.
     state.players[state.active_player.0 as usize].turns_taken += 1;
@@ -3302,6 +3368,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 613.1b: recompute layer-2 control now the effect is gone, then emit the
     // loss event for every object whose controller actually reverted.
+    // CR 603.2c: the occurrences this cleanup publishes, as positions in the
+    // action's event buffer.
+    let reversion_start = events.len();
     if let Some(boundary) = control_revert_boundary {
         // CR 514.2: the members' pre-revert evidence was fixed above, before
         // the prune; read it now, then publish against the reverted board.
@@ -3312,9 +3381,6 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             })
             .collect();
         super::layers::flush_layers(state);
-        // CR 603.2c: the occurrences this reversion publishes, as positions in
-        // the action's event buffer.
-        let reversion_start = events.len();
         let mut seen_reverting = HashSet::new();
         for (object_id, member) in control_reverting.into_iter().zip(members) {
             if !seen_reverting.insert(object_id) {
@@ -3332,7 +3398,14 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
                 new_controller,
             );
         }
-
+    }
+    // CR 514.2 + CR 613.1b + CR 603.2: the control changes the layer pass
+    // derived and no instruction published — a "for as long as" control
+    // duration that lapsed because the reversion returned its source (Rubinia
+    // Soulsinger), or one derived earlier in the turn — are published with the
+    // reversion, so CR 514.3a settles their abilities in this cleanup step.
+    super::layers::publish_layer_control_changes(state, events);
+    if events.len() > reversion_start {
         // CR 603.2 + CR 603.10d + CR 603.7: the reversion triggers its
         // abilities as it happens. The printed lose-side abilities come from the
         // watchers its boundary latched before the prune above. The printed
@@ -5894,6 +5967,10 @@ card into your hand at the beginning of your next end step.";
         );
         crate::game::layers::flush_layers(state);
         assert_eq!(state.objects[&kharn].controller, P0);
+        // The steal itself was published (and its own trigger handled) by the
+        // instruction this direct install stands in for; only the reversion
+        // is under test.
+        state.layer_control_changes.clear();
         let starting_turn = state.turn_number;
 
         let mut events = Vec::new();
@@ -7311,6 +7388,66 @@ card into your hand at the beginning of your next end step.";
             [&DelayedTriggerCondition::AtNextPhase { phase: Phase::End }],
             "the bound trigger is removed and the next-end-step trigger is kept"
         );
+    }
+
+    /// CR 500.7 + CR 603.7a: a trigger bound to the granted turn that just ended
+    /// without reaching its step is removed when the turn ends; a trigger bound
+    /// to another queued turn, and an unrelated trigger, are kept.
+    ///
+    /// DISCRIMINATION: drop the retirement of `current_extra_turn` in
+    /// `start_next_turn` and the ended turn's trigger survives.
+    #[test]
+    fn start_next_turn_retires_triggers_bound_to_the_granted_turn_that_ended() {
+        let mut state = setup();
+        let draw = || {
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))
+        };
+        for condition in [
+            DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                phase: Phase::End,
+                turn: Some(ExtraTurnId(1)),
+            },
+            DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                phase: Phase::End,
+                turn: Some(ExtraTurnId(2)),
+            },
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        ] {
+            state.delayed_triggers.push(DelayedTrigger::new(
+                condition,
+                draw(),
+                PlayerId(0),
+                ObjectId(100),
+                true,
+            ));
+        }
+        state.current_extra_turn = Some(ExtraTurnId(1));
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert_eq!(
+            state
+                .delayed_triggers
+                .iter()
+                .map(|trigger| &trigger.condition)
+                .collect::<Vec<_>>(),
+            [
+                &DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                    phase: Phase::End,
+                    turn: Some(ExtraTurnId(2)),
+                },
+                &DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            ],
+        );
+        assert_eq!(state.current_extra_turn, None, "a natural turn follows");
     }
 
     #[test]
@@ -12767,7 +12904,7 @@ card into your hand at the beginning of your next end step.";
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 }
+                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. }
                     if *object_id == obj_id
             )),
             "CounterRemoved event should be emitted"
@@ -13335,6 +13472,7 @@ card into your hand at the beginning of your next end step.";
             vec![ExtraTurn {
                 player: PlayerId(1),
                 anchor: PlayerId(0),
+                id: ExtraTurnId(1),
             }]
         );
         assert_eq!(
@@ -13359,7 +13497,7 @@ card into your hand at the beginning of your next end step.";
 
         assert_eq!(state.extra_turns.len(), 1);
         assert_eq!(events.len(), 1);
-        let ExtraTurn { player, anchor } = &state.extra_turns[0];
+        let ExtraTurn { player, anchor, .. } = &state.extra_turns[0];
         let GameEvent::ExtraTurnCreated {
             player_id,
             anchor: event_anchor,
@@ -13685,7 +13823,8 @@ card into your hand at the beginning of your next end step.";
             state.extra_turns,
             vec![ExtraTurn {
                 player: PlayerId(2),
-                anchor: PlayerId(0)
+                anchor: PlayerId(0),
+                id: ExtraTurnId(1),
             }],
             "projection must not pop the source state's queued extra turn"
         );

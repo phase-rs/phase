@@ -77,6 +77,7 @@ fn removals(events: &[GameEvent]) -> Vec<(ObjectId, CounterType, u32)> {
                 object_id,
                 counter_type,
                 count,
+                ..
             } => Some((*object_id, counter_type.clone(), *count)),
             _ => None,
         })
@@ -844,33 +845,50 @@ fn search_for_tomorrow() -> serde_json::Value {
     })
 }
 
-/// F3 (review of f1cf70cf3; CR 603.2c): the four printed batched ("one or
-/// more counters are removed") and last-counter clauses are not modelled. Each
-/// lowers to an honest `TriggerMode::Unknown` with the exact printed payload,
-/// and that trigger is the card face's only coverage gap, so the card stays
-/// unsupported. A changed mode, a changed label or a missing definition fails.
+/// CR 603.2c + CR 122.1: the four printed batched ("one or more counters are
+/// removed") and last-counter clauses lower to live `CounterRemoved` triggers,
+/// not `Unknown` gaps: the "one or more" forms are batched (one occurrence per
+/// recipient per simultaneous batch), and Orcish Mine's "the last ore counter" is a single
+/// threshold-0 occurrence. No face keeps a trigger gap.
 #[test]
-fn batched_and_last_counter_clauses_are_unsupported_with_exact_gaps() {
-    for (record, payload) in [
+fn batched_and_last_counter_clauses_lower_to_live_counter_removed_triggers() {
+    // (record, expected counter filter, batched)
+    for (record, filter, batched) in [
         (
             chandra_fire_artisan(),
-            "Whenever one or more loyalty counters are removed from ~",
+            Some(CounterTriggerFilter {
+                counter_type: CounterType::Loyalty,
+                threshold: None,
+            }),
+            true,
         ),
-        (
-            cloudsculpt_armorer(),
-            "Whenever one or more counters are removed from a permanent you control",
-        ),
+        (cloudsculpt_armorer(), None, true),
         (
             regenerations_restored(),
-            "Whenever one or more time counters are removed from ~",
+            Some(CounterTriggerFilter {
+                counter_type: CounterType::Time,
+                threshold: None,
+            }),
+            true,
         ),
-        (orcish_mine(), "When the last ore counter is removed from ~"),
+        (
+            orcish_mine(),
+            Some(CounterTriggerFilter {
+                counter_type: engine::types::counter::parse_counter_type("ore"),
+                threshold: Some(0),
+            }),
+            false,
+        ),
     ] {
         let face = printed_face(record);
         let name = face.name.clone();
-        let unknown = TriggerMode::Unknown(payload.to_string());
         assert_eq!(
-            face.triggers.iter().filter(|t| t.mode == unknown).count(),
+            face.triggers
+                .iter()
+                .filter(|t| t.mode == TriggerMode::CounterRemoved
+                    && t.counter_filter == filter
+                    && t.batched == batched)
+                .count(),
             1,
             "{name}: {:?}",
             face.triggers
@@ -879,14 +897,14 @@ fn batched_and_last_counter_clauses_are_unsupported_with_exact_gaps() {
             !face
                 .triggers
                 .iter()
-                .any(|t| matches!(t.mode, TriggerMode::Unknown(_)) && t.mode != unknown),
-            "{name}: no other unknown trigger: {:?}",
+                .any(|t| matches!(t.mode, TriggerMode::Unknown(_))),
+            "{name}: no unknown trigger: {:?}",
             face.triggers
         );
-        assert_eq!(
-            card_face_gaps(&face),
-            vec![format!("Trigger:{payload}")],
-            "{name}"
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "{name}: gap_count 0 is the claimed parse impact: {:?}",
+            card_face_gaps(&face)
         );
     }
 

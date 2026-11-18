@@ -161,6 +161,7 @@
     "flip": "Girar",
     "report": "Informar de un problema",
     "reported": "Informado ✓",
+    "reportNotSent": "No enviado",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
@@ -1811,6 +1812,10 @@
     "spellCopyOrder": {
       "title": "Ordenar las copias",
       "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
+    },
+    "memberOrder": {
+      "title": "Ordena las cartas",
+      "subtitle": "Elige qué carta se procesa a continuación"
     },
     "collectEvidence": {
       "title": "Recabar pruebas",

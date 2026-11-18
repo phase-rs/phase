@@ -161,6 +161,7 @@
     "flip": "反転",
     "report": "問題を報告",
     "reported": "報告済み ✓",
+    "reportNotSent": "未送信",
     "altParsedAbilities": "Alt: 解析済み能力",
     "debugId": "ID: {{id}}",
     "engineParse": "エンジン解析",
@@ -1849,6 +1850,10 @@
     "spellCopyOrder": {
       "title": "コピーの順番",
       "subtitle": "次にコピーをスタックに置く呪文を選ぶ"
+    },
+    "memberOrder": {
+      "title": "カードの順序",
+      "subtitle": "次に処理するカードを選んでください"
     },
     "collectEvidence": {
       "title": "証拠収集",

@@ -457,7 +457,8 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
         entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         sibling_condition: _, // SiblingCondition replication marker, no dynamic read
-        distribute: _,   // announcement unit tag/string, no resolution-time dynamic read
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        distribute: _,       // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
@@ -5711,6 +5712,12 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
         // mirroring `WasStartingPlayer { controller }`'s delegation to
         // `scan_controller_ref`.
         TriggerCondition::IsMonarch { player } => scan_player_scope(player),
+        // CR 122.1f: the poison predicate reads the player's poison total,
+        // which `project_out_resources` erases, so it is a projected read.
+        TriggerCondition::IsPoisoned { player } => scan_player_scope(player).or(Axes {
+            projected: true,
+            ..Axes::NONE
+        }),
         // Digital-only Alchemy (no CR entry): "if you have a boon" — the
         // subject scope classifies exactly like the monarch's.
         TriggerCondition::HasBoon { player } => scan_player_scope(player),
@@ -6026,6 +6033,9 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
         // The same coordinate plus the identity of one added phase
         // (`ExtraPhaseId`). Neither reaches a filter or a quantity.
         DelayedTriggerCondition::AtBeginningOfAddedPhase { phase: _, entry: _ } => Axes::NONE,
+        // The same coordinate plus the identity of one granted extra turn
+        // (`ExtraTurnId`). Neither reaches a filter or a quantity.
+        DelayedTriggerCondition::AtBeginningOfGrantedTurn { phase: _, turn: _ } => Axes::NONE,
         // CR 603.7c: a delayed triggered ability that refers to a particular object.
         // `object_id` is already resolved, so there is no filter to walk and no
         // population whose size a growing class could move.
@@ -6203,6 +6213,13 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
         // subject scope is classified through the shared `PlayerScope` walker.
         StaticCondition::IsMonarch { player } => scan_player_scope(player),
         StaticCondition::HasBoon { player } => scan_player_scope(player),
+        // CR 122.1f: the poison predicate reads the scoped player's poison
+        // total, a projected player resource — same axes as the
+        // `TriggerCondition::IsPoisoned` sibling.
+        StaticCondition::PlayerIsPoisoned { player } => scan_player_scope(player).or(Axes {
+            projected: true,
+            ..Axes::NONE
+        }),
         StaticCondition::IsInitiative => Axes::NONE,
         StaticCondition::NoMonarch => Axes::NONE,
         StaticCondition::HasCityBlessing => Axes::NONE,
@@ -7555,6 +7572,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -14433,6 +14451,7 @@ mod tests {
             DelayedTriggerCondition::AtNextPhase { .. }
             | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
             | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+            | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
             | DelayedTriggerCondition::WhenLeavesPlay { .. } => (false, false, false),
             DelayedTriggerCondition::WhenDies { .. }
             | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
@@ -15509,6 +15528,59 @@ mod attacked_referent_scan_tests {
                 mode,
             );
             assert!(!none.event && !none.sibling.is_read(), "contrast: {mode:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod poison_condition_scan_tests {
+    use super::*;
+
+    use crate::types::ability::AggregateFunction;
+
+    /// CR 122.1f: "poisoned" is one or more player poison counters, so the
+    /// predicate reads a projected player-level resource. `scan_player_scope`
+    /// reports no axes for the ordinary scopes — `DefendingPlayer` included —
+    /// so the predicate itself must mark `projected`; delegating to
+    /// `scan_player_scope` alone hides the dependency from the loop-cover veto
+    /// and every other projected-read consumer.
+    #[test]
+    fn poison_predicate_scan_is_projected_for_every_player_scope() {
+        for player in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::DefendingPlayer,
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+        ] {
+            // Bound before the scan: `Axes` borrows the scanned condition.
+            let condition = TriggerCondition::IsPoisoned {
+                player: player.clone(),
+            };
+            let axes = scan_trigger_condition(&condition, ScanMode::Conservative);
+            assert!(
+                axes.projected,
+                "the poison total is a projected player resource ({player:?})"
+            );
+            assert!(
+                !axes.event && !axes.sibling.is_read(),
+                "the predicate alone reads no event or sibling axis ({player:?})"
+            );
+            // The static sibling (`StaticCondition::PlayerIsPoisoned`) feeds the
+            // same dependency model and must classify identically.
+            let static_condition = StaticCondition::PlayerIsPoisoned {
+                player: player.clone(),
+            };
+            let static_axes = scan_static_condition(&static_condition, ScanMode::Conservative);
+            assert!(
+                static_axes.projected,
+                "the static sibling arm marks the same projected read ({player:?})"
+            );
+            assert!(
+                !static_axes.event && !static_axes.sibling.is_read(),
+                "the static sibling arm reads no other axis ({player:?})"
+            );
         }
     }
 }

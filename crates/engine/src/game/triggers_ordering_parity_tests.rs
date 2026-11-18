@@ -1370,6 +1370,7 @@ fn self_departure(id: u64, co: &[u64]) -> Option<GameEvent> {
         to: Zone::Graveyard,
         record: Box::new(ZoneChangeRecord {
             co_departed: co.iter().map(|&x| ObjectId(x)).collect(),
+            instruction_lead: None,
             ..ZoneChangeRecord::test_minimal(ObjectId(id), Some(Zone::Battlefield), Zone::Graveyard)
         }),
     })

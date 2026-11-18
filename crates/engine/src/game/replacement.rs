@@ -1081,6 +1081,7 @@ fn stash_post_replacement_continuation(
             // `active_player` here would stamp a confident wrong answer in
             // place of that fallback.
             controller,
+            parked_entrants: Vec::new(),
         },
         ResidentDrainPolicy::KeepResident,
     );
@@ -8099,6 +8100,60 @@ pub(crate) fn draw_instruction_may_be_replaced(state: &GameState) -> bool {
             .any(admits_instruction)
 }
 
+/// CR 614.1c + CR 614.12: whether `def` is an object's own "As [this] enters,
+/// roll …" replacement: an entry replacement of the object itself whose
+/// instructions roll dice (Neverwinter Hydra, Hydradoodle, Hammer Jammer, Jumbo
+/// Imp, Temp of the Damned).
+pub(crate) fn replacement_rolls_as_it_enters(def: &ReplacementDefinition) -> bool {
+    fn rolls(link: &AbilityDefinition) -> bool {
+        matches!(*link.effect, Effect::RollDie { .. })
+            || link.sub_ability.as_deref().is_some_and(rolls)
+    }
+    def.event == ReplacementEvent::Moved
+        && def.valid_card == Some(TargetFilter::SelfRef)
+        && def.execute.as_deref().is_some_and(rolls)
+}
+
+/// CR 614.12 + CR 613.1f: whether `entrant`, as it would exist on the
+/// battlefield, still has an "As [this] enters, roll …" ability. The entrant is
+/// projected under the controller and face its entry gives it, with the
+/// continuous effects that already exist: a resident Humility or Dress Down
+/// removes the ability. The board is the one before the entry's event
+/// (CR 603.6a + CR 603.6d), so a co-entrant's effect does not exist yet. An
+/// entrant the projection cannot place keeps its own answer.
+fn entrant_keeps_as_enters_roll(
+    state: &GameState,
+    event: &ProposedEvent,
+    entrant: ObjectId,
+) -> bool {
+    let ProposedEvent::ZoneChange {
+        controller_override,
+        enter_transformed,
+        ..
+    } = event
+    else {
+        return true;
+    };
+    let view = crate::game::pre_entry_view::PreEntryRulesView::of_roll(state, entrant);
+    let board = view
+        .as_ref()
+        .map_or(state, crate::game::pre_entry_view::PreEntryRulesView::board);
+    crate::game::filter::BattlefieldEntrantProjection::new(
+        board,
+        entrant,
+        *controller_override,
+        *enter_transformed,
+    )
+    .is_none_or(|projection| {
+        projection.entrant().is_some_and(|object| {
+            object
+                .replacement_definitions
+                .iter_all()
+                .any(replacement_rolls_as_it_enters)
+        })
+    })
+}
+
 fn object_replacement_candidate_applies_on_entry_board(
     state: &GameState,
     event: &ProposedEvent,
@@ -8754,6 +8809,20 @@ fn object_replacement_candidate_applies_on_entry_board(
         if !m.matches(ev_ct) {
             return false;
         }
+    }
+    // CR 614.12 + CR 613.1f: the entrant's own "as [this] enters" roll applies
+    // only if the permanent as it would exist on the battlefield has it,
+    // checked against continuous effects that already exist (a resident
+    // Humility or Dress Down removes it), on the board before this entry's
+    // event (CR 603.6a + CR 603.6d: a co-entrant's effect does not exist yet).
+    // Last, so the entrant's projection is built only for a candidate every
+    // cheaper check has kept.
+    if is_entering
+        && !is_liminal_source
+        && replacement_rolls_as_it_enters(repl_def)
+        && !entrant_keeps_as_enters_roll(state, event, obj.id)
+    {
+        return false;
     }
 
     // CR 614.12 + CR 613.1f: last, so the projection is built only for an own entry
@@ -15901,6 +15970,7 @@ fn continue_replacement_impl(
                         // zone-change drain rebinds `source` to the entering /
                         // moving object, so the branch's "you" needs its own slot.
                         controller: branch_controller,
+                        parked_entrants: Vec::new(),
                     },
                     ResidentDrainPolicy::Replace,
                 );
@@ -16366,7 +16436,7 @@ mod tests {
                 1,
                 "accepted shield consumption must record one command"
             );
-            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1 } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1, .. } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
             if !destroy {
                 let removed_at = events.iter().position(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, .. } if *id == object_id)).unwrap();
                 let prevented_at = events
@@ -16456,7 +16526,7 @@ mod tests {
             1,
             "the post-batch shield consumption records one accepted removal"
         );
-        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1 } if *object_id == shielded)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1, .. } if *object_id == shielded)).count(), 1);
     }
 
     /// V14 — `ability_tree_copies_tokens` walks the substitution's OWN tree and
@@ -21726,6 +21796,7 @@ mod tests {
                     event_target: Some(TargetRef::Player(PlayerId(0))),
                     event_amount: None,
                     controller: Some(PlayerId(0)),
+                    parked_entrants: Vec::new(),
                 },
                 ResidentDrainPolicy::KeepResident,
             );

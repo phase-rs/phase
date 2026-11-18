@@ -4653,13 +4653,15 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // The match stays EXHAUSTIVE over `OracleNodeIr` (no `_` arm): it is now the
     // single place a new node variant must declare whether it consumes a printed
     // slot, an obligation `finish()` used to carry.
-    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for a lone "enchanted/
-    // equipped X" instruction that names its host without targeting it. Only the
-    // card's own spell/activated items and parsed effect-chain triggers are
-    // candidates; each records its printed-clause evidence here, and the
-    // conversion itself runs after every document relation has composed the
-    // final abilities (`convert_terminal_attachment_host_references` below), so a
-    // candidate that composition gives a follower, or folds into another
+    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for an "enchanted/
+    // equipped X" instruction that names its host without targeting it, alone
+    // or followed only by instructions on that host ("it", "that land's
+    // controller"). Only the card's own spell/activated items and parsed
+    // effect-chain triggers are candidates; each records its printed-clause
+    // evidence here, and the conversion itself runs after every document
+    // relation has composed the final abilities
+    // (`convert_terminal_attachment_host_references` below), so a candidate
+    // that composition gives any other follower, or folds into another
     // ability, keeps its target.
     //
     // CR 700.2: conservatively, a document that carries a modal choice
@@ -5003,7 +5005,7 @@ struct HostReferenceCandidates {
 /// resolved through its own category's id track only: one that a relation
 /// folded into another ability (a CR 614.15 self-replacement override) or moved
 /// elsewhere is no longer there and keeps its target, and one that composition
-/// gave a follower is refused by the converter.
+/// gave a follower other than a host anaphor is refused by the converter.
 fn convert_terminal_attachment_host_references(
     result: &mut ParsedAbilities,
     candidates: &HostReferenceCandidates,
@@ -11876,8 +11878,8 @@ fn render_ability_descriptions(def: &mut AbilityDefinition, card_name: &str) {
 /// not about `description`.)
 ///
 /// WILDCARD-FREE on purpose, for the same reason
-/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has ten
-/// variants, so the non-descending arm costs eight leaf names — not the ~206
+/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has eleven
+/// variants, so the non-descending arm costs nine leaf names — not the ~206
 /// that justify the wildcard in [`render_effect_descriptions`]. A new variant
 /// carrying a `TriggerDefinition` must be a COMPILE ERROR here, not a silent
 /// pass-through.
@@ -11898,11 +11900,12 @@ fn render_delayed_condition_descriptions(
                 render_trigger_descriptions(other, card_name);
             }
         }
-        // The remaining eight conditions are phase gates or object/filter
+        // The remaining nine conditions are phase gates or object/filter
         // matchers with no nested `TriggerDefinition`, hence no description.
         D::AtNextPhase { .. }
         | D::AtNextPhaseForPlayer { .. }
         | D::AtBeginningOfAddedPhase { .. }
+        | D::AtBeginningOfGrantedTurn { .. }
         | D::WhenLeavesPlay { .. }
         | D::WhenDies { .. }
         | D::WhenLeavesPlayFiltered { .. }

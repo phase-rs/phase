@@ -36,8 +36,8 @@ const ATTACHMENT_W_PX = 220;
  *
  * Each attachment renders through `<DialogAttachmentCard>` (full Scryfall
  * normal image, click-forwards target select / activation, counter
- * overlay). Wraps to additional rows as needed; `scrollable` on the
- * DialogShell handles vertical overflow when N is large.
+ * overlay). Wraps to additional rows as needed; the DialogShell body
+ * scrolls when N is large.
  *
  * Used for player-attached Aura clusters today and structured to take
  * object hosts as well — the discriminated `host` union picks the right
@@ -61,7 +61,6 @@ export function AttachmentsDialog({ isOpen, onClose, host, attachmentIds }: Prop
       title={title}
       subtitle={subtitle}
       size="lg"
-      scrollable
       onClose={onClose}
     >
       <div className="flex flex-wrap content-start justify-center gap-3 px-4 py-4 lg:px-6 lg:py-5">
