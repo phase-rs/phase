@@ -74,7 +74,7 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                 main_deck: vec!["Network Test Land".to_string(); 60],
                 ..Default::default()
             };
-            let deck = crate::resolve_deck(&app.db, &names).unwrap();
+            let deck = crate::resolve_deck(&app.db, &app.combos, &names).unwrap();
             let (draft_code, draft_token, target_key, _) = start_draft_match_with_deck(
                 &app,
                 deck,
@@ -87,6 +87,7 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                     .unwrap();
                 session.state.format_config = engine::types::format::FormatConfig::freeform();
                 session.start_game(&app.db).unwrap();
+                crate::socket_test_hooks::elect_contest_winner_to_play(&mut session);
                 (
                     session.player_tokens[1].clone(),
                     Some(session.player_tokens[0].clone()),

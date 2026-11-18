@@ -18,6 +18,7 @@
 //! and on the battlefield. A revert (no rider / no exemption check) sends it
 //! to the graveyard.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::sba::check_state_based_actions;
 use engine::game::zones::create_object;
@@ -30,6 +31,22 @@ use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::ManaColor;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+/// CR 702.16p: the start-snapshot key of the grant source's printed static 0,
+/// modification `mod_index`, for `host`'s current incarnation.
+fn printed_start_key(
+    state: &GameState,
+    mod_index: usize,
+    host: engine::types::identifiers::ObjectId,
+) -> engine::game::game_object::ProtectionStartKey {
+    engine::game::game_object::ProtectionStartKey {
+        occurrence: engine::types::layers::ProtectionGrantOccurrence::Static {
+            definition_index: 0,
+        },
+        mod_index,
+        host: engine::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&host]),
+    }
+}
 
 const FLICKERING_WARD: &str = "Enchant creature\n\
 As this Aura enters, choose a color.\n\
@@ -328,22 +345,22 @@ fn cr_702_16p_two_qualities_in_one_static_each_modification_snapshots_independen
         .objects
         .get(&grant_source)
         .unwrap()
-        .protection_start_exempt_attachments;
+        .protection_start_snapshots;
     assert!(
         snapshots
-            .get(&(0, 0, host))
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&red_equipment)),
         "red protection modification must snapshot the red Equipment at effect start"
     );
     assert!(
         snapshots
-            .get(&(0, 1, host))
+            .get(&printed_start_key(&state, 1, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&blue_equipment)),
         "blue protection modification must snapshot the blue Equipment at effect start"
     );
     assert!(
         !snapshots
-            .get(&(0, 0, host))
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&blue_equipment)),
         "red snapshot must not absorb the blue Equipment"
     );
@@ -405,7 +422,7 @@ fn cr_702_16p_snapshots_matching_controlled_attachment_at_grant_start() {
         &mut state,
         CardId(3),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -424,8 +441,8 @@ fn cr_702_16p_snapshots_matching_controlled_attachment_at_grant_start() {
             .objects
             .get(&grant_source)
             .unwrap()
-            .protection_start_exempt_attachments
-            .get(&(0, 0, host))
+            .protection_start_snapshots
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)),
         "CR 702.16p: white Equipment already attached when the grant starts must be snapshotted"
     );
@@ -475,7 +492,7 @@ fn cr_702_16p_does_not_retain_attachment_that_becomes_matching_later() {
         &mut state,
         CardId(12),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -549,7 +566,7 @@ fn cr_702_16p_second_unridered_protection_grant_still_removes_despite_snapshot()
         &mut state,
         CardId(22),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -590,7 +607,7 @@ fn cr_702_16p_second_unridered_protection_grant_still_removes_despite_snapshot()
 }
 
 #[test]
-fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
+fn cr_702_16p_recolored_rider_does_not_keep_the_old_qualitys_attachments() {
     use std::sync::Arc;
 
     let mut state = GameState::new_two_player(42);
@@ -628,7 +645,7 @@ fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
         &mut state,
         CardId(32),
         PlayerId(0),
-        "Dual Blessing".to_string(),
+        "Synthetic recolored rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -644,8 +661,8 @@ fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
         .objects
         .get(&grant_source)
         .unwrap()
-        .protection_start_exempt_attachments
-        .get(&(0, 0, host))
+        .protection_start_snapshots
+        .get(&printed_start_key(&state, 0, host))
         .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)));
 
     {
@@ -668,10 +685,10 @@ fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
             .objects
             .get(&grant_source)
             .unwrap()
-            .protection_start_exempt_attachments
-            .get(&(0, 0, host))
+            .protection_start_snapshots
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)),
-        "white rider must not inherit blue-rider snapshot at the same effect slot"
+        "the white rider takes a new snapshot under the same key: the blue Equipment from the blue snapshot is not in it"
     );
 
     state
@@ -689,6 +706,123 @@ fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
         state.objects.get(&equipment).and_then(|o| o.attached_to),
         None,
         "Equipment that became white after the white rider started must unattach"
+    );
+}
+
+/// CR 702.16p + CR 613.1f: the source's own static (the same occurrence and
+/// modification index) changes quality in place, blue to white. That is a new
+/// protection effect starting to apply, so it takes a new snapshot: the white
+/// Equipment attached when it started is exempt, and the stale blue snapshot
+/// (which held nothing, the Equipment not being blue) must not stand in for
+/// it. Synthetic: no printed card changes its protection quality in place; the
+/// nearest printed rider is Benevolent Blessing's ("This effect doesn't remove
+/// Auras and Equipment you control that are already attached to it.").
+#[test]
+fn cr_702_16p_own_static_changing_quality_in_place_takes_a_new_snapshot() {
+    use std::sync::Arc;
+
+    let mut state = GameState::new_two_player(42);
+    let host = create_object(
+        &mut state,
+        CardId(50),
+        PlayerId(0),
+        "Bear".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&host).unwrap().card_types.core_types = vec![CoreType::Creature];
+    let equipment = create_object(
+        &mut state,
+        CardId(51),
+        PlayerId(0),
+        "Sword".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&equipment).unwrap();
+        obj.card_types.core_types = vec![CoreType::Artifact];
+        obj.card_types.subtypes.push("Equipment".to_string());
+        obj.color.push(ManaColor::White);
+        obj.attached_to = Some(host.into());
+    }
+    state
+        .objects
+        .get_mut(&host)
+        .unwrap()
+        .attachments
+        .push(equipment);
+    let grant_source = create_object(
+        &mut state,
+        CardId(52),
+        PlayerId(0),
+        "Synthetic recolored rider source (Benevolent Blessing analogue)".to_string(),
+        Zone::Battlefield,
+    );
+
+    apply_host_protection_grant(
+        &mut state,
+        grant_source,
+        host,
+        ProtectionTarget::Color(ManaColor::Blue),
+        Some(ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached),
+    );
+    state.layers_dirty.mark_full();
+    evaluate_layers(&mut state);
+    let blue_snapshot = state
+        .objects
+        .get(&grant_source)
+        .unwrap()
+        .protection_start_snapshots
+        .get(&printed_start_key(&state, 0, host))
+        .cloned()
+        .expect("reach guard: the blue rider took a snapshot");
+    assert_eq!(
+        blue_snapshot.resolved_quality,
+        ProtectionTarget::Color(ManaColor::Blue)
+    );
+    assert!(
+        !blue_snapshot.attachment_ids.contains(&equipment),
+        "reach guard: the white Equipment is not in the blue snapshot"
+    );
+
+    {
+        let obj = state.objects.get_mut(&grant_source).unwrap();
+        obj.static_definitions.clear();
+        obj.base_static_definitions = Arc::new(Vec::new());
+        obj.base_characteristics_initialized = false;
+    }
+    apply_host_protection_grant(
+        &mut state,
+        grant_source,
+        host,
+        ProtectionTarget::Color(ManaColor::White),
+        Some(ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached),
+    );
+    state.layers_dirty.mark_full();
+    evaluate_layers(&mut state);
+    let white_snapshot = state
+        .objects
+        .get(&grant_source)
+        .unwrap()
+        .protection_start_snapshots
+        .get(&printed_start_key(&state, 0, host))
+        .cloned()
+        .expect("the white rider holds a snapshot under the same key");
+    assert_eq!(
+        white_snapshot.resolved_quality,
+        ProtectionTarget::Color(ManaColor::White),
+        "the snapshot follows the quality the static now grants"
+    );
+    assert!(
+        white_snapshot.attachment_ids.contains(&equipment),
+        "the white Equipment attached when the white effect started is snapshotted"
+    );
+
+    let mut events = Vec::new();
+    check_state_based_actions(&mut state, &mut events);
+    assert_eq!(
+        state.objects.get(&equipment).and_then(|o| o.attached_to),
+        Some(host.into()),
+        "the exempt Equipment stays attached"
     );
 }
 
@@ -731,7 +865,7 @@ fn cr_702_16p_opponent_controlled_matching_attachment_not_exempt() {
         &mut state,
         CardId(42),
         PlayerId(0),
-        "Blessing".to_string(),
+        "Synthetic rider source (Benevolent Blessing analogue)".to_string(),
         Zone::Battlefield,
     );
     apply_host_protection_grant(
@@ -749,8 +883,8 @@ fn cr_702_16p_opponent_controlled_matching_attachment_not_exempt() {
             .objects
             .get(&grant_source)
             .unwrap()
-            .protection_start_exempt_attachments
-            .get(&(0, 0, host))
+            .protection_start_snapshots
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)),
         "702.16p only exempts controlled attachments at effect start"
     );

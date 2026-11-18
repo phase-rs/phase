@@ -73,14 +73,18 @@ RESOLVED = re.compile(r"PostReplacementContinuation::Resolved\s*\(")
 # expression, and therefore no leading dot.
 INSTALL = re.compile(r"\.install_ready_continuation\s*\(")
 
-# (C) The replacement-pipeline stash authority and the post-delivery dispatcher.
+# (C) The replacement-pipeline stash authority and the post-delivery dispatcher,
+# reached through either of its two entry points: the wrapper
+# `apply_pending_post_replacement_effect` and the pause-reporting
+# `dispatch_pending_post_replacement_effect` it delegates to.
 # The lookbehind is exactly three characters because the declarations are
-# verified as `fn stash_post_replacement_continuation(` and `pub(crate) fn
-# apply_pending_post_replacement_effect(`. At each function name the immediate
+# verified as `fn stash_post_replacement_continuation(`, `pub(crate) fn
+# apply_pending_post_replacement_effect(` and `pub(crate) fn
+# dispatch_pending_post_replacement_effect(`. At each function name the immediate
 # preceding text is therefore `fn `, even when visibility appears earlier. This
 # must stay fixed-width: Python `re` rejects variable-width lookbehinds.
 STASH = re.compile(r"(?<!fn )stash_post_replacement_continuation\s*\(")
-CONSUMER = re.compile(r"(?<!fn )apply_pending_post_replacement_effect\s*\(")
+CONSUMER = re.compile(r"(?<!fn )(?:apply|dispatch)_pending_post_replacement_effect\s*\(")
 
 FAMILIES = (
     ("template", TEMPLATE),
@@ -100,7 +104,7 @@ def census_file(path: Path) -> list[tuple[str, str, str]]:
     Patterns run only on the shared scanner's stripped `code`, never `raw`, so
     a comment or string that names a continuation cannot create a fake site.
     """
-    rel = str(path.relative_to(REPO_ROOT))
+    rel = path.relative_to(REPO_ROOT).as_posix()
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     hits: list[tuple[str, str, str]] = []
 
@@ -153,7 +157,8 @@ HEADER = """\
 # family=resolved  direct `PostReplacementContinuation::Resolved(...)`
 # family=install   `.install_ready_continuation(...)`
 # family=stash     `stash_post_replacement_continuation(...)` call
-# family=consumer  `apply_pending_post_replacement_effect(...)` call
+# family=consumer  `apply_pending_post_replacement_effect(...)` or
+#                  `dispatch_pending_post_replacement_effect(...)` call
 #
 """
 

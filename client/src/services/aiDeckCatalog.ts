@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-import type { GameFormat, MatchType } from "../adapter/types";
-import { getSharedAdapter } from "../adapter/wasm-adapter";
+import type { ChallengeDeck, GameFormat, MatchType } from "../adapter/types";
+import { estimateDeckBracket } from "./bracketEstimate";
 import { evaluateDeckCompatibility } from "./deckCompatibility";
 import {
   buildDeckCatalog,
@@ -9,9 +9,11 @@ import {
   type DeckCatalogSource,
 } from "./deckCatalog";
 import type { DeckArchetype } from "./engineRuntime";
-import { expandParsedDeck, type ParsedDeck } from "./deckParser";
-import type { CommanderBracket } from "../types/bracket";
-import { effectiveBracket, isCommanderFamilyFormat } from "../types/bracket";
+import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "./deckParser";
+import { submitParsedDeck, type SubmissionArtSnapshot, type SubmittedDeck } from "./deckSubmission";
+import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
+import { effectiveBracket, isCommanderFamilyFormat, sameComboDeclaration } from "../types/bracket";
+import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
 import {
   DECKS_CHANGED_EVENT,
   FEED_DECK_ORIGINS_KEY,
@@ -31,12 +33,31 @@ export interface AiDeckCandidate {
   knownFormat?: GameFormat;
   coveragePct: number | null;
   archetype: DeckArchetype | null;
+  /** Bracket the pool filters on: the declared tag, else the engine's estimate. */
   bracket: CommanderBracket | null;
+  /**
+   * The tag a curator or the deck's owner declared, or `null`. Seats send this,
+   * never `bracket`, so an untagged deck reaches the engine undeclared and plays
+   * at the engine's own estimate.
+   */
+  declaredBracket: CommanderBracket | null;
+  /**
+   * The owner's two-card-combo answer. Sent with `declaredBracket` so a seat
+   * plays the same floor the pool filtered on.
+   */
+  comboDeclaration: ComboDeclaration;
 }
 
 export interface AiDeckCatalogOptions {
   selectedFormat?: GameFormat | null;
   selectedMatchType?: MatchType | null;
+  /**
+   * The Horde challenge deck AI survivors build against. Passed WITHOUT a
+   * format tag: the engine answers the picked challenge's survivor verdict
+   * per candidate (Commander shape for EDH hordes, unrestricted for
+   * constructed-block hordes).
+   */
+  selectedChallengeDeck?: ChallengeDeck | null;
   /**
    * Set false when the caller receives the catalog from a hoisted call
    * instead (e.g. `AiOpponentConfig` under `GameSetupPage`, which shares one
@@ -70,12 +91,17 @@ export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
   requestKey: string | null;
 }
 
-/** Identity of one legal-catalog scan: the format/match request it answers. */
+/**
+ * Identity of one legal-catalog scan: the format/match/challenge request it
+ * answers. The challenge leg keeps Horde survivor scans (same match type,
+ * different picked deck) from sharing a key.
+ */
 export function catalogRequestKey(
   selectedFormat?: GameFormat | null,
   selectedMatchType?: MatchType | null,
+  selectedChallengeDeck?: ChallengeDeck | null,
 ): string {
-  return `${selectedFormat ?? ""}::${selectedMatchType ?? ""}`;
+  return `${selectedFormat ?? ""}::${selectedMatchType ?? ""}::${selectedChallengeDeck ?? ""}`;
 }
 
 /**
@@ -92,27 +118,32 @@ export function catalogRequestKey(
  * manual-only), so a manual tag above it is expected, not a conflict.
  *
  * Pre-game metadata only: the value filters the candidate pool and never
- * reaches the Rust game loop. The estimate is meaningful only for the
+ * reaches the Rust game loop (seats send `declaredBracket`). The estimate is meaningful only for the
  * Commander family (CR 903), so non-Commander formats and decks with no
  * commander short-circuit to `null`.
  */
 async function resolveBracket(
   deck: ParsedDeck,
   staticBracket: CommanderBracket | null,
+  comboDeclaration: ComboDeclaration,
   format: GameFormat | undefined,
 ): Promise<CommanderBracket | null> {
   if (staticBracket !== null) return staticBracket;
   if (!isCommanderFamilyFormat(format)) return null;
   const request = expandParsedDeck(deck);
   if (request.commander.length === 0) return null;
-  try {
-    const estimate = await getSharedAdapter().estimateBracket(request);
-    return effectiveBracket(staticBracket, estimate?.tier ?? null);
-  } catch {
-    // Adapters without local estimation (Tauri/WebSocket/P2P/server-draft)
-    // throw BRACKET_ESTIMATION_UNSUPPORTED. Treat as untagged — the filter
-    // simply won't constrain these candidates in those builds.
-    return null;
+  const outcome = await estimateDeckBracket({
+    deck: { ...request, combo_declaration: comboDeclaration },
+    declared_tier: null,
+  });
+  switch (outcome.kind) {
+    case "estimate":
+      return effectiveBracket(staticBracket, outcome.estimate.tier);
+    case "no-commander":
+    case "card-data-unavailable":
+      // Without an engine reading, leave the candidate untagged so the filter
+      // does not constrain it to an invented bracket.
+      return null;
   }
 }
 
@@ -132,16 +163,59 @@ async function legalCandidate(
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,
     selectedMatchType: options.selectedMatchType,
+    // Horde survivor scans pass the picked challenge WITHOUT a format tag;
+    // the engine answers the challenge's survivor verdict per candidate.
+    selectedChallengeDeck: options.selectedChallengeDeck,
     summaryOnly: true,
   });
   if (result.selected_format_compatible !== true) return null;
   return {
     ...candidate,
-    bracket: await resolveBracket(candidate.deck, candidate.bracket, options.selectedFormat ?? undefined),
+    bracket: await resolveBracket(
+      candidate.deck,
+      candidate.declaredBracket,
+      candidate.comboDeclaration,
+      options.selectedFormat ?? undefined,
+    ),
     coveragePct: result.coverage && result.coverage.total_unique > 0
       ? Math.round((result.coverage.supported_unique / result.coverage.total_unique) * 100)
       : candidate.coveragePct,
   };
+}
+
+/** A seat's owner-declared bracket tag and two-card-combo answer, as the engine receives them. */
+export interface SeatDeclarations {
+  bracket_tier: CommanderBracketTier | null;
+  combo_declaration: ComboDeclaration;
+}
+
+/**
+ * The declarations a seat submits for a picked candidate: always the candidate's
+ * own tag and combo answer, never `bracket` (the pool-filter value) and never
+ * another deck's. Every seat built from the catalog goes through here, so none
+ * can pair a deck with another deck's answers.
+ */
+export function candidateDeclarations(candidate: AiDeckCandidate): SeatDeclarations {
+  return {
+    bracket_tier: bracketToEngineTier(candidate.declaredBracket),
+    combo_declaration: candidate.comboDeclaration,
+  };
+}
+
+/** A candidate's already-submitted deck list, paired with that same candidate's declarations. */
+export function candidateSeatDeck<T extends object>(
+  candidate: AiDeckCandidate,
+  submitted: T,
+): T & SeatDeclarations {
+  return { ...submitted, ...candidateDeclarations(candidate) };
+}
+
+/** `candidateSeatDeck` for a seat whose list is submitted (printings bound) here. */
+export async function submitCandidateSeatDeck(
+  candidate: AiDeckCandidate,
+  snapshot?: SubmissionArtSnapshot,
+): Promise<SubmittedDeck<ExpandedDeck> & SeatDeclarations> {
+  return candidateSeatDeck(candidate, await submitParsedDeck(candidate.deck, snapshot));
 }
 
 export function legacyAiDeckNameToId(name: string): string {
@@ -174,6 +248,8 @@ export async function buildLegalAiDeckCatalog(
     coveragePct: candidate.coveragePct ?? null,
     archetype: null,
     bracket: candidate.bracket ?? null,
+    declaredBracket: candidate.bracket ?? null,
+    comboDeclaration: candidate.comboDeclaration,
     knownFormat: candidate.knownFormat,
   }));
 
@@ -212,6 +288,7 @@ function isInventoryStorageKey(key: string | null): boolean {
 export function useAiDeckCatalog({
   selectedFormat,
   selectedMatchType,
+  selectedChallengeDeck,
   enabled = true,
 }: AiDeckCatalogOptions): UseAiDeckCatalogResult {
   const [result, setResult] = useState<UseAiDeckCatalogResult>({
@@ -256,10 +333,10 @@ export function useAiDeckCatalog({
 
   useEffect(() => {
     if (!enabled) return;
-    const key = catalogRequestKey(selectedFormat, selectedMatchType);
+    const key = catalogRequestKey(selectedFormat, selectedMatchType, selectedChallengeDeck);
     let cancelled = false;
     setResult((current) => ({ ...current, loading: true, error: null }));
-    buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType })
+    buildLegalAiDeckCatalog({ selectedFormat, selectedMatchType, selectedChallengeDeck })
       .then((catalog) => {
         if (!cancelled) setResult({ ...catalog, loading: false, error: null, requestKey: key });
       })
@@ -277,7 +354,7 @@ export function useAiDeckCatalog({
     return () => {
       cancelled = true;
     };
-  }, [selectedFormat, selectedMatchType, enabled, libraryRevision]);
+  }, [selectedFormat, selectedMatchType, selectedChallengeDeck, enabled, libraryRevision]);
 
   return result;
 }
@@ -312,6 +389,7 @@ function sameCatalogCandidates(a: readonly AiDeckCandidate[], b: readonly AiDeck
       (candidate, index) =>
         candidate.id === b[index].id
         && candidate.bracket === b[index].bracket
+        && sameComboDeclaration(candidate.comboDeclaration, b[index].comboDeclaration)
         && (candidate.knownFormat ?? null) === (b[index].knownFormat ?? null)
         && (candidate.coveragePct ?? null) === (b[index].coveragePct ?? null)
         && sameCatalogSource(candidate.source, b[index].source),

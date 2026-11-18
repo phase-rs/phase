@@ -9,9 +9,7 @@ use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::display_only::DisplayOnly;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{
-    GameState, ManaAbilityResume, ManaChoice, ManaChoicePrompt, PendingCostMoveResume, WaitingFor,
-};
+use engine::types::game_state::{GameState, ManaAbilityResume, PendingCostMoveResume, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{
     ManaColor, ManaCost, ManaRestriction, ManaType, ManaUnit, PaymentContext, SpecialAction,
@@ -49,6 +47,8 @@ fn redirect_exile_to_graveyard() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Graveyard,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -370,13 +370,13 @@ const SIMIC_CHAMBER_ORACLE: &str =
     "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.";
 
 /// CR 116.2g + CR 605.4a + CR 608.2d: a bonus-dependent companion payment
-/// pauses for the echo choice instead of failing. Mirari's Wake plus an
+/// selects the echo inline instead of failing. Mirari's Wake plus an
 /// untapped Simic Growth Chamber ({G}{U}), empty pool, taking the companion
 /// ({3}): base {G}{U} plus one chosen bonus. Before the non-cast settlement
 /// the preview admitted this while the live payer saw only {G}{U} and failed
 /// before offering the choice.
 #[test]
-fn companion_bonus_dependent_payment_pauses_for_echo_choice() {
+fn companion_bonus_dependent_payment_settles_selected_echo() {
     let mut scenario = companion_scenario();
     scenario.add_enchantment_from_oracle(P0, "Mirari's Wake", MIRARI_ECHO_ORACLE);
     scenario.add_land_from_oracle(P0, "Simic Growth Chamber", SIMIC_CHAMBER_ORACLE);
@@ -387,43 +387,43 @@ fn companion_bonus_dependent_payment_pauses_for_echo_choice() {
         can_activate_companion(runner.state(), P0),
         "the preview must count the echo bonus for the {{3}} companion cost"
     );
-    runner
+    let result = runner
         .act(GameAction::CompanionToHand)
-        .expect("bonus-dependent companion must pause for choice, not fail Cannot pay");
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseManaColor {
-            player,
-            choice: ManaChoicePrompt::SingleColor { options },
-            ..
-        } => {
-            assert_eq!(*player, P0, "P0 pays, so P0 chooses");
-            assert_eq!(options.len(), 2);
-            assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
-        }
-        other => panic!("expected a SingleColor echo choice pre-spend, got {other:?}"),
-    }
-
-    runner
-        .act(GameAction::ChooseManaColor {
-            choice: ManaChoice::SingleColor(ManaType::Blue),
-            count: 1,
-        })
-        .expect("answering Blue must resume payment");
-    // Base {G}{U} + bonus {U} minus {3}: the companion moves to hand with an
+        .expect("the automatically selected echo must fund the companion inline");
+    // Base {G}{U} plus one selected bonus minus {3}: the companion moves with an
     // empty pool and terminal Priority.
     assert!(runner.state().players[P0.0 as usize]
         .companion
         .as_ref()
         .is_some_and(|companion| companion.used));
-    assert!(runner.state().objects.values().any(|object| {
-        object.owner == P0
-            && object.zone == Zone::Hand
-            && object.name == "Companion Payment Witness"
-    }));
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.owner == P0
+                    && object.zone == Zone::Hand
+                    && object.name == "Companion Payment Witness"
+            })
+            .count(),
+        1,
+        "the companion moves exactly once"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event,
+        GameEvent::CompanionMovedToHand { player, .. } if *player == P0))
+            .count(),
+        1
+    );
+    assert!(!can_activate_companion(runner.state(), P0));
     assert_eq!(
         runner.state().players[P0.0 as usize].mana_pool.total(),
         0,
-        "base {{G}}{{U}} + bonus {{U}} exactly funds {{3}}"
+        "base {{G}}{{U}} plus one bonus exactly funds {{3}}"
     );
     assert!(
         matches!(&runner.state().waiting_for, WaitingFor::Priority { .. }),

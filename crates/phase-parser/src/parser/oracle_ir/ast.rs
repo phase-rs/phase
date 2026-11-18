@@ -26,6 +26,9 @@ use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ParsedEffectClause {
+    /// Lowering-only clause ownership; never part of the AST trace or gameplay data.
+    #[serde(skip)]
+    pub(crate) history: Vec<super::history_provenance::PendingHistory>,
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
@@ -74,6 +77,13 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 608.2c: the text the head instruction owns, when a compound split separated it
+    /// from its "and" continuation (`try_split_targeted_compound`), which is then its own
+    /// `sub_ability` checked against its own text there. `None` when the clause's text is
+    /// the head's alone. Parser bookkeeping for the block-history guard
+    /// (`instruction_drops_block_partner`); never lowered.
+    #[serde(skip)]
+    pub(crate) head_text: Option<String>,
     /// CR 611.2e + CR 608.2c: when this clause's continuous effect begins to apply to a
     /// permanent an earlier instruction of the same resolution put onto the battlefield.
     /// Stamped by the clause parser that recognized the verb form ("is/has" ⇒ `WithEntry`);
@@ -365,13 +375,19 @@ impl EntersUnderSpec {
     }
 }
 
-/// Grammatical number of an anaphoric pronoun that refers back to earlier
-/// instructions ("it" vs "they" / "those").
+/// Grammatical number of an anaphoric pronoun: one that refers back to
+/// earlier instructions ("it" vs "they" / "those"), or an object pronoun
+/// ("it" / "him" / "her" vs "them"). Each consumer documents what the number
+/// selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum AnaphorNumber {
-    /// "It" — the nearest antecedent instruction.
+    /// "It" (or "him" / "her"). CantRegenerate: the nearest antecedent
+    /// instruction. Copula goad: the single anaphor referent. Object pronoun: a
+    /// single object.
     Singular,
-    /// "They" / "those" — every instruction of the preceding run.
+    /// "They" / "those" / "them". CantRegenerate: every instruction of the
+    /// preceding run. Copula goad: every member of the anaphor's population.
+    /// Object pronoun: several objects.
     Plural,
 }
 
@@ -458,6 +474,13 @@ pub(crate) enum ContinuationAst {
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
     /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
     GoadLastCreated { duration: Option<Duration> },
+    /// CR 608.2c + CR 608.2d + CR 608.2f + CR 611.2a + CR 613.1b: "Each opponent/player
+    /// gains control of the <object> for which they were chosen" after a player
+    /// choice repeated once per member of a published population — after the last
+    /// choice, one application hands every object of the resolving ability's
+    /// object→player assignment to the player chosen for it, with no stated
+    /// duration (`TargetFilter::ChoiceAssignment`).
+    ChoiceAssignmentGainsControl,
     /// CR 702.34a / CR 702.128a / CR 702.180a: "The/Its [flashback|embalm|harmonize]
     /// cost is equal to its/that card's mana cost." after a self-cost graveyard
     /// keyword grant. Redundant reminder text — the grant already carries
@@ -527,6 +550,36 @@ pub(crate) enum ContinuationAst {
     BecomesPlotted,
     /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
     BecomesForetold,
+    /// CR 701.20a + CR 701.20e + CR 608.2c: "Put all other cards revealed this
+    /// way into exile" (or hand / randomized library) — the complement of a
+    /// REVEAL instruction's selection, named separately from that instruction
+    /// because an intervening clause uses the revealed card first ("You gain
+    /// life equal to that card's mana value"). Bound only to a PROVED public
+    /// reveal (`Dig { reveal: true, destination: Some(dest) }` where
+    /// `dest != Library`) whose selection departs the library: a private "look
+    /// at" never publishes a revealed population, and a selection remaining in
+    /// the library cannot be partitioned via `LastRevealed`. An owner-ordered
+    /// library (CR 401.4) or graveyard (CR 404.3) remainder is refused because
+    /// this instruction does not own an ordering prompt.
+    ///
+    /// Lowers to an explicit `ChangeZoneAll { origin: Library, target:
+    /// LastRevealed }`: "the cards the preceding reveal revealed that are still
+    /// in the library". Naming the complement by provenance keeps the reveal's
+    /// own tracked-set publication untouched, so a reveal whose kept cards are
+    /// routed by downstream sub_abilities (Zimone's Experiment: "Put all land
+    /// cards revealed this way onto the battlefield tapped and put all creature
+    /// cards revealed this way into your hand") never has its selected
+    /// population swapped for the unselected one — not even when zero cards
+    /// were selected.
+    RevealedRemainder {
+        destination: Zone,
+        /// CR 401.4 + CR 400.5 + CR 404.3: only an explicitly randomized library
+        /// remainder (or non-ordered zones like exile/hand) is accepted; an
+        /// owner-ordered remainder has no prompt on this path and is refused at
+        /// parse time rather than silently kept in place.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
+    },
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
@@ -567,7 +620,10 @@ pub(crate) enum ContinuationAst {
         /// name, so the bottom count is implied rather than stored twice.
         /// Always accompanied by `rest_destination: Some(Zone::Library)`.
         /// `None` for every uniform-remainder form, including the plain
-        /// "... and the rest on the bottom of your library".
+        /// "... and the rest on the bottom of your library". The all-top
+        /// remainder form ("… and the rest on top of your library") instead
+        /// sets this to the dig's own count, which the resolver clamps to the
+        /// actual pile size (see `rest_library_position`).
         ///
         /// Boxed only to keep `clippy::large_enum_variant` satisfied:
         /// `DigFromAmong` is already this enum's largest variant, and an
@@ -579,6 +635,19 @@ pub(crate) enum ContinuationAst {
         /// `Random`; every other accepted form preserves existing behavior.
         #[serde(default)]
         rest_order: DigRestOrder,
+        /// CR 401.4 + CR 701.20e: The library POSITION the same clause names
+        /// for the remainder — `Top` for "… and the rest on top of your
+        /// library in any order" (Diabolic Vision).
+        /// `Zone::Library` alone cannot express that position — the uniform
+        /// rest route defaults to the bottom — so the patch arm turns this into
+        /// the degenerate all-top remainder split the Dig resolver already
+        /// routes (and, for a 2+ card pile, hands to the owner for the CR 401.4
+        /// arrangement). `None` (no position named) and `Some(Bottom)` keep the
+        /// uniform bottom route; only `Some(Top)` lowers to the all-top split.
+        /// Boxed only to keep `clippy::large_enum_variant` satisfied
+        /// (`LibraryPosition` carries a `QuantityExpr`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_library_position: Option<Box<LibraryPosition>>,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
         /// ("... onto the battlefield ... under your control"). `None` leaves
         /// them under their owner's control.
@@ -1731,7 +1800,16 @@ pub(crate) enum HandRevealImperativeAst {
     RevealAll {
         target: TargetFilter,
         card_filter: TargetFilter,
+        /// CR 608.2d + CR 107.1c: how many `card_filter` cards are selected
+        /// (`AnyNumber` for "reveal any number of [type] cards").
+        cardinality: crate::types::ability::ObjectSelectionCardinality,
     },
+    /// CR 107.1c + CR 701.20a: "reveal any number of [type] cards" whose card
+    /// type phrase the parser cannot read (Sacellum Godspeaker's "creature cards
+    /// with power 5 or greater", Rosheen's "cards with {X} in their mana cost").
+    /// Without a filter the selection could reveal nothing, so it lowers to an
+    /// explicit unimplemented gap rather than a silently empty reveal.
+    UnreadableAnyNumberFilter { fragment: String },
     /// CR 701.20a: a counted reveal from a hand — "reveals X cards from their
     /// hand, where X is …", "reveals a card at random from their hand". `target`
     /// is the hand's owner; `selection` is `Random` exactly when the text says
@@ -1889,9 +1967,13 @@ pub(crate) enum ChooseImperativeAst {
 pub(crate) enum PutImperativeAst {
     /// CR 701.17a: "put the top <count> cards of <owner> library into <owner>
     /// graveyard" — a mill whose owner and count are carried, never assumed.
+    /// CR 401.2: `position` names the library edge the clause reads, so the
+    /// "bottom card of <owner> library" class (Grenzo, Dungeon Warden; Cellar
+    /// Door) takes the bottommost card instead of a chosen one.
     Mill {
         count: QuantityExpr,
         target: TargetFilter,
+        position: LibraryPosition,
     },
     /// A put clause the engine cannot yet model (e.g. CR 404.1 "put the top
     /// card of <possessive> graveyard …", a graveyard-sourced move it cannot
@@ -2109,12 +2191,15 @@ pub(crate) enum CostResourceImperativeAst {
     /// in the CostResource AST (DamageSource, DamageEachPlayer, etc.).
     /// The Effect is already fully constructed by try_parse_damage.
     DamageEffect(Box<Effect>),
-    /// CR 118.1: "pay {cost}" as an effect verb (mana, life, energy, …).
-    /// Carries the unified `AbilityCost` taxonomy directly (lowered to
-    /// `Effect::PayCost { cost, scale: None, .. }`); this IR path never emits a
-    /// per-object scaled mana cost.
+    /// CR 118.1: `pay {cost}` as an effect verb (mana, life, energy, …) carrying
+    /// the unified `AbilityCost`, plus the resolution-time multiplier when the
+    /// clause scales the cost by a player-chosen amount (`pay any amount of {R}`,
+    /// CR 107.1c + CR 107.3f): lowered to `Effect::PayCost { cost, scale, .. }`;
+    /// `scale` is `Some(Ref(Variable "X"))` only for that clause and `None` for
+    /// every other payment.
     Pay {
         cost: AbilityCost,
+        scale: Option<QuantityExpr>,
     },
 }
 
@@ -2208,6 +2293,11 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: QuantityExpr,
         target: TargetFilter,
+        /// CR 122.1 + CR 115.10a: `All` for a mass removal ("from all
+        /// permanents", "from each creature you control"); see
+        /// `Effect::RemoveCounter::scope`. Always `Single` when
+        /// `exact_selection` or `multi_target` is set.
+        scope: EffectScope,
         /// CR 115.1d + CR 122.1: A fixed `each of N <permanents>` phrase is
         /// an untargeted resolution-time selection, not N target slots.
         exact_selection: Option<u32>,
@@ -2334,6 +2424,8 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         effect,
         duration: None,
@@ -3185,6 +3277,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -3405,10 +3498,14 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        // Turtle Team-Up (no CR section — casual product): "the bosses play a
+        // card" is a one-shot — a duration does not govern it.
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
 }

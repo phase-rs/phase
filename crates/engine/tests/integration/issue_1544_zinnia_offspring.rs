@@ -64,7 +64,7 @@ fn zinnia_grants_offspring_on_creature_spells_you_cast() {
         match &runner.state().waiting_for {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("pay offspring");
                 paid_offspring = true;
             }

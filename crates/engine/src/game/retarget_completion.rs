@@ -146,6 +146,7 @@ pub(crate) fn retarget_dependencies(filter: &TargetFilter) -> RetargetDeps {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -262,7 +263,12 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
             AttachmentReferent::Source | AttachmentReferent::Recipient => RetargetDeps::Independent,
         },
         FilterProp::CombatRelation { subject, .. } => match subject {
-            CombatRelationSubject::ParentTarget => RetargetDeps::AllPositions,
+            // CR 115.7e: both read a declared target. The anaphor owns no slot of its own,
+            // so no class card routes through this dependency, as with the attachment host
+            // above; the conservative all-positions answer is exact.
+            CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget => {
+                RetargetDeps::AllPositions
+            }
             CombatRelationSubject::Source => RetargetDeps::Independent,
         },
         FilterProp::Attacking { defender } => defender
@@ -339,6 +345,7 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -942,5 +949,33 @@ mod attached_set_retarget_tests {
         }
         .reads_declared_slot());
         assert!(AttachmentReferent::DeclaredTarget { slot: 0 }.reads_declared_slot());
+    }
+
+    /// CR 115.7e: a target subject reads the final target set, in either form, and
+    /// a `Source` subject reads none of it. No board reaches the `AnaphoricTarget`
+    /// row: the arm runs only for a slot's filter, and a slot filter with this
+    /// subject has no legal target at announcement.
+    #[test]
+    fn combat_relation_subject_decides_retarget_dependencies() {
+        for (subject, deps) in [
+            (
+                CombatRelationSubject::AnaphoricTarget,
+                RetargetDeps::AllPositions,
+            ),
+            (
+                CombatRelationSubject::ParentTarget,
+                RetargetDeps::AllPositions,
+            ),
+            (CombatRelationSubject::Source, RetargetDeps::Independent),
+        ] {
+            let prop = FilterProp::CombatRelation {
+                relation: crate::types::ability::CombatRelation::BlockPairing {
+                    direction: crate::types::ability::BlockPairDirection::Either,
+                    scope: Some(crate::types::ability::CombatHistoryScope::ThisTurn),
+                },
+                subject,
+            };
+            assert_eq!(filter_prop_deps(&prop), deps, "{subject:?}");
+        }
     }
 }

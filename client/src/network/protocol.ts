@@ -298,7 +298,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       protocol 111.
  *  92 — GameState carries a deferred spell delivery for a spell paused on its
  *       own free-cast window. Older peers would leave the spell on the stack
- *       in no zone. The same bump adds the SpellCopyOrderChoice prompt.
+ *       in no zone. The same bump adds the MemberOrderChoice prompt.
  *       Bumped with full-game protocol 110.
  *  91 — GameState carries the CR 201.5a granter binding (ObjectScope
  *       GrantingObject / SpecificObject, TargetFilter GrantingObject.bound,

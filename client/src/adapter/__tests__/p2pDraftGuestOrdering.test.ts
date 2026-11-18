@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Peer from "peerjs";
 import type { PersistedDraftDeckSubmission } from "../../services/draftPersistence";
@@ -15,6 +18,7 @@ vi.mock("../../services/draftPersistence", () => persistence);
 
 import { EMPTY_DRAFT_POOL_GROUPS, type DraftPlayerView } from "../draft-adapter";
 import { P2PDraftGuest, type DraftGuestConnection, type DraftGuestEvent } from "../p2p-draft-guest";
+import { Draft27IncompatibilityError, type Draft27CompatibilityError } from "../draft-compatibility";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { DRAFT_PROTOCOL_VERSION, decodeDraftWireMessage, type DraftP2PMessage } from "../../network/draftProtocol";
 import * as protocol from "../../network/draftProtocol";
@@ -28,7 +32,7 @@ function deferred() {
 }
 
 /** Use the supported raw frame so only persistence, not decompression, yields. */
-function rawMessage(message: DraftP2PMessage): Uint8Array {
+function rawMessage(message: DraftP2PMessage | Record<string, unknown>): Uint8Array {
   const json = new TextEncoder().encode(JSON.stringify(message));
   const bytes = new Uint8Array(json.length + 1);
   bytes.set(json, 1);
@@ -141,6 +145,154 @@ function pauseNextEncoding() {
     }
   });
   return { started: started.promise, resume: resume.resolve, finished: finished.promise, encode };
+}
+
+type IncompatibleViewShape = "fifoFlow" | "reviewStatus" | "residualFifo";
+type ViewCarrier = "welcome" | "reconnect" | "state" | "pick" | "deck";
+
+function incompatibleView(
+  pickNumber: number,
+  shape: IncompatibleViewShape,
+): DraftPlayerView {
+  const legacy = view(pickNumber);
+  switch (shape) {
+    case "fifoFlow":
+      return { ...legacy, flow: "FifoAsync" } as unknown as DraftPlayerView;
+    case "reviewStatus":
+      return { ...legacy, status: "Review" } as unknown as DraftPlayerView;
+    case "residualFifo":
+      return { ...legacy, fifo: { session: "fifo-session" } } as unknown as DraftPlayerView;
+  }
+}
+
+function legacyCarrierMessage(
+  carrier: ViewCarrier,
+  carrierView: DraftPlayerView,
+  submissionId = "submission-1",
+): DraftP2PMessage {
+  switch (carrier) {
+    case "welcome":
+      return welcome(carrierView);
+    case "reconnect":
+      return firstContact("reconnect", carrierView);
+    case "state":
+      return { type: "draft_state_update", view: carrierView };
+    case "pick":
+      return { type: "draft_pick_ack", view: carrierView };
+    case "deck":
+      return { type: "draft_deck_submit_ack", submissionId, view: carrierView };
+  }
+}
+
+/** A card in the face-up prefix of a shared-stack pile. */
+const SHARED_STACK_PILE_CARD: DraftPlayerView["pool"][number] = {
+  instance_id: "pile-0-card",
+  name: "Ponder",
+  set_code: "TST",
+  collector_number: "2",
+  rarity: "common",
+  colors: ["U"],
+  cmc: 1,
+  type_line: "Sorcery",
+};
+
+/**
+ * A shared-stack (Winston) player view for a two-seat pod, in the
+ * shape the engine publishes it: the pile distribution and the play-first
+ * chooser on every status, and the live pile turn only while drafting.
+ */
+function sharedStackView(
+  pickNumber: number,
+  status: "Drafting" | "Deckbuilding" = "Drafting",
+): DraftPlayerView {
+  const base = view(pickNumber);
+  const pileTurn: NonNullable<DraftPlayerView["shared_stack"]> = {
+    main_stack_remaining: 30,
+    total_cards: 45,
+    active_seat: 0,
+    active_pile: 0,
+    piles: [
+      {
+        index: 0,
+        total: 2,
+        revealed: [SHARED_STACK_PILE_CARD],
+        legality: [
+          { decision: "Take", refusal: null },
+          { decision: "Decline", refusal: null },
+        ],
+      },
+      { index: 1, total: 1, revealed: [], legality: [{ decision: "Take", refusal: null }] },
+      { index: 2, total: 1, revealed: [], legality: [{ decision: "Take", refusal: null }] },
+    ],
+    decisions: pickNumber,
+    history: [{ seat: 1, pile: 0, decision: "Decline", pile_size: 1 }],
+    forced_draw: null,
+  };
+  return {
+    ...base,
+    status,
+    kind: "Winston",
+    distribution: { SharedStackPiles: { pile_count: 3 } },
+    current_pack: null,
+    required_pick_count: 0,
+    seats: base.seats.slice(0, 2).map((seat): DraftPlayerView["seats"][number] => ({
+      ...seat,
+      pick_status: status === "Drafting" ? (seat.seat_index === 0 ? "Pending" : "Waiting") : "NotDrafting",
+      active_pack_count: 0,
+      drafted_card_count: pickNumber,
+    })),
+    ...(status === "Drafting" ? { shared_stack: pileTurn } : {}),
+    play_first_chooser: 1,
+  };
+}
+
+/** The five view carriers, addressed to the second seat of the two-seat pod. */
+function sharedStackCarrierMessage(
+  carrier: ViewCarrier,
+  carrierView: DraftPlayerView,
+  submissionId = "submission-1",
+): DraftP2PMessage {
+  const message = legacyCarrierMessage(carrier, carrierView, submissionId);
+  return message.type === "draft_welcome" || message.type === "draft_reconnect_ack"
+    ? { ...message, seatIndex: 1 }
+    : message;
+}
+
+function withIncompatibleShape(base: DraftPlayerView, shape: IncompatibleViewShape): DraftPlayerView {
+  switch (shape) {
+    case "fifoFlow":
+      return { ...base, flow: "FifoAsync" } as unknown as DraftPlayerView;
+    case "reviewStatus":
+      return { ...base, status: "Review" } as unknown as DraftPlayerView;
+    case "residualFifo":
+      return { ...base, fifo: { session: "fifo-session" } } as unknown as DraftPlayerView;
+  }
+}
+
+/** The refusal message the guest reports for each incompatible view shape. */
+const INCOMPATIBLE_SHAPE_MESSAGES: Record<IncompatibleViewShape, string> = {
+  fifoFlow: "This draft uses FIFO delivery, which this connection cannot accept.",
+  reviewStatus: "This draft is in Review, which this connection cannot accept.",
+  residualFifo: "This draft includes FIFO state, which this connection cannot accept.",
+};
+
+/** The classifier code the guest reports for each incompatible view shape. */
+const INCOMPATIBLE_SHAPE_CODES: Record<IncompatibleViewShape, Draft27CompatibilityError["code"]> = {
+  fifoFlow: "fifo_flow",
+  reviewStatus: "review_status",
+  residualFifo: "residual_fifo",
+};
+
+/**
+ * A player view draft-core publishes for a FIFO pod, from the fixture its own
+ * tests check against its serialization.
+ */
+function fifoPlayerView(name: "queued_view" | "review_view"): DraftPlayerView {
+  const fixture = JSON.parse(readFileSync(resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../fixtures/draft-contract/fifo_legacy_admission.json",
+  ), "utf8")) as Record<typeof name, DraftPlayerView>;
+  return fixture[name];
 }
 
 describe("P2P draft guest receive ordering", () => {
@@ -889,6 +1041,391 @@ describe("P2P draft guest receive ordering", () => {
     vi.useRealTimers();
   });
 
+  it.each(["welcome", "reconnect", "state", "pick", "deck"] as const)(
+    "keeps legacy draft27 %s delivery reachable after admission",
+    async (carrier) => {
+      const connection: DraftGuestConnection = carrier === "reconnect"
+        ? { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" }
+        : { kind: "new", roomCode: "ABCDE", displayName: "Alice" };
+      const { guest, conn, events } = createGuest(connection);
+      const acceptedView = view(2);
+
+      if (carrier === "welcome" || carrier === "reconnect") {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(legacyCarrierMessage(carrier, acceptedView)));
+        await initialized;
+      } else {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(welcome(view(1))));
+        await initialized;
+        events.length = 0;
+
+        if (carrier === "deck") {
+          const submitted = guest.submitDeck(["Island"], []);
+          await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+          const command = await decodeDraftWireMessage(conn.sentRaw[1]!);
+          expect(command.type).toBe("draft_submit_deck");
+          if (command.type !== "draft_submit_deck") throw new Error("Expected draft deck submission");
+          await conn.receiveRaw(rawMessage(legacyCarrierMessage(carrier, acceptedView, command.submissionId)));
+          await submitted;
+        } else {
+          await conn.receiveRaw(rawMessage(legacyCarrierMessage(carrier, acceptedView)));
+        }
+      }
+
+      expect(guest.view).toEqual(acceptedView);
+      switch (carrier) {
+        case "welcome":
+          expect(events).toContainEqual({ type: "joined", seatIndex: 2, draftCode: "draft-xyz" });
+          break;
+        case "reconnect":
+          expect(events).toContainEqual({ type: "reconnected", seatIndex: 2 });
+          break;
+        case "state":
+          expect(events).toContainEqual({ type: "viewUpdated", view: acceptedView });
+          break;
+        case "pick":
+          expect(events).toContainEqual({ type: "pickAcknowledged", view: acceptedView });
+          break;
+        case "deck":
+          expect(events).toContainEqual({
+            type: "deckSubmissionAcknowledged",
+            submissionId: expect.any(String),
+            view: acceptedView,
+          });
+          break;
+      }
+    },
+  );
+
+  it.each(
+    (["welcome", "reconnect", "state", "pick", "deck"] as const).flatMap((carrier) =>
+      (["fifoFlow", "reviewStatus", "residualFifo"] as const).map((shape) => ({ carrier, shape })),
+    ),
+  )(
+    "draft27 rejects raw $shape before $carrier carrier effects",
+    async ({ carrier, shape }) => {
+      const connection: DraftGuestConnection = carrier === "reconnect"
+        ? { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" }
+        : { kind: "new", roomCode: "ABCDE", displayName: "Alice" };
+      const { guest, conn, events } = createGuest(connection);
+      const rejectedView = incompatibleView(2, shape);
+      const admittedView = view(1);
+
+      if (carrier === "welcome" || carrier === "reconnect") {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(legacyCarrierMessage(carrier, rejectedView)));
+        await expect(initialized).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+        expect(guest.view).toBeNull();
+      } else {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(welcome(admittedView)));
+        await initialized;
+        events.length = 0;
+
+        if (carrier === "deck") {
+          const submitted = guest.submitDeck(["Island"], []);
+          await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+          const command = await decodeDraftWireMessage(conn.sentRaw[1]!);
+          expect(command.type).toBe("draft_submit_deck");
+          if (command.type !== "draft_submit_deck") throw new Error("Expected draft deck submission");
+          await conn.receiveRaw(rawMessage(legacyCarrierMessage(carrier, rejectedView, command.submissionId)));
+          await expect(submitted).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+          expect(persistence.clearDraftDeckSubmission).not.toHaveBeenCalled();
+        } else {
+          await conn.receiveRaw(rawMessage(legacyCarrierMessage(carrier, rejectedView)));
+        }
+
+        expect(guest.view).toEqual(admittedView);
+      }
+
+      expect(events.slice(-2)).toEqual([
+        {
+          type: "reconnectFailed",
+          failure: {
+            kind: "incompatible",
+            message: expect.any(String),
+            code: INCOMPATIBLE_SHAPE_CODES[shape],
+          },
+        },
+        { type: "error", message: expect.any(String) },
+      ]);
+      expect(events.some((event) => event.type === "joined" || event.type === "reconnected" || event.type === "viewUpdated" || event.type === "pickAcknowledged" || event.type === "deckSubmissionAcknowledged"))
+        .toBe(false);
+      expect(persistence.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an exact-session pending leave on raw incompatible state without revoking recovery", async () => {
+    const { guest, conn, events } = createGuest({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const initialized = guest.initialize();
+    const admittedView = view(1);
+    await conn.receiveRaw(rawMessage(welcome(admittedView)));
+    await initialized;
+    events.length = 0;
+
+    const leaveResult = guest.leave().then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+    await expect(decodeDraftWireMessage(conn.sentRaw[1]!)).resolves.toEqual({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "guest-token",
+    });
+
+    // This reaches the real raw codec/session dispatch after the exact live
+    // session owns the leave acknowledgement; it is not a direct handler call.
+    await conn.receiveRaw(rawMessage({
+      type: "draft_state_update",
+      view: incompatibleView(2, "fifoFlow"),
+    }));
+
+    await expect(leaveResult).resolves.toEqual({
+      status: "rejected",
+      error: expect.any(Draft27IncompatibilityError),
+    });
+    expect(guest.view).toEqual(admittedView);
+    expect(guest.seat).toBe(2);
+    expect(guest.token).toBe("guest-token");
+    expect(guest.isRecoveryRevoked).toBe(false);
+    expect(conn.open).toBe(false);
+    expect(persistence.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    expect(persistence.clearDraftDeckSubmission).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      {
+        type: "reconnectFailed",
+        failure: { kind: "incompatible", message: expect.any(String), code: INCOMPATIBLE_SHAPE_CODES.fifoFlow },
+      },
+      { type: "error", message: expect.any(String) },
+    ]);
+
+    // The ordinary legacy acknowledgement sibling still completes a leave and
+    // performs its intentional terminal recovery revocation.
+    const control = createGuest({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const controlInitialized = control.guest.initialize();
+    await control.conn.receiveRaw(rawMessage(welcome(view(3))));
+    await controlInitialized;
+    control.events.length = 0;
+
+    const acknowledgedLeave = control.guest.leave().then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    await vi.waitFor(() => expect(control.conn.sentRaw).toHaveLength(2));
+    await expect(decodeDraftWireMessage(control.conn.sentRaw[1]!)).resolves.toEqual({
+      type: "draft_leave", draftProtocolVersion: DRAFT_PROTOCOL_VERSION, draftToken: "guest-token",
+    });
+    await control.conn.receiveRaw(rawMessage({
+      type: "draft_leave_ack",
+      draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "guest-token",
+    }));
+
+    await expect(acknowledgedLeave).resolves.toEqual({ status: "fulfilled" });
+    expect(control.guest.isRecoveryRevoked).toBe(true);
+    expect(control.events).toEqual([]);
+  });
+
+  it.each(["fifoFlow", "reviewStatus"] as const)(
+    "stops a rejected reconnect $shape route before it can redial",
+    async (shape) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const reconnectConn = new FakeDraftDataConnection();
+      reconnectConn.open = false;
+      const connect = vi.fn().mockReturnValue(reconnectConn);
+      const { guest, conn, events } = createGuest(
+        { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+        { connect } as never,
+      );
+      const initialized = guest.initialize();
+      const admittedView = view(1);
+      await conn.receiveRaw(rawMessage(welcome(admittedView)));
+      await initialized;
+
+      const deckSubmission = guest.submitDeck(["Island"], []);
+      await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+      const command = await decodeDraftWireMessage(conn.sentRaw[1]!);
+      expect(command.type).toBe("draft_submit_deck");
+      if (command.type !== "draft_submit_deck") throw new Error("Expected draft deck submission");
+      events.length = 0;
+      persistence.clearDraftDeckSubmission.mockClear();
+
+      conn.simulateClose();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(connect).toHaveBeenCalledExactlyOnceWith("phase2-ABCDE", PEER_CONNECT_OPTIONS);
+      reconnectConn.simulateOpen();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(decodeDraftWireMessage(reconnectConn.sentRaw[0]!)).resolves.toEqual({
+        type: "draft_reconnect",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+        draftToken: "guest-token",
+      });
+
+      await reconnectConn.receiveRaw(rawMessage(legacyCarrierMessage(
+        "reconnect",
+        incompatibleView(2, shape),
+      )));
+      await expect(deckSubmission).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+
+      expect(guest.view).toEqual(admittedView);
+      expect(reconnectConn.open).toBe(false);
+      expect(persistence.clearDraftDeckSubmission).not.toHaveBeenCalled();
+      expect(persistence.clearDraftGuestRecovery).not.toHaveBeenCalled();
+      expect(events).toEqual([
+        { type: "reconnecting", attempt: 1 },
+        {
+          type: "reconnectFailed",
+          failure: { kind: "incompatible", message: expect.any(String), code: INCOMPATIBLE_SHAPE_CODES[shape] },
+        },
+        { type: "error", message: expect.any(String) },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(60_000 * 3);
+      expect(connect).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Retained recovery data can seed a new, valid route. A late old frame
+      // is ignored while the current successor still updates normally.
+      const fresh = createGuest({
+        kind: "reconnect",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+        draftToken: "guest-token",
+      });
+      const recovered = fresh.guest.initialize();
+      await fresh.conn.receiveRaw(rawMessage(firstContact("reconnect", view(3))));
+      await recovered;
+      await reconnectConn.receiveRaw(rawMessage({ type: "draft_state_update", view: view(99) }));
+      expect(fresh.guest.view).toEqual(view(3));
+      await fresh.conn.receiveRaw(rawMessage({ type: "draft_state_update", view: view(4) }));
+      expect(fresh.guest.view).toEqual(view(4));
+    },
+  );
+
+  it.each(["welcome", "reconnect", "state", "pick", "deck"] as const)(
+    "admits a shared-stack %s delivery",
+    async (carrier) => {
+      const connection: DraftGuestConnection = carrier === "reconnect"
+        ? { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" }
+        : { kind: "new", roomCode: "ABCDE", displayName: "Alice" };
+      const { guest, conn, events } = createGuest(connection);
+      const acceptedView = carrier === "deck" ? sharedStackView(2, "Deckbuilding") : sharedStackView(2);
+
+      if (carrier === "welcome" || carrier === "reconnect") {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(sharedStackCarrierMessage(carrier, acceptedView)));
+        await initialized;
+      } else {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(sharedStackCarrierMessage("welcome", sharedStackView(1))));
+        await initialized;
+        events.length = 0;
+
+        if (carrier === "deck") {
+          const submitted = guest.submitDeck(["Island"], []);
+          await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+          const command = await decodeDraftWireMessage(conn.sentRaw[1]!);
+          expect(command.type).toBe("draft_submit_deck");
+          if (command.type !== "draft_submit_deck") throw new Error("Expected draft deck submission");
+          await conn.receiveRaw(rawMessage(sharedStackCarrierMessage(carrier, acceptedView, command.submissionId)));
+          await submitted;
+        } else {
+          await conn.receiveRaw(rawMessage(sharedStackCarrierMessage(carrier, acceptedView)));
+        }
+      }
+
+      expect(guest.view).toEqual(acceptedView);
+      expect(guest.view?.distribution).toEqual({ SharedStackPiles: { pile_count: 3 } });
+      expect(guest.view?.play_first_chooser).toBe(1);
+      switch (carrier) {
+        case "welcome":
+          expect(events).toContainEqual({ type: "joined", seatIndex: 1, draftCode: "draft-xyz" });
+          break;
+        case "reconnect":
+          expect(events).toContainEqual({ type: "reconnected", seatIndex: 1 });
+          break;
+        case "state":
+          expect(events).toContainEqual({ type: "viewUpdated", view: acceptedView });
+          break;
+        case "pick":
+          expect(events).toContainEqual({ type: "pickAcknowledged", view: acceptedView });
+          break;
+        case "deck":
+          expect(events).toContainEqual({
+            type: "deckSubmissionAcknowledged",
+            submissionId: expect.any(String),
+            view: acceptedView,
+          });
+          break;
+      }
+    },
+  );
+
+  it.each(
+    (["welcome", "reconnect", "state", "pick", "deck"] as const).flatMap((carrier) =>
+      (["fifoFlow", "reviewStatus", "residualFifo"] as const).map((shape) => ({ carrier, shape })),
+    ),
+  )(
+    "refuses a shared-stack view carrying $shape before $carrier carrier effects",
+    async ({ carrier, shape }) => {
+      const connection: DraftGuestConnection = carrier === "reconnect"
+        ? { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" }
+        : { kind: "new", roomCode: "ABCDE", displayName: "Alice" };
+      const { guest, conn, events } = createGuest(connection);
+      const rejectedView = withIncompatibleShape(
+        carrier === "deck" ? sharedStackView(2, "Deckbuilding") : sharedStackView(2),
+        shape,
+      );
+      const admittedView = sharedStackView(1);
+
+      if (carrier === "welcome" || carrier === "reconnect") {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(sharedStackCarrierMessage(carrier, rejectedView)));
+        await expect(initialized).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+        expect(guest.view).toBeNull();
+      } else {
+        const initialized = guest.initialize();
+        await conn.receiveRaw(rawMessage(sharedStackCarrierMessage("welcome", admittedView)));
+        await initialized;
+        events.length = 0;
+
+        if (carrier === "deck") {
+          const submitted = guest.submitDeck(["Island"], []);
+          await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+          const command = await decodeDraftWireMessage(conn.sentRaw[1]!);
+          expect(command.type).toBe("draft_submit_deck");
+          if (command.type !== "draft_submit_deck") throw new Error("Expected draft deck submission");
+          await conn.receiveRaw(rawMessage(sharedStackCarrierMessage(carrier, rejectedView, command.submissionId)));
+          await expect(submitted).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+          expect(persistence.clearDraftDeckSubmission).not.toHaveBeenCalled();
+        } else {
+          await conn.receiveRaw(rawMessage(sharedStackCarrierMessage(carrier, rejectedView)));
+        }
+
+        expect(guest.view).toEqual(admittedView);
+      }
+
+      expect(events.slice(-2)).toMatchObject([
+        { type: "reconnectFailed", failure: { kind: "incompatible" } },
+        { type: "error" },
+      ]);
+      expect(events.slice(-2)).toEqual([
+        {
+          type: "reconnectFailed",
+          failure: {
+            kind: "incompatible",
+            message: INCOMPATIBLE_SHAPE_MESSAGES[shape],
+            code: INCOMPATIBLE_SHAPE_CODES[shape],
+          },
+        },
+        { type: "error", message: INCOMPATIBLE_SHAPE_MESSAGES[shape] },
+      ]);
+      expect(events.some((event) => event.type === "joined" || event.type === "reconnected" || event.type === "viewUpdated" || event.type === "pickAcknowledged" || event.type === "deckSubmissionAcknowledged"))
+        .toBe(false);
+      expect(persistence.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    },
+  );
+
   it("still reports an active handshake persistence failure", async () => {
     persistence.saveDraftGuestSession.mockRejectedValueOnce(new Error("IDB unavailable"));
     const { guest, conn, events } = createGuest({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
@@ -900,4 +1437,90 @@ describe("P2P draft guest receive ordering", () => {
     expect(events).toEqual([{ type: "error", message: "Could not save draft recovery details" }]);
     expect(persistence.saveActiveDraftGuest).not.toHaveBeenCalled();
   });
+
+  it("reports a first-contact protocol mismatch as incompatible without a compatibility code", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { guest, conn, events } = createGuest({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    const rejected = expect(guest.initialize()).rejects.toThrow("Draft protocol mismatch");
+    const mismatch: Record<string, unknown> = { ...welcome(view(1)), draftProtocolVersion: DRAFT_PROTOCOL_VERSION - 1 };
+
+    await conn.receiveRaw(rawMessage(mismatch));
+    await rejected;
+
+    const failures = events.flatMap((event) => (event.type === "reconnectFailed" ? [event.failure] : []));
+    // Reach: the version check reported its own incompatible failure.
+    expect(failures).toEqual([{
+      kind: "incompatible",
+      message: `Draft protocol mismatch: host v${DRAFT_PROTOCOL_VERSION - 1}, client v${DRAFT_PROTOCOL_VERSION}. Refresh both windows.`,
+    }]);
+    expect(failures[0]).not.toHaveProperty("code");
+  });
+
+  async function expectFifoViewRefused(carrier: ViewCarrier, rejectedView: DraftPlayerView) {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const decode = vi.spyOn(protocol, "decodeDraftWireMessage");
+    const connection: DraftGuestConnection = carrier === "reconnect"
+      ? { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "guest-token" }
+      : { kind: "new", roomCode: "ABCDE", displayName: "Alice" };
+    const { guest, conn, events } = createGuest(connection);
+    const admittedView = view(1);
+    const initialized = guest.initialize();
+    // A refused first contact rejects this; the rejection is asserted below.
+    initialized.catch(() => {});
+    let submitted: Promise<unknown> | null = null;
+    let submissionId = "submission-1";
+    if (carrier !== "welcome" && carrier !== "reconnect") {
+      await conn.receiveRaw(rawMessage(welcome(admittedView)));
+      await initialized;
+      events.length = 0;
+      if (carrier === "deck") {
+        submitted = guest.submitDeck(["Island"], []);
+        submitted.catch(() => {});
+        await vi.waitFor(() => expect(conn.sentRaw).toHaveLength(2));
+        const command = await decodeDraftWireMessage(conn.sentRaw[1]!);
+        if (command.type !== "draft_submit_deck") throw new Error("Expected draft deck submission");
+        submissionId = command.submissionId;
+      }
+    }
+    const decodes = decode.mock.calls.length;
+
+    await conn.receiveRaw(rawMessage(legacyCarrierMessage(carrier, rejectedView, submissionId)));
+
+    // Reach: the frame reached the production decoder.
+    expect(decode.mock.calls.length).toBe(decodes + 1);
+    // Asserted before any wait on the guest, which a dropped frame leaves pending.
+    expect(warn.mock.calls
+      .filter(([label]) => label === "[DraftPeerSession] decode error:")
+      .map(([, error]) => String(error))).toEqual([]);
+    expect(events.slice(-2)).toEqual([
+      {
+        type: "reconnectFailed",
+        failure: { kind: "incompatible", message: INCOMPATIBLE_SHAPE_MESSAGES.fifoFlow, code: INCOMPATIBLE_SHAPE_CODES.fifoFlow },
+      },
+      { type: "error", message: INCOMPATIBLE_SHAPE_MESSAGES.fifoFlow },
+    ]);
+    expect(events.some((event) => event.type === "joined" || event.type === "reconnected" || event.type === "viewUpdated" || event.type === "pickAcknowledged" || event.type === "deckSubmissionAcknowledged"))
+      .toBe(false);
+    expect(persistence.clearDraftGuestRecovery).not.toHaveBeenCalled();
+    if (carrier === "welcome" || carrier === "reconnect") {
+      await expect(initialized).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+      expect(guest.view).toBeNull();
+    } else {
+      expect(guest.view).toEqual(admittedView);
+    }
+    if (submitted) {
+      await expect(submitted).rejects.toBeInstanceOf(Draft27IncompatibilityError);
+      expect(persistence.clearDraftDeckSubmission).not.toHaveBeenCalled();
+    }
+  }
+
+  it.each(["welcome", "reconnect", "state", "pick", "deck"] as const)(
+    "refuses a FIFO view whose seat holds two packs before %s carrier effects",
+    (carrier) => expectFifoViewRefused(carrier, fifoPlayerView("queued_view")),
+  );
+
+  it.each(["welcome", "reconnect", "state", "pick", "deck"] as const)(
+    "refuses a FIFO Review view before %s carrier effects",
+    (carrier) => expectFifoViewRefused(carrier, fifoPlayerView("review_view")),
+  );
 });

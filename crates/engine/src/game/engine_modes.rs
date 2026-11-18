@@ -642,9 +642,7 @@ fn carry_trigger_provenance(
     if let Some(origin) = &pending.may_trigger_origin {
         chosen.set_may_trigger_origin_recursive(origin.clone());
     }
-    if let Some(player) = pending.scoped_player {
-        chosen.set_scoped_player_recursive(player);
-    }
+    chosen.carry_player_binding_recursive(pending);
     if let Some(x) = pending.chosen_x {
         chosen.set_chosen_x_recursive(x);
     }

@@ -17,11 +17,13 @@ import { create, type StateCreator } from "zustand";
 import type {
   DraftCardInstance,
   DraftPlayerView,
+  DraftViewPresentation,
   PairingView,
   SeatPublicView,
   SharedStackPileDecision,
   StandingEntry,
 } from "../adapter/draft-adapter";
+import { draftViewPresentation } from "../adapter/draft-adapter";
 import type { EngineAdapter, GameAction, GameEvent, GameLogEntry, MatchScore, SubmitResult } from "../adapter/types";
 import type { DraftCommanderLaunch, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import { MAX_MATERIALIZED_VIRTUAL_BASICS } from "../components/draft/workspace/types";
@@ -60,10 +62,12 @@ import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
 import { useGameStore } from "./gameStore";
 import {
   DraftPodHostAdapter,
+  preflightDraftPodHostRecovery,
   type DraftPodHostConfig,
   type DraftPodHostEvent,
   type DraftPodHostStatus,
 } from "../adapter/draftPodHostAdapter";
+import { Draft27IncompatibilityError, type Draft27CompatibilityError } from "../adapter/draft-compatibility";
 import {
   DraftPodGuestAdapter,
   type DraftPodGuestConfig,
@@ -106,6 +110,7 @@ import type {
 } from "./draftStore";
 import { DRAFT_DECK_SESSION_KEY } from "./draftStore";
 import { FORMAT_DEFAULTS } from "./multiplayerStore";
+import { draftSessionFormatConfig } from "../services/draftFormatConfig";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -115,15 +120,42 @@ export const DRAFT_OFFLINE_ERROR = "offline.startUnavailable";
 
 export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "offline" | "superseded";
 
+/** The pod store owns the capture; this store owns preflight and adapter life. */
+export interface HostedDraftRecoveryAttempt {
+  config: DraftPodHostConfig;
+  isCurrent: () => boolean;
+  /**
+   * Ends the committed host, as `config.signal` does for `hostDraft`.
+   * `config.signal` here ends only the attempt, before its commit.
+   */
+  routeSignal?: AbortSignal;
+  /**
+   * Called once, synchronously, inside the fenced commit: after the recovering
+   * host is installed and before its buffered events are delivered.
+   */
+  onCommitted?: () => void;
+}
+
+export type HostedDraftRecoveryOutcome =
+  | "resumed"
+  | "incompatible"
+  | "readFailure"
+  | "initializationFailure"
+  | "aborted"
+  | "invalid"
+  | "offline"
+  | "superseded";
+
 /**
  * How a `hostDraft` / `joinDraft` attempt settled. `"superseded"`: the attempt
  * no longer owned the pod session when it settled, so the store's state is not
  * its result and the caller must not act on it. `"failed"` carries the
- * attempt's own error, `null` when it recorded none.
+ * attempt's own error, `null` when it recorded none, and, for a guest's
+ * compatibility refusal, that refusal's code.
  */
 export type DraftSessionOpenOutcome =
   | { readonly status: "opened" }
-  | { readonly status: "failed"; readonly error: string | null }
+  | { readonly status: "failed"; readonly error: string | null; readonly code?: Draft27CompatibilityError["code"] }
   | { readonly status: "superseded" };
 
 /**
@@ -137,7 +169,7 @@ export type DraftJoinFailureReport = "store" | "caller";
  * The pod SESSION's phase.
  *
  * Every member is the projection of an engine or adapter session status — the
- * union of the ranges of `phaseForDraftViewStatus`, `hostStatusToPhase` and
+ * union of the ranges of `draftViewPresentation`, `hostStatusToPhase` and
  * `guestStatusToPhase`. Nothing else belongs here.
  *
  * The Bo3 intergame window is deliberately NOT a member: the pod session is
@@ -149,6 +181,7 @@ export type MultiplayerDraftPhase =
   | "connecting"
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "pairing"
   | "matchInProgress"
@@ -166,11 +199,17 @@ export function isMultiplayerDraftPodLive(
     state.phase === "connecting"
     || state.phase === "lobby"
     || state.phase === "drafting"
+    || state.phase === "review"
     || state.phase === "deckbuilding"
     || state.phase === "pairing"
     || state.phase === "matchInProgress"
     || state.phase === "roundComplete"
   );
+}
+
+/** The phases the pod page shows on its drafting workspace. */
+export function isDraftPodWorkspacePhase(phase: MultiplayerDraftPhase): boolean {
+  return phase === "drafting" || phase === "review";
 }
 
 /**
@@ -266,6 +305,8 @@ interface MultiplayerDraftState {
   role: DraftRole | null;
   phase: MultiplayerDraftPhase;
   roomCode: string | null;
+  /** Existing host-lifecycle identity; never infer ownership from room code. */
+  hostPersistenceId: string | null;
   draftCode: string | null;
   seatIndex: number | null;
   view: DraftPlayerView | null;
@@ -294,6 +335,12 @@ interface MultiplayerDraftState {
   /** Full deck submitted during deckbuilding (mainDeck + lands). */
   submittedDeck: string[];
   submittedWorkspaceState: DraftWorkspaceState | null;
+  /**
+   * CR 702.139a: the companion the player's last accepted submission
+   * designated, or null. A later resubmission (between rounds) starts from it,
+   * so only an explicit removal in the builder clears the designation.
+   */
+  submittedCompanion: string | null;
   submittedPartition: DraftWorkspacePartition | null;
   intergameWorkspaceState: DraftWorkspaceState | null;
   matchPairing: DraftMatchLaunch | null;
@@ -361,6 +408,11 @@ interface MultiplayerDraftActions {
   /** Host: create a new draft pod and start accepting guests. */
   /** `"opened"` only after the current adapter initialized and remains owned. */
   hostDraft: (config: DraftPodHostConfig) => Promise<DraftSessionOpenOutcome>;
+  /**
+   * Typed host-recovery handoff. It verifies the carried source before the
+   * ordinary host lifecycle can detach an installed adapter.
+   */
+  resumeHostedDraft: (attempt: HostedDraftRecoveryAttempt) => Promise<HostedDraftRecoveryOutcome>;
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (
     config: DraftPodGuestConfig,
@@ -396,7 +448,7 @@ interface MultiplayerDraftActions {
   retryWorkspaceSync: () => Promise<void>;
   setIntergameWorkspaceState: (next: DraftWorkspaceState) => void;
   /** Both: submit the built deck. */
-  submitDeck: (commanders?: string[]) => Promise<void>;
+  submitDeck: (commanders?: string[], companion?: string | null) => Promise<void>;
   /** Host: kick a player from the pod. */
   kickPlayer: (seat: number, reason?: string) => void;
   /** Host: pause the draft. */
@@ -815,6 +867,7 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
   const state = useMultiplayerDraftStore.getState();
   const adapter = activeWorkspaceAdapter();
   if (!adapter || !state.view || !state.workspaceState) return { status: "rejected", reason: "invalid-request" };
+  if (draftViewPresentation(state.view).isReadOnly) return { status: "rejected", reason: "invalid-request" };
 
   const token = Symbol("pick");
   exclusivePickToken = token;
@@ -946,7 +999,7 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
       base: workspace,
       publish: true,
       patch: {
-        phase: phaseForDraftViewStatus(acknowledgedView.status),
+        phase: draftViewPresentation(acknowledgedView).podPhase,
         selectedCard: null,
         pendingPickIntent: null,
         pickInteractionLocked: false,
@@ -1070,7 +1123,7 @@ async function performSharedStackDecision(
       ),
       publish: true,
       patch: {
-        phase: phaseForDraftViewStatus(acknowledgedView.status),
+        phase: draftViewPresentation(acknowledgedView).podPhase,
         selectedCard: null,
         pendingPickIntent: null,
         pickInteractionLocked: false,
@@ -1321,6 +1374,24 @@ function localLaunchDeck(launch: DraftMatchLaunch) {
   }
 }
 
+/**
+ * The pod-level state a match launch installs. The between-games seed is
+ * per-match: a new match's game-2 sideboarding starts from the deck
+ * registered for THAT match (the latest accepted submission, which a Casual
+ * pod may have revised between rounds — MTR 7.3), never from a prior match's
+ * sideboard configuration. A re-delivered start for the SAME match
+ * (reconnect) keeps the in-match configuration for the next game.
+ */
+function matchStartState(state: MultiplayerDraftState, launch: DraftMatchLaunch): Partial<MultiplayerDraftState> {
+  return {
+    matchPairing: launch,
+    phase: "matchInProgress",
+    intergameWorkspaceState: state.matchPairing?.matchId === launch.matchId
+      ? state.intergameWorkspaceState
+      : null,
+  };
+}
+
 function nameMultiset(names: readonly string[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -1335,17 +1406,58 @@ function sameNameMultiset(left: readonly string[], right: readonly string[]): bo
 }
 
 /**
- * The local workspace's partition when it projects the replay-accepted main deck, else null: a name-only
- * main deck cannot tell a drafted card from a virtual one of the same name.
+ * The local workspace and its partition when it projects the replay-accepted main deck, else null: a
+ * name-only main deck cannot tell a drafted card from a virtual one of the same name.
  */
 function recoveredSubmissionPartition(
   mainDeck: readonly string[],
   pool: DraftPlayerView["pool"],
-): DraftWorkspacePartition | null {
+): { workspace: DraftWorkspaceState; partition: DraftWorkspacePartition } | null {
   const { workspaceState } = useMultiplayerDraftStore.getState();
   if (!workspaceState) return null;
-  const partition = projectWorkspacePartition(reconcileWorkspaceState(workspaceState, pool), pool);
-  return sameNameMultiset(partition.mainDeck, mainDeck) ? partition : null;
+  const workspace = reconcileWorkspaceState(workspaceState, pool);
+  const partition = projectWorkspacePartition(workspace, pool);
+  return sameNameMultiset(partition.mainDeck, mainDeck) ? { workspace, partition } : null;
+}
+
+/**
+ * The single authority for recording a deck submission the host ACCEPTED: the deck, its partition and the
+ * companion it designated (CR 702.139a) are stored together, so a later re-edit (Casual RoundComplete)
+ * starts from exactly what was accepted and an unchanged resubmit cannot drop the companion. Both the
+ * ordinary submit path and the reconnect-recovery path (a replayed acceptance with no surviving caller)
+ * record through here. `nextView` is the host's post-submit view, installed with the workspace; a guest
+ * has none and only records the submission. A null `partition` (a recovered deck the local workspace
+ * cannot project) still records the accepted deck and companion.
+ */
+function recordAcceptedSubmission(input: {
+  view: DraftPlayerView;
+  nextView?: DraftPlayerView;
+  mainDeck: readonly string[];
+  partition: DraftWorkspacePartition | null;
+  workspace: DraftWorkspaceState | null;
+  commanders: readonly string[];
+  companion: string | null;
+}): void {
+  const patch: Partial<MultiplayerDraftState> = {
+    submittedDeck: [...input.mainDeck],
+    submittedPartition: input.partition,
+    submittedCompanion: input.companion,
+    ...(input.workspace ? { submittedWorkspaceState: cloneWorkspace(input.workspace) } : {}),
+  };
+  if (input.nextView && input.workspace) {
+    installWorkspace({ view: input.nextView, base: input.workspace, publish: false, patch });
+  } else {
+    useMultiplayerDraftStore.setState(patch);
+  }
+  if (input.partition) {
+    void autosaveDraftDeck({
+      view: input.view,
+      setCode: null,
+      partition: input.partition,
+      commanders: [...input.commanders],
+      companion: input.companion,
+    });
+  }
 }
 
 function disposeMatchController(): void {
@@ -1442,6 +1554,7 @@ function activePhaseForHostStatus(status: DraftPodHostStatus): ActiveDraftPodPha
   switch (status) {
     case "lobby":
     case "drafting":
+    case "review":
     case "deckbuilding":
     case "pairing":
     case "matchInProgress":
@@ -1456,47 +1569,25 @@ function activePhaseForHostStatus(status: DraftPodHostStatus): ActiveDraftPodPha
   }
 }
 
-function phaseForDraftViewStatus(status: DraftPlayerView["status"]): MultiplayerDraftPhase {
-  switch (status) {
-    case "Lobby":
-      return "lobby";
-    case "Drafting":
-    case "Paused":
-      return "drafting";
-    case "Deckbuilding":
-      return "deckbuilding";
-    case "Pairing":
+function activePhaseForPresentation(presentation: DraftViewPresentation): ActiveDraftPodPhase | null {
+  switch (presentation.podPhase) {
+    case "lobby":
+    case "drafting":
+    case "review":
+    case "deckbuilding":
+    case "pairing":
+    case "matchInProgress":
+    case "complete":
+      return presentation.podPhase;
+    case "roundComplete":
       return "pairing";
-    case "MatchInProgress":
-      return "matchInProgress";
-    case "RoundComplete":
-      return "roundComplete";
-    case "Complete":
-      return "complete";
-    case "Abandoned":
-      return "error";
+    case "error":
+      return null;
   }
 }
 
-function activePhaseForDraftViewStatus(status: DraftPlayerView["status"]): ActiveDraftPodPhase | null {
-  switch (status) {
-    case "Lobby":
-      return "lobby";
-    case "Drafting":
-    case "Paused":
-      return "drafting";
-    case "Deckbuilding":
-      return "deckbuilding";
-    case "Pairing":
-    case "RoundComplete":
-      return "pairing";
-    case "MatchInProgress":
-      return "matchInProgress";
-    case "Complete":
-      return "complete";
-    case "Abandoned":
-      return null;
-  }
+function activePhaseForDraftView(view: DraftPlayerView): ActiveDraftPodPhase | null {
+  return activePhaseForPresentation(draftViewPresentation(view));
 }
 
 /**
@@ -1606,6 +1697,7 @@ const initialState: MultiplayerDraftState = {
   role: null,
   phase: "idle",
   roomCode: null,
+  hostPersistenceId: null,
   draftCode: null,
   seatIndex: null,
   view: null,
@@ -1632,6 +1724,7 @@ const initialState: MultiplayerDraftState = {
   pairings: [],
   submittedDeck: [],
   submittedWorkspaceState: null,
+  submittedCompanion: null,
   submittedPartition: null,
   intergameWorkspaceState: null,
   matchPairing: null,
@@ -1730,6 +1823,192 @@ export const useMultiplayerDraftStore = create<
 
   clearError: () => set({ error: null }),
 
+  resumeHostedDraft: async (attempt) => {
+    if (!attempt.isCurrent()) return "superseded";
+    if (attempt.config.signal?.aborted) return "aborted";
+    if (getEffectiveOffline()) return "offline";
+
+    // This is intentionally before `hostDraft`: its first lifecycle action is
+    // detachment, so a typed refusal, or a check that cannot answer, must
+    // leave an installed owner untouched.
+    let preflight: Awaited<ReturnType<typeof preflightDraftPodHostRecovery>>;
+    try {
+      preflight = await preflightDraftPodHostRecovery(attempt.config.recovery);
+    } catch {
+      if (!attempt.isCurrent()) return "superseded";
+      if (attempt.config.signal?.aborted) return "aborted";
+      return "initializationFailure";
+    }
+    if (preflight.type === "incompatible") return "incompatible";
+    if (!attempt.isCurrent()) return "superseded";
+    if (attempt.config.signal?.aborted) return "aborted";
+
+    // Exact persistence identity, rather than room-code coincidence, is the
+    // only already-resumed owner. A same-code replacement still runs through
+    // the captured lifecycle protocol.
+    if (activeHostAdapter && activeHostPersistenceId === attempt.config.persistenceId) {
+      return "resumed";
+    }
+
+    // Recovery must not borrow `hostDraft`: that normal new-host path
+    // intentionally detaches its predecessor before it allocates its next
+    // adapter.  Keep B local through its allocation. The one synchronous
+    // ownership handoff below comes before B restores a saved draft session
+    // or, when the record carries none, after B has initialized.
+    const provisional = new DraftPodHostAdapter();
+    const bufferedEvents: DraftPodHostEvent[] = [];
+    const stopBuffering = provisional.onEvent((event) => bufferedEvents.push(event));
+    const disposeProvisional = async () => {
+      stopBuffering();
+      await disposeHostAdapter(provisional, true);
+    };
+    // An attempt abandoned before its handover ends B at once, which closes any
+    // peer B has open, and the next attempt for this saved pod waits for that.
+    const abandonProvisional = () => {
+      retainDraftSessionTeardown(attempt.config.persistenceId ?? null, disposeProvisional());
+    };
+    attempt.config.signal?.addEventListener("abort", abandonProvisional, { once: true });
+
+    // The fenced commit: detach the installed owner, install B, bind B to the
+    // route signal, publish its session and deliver its buffered events. It
+    // contains no await.
+    let committedEpoch: number | null = null;
+    const commit = (): { owner: AbortController; previousTeardown: Promise<void> } => {
+      attempt.config.signal?.removeEventListener("abort", abandonProvisional);
+      stopBuffering();
+      const epoch = ++draftAdapterEpoch;
+      committedEpoch = epoch;
+      const previous = detachDraftAdapters();
+      const generation = beginDraftLifecycle();
+      const controller = new AbortController();
+      activeHostAdapter = provisional;
+      activeHostAbort = controller;
+      activeHostPersistenceId = attempt.config.persistenceId ?? null;
+      activeHostEventUnsub = provisional.onEvent((event) => {
+        if (generation === lifecycleGeneration && activeHostAdapter === provisional && epoch === draftAdapterEpoch) {
+          handleHostEvent(event, set);
+        }
+      });
+
+      const abortOwner = () => {
+        controller.abort();
+        if (activeHostAdapter !== provisional || epoch !== draftAdapterEpoch) return;
+        ++draftAdapterEpoch;
+        const detached = detachDraftAdapters();
+        const teardown = disposeDetachedDraftAdapters(detached, true);
+        retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+        void teardown;
+        set(initialState);
+      };
+      attempt.routeSignal?.addEventListener("abort", abortOwner, { once: true });
+      if (attempt.routeSignal) {
+        activeHostRouteAbortListener = { signal: attempt.routeSignal, listener: abortOwner };
+      }
+
+      replaceDraftSession(set, {
+        role: "host",
+        phase: "connecting",
+        hostPersistenceId: attempt.config.persistenceId ?? null,
+        seatIndex: 0,
+        interactionGeneration: generation,
+      });
+      attempt.onCommitted?.();
+      // The wrapper emitted only into the private buffer while B was
+      // provisional. Deliver those events only after the fenced install.
+      for (const event of bufferedEvents) handleHostEvent(event, set);
+
+      const previousTeardown = disposeDetachedDraftAdapters(previous, true);
+      retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
+      return { owner: controller, previousTeardown };
+    };
+
+    // Called by B's initialization before its first write to the draft
+    // engine session: the attempt's last checks, the commit, then the retired
+    // owner's teardown, which closes its persistence and drains its saves.
+    const handover = async (): Promise<AbortSignal> => {
+      if (attempt.config.signal?.aborted || !attempt.isCurrent() || getEffectiveOffline()) {
+        throw new Error("Draft pod host recovery ended before its handover");
+      }
+      const { owner, previousTeardown } = commit();
+      await previousTeardown;
+      return owner.signal;
+    };
+
+    // After the handover the retired owner is not reinstated. A restore that
+    // fails ends B as well, with its saved session kept.
+    const endCommittedRecovery = async () => {
+      if (activeHostAdapter === provisional && committedEpoch === draftAdapterEpoch) {
+        ++draftAdapterEpoch;
+        const detached = detachDraftAdapters();
+        set(initialState);
+        const teardown = disposeDetachedDraftAdapters(detached, true);
+        retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+        await teardown;
+      } else {
+        await disposeHostAdapter(provisional, true);
+      }
+    };
+
+    try {
+      // A retained teardown belongs to an earlier, already-detached owner or an
+      // abandoned attempt of this exact persistence source. Waiting for it does
+      // not touch live A; it only prevents B from racing that peer's release.
+      await claimDraftSessionOwner(attempt.config.persistenceId);
+      if (attempt.config.signal?.aborted) {
+        await disposeProvisional();
+        return "aborted";
+      }
+      if (!attempt.isCurrent()) {
+        await disposeProvisional();
+        return "superseded";
+      }
+      if (getEffectiveOffline()) {
+        await disposeProvisional();
+        return "offline";
+      }
+      await provisional.initialize({
+        ...attempt.config,
+        recovery: attempt.config.recovery
+          ? { ...attempt.config.recovery, isCurrent: attempt.isCurrent, handover }
+          : undefined,
+      });
+    } catch (error) {
+      if (committedEpoch === null) await disposeProvisional();
+      else await endCommittedRecovery();
+      if (error instanceof Draft27IncompatibilityError) return "incompatible";
+      if (attempt.config.signal?.aborted) return "aborted";
+      if (!attempt.isCurrent()) return "superseded";
+      if (getEffectiveOffline()) return "offline";
+      return "initializationFailure";
+    }
+
+    // B committed at its handover and has initialized. It is resumed unless
+    // its route or a later replacement has already ended it.
+    if (committedEpoch !== null) {
+      return activeHostAdapter === provisional ? "resumed" : "superseded";
+    }
+
+    // A record without a draft session commits here. Every B non-commit
+    // outcome leaves A and its listener, durable source, credentials, outbox,
+    // and last admitted state untouched.  In particular, no await occurs after
+    // the final successful check and before the detach / install transition.
+    if (attempt.config.signal?.aborted) {
+      await disposeProvisional();
+      return "aborted";
+    }
+    if (!attempt.isCurrent()) {
+      await disposeProvisional();
+      return "superseded";
+    }
+    if (getEffectiveOffline()) {
+      await disposeProvisional();
+      return "offline";
+    }
+
+    void commit().previousTeardown;
+    return "resumed";
+  },
+
   hostDraft: async (config) => {
     if (getEffectiveOffline()) {
       set({ error: DRAFT_OFFLINE_ERROR });
@@ -1781,7 +2060,13 @@ export const useMultiplayerDraftStore = create<
     config.signal?.addEventListener("abort", abortOwner, { once: true });
     if (config.signal) activeHostRouteAbortListener = { signal: config.signal, listener: abortOwner };
 
-    replaceDraftSession(set, { role: "host", phase: "connecting", seatIndex: 0, interactionGeneration: generation });
+    replaceDraftSession(set, {
+      role: "host",
+      phase: "connecting",
+      hostPersistenceId: config.persistenceId ?? null,
+      seatIndex: 0,
+      interactionGeneration: generation,
+    });
 
     let initialized = false;
     try {
@@ -1790,7 +2075,7 @@ export const useMultiplayerDraftStore = create<
       if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) return { status: "superseded" };
       if (config.persistenceId) {
         const view = get().view;
-        const phase = view ? activePhaseForDraftViewStatus(view.status) ?? "lobby" : "lobby";
+        const phase = view ? activePhaseForDraftView(view) ?? "lobby" : "lobby";
         saveActiveDraftPod({
           id: config.persistenceId,
           roomCode: adapter.roomCode ?? config.preferredRoomCode ?? "",
@@ -1805,9 +2090,14 @@ export const useMultiplayerDraftStore = create<
         });
       }
       return { status: "opened" };
-    } catch {
+    } catch (error) {
       // The adapter reports the error while it is current. A late failure is
       // deliberately silent: its event gate was detached by the new owner.
+      // The typed recovery caller must preserve this discriminator instead of
+      // collapsing it to the legacy boolean outcome.
+      if (config.recovery && error instanceof Draft27IncompatibilityError) {
+        throw error;
+      }
     } finally {
       if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) {
         config.signal?.removeEventListener("abort", abortOwner);
@@ -1832,9 +2122,13 @@ export const useMultiplayerDraftStore = create<
     // Only while this attempt owns the pod session: the state it clears is then
     // its own.
     const ownFailure = (): DraftSessionOpenOutcome => {
-      const { error } = get();
+      const { error, guestRecoveryFailure } = get();
       if (failureReport === "caller") set(initialState);
-      return { status: "failed", error };
+      // A compatibility refusal's code survives the reset, so a caller can
+      // show the translated message rather than the English error.
+      return guestRecoveryFailure?.kind === "incompatible" && guestRecoveryFailure.code !== undefined
+        ? { status: "failed", error, code: guestRecoveryFailure.code }
+        : { status: "failed", error };
     };
     const epoch = ++draftAdapterEpoch;
     const previous = detachDraftAdapters();
@@ -2021,6 +2315,7 @@ export const useMultiplayerDraftStore = create<
     const pack = view?.current_pack ?? [];
     if (
       !view
+      || draftViewPresentation(view).isReadOnly
       || view.required_pick_count <= 0
       || selected.length !== view.required_pick_count
       || new Set(selected).size !== selected.length
@@ -2038,7 +2333,8 @@ export const useMultiplayerDraftStore = create<
   submitSharedStackDecision: (pile, decision) => performSharedStackDecision(pile, decision),
 
   selectCard: (cardInstanceId) => {
-    if (get().pickInteractionLocked) return;
+    const state = get();
+    if (state.pickInteractionLocked || (state.view && draftViewPresentation(state.view).isReadOnly)) return;
     set({ selectedCard: cardInstanceId });
   },
 
@@ -2050,6 +2346,9 @@ export const useMultiplayerDraftStore = create<
 
   autoPickCard: (placementHints) => {
     const { view } = get();
+    if (view && draftViewPresentation(view).isReadOnly) {
+      return Promise.resolve({ status: "rejected", reason: "invalid-request" });
+    }
     const instanceIds = chooseAutoPickCards(view);
     if (instanceIds.length === 0) return Promise.resolve({ status: "rejected", reason: "invalid-request" });
     return performPick({
@@ -2095,7 +2394,8 @@ export const useMultiplayerDraftStore = create<
 
   setWorkspaceState: (next) => {
     const state = get();
-    if (state.pickInteractionLocked || !state.view || !state.workspaceState) return;
+    if (state.pickInteractionLocked || !state.view || !state.workspaceState
+      || draftViewPresentation(state.view).isReadOnly) return;
     const reconciled = reconcileWorkspaceState(next, state.view.pool);
     if (reconciled === state.workspaceState) return;
     installWorkspace({ view: state.view, base: reconciled, publish: true });
@@ -2103,7 +2403,8 @@ export const useMultiplayerDraftStore = create<
 
   setWorkspacePlacement: (instanceId, placement) => {
     const state = get();
-    if (state.pickInteractionLocked || !state.view || !state.workspaceState) return;
+    if (state.pickInteractionLocked || !state.view || !state.workspaceState
+      || draftViewPresentation(state.view).isReadOnly) return;
     const next = updateWorkspacePlacement(state.workspaceState, state.view.pool, instanceId, placement);
     if (next === state.workspaceState) return;
     installWorkspace({ view: state.view, base: next, publish: true });
@@ -2112,6 +2413,7 @@ export const useMultiplayerDraftStore = create<
   addBasicLand: (name) => {
     const state = get();
     if (state.pickInteractionLocked || !state.view || !state.workspaceState
+      || draftViewPresentation(state.view).isReadOnly
       || state.workspaceState.virtualBasics.length >= MAX_MATERIALIZED_VIRTUAL_BASICS) return;
     const instanceId = makeInteractiveVirtualBasicInstanceId(state.workspaceState, state.view.pool);
     installWorkspace({
@@ -2123,7 +2425,8 @@ export const useMultiplayerDraftStore = create<
 
   removeBasicLand: (name) => {
     const state = get();
-    if (state.pickInteractionLocked || !state.view || !state.workspaceState) return;
+    if (state.pickInteractionLocked || !state.view || !state.workspaceState
+      || draftViewPresentation(state.view).isReadOnly) return;
     const target = [...state.workspaceState.virtualBasics].reverse().find(
       (basic) => basic.name === name && state.workspaceState!.placements[basic.instanceId]?.zone === "deck",
     );
@@ -2137,7 +2440,7 @@ export const useMultiplayerDraftStore = create<
 
   retryWorkspaceSync: async () => {
     const state = get();
-    if (!state.view || !state.workspaceState) return;
+    if (!state.view || !state.workspaceState || draftViewPresentation(state.view).isReadOnly) return;
     await publishWorkspace(reconcileWorkspaceState(state.workspaceState, state.view.pool));
   },
 
@@ -2149,33 +2452,39 @@ export const useMultiplayerDraftStore = create<
     set({ intergameWorkspaceState: workspace });
   },
 
-  submitDeck: async (commanders = []) => {
+  submitDeck: async (commanders = [], companion = null) => {
     const { role, view, workspaceState } = get();
     if (!view || !workspaceState) return;
     const workspace = reconcileWorkspaceState(workspaceState, view.pool);
     const partition = projectWorkspacePartition(workspace, view.pool);
 
     if (role === "host" && activeHostAdapter) {
-      const nextView = await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
-      installWorkspace({
-        view: nextView,
-        base: workspace,
-        publish: false,
-        patch: {
-          submittedDeck: partition.mainDeck,
-          submittedWorkspaceState: cloneWorkspace(workspace),
-          submittedPartition: partition,
-        },
+      const nextView = companion
+        ? await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion)
+        : await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
+      recordAcceptedSubmission({
+        view,
+        nextView,
+        mainDeck: partition.mainDeck,
+        partition,
+        workspace,
+        commanders,
+        companion,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
-      set({
-        submittedDeck: partition.mainDeck,
-        submittedWorkspaceState: cloneWorkspace(workspace),
-        submittedPartition: partition,
+      if (companion) {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
+      } else {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+      }
+      recordAcceptedSubmission({
+        view,
+        mainDeck: partition.mainDeck,
+        partition,
+        workspace,
+        commanders,
+        companion,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
     }
   },
 
@@ -2361,7 +2670,11 @@ export const useMultiplayerDraftStore = create<
         host.peer,
         host.onGuestConnected,
         launchView.seats.length,
-        FORMAT_DEFAULTS.CommanderDraft,
+        // CR 100.2b + CR 702.139b + CR 903.13f(1): the pod's own resolved minimum
+        // (a Commander Cube may raise it above 60), the same one submission
+        // validated the deck against, so admission and the pregame companion
+        // reveal measure Yorion against it too.
+        draftSessionFormatConfig(FORMAT_DEFAULTS.CommanderDraft, launchView.min_deck_size),
         // ENGINE-OWNED: read the view's config, never construct one. A frontend
         // inventing a `MatchConfig` is what the superseded `&match=bo1` URL did
         // wrong.
@@ -2774,6 +3087,13 @@ export const useMultiplayerDraftStore = create<
     if (!matchPairing) return null;
     const gameId = `draft-match-${matchPairing.matchId}`;
     if (matchAdapter) return gameId;
+    // CR 100.2b + CR 702.139b: the match runs under the pod's own resolved
+    // minimum deck size (a Cube may configure other than 40), which the
+    // engine's "minimum deck size" companion condition reads.
+    const matchFormatConfig = draftSessionFormatConfig(
+      DRAFT_MATCH_FORMAT_CONFIG,
+      get().view?.min_deck_size,
+    );
     // A pod session already detached has no pod left to host or report this match.
     if (!activeWorkspaceAdapter()) return null;
     if (matchStartInFlight?.matchId === matchPairing.matchId && !matchStartInFlight.abort.signal.aborted) return null;
@@ -2810,7 +3130,7 @@ export const useMultiplayerDraftStore = create<
           host.peer,
           host.onGuestConnected,
           2, // 1v1 match
-          DRAFT_MATCH_FORMAT_CONFIG,
+          matchFormatConfig,
           matchPairing.matchConfig,
           undefined,
           undefined,
@@ -2996,7 +3316,7 @@ export const useMultiplayerDraftStore = create<
         abort.signal.throwIfAborted();
         const initResult = await matchAdapter.initializeGame(
           { ...matchPairing.deckPayload, player, opponent, ai_decks: aiDecks },
-          DRAFT_MATCH_FORMAT_CONFIG,
+          matchFormatConfig,
           2,
           matchPairing.matchConfig,
         );
@@ -3171,6 +3491,9 @@ export const useMultiplayerDraftStore = create<
 
   handleBetweenGamesPrompt: (prompt) => {
     const state = get();
+    // A guest that refused its draft's FIFO or Review view has lost its host:
+    // it stays on the translated error view, not the between-games window.
+    if (state.role === "guest" && state.guestRecoveryFailure?.kind === "incompatible" && state.guestRecoveryFailure.code !== undefined) return;
     const source = state.intergameWorkspaceState ?? state.submittedWorkspaceState;
     const launch = state.matchPairing;
     const view = state.view;
@@ -3207,6 +3530,10 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async (preserveRecovery = false) => {
+    // With nothing installed, this new epoch supersedes a start that has no
+    // adapter yet: one waiting for its predecessor's teardown, or a guest
+    // resume reading its seat.
+    if (!activeHostAdapter && !activeGuestAdapter) ++draftAdapterEpoch;
     // Fenced against a newer `hostDraft`/`joinDraft` that opened while this
     // call was awaiting: each `await` below can run long enough (the
     // Commander termination flush; the guest leave-ack, up to
@@ -3292,6 +3619,8 @@ function hostStatusToPhase(status: DraftPodHostStatus): MultiplayerDraftPhase {
       return "lobby";
     case "drafting":
       return "drafting";
+    case "review":
+      return "review";
     case "deckbuilding":
       return "deckbuilding";
     case "pairing":
@@ -3317,6 +3646,8 @@ function guestStatusToPhase(status: DraftPodGuestStatus): MultiplayerDraftPhase 
       return "lobby";
     case "drafting":
       return "drafting";
+    case "review":
+      return "review";
     case "deckbuilding":
       return "deckbuilding";
     case "matchInProgress":
@@ -3340,6 +3671,7 @@ type SetFn = (
 
 function installEventView(view: DraftPlayerView): void {
   if (exclusivePickToken) return;
+  const presentation = draftViewPresentation(view);
   const state = useMultiplayerDraftStore.getState();
   const restored = restoredWorkspace?.generation === lifecycleGeneration ? restoredWorkspace : null;
   restoredWorkspace = null;
@@ -3356,15 +3688,15 @@ function installEventView(view: DraftPlayerView): void {
     view.pool_groups,
     getArrivingCardBoardPreferences(),
   );
-  const publish = restored !== null
+  const publish = !presentation.isReadOnly && (restored !== null
     ? (restored.state === null ? view.pool.length > 0 : workspace !== base)
-    : workspace !== state.workspaceState;
+    : workspace !== state.workspaceState);
   installWorkspace({
     view,
     base: workspace,
     publish,
     patch: {
-      phase: phaseForDraftViewStatus(view.status),
+      phase: presentation.podPhase,
       // Only overwrite the clock when the view actually carries one. A view
       // NEVER does on the P2P path -- `draft-core` publishes
       // `timer_remaining_ms: None` on every view it builds, and the countdown
@@ -3380,6 +3712,15 @@ function installEventView(view: DraftPlayerView): void {
       standings: view.standings ?? [],
       currentRound: view.current_round ?? 0,
       pairings: view.pairings ?? [],
+      // CR 702.139a: the host-accepted designation is authoritative, so a
+      // reload or rejoin that lost the local record (or whose replayed command
+      // is already acknowledged and cleared) restores it from the view. Only a
+      // PRESENT value is applied: an absent field never erases a designation,
+      // which `recordAcceptedSubmission` clears when an accepted resubmit
+      // drops the companion.
+      ...(typeof view.submitted_companion === "string"
+        ? { submittedCompanion: view.submitted_companion }
+        : {}),
     },
   });
 }
@@ -3404,9 +3745,9 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       updateActiveDraftPod({ roomCode: event.roomCode });
       break;
     case "viewUpdated":
-      installEventView(event.view);
       {
-        const activePhase = activePhaseForDraftViewStatus(event.view.status);
+        installEventView(event.view);
+        const activePhase = activePhaseForDraftView(event.view);
         if (activePhase) saveDraftPodProgress(activePhase, event.view);
       }
       break;
@@ -3416,8 +3757,8 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "lobbyFull":
       break;
     case "draftStarted": {
-      const activePhase = activePhaseForDraftViewStatus(event.view.status);
       installEventView(event.view);
+      const activePhase = activePhaseForDraftView(event.view);
       if (activePhase) saveDraftPodProgress(activePhase, event.view);
       break;
     }
@@ -3430,8 +3771,8 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       // cannot know where the pod went — a `PostDraftPlay::CompleteImmediately`
       // pod is already `Complete` (draft-core session.rs:902), and writing
       // "pairing" here overwrote the reducer's own answer. The `viewUpdated`
-      // that follows establishes BOTH: the phase via `phaseForDraftViewStatus`
-      // and the persisted record via `activePhaseForDraftViewStatus`.
+      // that follows establishes BOTH: the phase via `draftViewPresentation`
+      // and the persisted record via `activePhaseForPresentation`.
       //
       // The arm itself stays for the reader, not for the compiler: this
       // `switch` returns `void` and has no `default`/`assertNever`, so dropping
@@ -3460,7 +3801,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "matchStart":
       // A pairing replaced by another match ends the start bound to the old one.
       if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
-      set({ matchPairing: event.launch, phase: "matchInProgress" });
+      set((state) => matchStartState(state, event.launch));
       void retryDraftSettlement(event.launch, "host");
       break;
     case "commanderLaunch":
@@ -3610,10 +3951,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
     case "matchStart":
       // A pairing replaced by another match ends the start bound to the old one.
       if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
-      set({
-        matchPairing: event.launch,
-        phase: "matchInProgress",
-      });
+      set((state) => matchStartState(state, event.launch));
       void retryDraftSettlement(event.launch, "guest");
       break;
     case "commanderLaunch":
@@ -3686,8 +4024,15 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       // Informational — standings update comes via viewUpdated
       break;
     case "recoveredDeckSubmissionAccepted": {
-      const partition = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
-      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders });
+      const recovered = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
+      recordAcceptedSubmission({
+        view: event.view,
+        mainDeck: event.mainDeck,
+        partition: recovered?.partition ?? null,
+        workspace: recovered?.workspace ?? null,
+        commanders: event.commanders,
+        companion: event.companion ?? null,
+      });
       break;
     }
   }

@@ -1,0 +1,8 @@
+{
+  "surfaces": [
+    "full",
+    "lobby",
+    "wire"
+  ],
+  "reason": "FormatConfig gains poison_counter_threshold (CR 704.5c individual poison-loss threshold, host-adjustable; null for the Two-Headed Giant family), StructuralRules gains its mirror, and DerivedViews gains poison_loss (the per-player poison-loss rule the HUD displays). Defaulted and migrated on ingress, so either side parses, but a peer missing the field plays at the CR value and silently drops a host's house-rule threshold."
+}

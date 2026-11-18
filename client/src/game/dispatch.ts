@@ -20,6 +20,7 @@ import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
 import {
+  canUndo,
   captureTrustedCheckpoint,
   isAuthorityRemote,
   nextGameSessionGeneration,
@@ -266,16 +267,16 @@ function sameBoundGameSession(
 /**
  * Discard every queued and in-flight dispatch and release the mutex.
  *
- * Two callers, both of which abandon the game the pending work belongs to:
- * `restoreGameState` (the engine state is replaced wholesale) and
- * `clearPromptOverlayState` (a game-session boundary). Bumping
+ * Three callers, each of which abandons the game state the pending work belongs
+ * to: `restoreGameState` and `undoLastAction` (the engine state is replaced
+ * wholesale) and `clearPromptOverlayState` (a game-session boundary). Bumping
  * `dispatchGeneration` makes every downstream `isDispatchContextCurrent` guard
  * decline, so a `processAction` continuation still in flight can neither commit
  * nor release a newer dispatch's mutex. That covers the action and remote
  * dispatch pipelines. `dispatchInteraction` also captures this generation and
  * its bound session, then checks both after each asynchronous boundary.
- * `restoreGameState` still commits without capturing the generation, so it
- * remains unaffected by the bump and can write.
+ * `restoreGameState` and `undoLastAction` still commit without capturing the
+ * generation, so they remain unaffected by the bump and can write.
  * Queued work is *resolved*, not rejected: a caller
  * awaiting an action in an abandoned game has nothing to recover from and
  * must not see a spurious rejection.
@@ -308,6 +309,12 @@ function releaseDispatchMutex(generation: number): void {
   } else {
     isAnimating = false;
   }
+}
+
+/** Actions that report a physical event (an Un-card touch) rather than answer
+ *  a prompt: every submission is a separate instance. */
+function isRepeatableEvent(action: GameAction): boolean {
+  return action.type === "UnAction" && action.data.action.type === "TouchObject";
 }
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
@@ -360,8 +367,21 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     || next.action.type === "CancelAutoPass"
     || next.action.type === "SetMayTriggerAutoChoice"
     || next.action.type === "SetReplacementAutoChoice"
-    || next.action.type === "UnAction"
   ) {
+    return true;
+  }
+  if (next.action.type === "UnAction") {
+    // CR 400.7: an Un-card touch must target the object's exact live incarnation.
+    // A delayed touch queued across a prompt change (such as during Cloudshift)
+    // must not trigger a returned permanent that is now a new object.
+    if (next.action.data.action.type === "TouchObject") {
+      const target = next.action.data.action.data.target;
+      const { gameState } = useGameStore.getState();
+      const touchable = gameState?.un_actions?.touchable;
+      return touchable?.some(
+        (t) => t.object_id === target.object_id && t.incarnation === target.incarnation,
+      ) ?? false;
+    }
     return true;
   }
   const { gameState, legalActions, waitingFor } = useGameStore.getState();
@@ -736,14 +756,10 @@ async function processAction(
   // Re-check after the await: a session boundary mid-animation must not let
   // a stale checkpoint resurrect history into the replacement game.
   if (!isDispatchContextCurrent(generation, session)) return;
-  const store = useGameStore.getState();
-  const stateHistory = checkpoint
-    ? [...store.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
-    : undefined;
-  store.commitEngineSnapshot(snapshotResult, {
+  useGameStore.getState().commitEngineSnapshot(snapshotResult, {
     events,
     logEntries: result.log_entries ?? [],
-    stateHistory,
+    undoCheckpoint: checkpoint ?? undefined,
     extraState: { restoredStackAutomation: null },
   });
 
@@ -870,8 +886,18 @@ async function dispatchActionInternal(
   automated = false,
 ): Promise<void> {
   if (!isBoundGameSessionCurrent(session)) return;
-  const { gameMode } = useGameStore.getState();
+  const { gameMode, pendingUndoId } = useGameStore.getState();
   if (gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return;
+  }
+  // An action chosen on the board an undo is taking back must not reach the
+  // engine, which may already hold the restored game (see `undoLastAction`).
+  // A standing preference bound to the game session is let through: it is not
+  // chosen on the board, takes no checkpoint, and belongs on the restored game.
+  // Its sender records it as sent once this resolves, so refusing it would
+  // lose it for the rest of the game.
+  if (pendingUndoId !== null && session === null) {
+    debugLog(`dispatch refused during an undo: ${action.type}`, "info");
     return;
   }
 
@@ -882,8 +908,12 @@ async function dispatchActionInternal(
 
   if (isAnimating) {
     // Same action + same actor + same prompt is a duplicate. A changed prompt
-    // is a new decision even when the payload is structurally identical.
+    // is a new decision even when the payload is structurally identical. An
+    // Un-card touch is an event, not a decision: each one is its own instance,
+    // so a repeat while an earlier touch is in flight is never a duplicate.
+    const repeatable = isRepeatableEvent(submittedAction);
     if (
+      !repeatable &&
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
       sameBoundGameSession(inFlightLocalAction.session, session) &&
@@ -892,7 +922,7 @@ async function dispatchActionInternal(
     ) {
       return;
     }
-    for (const pending of pendingQueue) {
+    for (const pending of repeatable ? [] : pendingQueue) {
       if (
         pending.kind === "local" &&
         pending.actor === actor &&
@@ -969,8 +999,13 @@ export async function dispatchInteraction(
   submission: InteractionSubmission,
   actor: number = getPlayerId(),
 ): Promise<{ status: "applied" | "stale" }> {
-  const { adapter, gameState, gameMode, gameSessionGeneration } = useGameStore.getState();
+  const { adapter, gameState, gameMode, gameSessionGeneration, pendingUndoId } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return { status: "stale" };
+  }
+  // A response to a prompt on the board an undo is taking back (see `undoLastAction`).
+  if (pendingUndoId !== null) {
+    debugLog("interaction refused during an undo", "info");
     return { status: "stale" };
   }
 
@@ -1271,6 +1306,162 @@ export async function restoreGameState(
   }
 
   return null;
+}
+
+/** Numbers each undo begun, across games, so an undo clears only its own `pendingUndoId`. */
+let latestUndoId = 0;
+
+/**
+ * Undo back to the newest checkpoint on the undo ring: the local player's last
+ * undoable action, and anything still in flight after it. The one entry point
+ * for the Undo button and the Z shortcut, and the one owner of an undo.
+ *
+ * Like `restoreGameState`, the undo replaces the engine state wholesale, so it
+ * abandons the dispatch pipeline's queued and in-flight work first. A play still
+ * animating would otherwise commit after the rewind: its log lines into the
+ * rewound log, which the next LLM prompt is built from, and its checkpoint onto
+ * the ring, where the next undo would redo it. Pressed while one of the
+ * player's own undoable actions animates, the undo takes that action back too:
+ * it never committed, and the restored checkpoint precedes it. A store
+ * `dispatch` begun before the press needs no fence: both engine transports
+ * answer in call order, so it commits before the undo does, and the undo's
+ * commit takes its log lines and checkpoint back.
+ *
+ * While `pendingUndoId` is set, no choice made on the board reaches the
+ * engine: the store still shows the board being undone, so an action chosen
+ * on it could land on the restored game, and a failed read after the restore
+ * would then re-sync a board holding that action while dropping its log line
+ * and checkpoint. The pipeline, the store's `dispatch` and
+ * `dispatchInteraction` refuse every such submit, and the AI controller drops
+ * its decision and starts none. A standing preference sent through
+ * `dispatchActionForGameSession` still goes through, onto the restored game.
+ *
+ * Nothing is abandoned when there is nothing to undo, or during an undo, so
+ * such a press leaves the work in flight alone. Nothing is rethrown: the Undo
+ * controls fire and forget.
+ */
+export async function undoLastAction(): Promise<void> {
+  const store = useGameStore.getState();
+  if (!canUndo(store)) return;
+  const { adapter, stateHistory } = store;
+  const session: BoundGameSession = { adapter, generation: store.gameSessionGeneration };
+  const previous = stateHistory[stateHistory.length - 1];
+
+  // The restore rewinds the engine, not this store's log: drop every entry
+  // from the undone action on, a line logged during the restore included, so
+  // the log is read as it stands at the commit. `nextLogSeq` keeps counting, so
+  // a seq still names one entry only, for anything that remembers one (the log
+  // panel keys its rows by seq). The ring keeps step with the log: it is the
+  // ring this undo found, less the checkpoint it restores, so a checkpoint
+  // pushed during the restore goes too.
+  const commitRestoredBoard = (snapshot: EngineSnapshot) => {
+    const { commitEngineSnapshot, logHistory } = useGameStore.getState();
+    commitEngineSnapshot(snapshot, {
+      extraState: {
+        events: [],
+        logHistory: logHistory.filter((entry) => entry.seq < previous.logSeq),
+        stateHistory: stateHistory.slice(0, -1),
+        restoredStackAutomation: null,
+      },
+    });
+  };
+
+  abandonPendingDispatches();
+  // Before the first await: from the restore on, the engine may hold the
+  // restored state while the store still shows the one being undone.
+  latestUndoId += 1;
+  const undoId = latestUndoId;
+  useGameStore.setState({ pendingUndoId: undoId });
+  try {
+    try {
+      await adapter.restoreState(previous.state);
+    } catch (err) {
+      // The engine presumably holds what it held, abandoned work included.
+      await recoverFromFailedUndo(err, session, (snapshot) => {
+        useGameStore.getState().commitEngineSnapshot(snapshot);
+      });
+      return;
+    }
+    // Commit the snapshot's OWN state, not `previous`: post-restore the engine
+    // is the source of truth, and taking both halves from one snapshot is what
+    // keeps the pair coherent. Newest-by-construction, so it passes the gate.
+    let snapshot: EngineSnapshot;
+    try {
+      snapshot = await adapter.getSnapshot();
+    } catch (err) {
+      // The engine holds the restored game, so the rewound history goes with
+      // its board, once that board can be read.
+      await recoverFromFailedUndo(err, session, commitRestoredBoard);
+      return;
+    }
+    // A game torn down or replaced while the undo ran is not the one it
+    // restored, and must not take its snapshot.
+    if (!isBoundGameSessionCurrent(session)) return;
+    commitRestoredBoard(snapshot);
+  } finally {
+    // Cleared once the undo is over, its board committed or its failure
+    // handled, and only by this undo: a newer game's undo may hold the field.
+    if (useGameStore.getState().pendingUndoId === undoId) {
+      useGameStore.setState({ pendingUndoId: null });
+    }
+  }
+}
+
+/**
+ * Handle an undo that failed with the store still showing the undone board.
+ * `commitBoard` commits the engine's board, with whatever history belongs to
+ * it.
+ *
+ * A panic or a lost engine goes to the recovery path, which leaves the store
+ * as it is: its board and its history still agree, and a reload resumes the
+ * saved game. Any other failure is reported, and the engine's board is read
+ * again and committed, so the board and every seat's next decision agree with
+ * the engine. Abandoned work's log lines and checkpoint are lost, as under
+ * `restoreGameState`.
+ */
+async function recoverFromFailedUndo(
+  err: unknown,
+  session: BoundGameSession,
+  commitBoard: (snapshot: EngineSnapshot) => void,
+): Promise<void> {
+  // An undo whose game was torn down or replaced meanwhile has no board to
+  // repair, and its failure (a disposed worker) is no news to the player. The
+  // console, not the game log, which by now belongs to another game.
+  if (!isBoundGameSessionCurrent(session)) {
+    console.info(`[undo] failed after its game ended: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (await recoverFromEngineFailure(err, "undo")) return;
+  reportActionError(err);
+  try {
+    const snapshot = await session.adapter.getSnapshot();
+    if (!isBoundGameSessionCurrent(session)) return;
+    commitBoard(snapshot);
+  } catch (resyncErr) {
+    // The engine cannot be read, so the board cannot be shown as it is.
+    if (isBoundGameSessionCurrent(session) && !(await recoverFromEngineFailure(resyncErr, "undo-resync"))) {
+      notifyEngineLost("undo-resync");
+    }
+  }
+}
+
+/**
+ * Hand an engine failure during an undo to the recovery path: a panic goes to
+ * `routePanic`, and an unresponsive or lost engine goes straight to
+ * `notifyEngineLost`. Unlike `processAction`, no rehydrate is tried for a lost
+ * engine, because the store's board is the state being undone. Returns false
+ * for any other failure, which the caller reports itself.
+ */
+async function recoverFromEngineFailure(err: unknown, reason: string): Promise<boolean> {
+  if (isEnginePanic(err)) {
+    await routePanic(`${reason}-panic`, err.panic);
+    return true;
+  }
+  if (isEngineUnresponsive(err) || isStateLost(err)) {
+    notifyEngineLost(reason);
+    return true;
+  }
+  return false;
 }
 
 /**

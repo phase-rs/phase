@@ -119,7 +119,20 @@ pub fn resolve(
 
             match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
-                    super::life::apply_life_loss_after_replacement(state, event, events);
+                    // A Horde-redirect mill pause parks its own prompt; fall
+                    // through to counter removal exactly like the NeedsChoice
+                    // arm below (the prompt stays parked either way).
+                    if let Err(deferred) =
+                        super::life::apply_life_loss_after_replacement(state, event, events)
+                    {
+                        debug_assert!(
+                            matches!(
+                                deferred,
+                                super::life::ReplacementDeferred::ReplacementChoice
+                            ),
+                            "the only pause a loss settle can surface is a mill ordering choice"
+                        );
+                    }
                 }
                 ReplacementResult::Prevented => {}
                 ReplacementResult::NeedsChoice(player) => {

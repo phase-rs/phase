@@ -59,6 +59,11 @@ const PAY_ABILITY_COST: &[(&str, &str, Class)] = &[
         Class::Guarded("PushToStack"),
     ),
     (
+        "game/casting_costs.rs",
+        "surface_next_interactive_activation_cost_leg",
+        Class::Guarded("LibraryAggregateTierOne"),
+    ),
+    (
         "game/planeswalker.rs",
         "finalize_loyalty_activation",
         Class::LoyaltyNoCarrier,

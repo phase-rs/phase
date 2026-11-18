@@ -6,18 +6,20 @@ use std::sync::Arc;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-use crate::database::CardDatabase;
-use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::database::{CardDatabase, ComboTable};
+use crate::game::bracket_estimate::{estimate_bracket, ComboDeclaration, CommanderBracketTier};
 use crate::starter_decks::DeckData;
-use crate::types::card::CardFace;
+use crate::types::card::{CardFace, Rarity, TokenImageRef};
 use crate::types::card_printing::{
     deck_face_identity, CardPrinting, DeckFaceLookupName, DeckPrinting, DeckPrintingRecord,
     DeckSection, SharedPrinting,
 };
 use crate::types::card_type::CoreType;
 use crate::types::display_only::DisplayOnly;
+use crate::types::format::CompanionSlot;
 use crate::types::game_state::{GameState, OutsideGameCardUse, PlayerDeckPool};
 use crate::types::identifiers::CardId;
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -51,7 +53,24 @@ impl DeckEntry {
         if combined != face.mana_cost.mana_value() {
             card.metadata.off_stack_mana_value_override = Some(combined);
         }
+        // CR 709.4b: a split card keeps each half's cost for symbol-reading checks.
+        let halves = db.off_stack_mana_costs_for_face(face);
+        if halves.len() > 1 {
+            card.metadata.off_stack_mana_costs = halves;
+        }
         Self { card, count }
+    }
+
+    /// CR 709.4b: the mana costs whose symbols this entry exposes — one per half
+    /// for a split card (cached by `from_resolved_face`), else the face's own.
+    /// The single accessor for effects that refer specifically to the symbols in
+    /// a mana cost (Jegantha), as `off_stack_mana_value` is for mana value.
+    pub fn off_stack_mana_costs(&self) -> &[ManaCost] {
+        if self.card.metadata.off_stack_mana_costs.is_empty() {
+            std::slice::from_ref(&self.card.mana_cost)
+        } else {
+            &self.card.metadata.off_stack_mana_costs
+        }
     }
 
     /// CR 202.3d + CR 709.4b: This entry's OFF-STACK mana value — the load-time
@@ -83,8 +102,9 @@ pub struct PlayerDeckPayload {
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
-    /// Commander-family companion held outside the game's 100-card deck.
-    /// The loader accepts this slot only for `GameFormat::uses_commander()`;
+    /// CR 702.139a: a companion designated outside the deck. The loader keeps
+    /// it only where `FormatConfig::companion_slot` provides a slot (the
+    /// commander family, and Limited, where it is netted from the sideboard);
     /// Oathbreaker keeps its separate signature-spell slot.
     #[serde(default)]
     pub companion: Vec<DeckEntry>,
@@ -110,11 +130,16 @@ pub struct PlayerDeckPayload {
     /// the Oathbreaker. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<DeckEntry>,
-    /// The declared bracket tier for this player's deck. Defaults to `Core`
-    /// so that existing serialized payloads and test fixtures that omit the
-    /// field continue to deserialize correctly.
+    /// The bracket this player's deck owner declared. `None` means undeclared,
+    /// and is what payloads and fixtures that omit the field deserialize to.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The estimator's bracket floor. `None` means no estimate was taken, such as
+    /// for a deck without a commander, a pre-phase payload, or a test fixture.
+    /// AI code must never read `bracket_tier` directly; it reads the reconciled
+    /// effective tier from the resulting [`crate::types::game_state::PlayerDeckPool`].
+    #[serde(default)]
+    pub estimated_bracket_tier: Option<CommanderBracketTier>,
     /// Normalized owner choices, display-only (CR 203.1 + CR 206.1).
     /// Resolvers, and between games `rebind_retained_printings`, bind these to the
     /// payload's entries before database-free loading.
@@ -172,14 +197,18 @@ pub struct PlayerDeckList {
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<String>,
-    /// Declared bracket tier for this player's deck. Defaults to `Core` for
-    /// backward-compatible deserialization (payloads that predate this field
-    /// omit it, which `#[serde(default)]` handles transparently).
+    /// The bracket this player's deck owner declared. `None` means undeclared,
+    /// and is what payloads that predate this field deserialize to.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The deck owner's answer to the two-card-infinite-combo barometer. Defaults to
+    /// `Undeclared` when omitted — every payload that predates this field is unanswered,
+    /// which is deliberately NOT the same as a declared absence.
+    #[serde(default)]
+    pub combo_declaration: ComboDeclaration,
     /// The owner's explicit printing choices for this list's cards, keyed by
-    /// section and name. Display-only (CR 203.1 + CR 206.1). Absent from the wire
-    /// when empty; decoded by `deserialize_deck_printings`.
+    /// section and name. Display-only (CR 203.1 + CR 206.1). Absent from the wire when
+    /// empty; decoded by `deserialize_deck_printings`.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -206,6 +235,7 @@ impl From<DeckData> for PlayerDeckList {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         } = deck;
         Self {
@@ -220,6 +250,7 @@ impl From<DeckData> for PlayerDeckList {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         }
     }
@@ -239,6 +270,7 @@ impl From<PlayerDeckList> for DeckData {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         } = list;
         Self {
@@ -253,6 +285,7 @@ impl From<PlayerDeckList> for DeckData {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         }
     }
@@ -567,13 +600,27 @@ pub(crate) fn rebind_retained_printings(
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
 ///
-/// The `bracket_tier` is taken from `list.bracket_tier` — `PlayerDeckList`
-/// already carries the declared tier, so there is no separate parameter to
-/// keep in sync. Callers that need a specific tier set it on the
-/// `PlayerDeckList` before calling.
+/// The `bracket_tier` is taken from `list.bracket_tier`, while the estimator's
+/// floor is computed from the complete `PlayerDeckList`. Callers that need a
+/// specific declared tier set it on the list before calling.
 ///
 /// Printing choices are normalized and bound to resolved entries.
-pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
+pub fn resolve_player_deck_list(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    list: &PlayerDeckList,
+) -> PlayerDeckPayload {
+    resolve_seat_deck_list(db, combos, list, "player")
+}
+
+/// `resolve_player_deck_list` with the seat label the estimator's trace carries.
+fn resolve_seat_deck_list(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    list: &PlayerDeckList,
+    seat: &str,
+) -> PlayerDeckPayload {
+    let estimated_bracket_tier = estimate_tier_for_seat(db, combos, list, seat);
     let mut payload = PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
@@ -586,6 +633,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
+        estimated_bracket_tier,
         printings: list.printings.clone(),
         printing_entry_names: Vec::new(),
     };
@@ -593,23 +641,40 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
     payload
 }
 
+fn estimate_tier_for_seat(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    list: &PlayerDeckList,
+    seat: &str,
+) -> Option<CommanderBracketTier> {
+    let estimated = estimate_bracket(list, db, combos).map(|estimate| estimate.tier);
+    tracing::debug!(
+        seat,
+        declared_tier = ?list.bracket_tier,
+        estimated_tier = ?estimated,
+        combo_coverage = ?combos.coverage(),
+        "resolved Commander bracket estimate"
+    );
+    estimated
+}
+
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
 ///
-/// Each seat (player, opponent and every AI deck) resolves through
-/// `resolve_player_deck_list`, preserving each seat's `bracket_tier` and
-/// normalizing its printing choices against that seat's resolved entries.
-/// Callers that populate the tier before calling this
-/// function receive correctly-tiered payloads. Old payloads that omit the field
-/// deserialize with `CommanderBracketTier::Core` (the `default`).
-pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
+/// Each seat (player, opponent and every AI deck) resolves through the same
+/// per-seat path, preserving its `bracket_tier`, computing the estimator's floor
+/// from the complete `PlayerDeckList`, and normalizing its printing choices
+/// against that seat's resolved entries. Old payloads that omit either bracket
+/// field deserialize with `None`.
+pub fn resolve_deck_list(db: &CardDatabase, combos: &ComboTable, list: &DeckList) -> DeckPayload {
     DeckPayload {
-        player: resolve_player_deck_list(db, &list.player),
-        opponent: resolve_player_deck_list(db, &list.opponent),
+        player: resolve_seat_deck_list(db, combos, &list.player, "player"),
+        opponent: resolve_seat_deck_list(db, combos, &list.opponent, "opponent"),
         ai_decks: list
             .ai_decks
             .iter()
-            .map(|deck| resolve_player_deck_list(db, deck))
+            .enumerate()
+            .map(|(index, deck)| resolve_seat_deck_list(db, combos, deck, &format!("ai_{index}")))
             .collect(),
         // ai_difficulties is carried through from the DeckList so the caller's
         // per-seat difficulty annotations survive resolution.
@@ -769,11 +834,15 @@ pub fn default_planar_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
 }
 
 pub fn default_scheme_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
+    let valid_subtypes = db.valid_subtypes();
     let mut schemes: Vec<CardFace> = db
         .face_iter()
         .map(|(_, face)| face)
         .filter(|face| face.card_type.core_types.contains(&CoreType::Scheme))
-        .filter(|face| crate::game::coverage::card_face_gaps(face).is_empty())
+        .filter(|face| {
+            crate::game::coverage::card_face_coverage_with_subtypes(face, valid_subtypes)
+                .is_supported()
+        })
         .cloned()
         .collect();
     schemes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -805,7 +874,8 @@ fn main_deck_only_payload(main_deck: Vec<DeckEntry>) -> PlayerDeckPayload {
         contraption_deck: Vec::new(),
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
-        bracket_tier: CommanderBracketTier::default(),
+        bracket_tier: None,
+        estimated_bracket_tier: None,
         // Synthetic decks have no submitted printing choices or bindings.
         printings: Vec::new(),
         printing_entry_names: Vec::new(),
@@ -941,6 +1011,522 @@ pub fn momir_emblem_ability() -> crate::types::ability::AbilityDefinition {
     // CR 114.4: the ability functions (and is activated) from the command zone.
     ability.activation_zone = Some(Zone::Command);
     ability
+}
+
+/// Horde Magic display name for the game-start Horde emblem chip.
+const HORDE_EMBLEM_SOURCE_NAME: &str = "The Horde";
+
+/// The Horde's game-start command-zone emblem static: a single continuous
+/// ability granting every creature the Horde controls haste (when the
+/// ruleset grants it) and "attacks each combat if able" (when the ruleset
+/// forces it).
+///
+/// Both grants are Layer 6 ability-adding continuous effects (CR 613.1f /
+/// CR 613.3): `AddKeyword(Haste)` (CR 702.10b), gated on the ruleset's
+/// `horde_creatures_haste` (classic Hordes grant it; default Turtle does
+/// not — booklet p. 6 excludes newly entered creatures from that turn's
+/// combat), and, gated on `horde_creatures_forced_attackers`, a grafted
+/// `StaticMode::MustAttack` (CR 508.1d) via `GrantStaticAbility`. The two
+/// axes are independent: a no-haste Horde still attacks every combat if
+/// able, just never the turn its creatures enter. The outer static is
+/// controlled by the Horde, so its `ControllerRef::You` affected-filter
+/// resolves to "creatures the Horde controls" — a live read, so a creature
+/// that changes controller stops receiving both grants. Mirrors
+/// `create_emblem::ninja_pump_static`'s command-zone anthem pattern.
+fn horde_emblem_static(
+    forced_attackers: bool,
+    haste: bool,
+) -> Option<crate::types::ability::StaticDefinition> {
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    let mut modifications = Vec::new();
+    if haste {
+        // CR 702.10b: haste — the Horde's creatures can attack the turn they
+        // enter and ignore summoning sickness for tap abilities.
+        modifications.push(ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        });
+    }
+    if forced_attackers {
+        // CR 508.1d: graft "attacks each combat if able" onto each affected
+        // creature as a static ability of its own (self-scoped), so the
+        // declare-attackers validation forces it to attack. SelfRef-scoped:
+        // `affected: None` is game-wide under the matcher's authority
+        // (`static_ability_match_applies` skips the filter when absent), so a
+        // bare `StaticDefinition::new` graft would force EVERY creature to
+        // attack, including the survivors' board.
+        modifications.push(ContinuousModification::GrantStaticAbility {
+            definition: Box::new(
+                StaticDefinition::new(StaticMode::MustAttack).affected(TargetFilter::SelfRef),
+            ),
+        });
+    }
+
+    if modifications.is_empty() {
+        // Neither axis grants anything: install no static rather than an
+        // empty continuous effect. No shipped ruleset reaches this (every
+        // published Horde forces attackers, with or without haste).
+        return None;
+    }
+    let description = match (haste, forced_attackers) {
+        (true, true) => "Creatures the Horde controls have haste and attack each combat if able.",
+        (true, false) => "Creatures the Horde controls have haste.",
+        (false, true) => "Creatures the Horde controls attack each combat if able.",
+        (false, false) => unreachable!("empty modifications return above"),
+    };
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(modifications)
+            .description(description.to_string()),
+    )
+}
+
+/// The Horde combat rule "only Horde creatures with Defender can block": a Layer 6
+/// `GrantStaticAbility` that gives every NON-Defender creature the Horde controls a
+/// `CantBlock` static (CR 509.1b). The Horde is an attacking force — its creatures
+/// must attack and don't hold the line — so this pairs with the forced-attackers
+/// grant as one aggressive-Horde combat package, gated on the same ruleset axis
+/// (`horde_creatures_forced_attackers`). A Defender creature (which can't attack,
+/// CR 702.3b) is excluded by the `WithoutKeyword(Defender)` affected-filter, so it
+/// remains the Horde's only legal blocker. `ControllerRef::You` resolves against the
+/// emblem's controller (the Horde), so this is a live "creatures the Horde controls"
+/// read, mirroring [`horde_emblem_static`].
+fn horde_no_block_static() -> crate::types::ability::StaticDefinition {
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
+        TypedFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::WithoutKeyword {
+                    value: Keyword::Defender,
+                }]),
+        ))
+        // SelfRef-scoped (see `horde_emblem_static`): a bare `new` graft is
+        // game-wide under the matcher's authority and would stop EVERY
+        // creature from blocking, including the survivors'.
+        .modifications(vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(
+                StaticDefinition::new(StaticMode::CantBlock).affected(TargetFilter::SelfRef),
+            ),
+        }])
+        .description(
+            "Non-Defender creatures the Horde controls can't block (only Defenders block)."
+                .to_string(),
+        )
+}
+
+/// Grant the Horde seat its game-start setup: the command-zone emblem (haste on
+/// its creatures under `haste`, plus — under `forced_attackers` — the
+/// aggressive-combat package of "attacks each combat if able" and "only
+/// Defenders can block") and, under the advanced
+/// `HordePostCombatActivation::OncePerPermanent` rule, infinite mana (so its
+/// post-combat activation costs are payable). Single authority for Horde
+/// game-start setup, mirroring the Momir emblem grant; `forced_attackers` and
+/// `haste` come from the ruleset, and the infinite-mana grant reads the
+/// ruleset directly.
+pub fn grant_horde_emblem(
+    state: &mut GameState,
+    horde_seat: PlayerId,
+    forced_attackers: bool,
+    haste: bool,
+) {
+    // The aggressive-Horde combat package: haste + forced attackers (in
+    // `horde_emblem_static`, each under its own ruleset axis) and, under the
+    // forced-attackers axis, the "only Defenders block" restriction
+    // ([`horde_no_block_static`]).
+    let mut statics = Vec::new();
+    if let Some(combat) = horde_emblem_static(forced_attackers, haste) {
+        statics.push(combat);
+    }
+    if forced_attackers {
+        statics.push(horde_no_block_static());
+    }
+    let emblem_id = crate::game::effects::create_emblem::grant_emblem(
+        state,
+        horde_seat,
+        statics,
+        Vec::new(),
+        Vec::new(),
+    );
+    // CR 114.5: give the emblem chip a display-only name (it has no art of its
+    // own); `grant_emblem` leaves `emblem_source` unset.
+    if let Some(obj) = state.objects.get_mut(&emblem_id) {
+        obj.emblem_source = Some(crate::game::game_object::EmblemSource {
+            name: HORDE_EMBLEM_SOURCE_NAME.to_string(),
+            printed_ref: None,
+            printing: crate::types::display_only::DisplayOnly::default(),
+        });
+    }
+
+    // Hordemagic advanced rule: "Horde has infinite mana (for … activation
+    // costs)." Only the decks that actually activate abilities post-combat need
+    // it, so gate on the ruleset axis. Reuses the standard unbounded-mana
+    // machinery — mark the axes, then `mana_payment::refill_infinite_mana` (run
+    // after every action) keeps the pool topped so activation mana costs are
+    // payable. The mark is PERSISTENT: the step-end drain exempts seats under
+    // `horde::has_horde_infinite_mana` from both the pool-empty and the axis
+    // de-realization, so the mana survives to the post-combat queue. Real
+    // non-mana costs (tap/sacrifice) are still paid normally.
+    if state.format_config.horde_ruleset.as_ref().is_some_and(|r| {
+        r.post_combat_activation
+            == crate::types::format::HordePostCombatActivation::OncePerPermanent
+    }) {
+        state.mark_unbounded_loop(
+            horde_seat,
+            &crate::game::mana_payment::INFINITE_MANA_AXES,
+            &crate::game::mana_payment::INFINITE_MANA_AXES,
+        );
+        crate::game::mana_payment::refill_infinite_mana(state);
+    }
+}
+
+/// Create a non-token Horde library card face up in the Horde seat's library.
+///
+/// Mirrors `create_scheme_deck_card`, but the Horde's engine-supplied deck IS
+/// its library (not the command-zone scheme deck): the card sits face up in the
+/// owner's `Player::library` with no scheme flag, exactly like any ordinary
+/// library card, so `horde::maybe_reveal_next` can reveal and free-cast it. This
+/// is the single Horde authority for library-card creation; it reuses
+/// `create_object_from_card_face` (the shared library-object building block)
+/// rather than duplicating the create + `apply_card_face_to_object` steps.
+pub fn create_horde_library_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    rarity_override: Option<Rarity>,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let obj_id = create_object_from_card_face(state, card_face, owner);
+    // Record the card's rarity so a rarity-based wave
+    // (`WaveTermination::UntilRarityAtLeast`, the D&D Horde) can tell when a
+    // reveal-and-resolve wave ends. Prefer the deck's PINNED rarity: the runtime
+    // `card-data.json` export does not carry rarity (`CardFace::rarities` is
+    // always empty), so without a pin the wave would never find an uncommon-or-
+    // better card and would reveal the whole library. Fall back to the card
+    // face's lowest printing rarity if a deck ever relies on DB-supplied rarity.
+    if let Some(obj) = state.objects.get_mut(&obj_id) {
+        obj.horde_library_rarity =
+            rarity_override.or_else(|| card_face.rarities.iter().min().copied());
+    }
+    obj_id
+}
+
+/// Create a predefined token in the Horde seat's library from a token body.
+///
+/// CR 111: a token can never be cast, so Cyberman/Dalek tokens wait in the
+/// Horde's library and enter the battlefield when revealed
+/// (`horde::reveal_library_token`). The object is stamped `is_token` and
+/// `is_horde_deck_token` (the CR 704.5d cease-to-exist exemption plus the
+/// CR 111.8 movement-freeze carve-out — boss-deck loops move these tokens)
+/// and carries the body's full
+/// characteristics — P/T, card types, colors, keywords — on both the live and
+/// `base_*` fields so `reveal_library_token`'s `GameObject → TokenCharacteristics`
+/// projection round-trips the body faithfully. `TokenCharacteristics` has no
+/// channel for non-keyword abilities, so keyword-only / vanilla bodies (Cyberman
+/// 2/2 vanilla; Dalek 3/3 with Menace) round-trip fully.
+/// The predefined-token identity to stamp on an id-pinned Horde library token,
+/// so its catalog `rules_text` abilities can be recovered on reveal. Prefer the
+/// preset's own `token_image_ref` (correct art + preset id, matching how ordinary
+/// token creation resolves identity); if the catalog entry has none, synthesize a
+/// minimal ref keyed on the preset id — the only field the reveal-time injection
+/// needs to find the preset again.
+pub(crate) fn horde_token_image_ref(
+    preset: &crate::game::token_presets::TokenPreset,
+) -> TokenImageRef {
+    preset
+        .token_image_ref
+        .clone()
+        .unwrap_or_else(|| TokenImageRef {
+            scryfall_id: preset.id.clone(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: preset.id.clone(),
+        })
+}
+
+/// A token whose printed rules carry a non-keyword (triggered/activated) ability
+/// is stamped with its preset identity via `token_image_ref` (`None` for bodies
+/// without one); on reveal the apply path re-materializes the preset's catalog
+/// abilities from that identity (see `horde::reveal_library_token`).
+pub fn create_horde_library_token(
+    state: &mut GameState,
+    body: &crate::types::proposed_event::TokenCharacteristics,
+    token_image_ref: Option<TokenImageRef>,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let obj_id = create_object(
+        state,
+        CardId(0),
+        owner,
+        body.display_name.clone(),
+        Zone::Library,
+    );
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    // CR 111.1: mark as a token; CR 704.5d exemption while library-resident.
+    obj.is_token = true;
+    obj.is_horde_deck_token = true;
+    // Token-layout art lives behind `token_image_ref`, which the client only
+    // reads when `display_source` is `Token` — stamp it so these objects never
+    // fall back to name lookup (their display names resolve nowhere).
+    obj.display_source = crate::game::game_object::DisplaySource::Token;
+    // CR 111.4: the token's predefined identity, so `reveal_library_token` can
+    // recover its catalog `rules_text` abilities on the apply path.
+    obj.token_image_ref = token_image_ref.clone();
+    // CR 111.10: link the placeholder to its exact preset. The reveal drives a
+    // `CreateToken` with this object as `source_id`, and without the link the
+    // create path resolves identity by body alone — ambiguous for same-name
+    // families ("Ooze" has six bodies; same-body reprints share Oracle text, so
+    // the body match installs from a sibling printing and the reveal's pinned
+    // re-inject double-installs the trigger). With the sole-link fast path the
+    // create path resolves the pinned preset (or nothing, if the body
+    // round-tripped lossy) and the revealed token carries exactly one install.
+    obj.source_related_token_ids = token_image_ref
+        .map(|image_ref| vec![image_ref.preset_id])
+        .unwrap_or_default();
+    obj.power = body.power;
+    obj.toughness = body.toughness;
+    obj.base_power = body.power;
+    obj.base_toughness = body.toughness;
+    obj.card_types = crate::types::card_type::CardType {
+        supertypes: body.supertypes.clone(),
+        core_types: body.core_types.clone(),
+        subtypes: body.subtypes.clone(),
+    };
+    obj.base_card_types = obj.card_types.clone();
+    obj.base_name = body.display_name.clone();
+    obj.color = body.colors.clone();
+    obj.base_color = body.colors.clone();
+    obj.keywords = body.keywords.clone();
+    obj.base_keywords = body.keywords.clone();
+    obj_id
+}
+
+/// Build the Horde seat's engine-supplied library for a challenge deck and
+/// shuffle it deterministically from the game seed.
+///
+/// Seat-scoped like the Archenemy scheme deck (`load_shared_scheme_deck`), NOT
+/// all-seat like Momir: only the Horde's library is replaced; survivors keep the
+/// decks they submitted. Non-token names are resolved from the card DB (any name
+/// that fails to resolve panics — the decklist is a fixed engine resource and a
+/// silent miss would ship a short library); token names are resolved from the
+/// predefined-token catalog. CR 103.3: the assembled library is then shuffled
+/// with `state.rng` so reveals are random but reproducible from the game seed.
+pub fn load_horde_library(
+    state: &mut GameState,
+    db: &CardDatabase,
+    horde_seat: PlayerId,
+    deck: crate::types::format::ChallengeDeck,
+) {
+    use crate::types::format::ChallengeDeck;
+
+    // Only rarity-wave decks pin per-card rarity (the D&D Horde); every other
+    // deck terminates its wave on a different axis (fixed count / nontoken count)
+    // and never consults rarity, so it resolves to `None`.
+    fn no_pinned_rarity(_name: &str) -> Option<Rarity> {
+        None
+    }
+
+    let (nontokens, tokens, card_rarity): (_, _, fn(&str) -> Option<Rarity>) = match deck {
+        ChallengeDeck::CybermanHorde => (
+            crate::game::decks::cyberman_horde::CYBERMAN_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::cyberman_horde::CYBERMAN_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        ChallengeDeck::DndHorde => (
+            crate::game::decks::dnd_horde::DND_OOZE_NONTOKEN_CARDS,
+            crate::game::decks::dnd_horde::DND_OOZE_TOKENS,
+            crate::game::decks::dnd_horde::card_rarity,
+        ),
+        ChallengeDeck::ZombiesHorde => (
+            crate::game::decks::zombies_horde::ZOMBIES_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::zombies_horde::ZOMBIES_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        ChallengeDeck::SliversHorde => (
+            crate::game::decks::slivers_horde::SLIVERS_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::slivers_horde::SLIVERS_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        ChallengeDeck::HumansGodzillaHorde => (
+            crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        // LOTR "Two Towers" — Sauron. Rarity is pinned per card for the uncommon+
+        // wave (the runtime DB carries no rarity); revealed Orc Army tokens amass
+        // (see `horde::maybe_reveal_next`).
+        ChallengeDeck::SauronHorde => (
+            crate::game::decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
+            crate::game::decks::sauron_horde::card_rarity,
+        ),
+        // LOTR "Two Towers" — Saruman. Rarity pinned per card for the uncommon+
+        // wave; revealed Orc Army tokens amass (see `horde::maybe_reveal_next`).
+        ChallengeDeck::SarumanHorde => (
+            crate::game::decks::saruman_horde::SARUMAN_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::saruman_horde::SARUMAN_HORDE_TOKENS,
+            crate::game::decks::saruman_horde::card_rarity,
+        ),
+        // The Two Towers picker identity: seat 0's library IS Sauron's (Saruman is
+        // the co-horde loaded into seat 1 via `horde_decks()`).
+        ChallengeDeck::LotrTwoTowersHorde => (
+            crate::game::decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
+            crate::game::decks::sauron_horde::card_rarity,
+        ),
+        // Turtle Team-Up: the 27-card event deck IS the Boss library (all
+        // tokens — the enemy deck has no card-DB cards). The 11-card Boss
+        // deck loads separately as the face-down Boss pile (see
+        // `boss::load_boss_deck`), not into the library.
+        ChallengeDeck::TurtleTeamUpHorde => (
+            crate::game::decks::turtle_teamup_horde::TURTLE_TEAMUP_NONTOKEN_CARDS,
+            crate::game::decks::turtle_teamup_horde::TURTLE_TEAMUP_EVENT_DECK_TOKENS,
+            no_pinned_rarity,
+        ),
+    };
+
+    // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a
+    // real game it is an AI seat that was auto-assigned a deck, which
+    // `load_deck_into_state` already loaded into this library. Clear it (and drop
+    // the now-orphaned objects) so the Horde's library ends up EXACTLY the
+    // challenge deck — matching this function's contract.
+    let stale_library: Vec<crate::types::identifiers::ObjectId> = state
+        .players
+        .iter()
+        .find(|p| p.id == horde_seat)
+        .map(|p| p.library.iter().copied().collect())
+        .unwrap_or_default();
+    for id in &stale_library {
+        state.objects.remove(id);
+    }
+    if let Some(player) = state.players.iter_mut().find(|p| p.id == horde_seat) {
+        // allow-raw-zone: pregame setup swaps the stale library for the fixed challenge deck; begins from outside the game, not a zone move (CR 400.11).
+        player.library.clear();
+    }
+
+    // CR 400.2 + CR 103.3: expand BOTH groups into one combined entry list
+    // and shuffle it BEFORE object allocation (a Placement draw, like
+    // `shuffled_entry_faces` for hidden-order decks). Sequential `ObjectId`s
+    // plus the viewer-visible pile order would otherwise let an observer sort
+    // by ID and recover the pre-shuffle assembly order.
+    enum HordeLibraryEntry {
+        Card {
+            // Boxed: `CardFace` dwarfs the token variant (`clippy::large_enum_variant`).
+            face: Box<CardFace>,
+            pinned: Option<Rarity>,
+        },
+        Token {
+            body: &'static crate::types::proposed_event::TokenCharacteristics,
+            image_ref: Option<TokenImageRef>,
+        },
+    }
+    let mut assembled: Vec<HordeLibraryEntry> = Vec::new();
+    for (count, name) in nontokens {
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| {
+                panic!("Horde deck {deck:?} non-token card '{name}' must resolve in the card DB")
+            })
+            .clone();
+        let pinned = card_rarity(name);
+        for _ in 0..*count {
+            assembled.push(HordeLibraryEntry::Card {
+                face: Box::new(face.clone()),
+                pinned,
+            });
+        }
+    }
+
+    for (count, selector) in tokens {
+        // Resolve a token selector by display name first (the Cyberman deck's
+        // uniquely-named "Cyberman"/"Dalek"), then fall back to a preset id. The
+        // id path is required for generic subtype tokens whose display name maps
+        // to multiple distinct bodies (the D&D Horde's "Ooze" — six same-name
+        // bodies in the catalog make name lookup ambiguous, so it pins the id).
+        // Prefer a preset id (the path generic subtype tokens must use — the D&D
+        // Horde's "Ooze" maps to six same-name bodies, so a name lookup is
+        // ambiguous), then a unique display name (Cyberman/Dalek). An id-pinned
+        // token also carries its preset IDENTITY onto the library object, so the
+        // reveal can materialize the preset's catalog abilities (the
+        // self-replicating Ooze's dies trigger). Name-resolved tokens are uniquely
+        // named vanilla/keyword bodies with no catalog abilities and pass `None`.
+        let (body, token_image_ref): (
+            &'static crate::types::proposed_event::TokenCharacteristics,
+            Option<TokenImageRef>,
+        ) = if let Some(preset) = crate::game::token_presets::known_token_preset_by_id(selector) {
+            (&preset.body, Some(horde_token_image_ref(preset)))
+        } else if let Some(body) = crate::game::token_presets::known_token_body_by_name(selector) {
+            (body, None)
+        } else {
+            panic!(
+                "Horde deck {deck:?} token selector '{selector}' must resolve to a unique body \
+                 (by display name or preset id)"
+            )
+        };
+        for _ in 0..*count {
+            assembled.push(HordeLibraryEntry::Token {
+                body,
+                image_ref: token_image_ref.clone(),
+            });
+        }
+    }
+
+    assembled.shuffle(
+        state
+            .rng
+            .draw(crate::types::game_state::RandomDraw::Placement),
+    );
+    for entry in assembled {
+        match entry {
+            HordeLibraryEntry::Card { face, pinned } => {
+                create_horde_library_card(state, &face, pinned, horde_seat);
+            }
+            HordeLibraryEntry::Token { body, image_ref } => {
+                create_horde_library_token(state, body, image_ref, horde_seat);
+            }
+        }
+    }
+
+    // CR 103.3: shuffle the assembled Horde library. Uses `state.rng` (seeded
+    // from the game seed) so the reveal order is random yet reproducible.
+    let GameState { players, rng, .. } = state;
+    if let Some(player) = players.iter_mut().find(|p| p.id == horde_seat) {
+        let placement = rng.draw(crate::types::game_state::RandomDraw::Placement);
+        crate::util::im_ext::shuffle_vector(&mut player.library, placement);
+    }
+}
+
+/// CR 903.5a: the commander is one of the 100 — a decklist that names it in both
+/// the command zone and the main deck describes ONE physical card, not two. Nets
+/// each command-zone copy out of the main deck, bounded by occurrence
+/// (`saturating_sub`), so a main deck holding more copies than the command zone
+/// claims keeps its remainder. The single netting authority: the game loader and
+/// the companion starting-deck helper both call it, so a deck the loader builds
+/// and a deck a companion condition measures can never disagree on its size.
+pub fn net_command_zone(main: &[DeckEntry], command: &[&[DeckEntry]]) -> Vec<DeckEntry> {
+    let mut netted = main.to_vec();
+    for entry in command.iter().copied().flatten() {
+        let Some(target) = netted
+            .iter_mut()
+            .find(|m| m.card.name.eq_ignore_ascii_case(&entry.card.name))
+        else {
+            continue;
+        };
+        target.count = target.count.saturating_sub(entry.count);
+    }
+    netted
 }
 
 /// Create a commander GameObject from a CardFace, placing it in the command zone.
@@ -1208,6 +1794,22 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 /// CR 100.4 + CR 203.1 + CR 206.1: load the next game of a match. Each seat's pool
 /// keeps the previous game's printing record (the same allocation), and the payload's
 /// rebound rows stamp the new objects.
+/// Adds `copies` of `card` to a deck partition, merging into an existing entry
+/// of the same name.
+pub(crate) fn add_deck_copies(partition: &mut Vec<DeckEntry>, card: &DeckEntry, copies: u32) {
+    if let Some(entry) = partition
+        .iter_mut()
+        .find(|entry| entry.card.name == card.card.name)
+    {
+        entry.count += copies;
+    } else {
+        partition.push(DeckEntry {
+            card: card.card.clone(),
+            count: copies,
+        });
+    }
+}
+
 pub(crate) fn load_next_game_decks(
     state: &mut GameState,
     payload: &DeckPayload,
@@ -1243,13 +1845,6 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         state.format_config.sideboard_policy,
         crate::types::format::SideboardPolicy::Forbidden
     );
-    let sideboard_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if drop_sideboard {
-            Vec::new()
-        } else {
-            submitted.to_vec()
-        }
-    };
     // CR 903.5a: the commander is one of the 100 — a decklist that names it in
     // both the command zone and the main deck describes ONE physical card, not
     // two. The validator nets exactly this double-listing out of its deck-size
@@ -1259,25 +1854,12 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // signature spell is the second command-zone slot with the same "one
     // physical card" identity, and it is netted on the same axis rather than as
     // a special case. This is the rule-enforcement boundary, mirroring
-    // `sideboard_for` above.
+    // `drop_sideboard` above.
     //
     // Netting is bounded by occurrence: `min(command_zone_copies,
     // main_deck_copies)` per card, so a main deck holding more copies than the
     // command zone claims keeps its remainder (and the validator still reports
     // the CR 903.5b singleton violation).
-    let net_command_zone = |main: &[DeckEntry], command: &[&[DeckEntry]]| -> Vec<DeckEntry> {
-        let mut netted = main.to_vec();
-        for entry in command.iter().copied().flatten() {
-            let Some(target) = netted
-                .iter_mut()
-                .find(|m| m.card.name.eq_ignore_ascii_case(&entry.card.name))
-            else {
-                continue;
-            };
-            target.count = target.count.saturating_sub(entry.count);
-        }
-        netted
-    };
     // The netted slots must mirror the command-zone placement loops below
     // EXACTLY: commanders only when the format's command zone is filled from
     // the decklist's `commander` slot, signature spells only under
@@ -1305,13 +1887,12 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     // passing; that is the narrowing, made visible.
     //
     // The predicate is `command_zone_holds_decklist_commander`, NOT
-    // `uses_commander`. `uses_commander` is `command_zone &&
-    // commander_damage_threshold.is_some()` — it answers "does CR 903.10a
-    // commander damage apply", not "does the command zone hold a decklist
-    // card". Tiny Leaders and Oathbreaker seat a real commander card in the
-    // command zone with no damage threshold, so `uses_commander` is `false`
-    // for both while `deck_validation.rs` nets them with
-    // `CommandZoneNetting::NetAgainstMainDeck`. Narrowing on `uses_commander`
+    // `uses_commander`. `uses_commander` marks a CR 903 Commander variant, not
+    // "does the command zone hold a decklist card". Tiny Leaders and
+    // Oathbreaker seat a real commander card in the command zone without
+    // being CR 903 formats, so `uses_commander` is `false` for both while
+    // `deck_validation.rs` nets them with `CommandZoneNetting::NetAgainstMainDeck`.
+    // Narrowing on `uses_commander`
     // instead WOULD leave a legal Oathbreaker or Tiny Leaders deck's commander
     // in the library AND unplaced in the command zone, while the validator had
     // already netted it out of the deck-size check — the two would disagree
@@ -1324,11 +1905,8 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     //
     // Called on the RESOLVED config, not the bare `GameFormat`: a Custom
     // format is answered from its own `CommandZoneMode`. Deriving Custom from
-    // `uses_commander` would reopen exactly that trap for Custom, since
-    // `for_custom_rules` sets `uses_commander` from the declared
-    // commander-damage threshold alone — a custom format shaped like
-    // Oathbreaker (enabled command zone, an eligibility rule, no threshold)
-    // would strand its commander in the library.
+    // `uses_commander` would reopen exactly that trap for an
+    // Oathbreaker-shaped custom format.
     let place_commanders = state.format_config.command_zone_holds_decklist_commander();
     let oathbreaker = state.format_config.format == crate::types::format::GameFormat::Oathbreaker;
     let netted_main_deck = |deck: &PlayerDeckPayload| -> Vec<DeckEntry> {
@@ -1346,15 +1924,13 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         entries.retain(|entry| entry.count > 0);
         entries
     };
-    // CR 702.139a: The Commander-family external companion slot represents one
-    // card, even when a transport bypasses name-list validation and supplies a
-    // resolved entry with an aggregated count. Keep one normalized copy in the
-    // game pool; construction validation remains responsible for rejecting an
-    // oversized submitted list.
-    let dedicated_companion_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if !state.format_config.uses_commander {
-            return Vec::new();
-        }
+    // CR 702.139a: a designated companion slot represents one card, even when a
+    // transport bypasses name-list validation and supplies a resolved entry with
+    // an aggregated count. Keep one normalized copy in the game pool;
+    // construction validation remains responsible for rejecting an oversized
+    // submitted list.
+    let companion_slot = state.format_config.companion_slot();
+    let designated_companion = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
         submitted
             .first()
             .cloned()
@@ -1363,6 +1939,44 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
                 vec![entry]
             })
             .unwrap_or_default()
+    };
+    let allocate_companion_and_sideboard = |submitted_side: &[DeckEntry],
+                                            submitted_companion: &[DeckEntry]|
+     -> (Vec<DeckEntry>, Vec<DeckEntry>) {
+        let side = if drop_sideboard {
+            Vec::new()
+        } else {
+            submitted_side.to_vec()
+        };
+        match companion_slot {
+            CompanionSlot::SideboardOnly => (side, Vec::new()),
+            CompanionSlot::CommanderFamily => (side, designated_companion(submitted_companion)),
+            // CR 100.4b + CR 702.139a: in Limited every pool card outside the main
+            // deck is a sideboard card, so the designation is one of them. A
+            // payload that lists the sideboard nets the designated copy out of it;
+            // if no copy is there (all of them were put in the main deck) nothing
+            // is designated. The server payload carries no sideboard at all and
+            // sends the designated card only in its own slot.
+            CompanionSlot::LimitedPool if side.is_empty() => {
+                (side, designated_companion(submitted_companion))
+            }
+            CompanionSlot::LimitedPool => {
+                let mut side = side;
+                let mut allocated = Vec::new();
+                for companion in designated_companion(submitted_companion) {
+                    if let Some(copy) = side
+                        .iter_mut()
+                        .find(|entry| entry.card.name == companion.card.name)
+                        .filter(|entry| entry.count > 0)
+                    {
+                        copy.count -= 1;
+                        allocated.push(companion);
+                    }
+                }
+                side.retain(|entry| entry.count > 0);
+                (side, allocated)
+            }
+        }
     };
     let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
         if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
@@ -1374,10 +1988,12 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
     // they start identical and diverge via Arc::make_mut on first mutation.
+    let (p0_side_entries, p0_comp_entries) =
+        allocate_companion_and_sideboard(&payload.player.sideboard, &payload.player.companion);
     let p0_main = std::sync::Arc::new(main_deck_for(&payload.player));
-    let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
+    let p0_side = std::sync::Arc::new(p0_side_entries);
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
-    let p0_companion = std::sync::Arc::new(dedicated_companion_for(&payload.player.companion));
+    let p0_companion = std::sync::Arc::new(p0_comp_entries);
     let p0_sig = std::sync::Arc::new(signature_spell_for(&payload.player.signature_spell));
     let p0_planar = std::sync::Arc::new(payload.player.planar_deck.clone());
     let p0_scheme = std::sync::Arc::new(payload.player.scheme_deck.clone());
@@ -1399,12 +2015,15 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             registered_scheme_deck: std::sync::Arc::clone(&p0_scheme),
             current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
+            estimated_bracket_tier: payload.player.estimated_bracket_tier,
             printings: records.record_for(PlayerId(0), &payload.player),
         });
+    let (p1_side_entries, p1_comp_entries) =
+        allocate_companion_and_sideboard(&payload.opponent.sideboard, &payload.opponent.companion);
     let p1_main = std::sync::Arc::new(main_deck_for(&payload.opponent));
-    let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
+    let p1_side = std::sync::Arc::new(p1_side_entries);
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
-    let p1_companion = std::sync::Arc::new(dedicated_companion_for(&payload.opponent.companion));
+    let p1_companion = std::sync::Arc::new(p1_comp_entries);
     let p1_sig = std::sync::Arc::new(signature_spell_for(&payload.opponent.signature_spell));
     let p1_scheme = std::sync::Arc::new(payload.opponent.scheme_deck.clone());
     state
@@ -1425,14 +2044,17 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             registered_scheme_deck: std::sync::Arc::clone(&p1_scheme),
             current_scheme_deck: p1_scheme,
             bracket_tier: payload.opponent.bracket_tier,
+            estimated_bracket_tier: payload.opponent.estimated_bracket_tier,
             printings: records.record_for(PlayerId(1), &payload.opponent),
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
+        let (ai_side_entries, ai_comp_entries) =
+            allocate_companion_and_sideboard(&ai_deck.sideboard, &ai_deck.companion);
         let main = std::sync::Arc::new(main_deck_for(ai_deck));
-        let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
+        let side = std::sync::Arc::new(ai_side_entries);
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
-        let companion = std::sync::Arc::new(dedicated_companion_for(&ai_deck.companion));
+        let companion = std::sync::Arc::new(ai_comp_entries);
         let sig = std::sync::Arc::new(signature_spell_for(&ai_deck.signature_spell));
         let scheme = std::sync::Arc::new(ai_deck.scheme_deck.clone());
         state
@@ -1453,6 +2075,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
                 registered_scheme_deck: std::sync::Arc::clone(&scheme),
                 current_scheme_deck: scheme,
                 bracket_tier: ai_deck.bracket_tier,
+                estimated_bracket_tier: ai_deck.estimated_bracket_tier,
                 printings: records.record_for(player_id, ai_deck),
             });
     }
@@ -1513,11 +2136,20 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         None
     };
     if let Some(placement) = placement {
+        // Horde Magic: a Horde seat's submitted deck is wholly replaced by its
+        // engine-supplied challenge deck (`load_horde_library` below), so its
+        // payload `commander` slot is an inert placeholder — placing it would seat
+        // a phantom commander the Horde never owns. Skip the same seats whose
+        // libraries are replaced.
+        let horde_seats = crate::game::horde::horde_seats(state);
         for (seat, deck) in std::iter::once(&payload.player)
             .chain(std::iter::once(&payload.opponent))
             .chain(&payload.ai_decks)
             .enumerate()
         {
+            if horde_seats.contains(&PlayerId(seat as u8)) {
+                continue;
+            }
             let owner = PlayerId(seat as u8);
             for copy in entry_copies(deck, DeckSection::Commander, None) {
                 match placement {
@@ -1629,6 +2261,37 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         }
     }
 
+    // Horde Magic: grant the Horde seat its game-start command-zone emblem
+    // (haste + forced attackers on the Horde's creatures). Mirrors the Momir
+    // emblem grant above; scoped to the single Horde seat, unlike Momir's
+    // all-seat loop, because only the Horde controls Horde creatures.
+    if state.format_config.format == crate::types::format::GameFormat::Horde {
+        let ruleset = state.format_config.horde_ruleset.as_ref();
+        let forced_attackers = ruleset.is_some_and(|r| r.horde_creatures_forced_attackers);
+        // Haste is per-deck: the classic Hordes grant it, default Turtle does
+        // not (booklet p. 6 excludes newly entered creatures from combat).
+        let haste = ruleset.is_some_and(|r| r.horde_creatures_haste);
+        // Every Horde seat gets the emblem — a two-Horde deck (LOTR Two Towers) has
+        // two commanders, each controlling its own creatures.
+        for horde_seat in crate::game::horde::horde_seats(state) {
+            grant_horde_emblem(state, horde_seat, forced_attackers, haste);
+        }
+    }
+
+    // Turtle Team-Up: load the shuffled Boss pile and deploy stage 1. Beside
+    // the emblem grant because it is the same kind of game-start setup; gated
+    // on the ruleset's `boss_stages` axis so every classic deck skips it. Deck
+    // loading is event-free by design (no consumer exists yet at setup), so
+    // stage-1 deploy events (Boss zone moves, Leatherhead's potential
+    // enter-gain) go to a throwaway vec — the STATE (pile, deployed Bosses,
+    // grafted abilities, life) is what setup must produce.
+    if crate::game::horde::has_boss_stages(state) {
+        if let Some(&horde_seat) = crate::game::horde::horde_seats(state).first() {
+            let mut setup_events = Vec::new();
+            crate::game::boss::setup_boss_game(state, horde_seat, &mut setup_events);
+        }
+    }
+
     // Collect all creature subtypes for Changeling CDA expansion.
     // CR 205.2b + CR 205.3m + CR 308.1: creature subtypes are shared by Creature
     // and Kindred (legacy Tribal) faces. Subtype categories are disjoint, so a
@@ -1682,6 +2345,43 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             &mut state.scheme_deck,
             state.rng.draw(RandomDraw::Placement),
         );
+    }
+
+    // CR 103.2a: latch each seat's submitted starting-deck size — the netted
+    // library plus the placed command-zone decklist cards (commanders when the
+    // format seats them, Oathbreaker signature spells), single-counted by
+    // construction through `net_command_zone` (a copy netted out of the
+    // library is counted exactly once, in the command zone). Sideboards,
+    // companions, planar / scheme / attraction / contraption decks, and emblems
+    // are NOT starting-deck cards (CR 103.2a / CR 702.139b) and are excluded.
+    // `Player::starting_deck_size` never changes mid-game: Whtz's "had"
+    // reads this snapshot, not the live library.
+    // Boundary: engine-replaced libraries (Horde challenge decks) keep the
+    // submitted-placeholder count — no starting-deck reader exists for those
+    // seats, so the latch is inert there rather than silently redefined.
+    let starting_size = |deck: &PlayerDeckPayload| -> u32 {
+        let main: u32 = netted_main_deck(deck).iter().map(|entry| entry.count).sum();
+        let mut placed_zone = 0u32;
+        if place_commanders {
+            placed_zone += deck.commander.iter().map(|entry| entry.count).sum::<u32>();
+        }
+        if oathbreaker {
+            placed_zone += deck
+                .signature_spell
+                .iter()
+                .map(|entry| entry.count)
+                .sum::<u32>();
+        }
+        main.saturating_add(placed_zone)
+    };
+    for (seat, deck) in std::iter::once(&payload.player)
+        .chain(std::iter::once(&payload.opponent))
+        .chain(&payload.ai_decks)
+        .enumerate()
+    {
+        if let Some(player) = state.players.get_mut(seat) {
+            player.starting_deck_size = starting_size(deck);
+        }
     }
 
     // Shuffle each player's library and supplementary decks.
@@ -2063,7 +2763,35 @@ pub fn load_and_hydrate_decks(
     };
     load_deck_into_state(state, payload);
     match db {
-        Some(db) => hydrate_loaded_game_from_card_db(state, db),
+        Some(db) => {
+            // Horde Magic: inject the Horde seat's engine-supplied library
+            // (~300 cards) BEFORE rehydration so the freshly-created non-token
+            // cards get their DFC `back_face`/layout hydrated alongside every
+            // other object. Seat-scoped (like the Archenemy scheme deck),
+            // unlike Momir's all-seat overwrite: survivors keep their submitted
+            // decks. Library-resident tokens carry no `printed_ref`, so
+            // rehydration skips them and their materialized bodies are
+            // preserved. `load_horde_library` shuffles the Horde library itself
+            // (CR 103.3) — `load_deck_into_state`'s per-player shuffle already
+            // ran, before these cards existed.
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                // Load each Horde seat's own library: seat i gets `horde_decks()[i]`
+                // (the primary `challenge_deck` for the archenemy seat, then each
+                // co-horde for a two-Horde deck like LOTR Two Towers). `horde_seats`
+                // and `horde_decks` are both in seat order, so they zip 1:1.
+                let horde_seats = crate::game::horde::horde_seats(state);
+                let horde_decks: Vec<crate::types::format::ChallengeDeck> = state
+                    .format_config
+                    .horde_ruleset
+                    .as_ref()
+                    .map(|r| r.horde_decks())
+                    .unwrap_or_default();
+                for (horde_seat, deck) in horde_seats.into_iter().zip(horde_decks) {
+                    load_horde_library(state, db, horde_seat, deck);
+                }
+            }
+            hydrate_loaded_game_from_card_db(state, db);
+        }
         None => {
             // Latch the warning so a long-running desktop session that
             // starts many games doesn't spam the log on each match.
@@ -2121,6 +2849,17 @@ mod tests {
 
     use super::super::printed_cards::derive_colors_from_mana_cost;
 
+    #[test]
+    fn player_deck_payload_without_estimated_bracket_tier_defaults_to_none() {
+        let mut json = serde_json::to_value(PlayerDeckPayload::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("estimated_bracket_tier");
+
+        let payload: PlayerDeckPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.estimated_bracket_tier, None);
+    }
+
     fn make_creature_face() -> CardFace {
         CardFace {
             name: "Grizzly Bears".to_string(),
@@ -2168,6 +2907,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -2221,6 +2961,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -2407,6 +3148,130 @@ mod tests {
         assert_eq!(state.players[0].library.len(), 6); // 4 + 2
         assert_eq!(state.players[1].library.len(), 3);
         assert_eq!(state.objects.len(), 9); // 6 + 3
+    }
+
+    fn whtz_face() -> CardFace {
+        let mut face = make_creature_face();
+        face.name = "Whtz, the Bibliophile".to_string();
+        face.oracle_text = Some(
+            "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.".to_string(),
+        );
+        face
+    }
+
+    fn filler_face(name: &str) -> CardFace {
+        let mut face = make_instant_face();
+        face.name = name.to_string();
+        face.oracle_text = None;
+        face
+    }
+
+    /// CR 103.2a: the latch counts the submitted starting deck once —
+    /// netted library plus the placed commander, single-counted by
+    /// construction. P0 lists Whtz in the main (198 others + Whtz) and in the
+    /// command zone: raw slots sum to 200, the latch nets to 199. P1's main
+    /// holds 199 Whtz-distinct cards plus Whtz: raw slots sum to 201, the
+    /// latch nets to 200. Sideboards and companions never count.
+    #[test]
+    fn starting_deck_size_latches_netted_commander_deck_counts() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 2, 42);
+        let whtz = || DeckEntry {
+            card: whtz_face(),
+            count: 1,
+        };
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![whtz()];
+                    for i in 0..198 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler P0 {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![whtz()],
+                sideboard: vec![DeckEntry {
+                    card: filler_face("Sideboard P0"),
+                    count: 15,
+                }],
+                companion: vec![DeckEntry {
+                    card: filler_face("Companion P0"),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![whtz()];
+                    for i in 0..199 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler P1 {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![whtz()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // Placed counts prove the single-count construction.
+        assert_eq!(state.players[0].library.len(), 198);
+        assert_eq!(state.players[1].library.len(), 199);
+        assert_eq!(state.players[0].starting_deck_size, 199);
+        assert_eq!(state.players[1].starting_deck_size, 200);
+    }
+
+    /// The Oathbreaker signature spell counts exactly once —
+    /// a copy listed in both the main and the signature-spell slot nets to
+    /// its single command-zone placement.
+    #[test]
+    fn starting_deck_size_counts_oathbreaker_signature_spell_once() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::oathbreaker(), 2, 42);
+        let sig = || DeckEntry {
+            card: filler_face("Signature Spell"),
+            count: 1,
+        };
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![sig()];
+                    for i in 0..59 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![DeckEntry {
+                    card: filler_face("Oathbreaker"),
+                    count: 1,
+                }],
+                signature_spell: vec![sig()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: filler_face("Opp"),
+                    count: 3,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // 60 listed main - 1 netted signature double + 1 commander + 1 signature.
+        assert_eq!(state.players[0].library.len(), 59);
+        assert_eq!(state.players[0].starting_deck_size, 61);
     }
 
     /// A minimal card database containing only the five snow basic lands, so a
@@ -2848,7 +3713,7 @@ mod tests {
     /// This PR narrows command-zone placement, which was unconditional before
     /// it, to formats whose zone holds a decklist commander. Oathbreaker is the
     /// case that makes the narrowing predicate load-bearing rather than
-    /// cosmetic: it declares no commander-damage threshold, so
+    /// cosmetic: it is not a CR 903 format, so
     /// `FormatConfig::uses_commander` is `false` for it, and gating on that
     /// field instead would leave a legal Oathbreaker in the library with no
     /// command-zone object while `deck_validation` had already netted it out of
@@ -2896,7 +3761,7 @@ mod tests {
     }
 
     /// Tiny Leaders has the same shape as Oathbreaker: a decklist card in the
-    /// command zone with no commander-damage threshold, so `uses_commander` is
+    /// command zone outside CR 903, so `uses_commander` is
     /// `false` while `deck_validation` nets with `NetAgainstMainDeck`.
     #[test]
     fn load_deck_places_the_tiny_leaders_commander_in_the_command_zone() {
@@ -3298,7 +4163,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &ComboTable::default(), &list);
         assert_eq!(payload.player.commander.len(), 1);
         assert_eq!(
             payload.player.commander[0].card.name,

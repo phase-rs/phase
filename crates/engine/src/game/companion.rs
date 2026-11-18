@@ -6,7 +6,7 @@ use crate::types::card_printing::DeckSection;
 use crate::types::card_type::CoreType;
 use crate::types::display_only::DisplayOnly;
 use crate::types::events::GameEvent;
-use crate::types::format::{GameFormat, SideboardPolicy};
+use crate::types::format::{CompanionSlot, GameFormat, SideboardPolicy};
 use crate::types::game_state::{
     CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice, GameState,
     ManaAbilityResume, PlayerDeckPool, WaitingFor,
@@ -36,24 +36,17 @@ impl PriorityCompanionAnnouncement {
     }
 }
 
-/// Permanent card types for companion condition evaluation.
-const PERMANENT_TYPES: [CoreType; 5] = [
-    CoreType::Artifact,
-    CoreType::Creature,
-    CoreType::Enchantment,
-    CoreType::Planeswalker,
-    CoreType::Land,
-];
-
 fn is_land(face: &CardFace) -> bool {
     face.card_type.core_types.contains(&CoreType::Land)
 }
 
+/// CR 110.4a: a permanent card is an artifact, battle, creature, enchantment,
+/// land, or planeswalker card.
 fn is_permanent(face: &CardFace) -> bool {
     face.card_type
         .core_types
         .iter()
-        .any(|ct| PERMANENT_TYPES.contains(ct))
+        .any(|ct| ct.is_permanent_type())
 }
 
 fn is_creature(face: &CardFace) -> bool {
@@ -67,6 +60,16 @@ pub fn validate_companion_condition(
     condition: &CompanionCondition,
     main_deck: &[DeckEntry],
 ) -> bool {
+    validate_companion_condition_with_min_deck_size(condition, main_deck, 60)
+}
+
+/// CR 702.139: Validate that a main deck meets a companion's deckbuilding condition
+/// for a format with the given minimum deck size (e.g. 40 for Limited, 60 for Constructed).
+pub fn validate_companion_condition_with_min_deck_size(
+    condition: &CompanionCondition,
+    main_deck: &[DeckEntry],
+    min_deck_size: usize,
+) -> bool {
     match condition {
         CompanionCondition::EvenManaValues => main_deck
             .iter()
@@ -78,7 +81,7 @@ pub fn validate_companion_condition(
 
         CompanionCondition::NoRepeatedManaSymbols => main_deck
             .iter()
-            .all(|entry| !has_repeated_mana_symbols(&entry.card)),
+            .all(|entry| !has_repeated_mana_symbols(entry)),
 
         CompanionCondition::CreatureTypeRestriction(allowed_types) => {
             main_deck.iter().all(|entry| {
@@ -141,12 +144,16 @@ pub fn validate_companion_condition(
 
         CompanionCondition::MinDeckSizeOver(over) => {
             let total: u32 = main_deck.iter().map(|e| e.count).sum();
-            // Yorion requires 80+ cards (60 minimum + 20 over)
-            total >= 60 + over
+            // Yorion requires min_deck_size + 20 cards (e.g. 60 in 40-card Limited, 80 in 60-card Constructed)
+            total >= (min_deck_size as u32) + over
         }
 
+        // CR 702.139a: "each permanent card in your starting deck has an activated
+        // ability" covers land cards too. A land qualifies through a printed
+        // activated ability or the intrinsic mana ability of a basic land type
+        // (CR 305.6); a land with neither (Glacial Chasm) fails the condition.
         CompanionCondition::PermanentsHaveActivatedAbilities => main_deck.iter().all(|entry| {
-            if !is_permanent(&entry.card) || is_land(&entry.card) {
+            if !is_permanent(&entry.card) {
                 return true;
             }
             entry
@@ -154,38 +161,51 @@ pub fn validate_companion_condition(
                 .abilities
                 .iter()
                 .any(|a| a.kind == crate::types::ability::AbilityKind::Activated)
+                || (is_land(&entry.card)
+                    && !super::deck_validation::basic_land_type_colors(&entry.card).is_empty())
         }),
     }
 }
 
-/// CR 702.139 (Jegantha): Check if a card has more than one of the same mana symbol.
-fn has_repeated_mana_symbols(face: &CardFace) -> bool {
-    let shards = match &face.mana_cost {
-        crate::types::mana::ManaCost::Cost { shards, .. } => shards,
-        _ => return false,
-    };
-    let colored: Vec<&ManaCostShard> = shards
+/// One mana symbol of a mana cost as Jegantha compares them. The generic
+/// amount is a single symbol per cost ({2} is the symbol {2}, not two {1}s).
+#[derive(PartialEq, Eq, Hash)]
+enum CostSymbol {
+    Generic(u32),
+    Shard(ManaCostShard),
+}
+
+/// CR 702.139a (Jegantha): whether a card's mana cost repeats a mana symbol.
+/// Every symbol counts, not only the five colors: a hybrid symbol is one symbol,
+/// so {R/W}{R/W}{R/W} (Boros Reckoner) repeats it, as do {X}{X}, {C}{C}, and
+/// repeated Phyrexian or snow symbols (Wizards' Ikoria release notes).
+/// CR 709.4b: a split card's symbols are those of every half, so Fire // Ice
+/// ({1}{R} and {1}{U}) contains the symbol {1} twice.
+fn has_repeated_mana_symbols(entry: &DeckEntry) -> bool {
+    let mut seen: HashSet<CostSymbol> = HashSet::new();
+    entry
+        .off_stack_mana_costs()
         .iter()
-        .filter(|s| {
-            matches!(
-                s,
-                ManaCostShard::White
-                    | ManaCostShard::Blue
-                    | ManaCostShard::Black
-                    | ManaCostShard::Red
-                    | ManaCostShard::Green
-            )
+        .filter_map(|cost| match cost {
+            ManaCost::Cost { shards, generic } => Some((shards, *generic)),
+            _ => None,
         })
-        .collect();
-    let unique: HashSet<&&ManaCostShard> = colored.iter().collect();
-    colored.len() != unique.len()
+        .flat_map(|(shards, generic)| {
+            (generic > 0)
+                .then_some(CostSymbol::Generic(generic))
+                .into_iter()
+                .chain(shards.iter().copied().map(CostSymbol::Shard))
+        })
+        .any(|symbol| !seen.insert(symbol))
 }
 
 // ── Pre-game Reveal Flow ────────────────────────────────────────────────
 
-/// Builds the starting deck a companion condition evaluates. Commander-family
-/// games include the commander but never the prospective companion (CR
-/// 702.139b); other formats evaluate their main deck only.
+/// Builds the starting deck a companion condition evaluates from a game-loaded
+/// pool, whose `main_deck` is already netted of the command zone (the game
+/// loader's `net_command_zone`). Commander-family games include the commander
+/// but never the prospective companion (CR 702.139b); other formats evaluate
+/// their main deck only.
 pub fn companion_starting_deck(
     main_deck: &[DeckEntry],
     commanders: &[DeckEntry],
@@ -196,6 +216,30 @@ pub fn companion_starting_deck(
         starting.extend_from_slice(commanders);
     }
     starting
+}
+
+/// `companion_starting_deck` for a decklist-shaped `main_deck`, as submitted by
+/// deck construction, a draft pod, or game admission, where the commander may
+/// be named in the main list as well as in the command-zone list.
+///
+/// CR 903.5a: the commander is one of the deck's cards, so a main list that
+/// already names it and a separate command-zone list describe ONE physical
+/// card. The command-zone copy is netted out of `main_deck` through the
+/// loader's own `net_command_zone` before it is appended, so the deck measured
+/// here has exactly the size and contents of the deck the game starts with
+/// (never one card long, which would let a 79-card Commander deck satisfy
+/// Yorion's twenty-card margin over an 80-card threshold).
+pub fn companion_starting_deck_from_decklist(
+    main_deck: &[DeckEntry],
+    commanders: &[DeckEntry],
+    uses_commander: bool,
+) -> Vec<DeckEntry> {
+    if !uses_commander {
+        return main_deck.to_vec();
+    }
+    let mut netted = deck_loading::net_command_zone(main_deck, &[commanders]);
+    netted.retain(|entry| entry.count > 0);
+    companion_starting_deck(&netted, commanders, uses_commander)
 }
 
 fn commander_allows_companion(
@@ -236,6 +280,24 @@ pub fn is_eligible_companion(
     commanders: &[DeckEntry],
     uses_commander: bool,
 ) -> bool {
+    is_eligible_companion_with_min_deck_size(
+        companion,
+        starting_deck,
+        commanders,
+        uses_commander,
+        60,
+    )
+}
+
+/// Tests one candidate against a complete starting deck for a format with the
+/// given minimum deck size.
+pub fn is_eligible_companion_with_min_deck_size(
+    companion: &DeckEntry,
+    starting_deck: &[DeckEntry],
+    commanders: &[DeckEntry],
+    uses_commander: bool,
+    min_deck_size: usize,
+) -> bool {
     // allow-raw-authority: DeckEntry carries a printed CardFace snapshot; deck validation has no GameState or live object to query.
     let Some(condition) = companion.card.keywords.iter().find_map(|keyword| {
         if let Keyword::Companion(condition) = keyword {
@@ -247,51 +309,97 @@ pub fn is_eligible_companion(
         return false;
     };
 
-    validate_companion_condition(condition, starting_deck)
+    validate_companion_condition_with_min_deck_size(condition, starting_deck, min_deck_size)
         && commander_allows_companion(companion, starting_deck, commanders, uses_commander)
 }
 
-/// Both facts are passed as already-resolved values rather than a bare
-/// `GameFormat`: `GameFormat::uses_commander()` panics for `Custom`, and
-/// `GameFormat::sideboard_policy()`'s disclosed `Custom` fallback
-/// (`Forbidden`) would silently discard a Custom format's real declared
-/// policy sitting in `custom_rules.structural.sideboard_policy` — the
-/// resolved `FormatConfig.uses_commander`/`.sideboard_policy` fields are the
-/// caller's only safe source of truth for either.
+/// CR 702.139a: the companions `pool` may reveal, by the format's resolved
+/// companion slot and sideboard policy (`FormatConfig::companion_slot` /
+/// `.sideboard_policy`; never the bare `GameFormat` methods, whose `Custom`
+/// answers cannot see a custom format's declared rules).
+///
+/// - Commander family: only the dedicated slot. Commander games use no
+///   sideboard (CR 903.5e).
+/// - Otherwise: "one card you own from outside the game" is any sideboard card
+///   (CR 400.11a), and a Limited designation is one more such card. Every
+///   eligible candidate is offered, so an ineligible designation (a Lurrus whose
+///   deck took on a three-drop between games) never hides an eligible sideboard
+///   companion. A name offered from the designated slot is not offered again
+///   from the sideboard.
 fn companion_offers(
     pool: &PlayerDeckPool,
+    companion_slot: CompanionSlot,
     sideboard_policy: SideboardPolicy,
     uses_commander: bool,
+    min_deck_size: usize,
 ) -> Vec<CompanionRevealChoice> {
     let starting =
         companion_starting_deck(&pool.current_main, &pool.current_commander, uses_commander);
-    let candidates: Vec<(CompanionChoiceSource, &DeckEntry)> = if uses_commander {
-        pool.current_companion
-            .first()
-            .map(|entry| (CompanionChoiceSource::Dedicated, entry))
-            .into_iter()
-            .collect()
-    } else if !matches!(sideboard_policy, SideboardPolicy::Forbidden) {
-        pool.current_sideboard
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (CompanionChoiceSource::Sideboard { index }, entry))
-            .collect()
-    } else {
-        Vec::new()
+    let eligible = |entry: &DeckEntry| {
+        is_eligible_companion_with_min_deck_size(
+            entry,
+            &starting,
+            &pool.current_commander,
+            uses_commander,
+            min_deck_size,
+        )
     };
 
-    candidates
-        .into_iter()
-        .filter_map(|(source, entry)| {
-            is_eligible_companion(entry, &starting, &pool.current_commander, uses_commander).then(
-                || CompanionRevealChoice {
-                    name: entry.card.name.clone(),
-                    source,
-                },
-            )
+    let mut offers: Vec<CompanionRevealChoice> = pool
+        .current_companion
+        .first()
+        .filter(|_| companion_slot != CompanionSlot::SideboardOnly)
+        .filter(|entry| eligible(entry))
+        .map(|entry| CompanionRevealChoice {
+            name: entry.card.name.clone(),
+            source: CompanionChoiceSource::Dedicated,
         })
-        .collect()
+        .into_iter()
+        .collect();
+
+    let sideboard_offers = match companion_slot {
+        CompanionSlot::CommanderFamily => false,
+        CompanionSlot::SideboardOnly | CompanionSlot::LimitedPool => {
+            !matches!(sideboard_policy, SideboardPolicy::Forbidden)
+        }
+    };
+    if sideboard_offers {
+        for (index, entry) in pool.current_sideboard.iter().enumerate() {
+            if offers.iter().any(|offer| {
+                offer.source == CompanionChoiceSource::Dedicated && offer.name == entry.card.name
+            }) || !eligible(entry)
+            {
+                continue;
+            }
+            offers.push(CompanionRevealChoice {
+                name: entry.card.name.clone(),
+                source: CompanionChoiceSource::Sideboard { index },
+            });
+        }
+    }
+    offers
+}
+
+/// CR 100.4b + CR 702.139a: closes the pregame companion reveal window. A
+/// Limited designation that was not revealed from its slot (declined, never
+/// offered, or passed over for a sideboard companion) is an ordinary pool card
+/// outside the deck, i.e. a sideboard card (CR 400.11a), for the rest of the
+/// game, where outside-the-game effects can find it. A revealed designation
+/// already left the slot when it was revealed.
+pub(crate) fn close_companion_reveals(state: &mut GameState) {
+    if state.format_config.companion_slot() != CompanionSlot::LimitedPool {
+        return;
+    }
+    for pool in &mut state.deck_pools {
+        if pool.current_companion.is_empty() {
+            continue;
+        }
+        let released = std::mem::take(std::sync::Arc::make_mut(&mut pool.current_companion));
+        let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
+        for entry in released {
+            deck_loading::add_deck_copies(sideboard, &entry, entry.count);
+        }
+    }
 }
 
 /// CR 702.139a: Check if a player has eligible companions from their permitted
@@ -299,10 +407,13 @@ fn companion_offers(
 /// Returns CompanionReveal WaitingFor if eligible companions exist, otherwise None.
 pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<WaitingFor> {
     let pool = state.deck_pools.iter().find(|p| p.player == player)?;
+    let min_deck_size = state.format_config.deck_size.min_cards() as usize;
     let mut eligible = companion_offers(
         pool,
+        state.format_config.companion_slot(),
         state.format_config.sideboard_policy,
         state.format_config.uses_commander,
+        min_deck_size,
     );
     if state.format_config.format == GameFormat::TinyLeaders {
         eligible
@@ -370,6 +481,7 @@ pub fn handle_declare_companion(
             .iter_mut()
             .find(|pool| pool.player == player)
             .ok_or_else(|| "Player deck pool does not exist".to_string())?;
+        let min_deck_size = state.format_config.deck_size.min_cards() as usize;
         let starting = companion_starting_deck(
             &pool.current_main,
             &pool.current_commander,
@@ -383,11 +495,12 @@ pub fn handle_declare_companion(
                     .filter(|entry| entry.card.name == choice.name)
                     .cloned()
                     .ok_or_else(|| "Companion sideboard offer is stale".to_string())?;
-                if !is_eligible_companion(
+                if !is_eligible_companion_with_min_deck_size(
                     &entry,
                     &starting,
                     &pool.current_commander,
                     state.format_config.uses_commander,
+                    min_deck_size,
                 ) {
                     return Err("Companion is no longer eligible".to_string());
                 }
@@ -413,12 +526,13 @@ pub fn handle_declare_companion(
                     .filter(|entry| entry.card.name == choice.name)
                     .cloned()
                     .ok_or_else(|| "Dedicated companion offer is stale".to_string())?;
-                if !state.format_config.uses_commander
-                    || !is_eligible_companion(
+                if state.format_config.companion_slot() == CompanionSlot::SideboardOnly
+                    || !is_eligible_companion_with_min_deck_size(
                         &entry,
                         &starting,
                         &pool.current_commander,
                         state.format_config.uses_commander,
+                        min_deck_size,
                     )
                 {
                     return Err("Companion is no longer eligible".to_string());
@@ -466,8 +580,12 @@ pub(super) fn companion_reveals_or_agenda(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    check_all_companion_reveals(state)
-        .unwrap_or_else(|| super::conspiracy::agenda_choices_or_mulligan(state, events))
+    check_all_companion_reveals(state).unwrap_or_else(|| {
+        // CR 100.4b + CR 702.139a: no reveal is offered, so the window closes
+        // now and any unrevealed Limited designation returns to the sideboard.
+        close_companion_reveals(state);
+        super::conspiracy::agenda_choices_or_mulligan(state, events)
+    })
 }
 
 /// CR 702.139a: Move past `current_player` to the next living player's
@@ -499,8 +617,91 @@ pub(super) fn advance_companion_reveal(
         }
     }
 
-    // All players done — proceed to the conspiracy agenda step, then mulligans.
+    // All players done — close the reveal window (CR 100.4b + CR 702.139a),
+    // then proceed to the conspiracy agenda step, then mulligans.
+    close_companion_reveals(state);
     super::conspiracy::agenda_choices_or_mulligan(state, events)
+}
+
+// ── Revealed companion as a card outside the game ──────────────────────
+
+/// CR 702.139a + CR 400.11: the player's revealed companion while it is still
+/// outside the game. Revealing a companion does not bring it into the game
+/// (it is not in any zone), so it stays "a card you own from outside the game"
+/// until it is put into hand (CR 702.139c) — by the special action
+/// (`finish_paid_companion_to_hand`) or by an effect that finds it from outside
+/// the game ([`bring_revealed_companion_into_game`]); both set `used`. The
+/// single authority for what a player's companion contributes to "outside the
+/// game".
+///
+/// CR 903.11 + CR 702.139d: a Commander-family game admits a card from outside
+/// the game only through rules, special actions, and effects that specifically
+/// bring cards in, and the companion special action is the sole way this card
+/// enters. An effect that merely finds "a card you own from outside the game"
+/// (Living Wish) does not function there (Commander rule 10), so in that slot
+/// the companion contributes nothing to such effects. The special action never
+/// reads this function (`validate_companion_to_hand_action`), so it is
+/// unaffected.
+pub(crate) fn outside_game_companion(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<&CompanionInfo> {
+    if state.format_config.companion_slot() == CompanionSlot::CommanderFamily {
+        return None;
+    }
+    state
+        .players
+        .iter()
+        .find(|entry| entry.id == player)?
+        .companion
+        .as_ref()
+        .filter(|companion| !companion.used)
+}
+
+/// CR 400.11b + CR 702.139c: an effect that finds cards from outside the game
+/// (Living Wish) brings the revealed companion into `destination`. It remains
+/// in the game from then on, so the companion is marked used: it is no longer
+/// outside the game, and the special action can no longer put it into hand.
+/// CR 203.1 + CR 206.1: the created object carries the printing captured at the
+/// reveal (display-only).
+pub(crate) fn bring_revealed_companion_into_game(
+    state: &mut GameState,
+    player: PlayerId,
+    destination: Zone,
+) -> Result<crate::types::identifiers::ObjectId, EngineError> {
+    let (card_face, printing) = outside_game_companion(state, player)
+        .map(|companion| {
+            (
+                companion.card.card.clone(),
+                companion.printing.get().clone(),
+            )
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Companion is not outside the game".to_string())
+        })?;
+    // CR 407.3: refused here as at every other outside-the-game source.
+    let object_id = super::effects::search_outside_game::put_outside_game_face_into(
+        state,
+        player,
+        &card_face,
+        destination,
+    )
+    .ok_or_else(|| {
+        EngineError::InvalidAction(format!(
+            "{} can't be brought into the game from outside the game (CR 407.3)",
+            card_face.name
+        ))
+    })?;
+    if let Some(companion) = state
+        .players
+        .iter_mut()
+        .find(|entry| entry.id == player)
+        .and_then(|entry| entry.companion.as_mut())
+    {
+        companion.used = true;
+    }
+    deck_loading::stamp_created_card_shared(state, object_id, printing);
+    Ok(object_id)
 }
 
 // ── Special Action: Pay {3} to Move Companion to Hand ───────────────────
@@ -682,7 +883,7 @@ pub(crate) fn resume_companion_to_hand_payment(
 mod tests {
     use super::*;
     use crate::types::card::CardFace;
-    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::keywords::CompanionCondition;
     use crate::types::mana::ManaCost;
 
@@ -947,6 +1148,50 @@ mod tests {
     }
 
     #[test]
+    fn min_deck_size_over_limited_valid() {
+        // In 40-card Limited, Yorion (+20) requires 60 cards
+        let deck = vec![DeckEntry {
+            card: CardFace {
+                name: "Plains".to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Basic],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 60,
+        }];
+        assert!(validate_companion_condition_with_min_deck_size(
+            &CompanionCondition::MinDeckSizeOver(20),
+            &deck,
+            40,
+        ));
+    }
+
+    #[test]
+    fn min_deck_size_over_limited_invalid() {
+        // 59 cards is not enough for Yorion in 40-card Limited (needs 60)
+        let deck = vec![DeckEntry {
+            card: CardFace {
+                name: "Plains".to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Basic],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 59,
+        }];
+        assert!(!validate_companion_condition_with_min_deck_size(
+            &CompanionCondition::MinDeckSizeOver(20),
+            &deck,
+            40,
+        ));
+    }
+
+    #[test]
     fn no_repeated_mana_symbols_valid() {
         use crate::types::mana::ManaCostShard;
         let deck = vec![DeckEntry {
@@ -1002,6 +1247,87 @@ mod tests {
         ));
     }
 
+    fn costed(name: &str, shards: Vec<crate::types::mana::ManaCostShard>) -> DeckEntry {
+        DeckEntry {
+            card: CardFace {
+                name: name.to_string(),
+                mana_cost: ManaCost::Cost { shards, generic: 0 },
+                card_type: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            },
+            count: 1,
+        }
+    }
+
+    /// CR 702.139a (Jegantha): every mana symbol counts, so a repeated hybrid,
+    /// {X} or {C} symbol fails the condition, while two distinct hybrid symbols
+    /// and a hybrid beside its own colour (different symbols) pass.
+    #[test]
+    fn no_repeated_mana_symbols_counts_hybrid_x_and_colorless_symbols() {
+        use crate::types::mana::ManaCostShard::{Colorless, Red, RedWhite, X};
+        let passes = |shards| {
+            validate_companion_condition(
+                &CompanionCondition::NoRepeatedManaSymbols,
+                &[costed("Probe", shards)],
+            )
+        };
+        assert!(
+            !passes(vec![RedWhite, RedWhite, RedWhite]),
+            "Boros Reckoner"
+        );
+        assert!(!passes(vec![X, X, Red]), "{{X}}{{X}}{{R}}");
+        assert!(!passes(vec![Colorless, Colorless]));
+        assert!(
+            passes(vec![RedWhite, Red]),
+            "a hybrid is not its own colour"
+        );
+        assert!(passes(vec![
+            RedWhite,
+            crate::types::mana::ManaCostShard::GreenWhite
+        ]));
+        assert!(passes(vec![X, Red]));
+    }
+
+    /// CR 702.139a + CR 305.6 (Zirda): a land card is a permanent card, so it
+    /// needs an activated ability: a basic land type's intrinsic mana ability
+    /// or a printed one. A utility land with neither fails.
+    #[test]
+    fn permanents_have_activated_abilities_covers_land_cards() {
+        let land_with = |name: &str, subtypes: Vec<&str>| DeckEntry {
+            card: CardFace {
+                name: name.to_string(),
+                card_type: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Land],
+                    subtypes: subtypes.into_iter().map(str::to_string).collect(),
+                },
+                ..Default::default()
+            },
+            count: 1,
+        };
+        let verdict = |land| {
+            validate_companion_condition(
+                &CompanionCondition::PermanentsHaveActivatedAbilities,
+                &[land],
+            )
+        };
+        assert!(verdict(land_with("Plains", vec!["Plains"])), "CR 305.6");
+        assert!(!verdict(land_with("Glacial Chasm", vec![])));
+        let mut tapland = land_with("Evolving Wilds", vec![]);
+        tapland
+            .card
+            .abilities
+            .push(crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                crate::types::ability::Effect::unimplemented("probe", "probe"),
+            ));
+        assert!(verdict(tapland), "a printed activated ability qualifies");
+    }
+
     #[test]
     fn commander_starting_deck_includes_commander_but_not_companion() {
         let main = vec![creature("Main Card", 2, vec![])];
@@ -1023,6 +1349,52 @@ mod tests {
                 .map(|entry| entry.card.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["Main Card"]
+        );
+    }
+
+    /// CR 709.4b + CR 702.139a: Jegantha reads every half's symbols. Each half's
+    /// generic amount is ONE symbol: {1} and {1} repeat, {1} and {2} do not.
+    #[test]
+    fn jegantha_counts_each_split_half_generic_amount_as_one_symbol() {
+        use crate::types::mana::ManaCostShard;
+        let half = |shard: ManaCostShard, generic: u32| ManaCost::Cost {
+            shards: vec![shard],
+            generic,
+        };
+        let split = |halves: Vec<ManaCost>| {
+            let mut entry = creature("Split", 4, vec![]);
+            entry.card.metadata.off_stack_mana_costs = halves;
+            entry
+        };
+        let repeats = |halves| has_repeated_mana_symbols(&split(halves));
+
+        assert!(
+            repeats(vec![
+                half(ManaCostShard::Red, 1),
+                half(ManaCostShard::Blue, 1)
+            ]),
+            "{{1}}{{R}} and {{1}}{{U}} contain {{1}} twice"
+        );
+        assert!(
+            !repeats(vec![
+                half(ManaCostShard::Red, 1),
+                half(ManaCostShard::Blue, 2)
+            ]),
+            "{{2}} is one symbol, not two {{1}}s"
+        );
+        assert!(
+            repeats(vec![
+                half(ManaCostShard::Red, 0),
+                half(ManaCostShard::Red, 3)
+            ]),
+            "a shard repeated across halves repeats"
+        );
+        assert!(
+            !repeats(vec![
+                half(ManaCostShard::Red, 1),
+                half(ManaCostShard::White, 0)
+            ]),
+            "halves sharing no symbol do not repeat"
         );
     }
 }

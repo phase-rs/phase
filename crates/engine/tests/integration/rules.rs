@@ -146,12 +146,33 @@ pub fn damage_ability(
 ///
 /// Assumes the runner is at a phase where passing priority twice will reach DeclareAttackers
 /// (i.e., the scenario started at `Phase::PreCombatMain`). All attackers target P1.
+///
+/// Drives through BOTH combat damage steps when the window after the first step
+/// is empty (CR 510.4 + CR 510.3: each step ends with a priority window, and the
+/// harness passes an empty one). A window with something on the stack (a
+/// first-strike damage trigger) is left open for the test. A test that must stop
+/// at an empty window uses [`run_combat_first_damage_step`].
+///
+/// `run_combat*` and [`run_combat_first_damage_step`] are 2-seat only: they open
+/// with `pass_both_players()` (two passes) and use it again after the attackers
+/// and blockers steps, which in a 3+ seat game leaves a later seat holding
+/// priority. A multi-seat test drives combat by hand (see
+/// `love_on_the_battlefield_combat_counters.rs`).
 pub fn run_combat(
     runner: &mut GameRunner,
     attacker_ids: Vec<ObjectId>,
     blocker_assignments: Vec<(ObjectId, ObjectId)>,
 ) {
     run_combat_with_blocker_divisions(runner, attacker_ids, blocker_assignments, &[]);
+}
+
+/// [`run_combat`] with the `GameEvent`s emitted by the combat actions.
+pub fn run_combat_and_collect_events(
+    runner: &mut GameRunner,
+    attacker_ids: Vec<ObjectId>,
+    blocker_assignments: Vec<(ObjectId, ObjectId)>,
+) -> Vec<GameEvent> {
+    run_combat_with_blocker_divisions_and_events(runner, attacker_ids, blocker_assignments, &[])
 }
 
 /// Banding-aware variant of [`run_combat`] (CR 702.22k): drives the same
@@ -171,19 +192,88 @@ pub fn run_combat_with_blocker_divisions(
     blocker_assignments: Vec<(ObjectId, ObjectId)>,
     blocker_divisions: &[(ObjectId, Vec<(ObjectId, u32)>)],
 ) {
-    runner.pass_both_players();
+    drop(run_combat_with_blocker_divisions_and_events(
+        runner,
+        attacker_ids,
+        blocker_assignments,
+        blocker_divisions,
+    ));
+}
+
+/// Event-returning implementation shared by the legacy and event-inspecting
+/// combat helpers so every caller follows the same combat progression.
+fn run_combat_with_blocker_divisions_and_events(
+    runner: &mut GameRunner,
+    attacker_ids: Vec<ObjectId>,
+    blocker_assignments: Vec<(ObjectId, ObjectId)>,
+    blocker_divisions: &[(ObjectId, Vec<(ObjectId, u32)>)],
+) -> Vec<GameEvent> {
+    let mut events =
+        drive_to_first_damage_window(runner, attacker_ids, blocker_assignments, blocker_divisions);
+
+    // CR 510.4 + CR 510.3: the first combat damage step ended with an empty
+    // priority window; pass it (a non-empty stack leaves the window open), then
+    // answer the regular step's prompts.
+    events.extend(runner.pass_combat_damage_window());
+    answer_combat_damage_prompts(runner, blocker_divisions, &mut events);
+    events
+}
+
+/// [`run_combat_with_blocker_divisions`] up to the first priority window after
+/// the first combat damage step (or the only one, without first strike): the
+/// harness stops there, so a test can act inside the CR 510.3 window between the
+/// two steps of a first-strike combat. 2-seat only (see [`run_combat`]).
+///
+/// The prompt loop answers an `AssignCombatDamage` prompt itself with the
+/// lethal-minimum split, so this returns only at a `Priority` window or a later
+/// non-prompt state; a test that must submit that prompt by hand cannot use it.
+pub fn run_combat_first_damage_step(
+    runner: &mut GameRunner,
+    attacker_ids: Vec<ObjectId>,
+    blocker_assignments: Vec<(ObjectId, ObjectId)>,
+    blocker_divisions: &[(ObjectId, Vec<(ObjectId, u32)>)],
+) {
+    drop(drive_to_first_damage_window(
+        runner,
+        attacker_ids,
+        blocker_assignments,
+        blocker_divisions,
+    ));
+}
+
+/// Shared progression of the combat helpers: declare attackers and blockers, then
+/// answer damage prompts until the first priority window after the first (or only)
+/// combat damage step. Returns the `GameEvent`s emitted on the way.
+fn drive_to_first_damage_window(
+    runner: &mut GameRunner,
+    attacker_ids: Vec<ObjectId>,
+    blocker_assignments: Vec<(ObjectId, ObjectId)>,
+    blocker_divisions: &[(ObjectId, Vec<(ObjectId, u32)>)],
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("PassPriority should succeed")
+                .events,
+        );
+    }
 
     let attacks: Vec<_> = attacker_ids
         .iter()
         .map(|&id| (id, AttackTarget::Player(P1)))
         .collect();
 
-    runner
-        .act(GameAction::DeclareAttackers {
-            attacks,
-            bands: vec![],
-        })
-        .expect("DeclareAttackers should succeed");
+    events.extend(
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks,
+                bands: vec![],
+            })
+            .expect("DeclareAttackers should succeed")
+            .events,
+    );
 
     // CR 603.3b: same-controller attack triggers (e.g. Stonehoof Chieftain with
     // many attackers) may surface an ordering prompt before priority.
@@ -193,11 +283,14 @@ pub fn run_combat_with_blocker_divisions(
         } else {
             0
         };
-        runner
-            .act(GameAction::OrderTriggers {
-                order: (0..n).collect(),
-            })
-            .expect("OrderTriggers should succeed");
+        events.extend(
+            runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..n).collect(),
+                })
+                .expect("OrderTriggers should succeed")
+                .events,
+        );
     }
 
     // CR 508.2 + CR 603.3b: attack triggers (Stonehoof Chieftain #5335) must
@@ -209,7 +302,14 @@ pub fn run_combat_with_blocker_divisions(
 
     // CR 508.2: Active player gets priority after attackers — pass through it.
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-        runner.pass_both_players();
+        for _ in 0..2 {
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority should succeed")
+                    .events,
+            );
+        }
     }
 
     // CR 509.1: Interactive blocker declaration only when the defender has legal
@@ -219,24 +319,43 @@ pub fn run_combat_with_blocker_divisions(
         runner.state().waiting_for,
         WaitingFor::DeclareBlockers { .. }
     ) {
-        runner
-            .act(GameAction::DeclareBlockers {
-                assignments: blocker_assignments,
-            })
-            .expect("DeclareBlockers should succeed");
+        events.extend(
+            runner
+                .act(GameAction::DeclareBlockers {
+                    assignments: blocker_assignments,
+                })
+                .expect("DeclareBlockers should succeed")
+                .events,
+        );
     }
 
     // CR 509.2 + CR 117.1c: Active player receives priority during the declare
     // blockers step — always, even when no blockers were declared. Pass through.
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-        runner.pass_both_players();
+        for _ in 0..2 {
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority should succeed")
+                    .events,
+            );
+        }
     }
 
-    // CR 510.1c / CR 510.1d + CR 702.22j/k: Handle interactive damage assignment.
-    // The engine raises `AssignCombatDamage` for an attacker dividing its damage
-    // among multiple blockers, and `AssignBlockerDamage` for a blocker dividing
-    // its damage among multiple banded attackers. Both can appear (and re-appear
-    // across the first-strike/regular sub-steps), so loop until neither remains.
+    answer_combat_damage_prompts(runner, blocker_divisions, &mut events);
+    events
+}
+
+/// CR 510.1c / CR 510.1d + CR 702.22j/k: Handle interactive damage assignment.
+/// The engine raises `AssignCombatDamage` for an attacker dividing its damage
+/// among multiple blockers, and `AssignBlockerDamage` for a blocker dividing
+/// its damage among multiple banded attackers. Both can appear (and re-appear
+/// across the first-strike/regular sub-steps), so loop until neither remains.
+fn answer_combat_damage_prompts(
+    runner: &mut GameRunner,
+    blocker_divisions: &[(ObjectId, Vec<(ObjectId, u32)>)],
+    events: &mut Vec<GameEvent>,
+) {
     loop {
         match &runner.state().waiting_for {
             WaitingFor::AssignCombatDamage {
@@ -260,14 +379,17 @@ pub fn run_combat_with_blocker_divisions(
                     }
                 }
                 let trample_damage = if trample.is_some() { remaining } else { 0 };
-                runner
-                    .act(GameAction::AssignCombatDamage {
-                        mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
-                        assignments,
-                        trample_damage,
-                        controller_damage: 0,
-                    })
-                    .expect("AssignCombatDamage should succeed");
+                events.extend(
+                    runner
+                        .act(GameAction::AssignCombatDamage {
+                            mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
+                            assignments,
+                            trample_damage,
+                            controller_damage: 0,
+                        })
+                        .expect("AssignCombatDamage should succeed")
+                        .events,
+                );
             }
             WaitingFor::AssignBlockerDamage {
                 blocker_id,
@@ -283,14 +405,21 @@ pub fn run_combat_with_blocker_divisions(
                     .find(|(bid, _)| bid == blocker_id)
                     .map(|(_, div)| div.clone())
                     .unwrap_or_else(|| even_split(*total_damage, attackers));
-                runner
-                    .act(GameAction::AssignBlockerDamage { assignments })
-                    .expect("AssignBlockerDamage should succeed");
+                events.extend(
+                    runner
+                        .act(GameAction::AssignBlockerDamage { assignments })
+                        .expect("AssignBlockerDamage should succeed")
+                        .events,
+                );
             }
             _ => break,
         }
     }
 }
+
+pub use crate::support::{
+    advance_until_stack_empty_and_collect_events, assert_damage_dealt, assert_no_damage_to,
+};
 
 /// Evenly divide `total` damage among `targets` (first target absorbs the
 /// remainder) so the assignment sums to `total` (CR 510.1e). Used as the

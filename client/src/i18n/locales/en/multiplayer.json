@@ -253,6 +253,7 @@
     "bo3": "BO3",
     "bo3Note": "BO3 is available only for 2-player matches.",
     "commanderDamage": "Commander Damage",
+    "poisonCounters": "Poison Counters",
     "playerSeats": "Player Seats",
     "seat": "Seat {{number}}",
     "youHost": "You (Host)",

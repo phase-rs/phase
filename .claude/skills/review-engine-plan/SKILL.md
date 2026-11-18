@@ -64,12 +64,14 @@ This applies in every mode. Findings are defects in the change under review: wha
 
 1. **Class vs card**
    - Identify how many cards or patterns the plan covers.
+   - Re-run the recorded command from engine-planner [Step 0.5](../engine-planner/SKILL.md#step-05-enumerate-the-class-and-read-every-ruling) with its output redirected to a scratch file, never over the saved `class.json`, and compare `jq -cS . <scratch file> | shasum -a 256` with the recorded hash, which covers the card list and every ruling, not only the count. Reject a plan without that step's record, or whose hash does not reproduce at the recorded MTGJSON version; when the local version differs, report the difference instead. Check the reason given for each `add`, `drop` and unselected `keyword_missing` card. A design that a ruling in the record contradicts is a `behavior` finding. A hash mismatch where the recorded MTGJSON version or `jq --version` differs from yours is reported with both versions and investigated before any rejection.
    - Reject one-card plans unless the card is only the validating consumer of a reusable building block.
 
 2. **Building-block reuse**
    - Confirm the plan consulted relevant existing modules from the CLAUDE.md building-block table.
    - Reject duplicated logic already covered by `parser/oracle_nom/`, `parser/oracle_util.rs`, `game/filter.rs`, `game/quantity.rs`, `game/ability_utils.rs`, `game/keywords.rs`, or nearby helpers.
    - Require justification for every new helper.
+   - Apply `review-engine-impl`'s [seam lens](../review-engine-impl/SKILL.md#universal-lenses) (Universal Lens 1, "Grep for the rule, not the symbol") to the owning function the plan names for each behavior. A plan that places a behavior beside the authority that check finds is a `behavior` finding.
 
 3. **Trace verification**
    - The plan must name an analogous existing feature and list the file path trace followed end to end.
@@ -150,7 +152,7 @@ Review the decomposition, not per-phase detail. Checklist:
 - **Deferral lists complete and phase-attributed** — everything the full task needs that a phase omits names the phase that lands it.
 - **Linear ordering respects dependencies** — infrastructure before consumer.
 - **Recursive gate check** — no individual phase itself trips the T1∧T2 conjunction defined in `/engine-implementer`.
-- **Premise verification present** — charter mode preserves engine-planner Step 0.
+- **Premise verification present** — charter mode preserves engine-planner Step 0, and its class attribution carries the Step 0.5 record.
 - **Scope entries are a rule, not an inventory** — literal paths or directories, no globs (T2 directory expansion and the orchestrator's `SCOPE_PATHS` materialization consume concrete paths, as does `/implement-task`'s snapshot pathspec machinery). A missing compiler-forced site, shared registration file, or comment-only file is **not** a finding — the scope rule admits those at materialization. A missing path of any other class is.
 - **No code-state assertions** — a sentence stating how the code behaves today ("no offer mints one", "the gate records this outcome") is a finding of class *premise*. If no phase decision rests on it, the repair is a correction: delete the sentence, since the phase plan names and measures the claim. If a phase boundary, ordering, or unit count — or any other frozen decision: a goal, an architecture decision, a seam, a deferral attribution — rests on it, it is a design finding, and the reviewer measures the assertion before reporting — a probe, not a reading.
 - **Architecture only** — acceptance rows and claims a phase must establish belong to the phase plan; in the charter they are a correction (delete them). Each phase names its addenda file. A re-charter round also reads the addenda that led to it.

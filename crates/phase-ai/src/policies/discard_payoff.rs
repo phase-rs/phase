@@ -232,6 +232,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::TurnFaceUp { .. }
         | GameAction::SubmitSideboard { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::SubmitSpellbookDraft { .. }

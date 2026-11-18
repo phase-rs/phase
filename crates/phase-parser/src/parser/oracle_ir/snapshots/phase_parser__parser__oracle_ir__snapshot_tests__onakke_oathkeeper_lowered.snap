@@ -86,7 +86,11 @@ expression: "&lowered"
         "scaling": {
           "type": "PerAffectedCreature"
         },
-        "defended": "Planeswalker"
+        "defended": {
+          "Planeswalker": {
+            "subtype": null
+          }
+        }
       },
       "affected_zone": null,
       "effect_zone": null,

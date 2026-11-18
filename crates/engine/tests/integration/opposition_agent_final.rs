@@ -23,6 +23,7 @@ const P2: PlayerId = PlayerId(2);
 const OPPOSITION_AGENT: &str = "Flash\n\
 You control your opponents while they're searching their libraries.\n\
 While an opponent is searching their library, they exile each card they find. You may play those cards for as long as they remain exiled, and you may spend mana as though it were mana of any color to cast them.";
+const FIELD_OF_RUIN: &str = "{T}: Add {C}.\n{2}, {T}, Sacrifice this land: Destroy target nonbasic land an opponent controls. Each player searches their library for a basic land card, puts it onto the battlefield, then shuffles.";
 const TEST_TUTOR: &str =
     "Search your library for a card, put that card into your hand, then shuffle.";
 
@@ -167,6 +168,9 @@ fn opponent_own_library_search_controls_exiles_and_grants_any_color_permission()
 
     assert_eq!(runner.state().objects[&found].zone, Zone::Exile);
     assert!(has_agent_permission(&runner, found, P0));
+    // CR 608.2c: "they exile each card they find" — the searching opponent
+    // performs the exile, though the Agent's controller makes the choice.
+    assert_eq!(runner.state().objects[&found].exiled_by, Some(P1));
 }
 
 fn direct_search_definition(
@@ -430,4 +434,192 @@ fn newest_player_control_effect_wins_and_search_authority_remains_latched() {
         P1,
         "a newer active self-control effect still overwrites an older Agent"
     );
+}
+
+/// CR 608.2c + CR 614.1: the found-card binder records the searcher, so it
+/// binds only the controller's move or the searcher's own (`LibraryPlayer`); a
+/// move naming any other player is not bound and the replacement does not
+/// apply. Synthetic: Opposition Agent's move parses with the searcher as its
+/// actor; this row names another player instead.
+#[test]
+fn search_found_move_with_a_named_performer_is_not_bound() {
+    let (mut runner, agent, tutor, found) = setup_two_player();
+    fn stamp(definitions: &mut [engine::types::ability::ReplacementDefinition]) -> usize {
+        let mut stamped = 0;
+        for definition in definitions {
+            if let Some(Effect::ChangeZone { actor, .. }) = definition
+                .execute
+                .as_deref_mut()
+                .map(|execute| execute.effect.as_mut())
+            {
+                *actor = engine::types::ability::LibraryInstructionActor::Player {
+                    player: TargetFilter::TriggeringPlayer,
+                };
+                stamped += 1;
+            }
+        }
+        stamped
+    }
+    let object = runner
+        .state_mut()
+        .objects
+        .get_mut(&agent)
+        .expect("Opposition Agent");
+    // Layers rebuild the live list from the base list, so both carry the actor.
+    let stamped =
+        stamp(std::sync::Arc::make_mut(&mut object.base_replacement_definitions).as_mut_slice())
+            + stamp(std::sync::Arc::make_mut(&mut object.replacement_definitions.0).as_mut_slice());
+    assert_eq!(stamped, 2, "reach: the SearchFound move exists");
+    resolve_to_search(&mut runner, tutor);
+    runner
+        .act(GameAction::SelectCards { cards: vec![found] })
+        .expect("the search choice is submitted");
+    assert_eq!(runner.state().objects[&found].zone, Zone::Hand);
+    assert!(!has_agent_permission(&runner, found, P0));
+}
+
+/// CR 608.2c + CR 701.23a: in an each-player search (Field of Ruin), the
+/// opponent searching their own library under Opposition Agent exiles the
+/// card they find and is recorded as having exiled it (the search-found
+/// delivery in `engine_resolution_choices`); the controller's own found land
+/// is unaffected. The scoped batch delivery's own record is covered by the
+/// unit row in `scoped_library_search`.
+#[test]
+fn scoped_search_records_the_searching_opponent_as_exiler() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Opposition Agent", 3, 2, OPPOSITION_AGENT);
+    let field = scenario
+        .add_land_from_oracle(P0, "Field of Ruin", FIELD_OF_RUIN)
+        .id();
+    let victim = scenario
+        .add_land_from_oracle(P1, "Victim Land", "{T}: Add {C}.")
+        .id();
+    let forest = scenario.add_card_to_library_top(P0, "Forest");
+    let island = scenario.add_card_to_library_top(P1, "Island");
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ),
+            engine::types::mana::ManaUnit::new(
+                engine::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ),
+        ],
+    );
+    let mut runner = scenario.build();
+    for id in [forest, island] {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Land);
+        object
+            .card_types
+            .supertypes
+            .push(engine::types::card_type::Supertype::Basic);
+        object.base_card_types = object.card_types.clone();
+    }
+
+    let outcome = runner
+        .activate(field, 1)
+        .target_object(victim)
+        .search_first_legal()
+        .resolve();
+
+    // Reach-guard: the ability resolved and the controller's own search was
+    // not replaced.
+    outcome.assert_zone(&[field, victim], Zone::Graveyard);
+    outcome.assert_zone(&[forest], Zone::Battlefield);
+    outcome.assert_zone(&[island], Zone::Exile);
+    assert_eq!(outcome.state().objects[&island].exiled_by, Some(P1));
+}
+
+/// CR 614.6 ("A modified event occurs instead") + CR 608.2c: in a Dandân
+/// game, whose library is one pile both seats read, the opponent searching
+/// under Opposition Agent exiles the card they find; when a replacement
+/// redirects that exile to the hand, the card goes to its owner's hand and
+/// stays theirs. The searcher (P1) is recorded as the exile's performer, never
+/// as the entry-ownership input, so the redirect cannot hand P1 a P0-owned
+/// card. Synthetic: the mandatory exile-to-hand redirect; no printed card
+/// redirects an exile to a hand (Rest in Peace and Dauthi Voidwalker redirect
+/// into exile).
+///
+/// Revert sensitivity: reading the performer as the ownership input sends the
+/// card to P1's hand, owned by P1.
+#[test]
+fn redirected_found_card_exile_keeps_its_owner_in_a_shared_library() {
+    use engine::types::ability::{ReplacementDefinition, ReplacementMode};
+    use engine::types::replacements::ReplacementEvent;
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Opposition Agent", 3, 2, OPPOSITION_AGENT);
+    scenario
+        .add_creature(P0, "Synthetic Exile Redirect", 1, 1)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Mandatory)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
+                        origin: None,
+                        destination: Zone::Hand,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+                .destination_zone(Zone::Exile),
+        );
+    let tutor = scenario
+        .add_spell_to_hand_from_oracle(P1, "Test Tutor", false, TEST_TUTOR)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let found = scenario
+        .add_spell_to_library_top(P0, "Found Card", true)
+        .id();
+    scenario.add_card_to_library_top(P0, "Library Filler");
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+
+    resolve_to_search(&mut runner, tutor);
+    // Reach-guard: Opposition Agent controls the opponent's search.
+    assert_eq!(
+        engine::game::turn_control::authorized_submitter_for_player(runner.state(), P1),
+        P0
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![found] })
+        .expect("the Agent's controller submits the search choice");
+
+    // Reach-guard: the exile was requested and redirected.
+    assert_eq!(runner.state().objects[&found].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&found].owner, P0);
+    let holder = runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.hand.contains(&found))
+        .map(|player| player.id);
+    assert_eq!(holder, Some(P0));
 }

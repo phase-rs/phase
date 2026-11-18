@@ -247,6 +247,17 @@ fn parse_during_their_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 611.3a: AND a split leading "As long as" gate with any gate the effect
+/// parser already set, so neither is lost.
+fn attach_leading_condition(def: &mut StaticDefinition, leading: StaticCondition) {
+    def.condition = Some(match def.condition.take() {
+        Some(existing) => StaticCondition::And {
+            conditions: vec![leading, existing],
+        },
+        None => leading,
+    });
+}
+
 /// CR 502.3 + CR 611.3a + CR 604.1: "[As long as <condition>, ]players can't
 /// untap more than <N> <type> during their untap steps[ as long as
 /// <condition>]." — the Smoke / Damping Field / Imi Statue / Stoic Angel
@@ -837,6 +848,37 @@ fn is_enforceable_continuous_static(def: &StaticDefinition) -> bool {
             .is_some_and(StaticCondition::contains_unrecognized)
 }
 
+/// CR 109.2a + CR 115.1: the subject a targeting prohibition ("<subject> can't be
+/// the target of ...") binds to, typed by the shared rule-static subject parser.
+/// `None` when the text before the prohibition is not a subject that parser
+/// types, so callers never default an unread subject to the source.
+fn cant_be_targeted_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
+    let (before, _, _) = nom_primitives::scan_preceded(tp.lower, |i: &str| {
+        alt((
+            tag("can't be the target"),
+            tag("can’t be the target"),
+            tag("cannot be the target"),
+            tag("can't be targeted"),
+            tag("can’t be targeted"),
+            tag("cannot be targeted"),
+        ))
+        .parse(i)
+    })?;
+    let subject = tp.original.get(..before.len())?.trim();
+    super::shared::parse_rule_static_subject_filter(subject)
+}
+
+/// Inert, coverage-visible gap for a targeting prohibition the engine cannot
+/// model (source-qualified, or a subject no building block types). Never
+/// defaults `affected` to the source for an unread subject.
+fn cant_be_targeted_gap(subject: Option<TargetFilter>, original: &str) -> StaticDefinition {
+    match subject {
+        Some(filter) => super::evasion::source_qualified_cant_be_targeted_gap(filter, original),
+        None => StaticDefinition::new(StaticMode::Other(original.to_string()))
+            .description(original.to_string()),
+    }
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -1038,7 +1080,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1062,7 +1104,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1099,7 +1141,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -2859,28 +2901,42 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "~ can't be the target" or "~ can't be targeted" ---
-    // CR 702.18a / 702.11a: these descriptive phrasings ARE Shroud / Hexproof.
-    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
-        return Some(match scope {
-            // CR 702.11a: "... your opponents control" — grant Hexproof so the
-            // permanent's own controller can still target it.
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-                StaticDefinition::continuous()
-                    .affected(TargetFilter::SelfRef)
-                    .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Hexproof,
-                    }])
-                    .description(text.to_string())
-            }
-            // CR 702.18a: blanket — can't be targeted by any player. Enforced in
-            // `targeting.rs::can_target` via the object's active static definitions.
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-                StaticDefinition::new(StaticMode::CantBeTargeted)
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string())
-            }
-        });
+    // --- "<subject> can't be the target" or "<subject> can't be targeted" ---
+    // CR 109.2a + CR 115.1: the prohibition binds the subject it names, not the
+    // source: `affected` is the parsed subject (`~` / "this creature" -> SelfRef,
+    // "creatures you control" -> its typed filter). A subject no existing
+    // building block types (Tomik's two-zone "lands on the battlefield and land
+    // cards in graveyards") makes the line an explicit, inert coverage gap rather
+    // than a prohibition stamped on the source.
+    if nom_primitives::scan_contains(tp.lower, "be the target")
+        || nom_primitives::scan_contains(tp.lower, "be targeted")
+    {
+        let subject = cant_be_targeted_subject(&tp);
+        // CR 115.1: a source-kind / source-quality qualifier ("of spells", "of black
+        // or red spells your opponents control") is not expressible by
+        // `CantBeTargeted { who }`; fail closed rather than emit a blanket mode.
+        if crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(tp.lower) {
+            return Some(cant_be_targeted_gap(subject, &text));
+        }
+        // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
+        if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
+            let Some(affected) = subject else {
+                return Some(cant_be_targeted_gap(None, &text));
+            };
+            let who = match scope {
+                crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                    crate::types::statics::ProhibitionScope::Opponents
+                }
+                crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                    crate::types::statics::ProhibitionScope::AllPlayers
+                }
+            };
+            return Some(
+                StaticDefinition::new(StaticMode::CantBeTargeted { who })
+                    .affected(affected)
+                    .description(text.to_string()),
+            );
+        }
     }
 
     // --- "~ can't be sacrificed" (CR 701.21) ---
@@ -3803,9 +3859,8 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "You may cast [type] spells as though they had flash" (CR 601.3b / CR 702.8a) ---
-    // Emits `CastWithKeyword { Flash }` with the spell-type filter — the only
-    // static mode the flash-timing path (granted_spell_keywords) reads, and the
-    // one that preserves the "creature spells" restriction (issue #1957).
+    // Emits `CastWithFlash` with the spell-type filter, a timing permission read
+    // by `spell_has_effective_flash` that preserves the "creature spells" restriction.
     if let Some(def) = parse_cast_as_though_flash_static(&tp, &text) {
         return Some(def);
     }

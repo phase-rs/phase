@@ -93,9 +93,14 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
         crate::util::im_ext::shuffle_vector(&mut player.library, rng.draw(RandomDraw::Placement));
     }
 
+    // Draw the opening hand for each player in seat order. The Horde seat is
+    // skipped: it has no hand and plays off the top of its library, so an
+    // opening hand would strand threats it can never cast and shorten the
+    // library it must deck out to lose.
     let deals: Vec<(PlayerId, usize)> = state
         .seat_order
         .iter()
+        .filter(|&&player| !crate::game::horde::player_skips_opening_hand(state, player))
         .map(|&player| (player, STARTING_HAND_SIZE))
         .collect();
     deal_hands(state, &deals, events);
@@ -116,6 +121,11 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
         .seat_order
         .iter()
         .filter(|&&player| super::players::is_alive(state, player))
+        // A seat with no opening hand has nothing to keep or mulligan; leaving
+        // the Horde in `pending` would stall the game waiting on a decision it
+        // can never meaningfully make (and its "Keep" would bottom cards from a
+        // hand it never drew).
+        .filter(|&&player| !crate::game::horde::player_skips_opening_hand(state, player))
         .map(|&player| MulliganDecisionEntry {
             free_reveals_taken: 0,
             player,
@@ -450,6 +460,7 @@ fn reveal_hand(state: &GameState, player: PlayerId, events: &mut Vec<GameEvent>)
         .collect();
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: Vec::new(),
         card_ids: Vec::new(),
         card_names,
     });
@@ -1096,8 +1107,9 @@ fn draw_one(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>
     };
     // CR 103.5: pregame draw — route through the pipeline under the
     // `PregameProcedure` exempt cause.
-    let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(top_card, Zone::Hand)
-        .performed_by(player);
+    let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(top_card, Zone::Hand).actors(
+        crate::game::zone_pipeline::MoveActors::performer_and_owner(player),
+    );
     crate::game::zone_pipeline::move_object(state, req, events);
     true
 }
@@ -1325,7 +1337,7 @@ mod tests {
         assert!(
             matches!(
                 events.first(),
-                Some(GameEvent::CardsRevealed { player, card_ids, card_names })
+                Some(GameEvent::CardsRevealed { player, card_ids, card_names, .. })
                     if *player == PlayerId(0) && card_ids.is_empty() && *card_names == old_names
             ),
             "the reveal comes first, by name only: {events:?}"
@@ -1729,6 +1741,8 @@ mod tests {
         let mut begin_game = AbilityDefinition::new(
             AbilityKind::BeginGame,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
                 origin: Some(Zone::Hand),
@@ -1741,7 +1755,8 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
-             enters_modified_if: None },
+             enters_modified_if: None
+            },
         )
         .description("If this card is in your opening hand, you may begin the game with it on the battlefield.".to_string());
         begin_game.optional = true;

@@ -236,6 +236,16 @@ pub fn resolve(
     let resolved_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, raw_filter.clone());
     let filter = &resolved_filter;
+    // CR 608.2b: an unavailable announcement names no permanent. Complete
+    // here so neither event/host fallback nor untargeted selection can refill it.
+    if matches!(filter, TargetFilter::ParentTarget) && ability.has_authoritative_empty_binding() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(completed_result(0));
+    }
     // CR 400.7: A self-referential sacrifice ("sacrifice this creature") does
     // nothing if the source has left and re-entered the battlefield (blink/
     // flicker) since this ability fired — the re-entered permanent is a new
@@ -584,6 +594,7 @@ pub fn resolve(
         // size for safety; the branch above handles the mandatory-all case.
         let choice_count = count.min(eligible.len());
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: chooser,
             cards: eligible,
             count: choice_count,
@@ -602,10 +613,12 @@ pub fn resolve(
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             // CR 708.2a: sacrifice selection is not a face-down entry.
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

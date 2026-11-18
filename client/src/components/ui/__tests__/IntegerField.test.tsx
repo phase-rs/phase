@@ -4,7 +4,7 @@
  * The component exists because a per-keystroke clamp corrupts what the user
  * typed (see the component docstring). These tests pin both halves of the
  * contract it replaced that clamp with: a reading is committed only when it is
- * a whole number at or above `min`, and anything else leaves the last
+ * a whole number within `min`..=`max`, and anything else leaves the last
  * committed value standing while the box keeps showing what was typed.
  */
 import { cleanup, render, screen } from "@testing-library/react";
@@ -15,9 +15,10 @@ import { useState } from "react";
 import { IntegerField } from "../IntegerField";
 
 /** Mirrors a real call site: the committed value is owned by the parent. */
-function Harness({ initial, min = 1, onCommit }: {
+function Harness({ initial, min = 1, max, onCommit }: {
   initial: number;
   min?: number;
+  max?: number;
   onCommit?: (next: number) => void;
 }) {
   const [value, setValue] = useState(initial);
@@ -25,6 +26,7 @@ function Harness({ initial, min = 1, onCommit }: {
     <IntegerField
       value={value}
       min={min}
+      max={max}
       ariaLabel="Starting Life"
       onCommit={(next) => {
         onCommit?.(next);
@@ -111,5 +113,34 @@ describe("IntegerField", () => {
     await user.type(field, "5");
 
     expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("commits a reading equal to max", async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    render(<Harness initial={10} max={255} onCommit={onCommit} />);
+
+    const field = screen.getByLabelText("Starting Life");
+    expect(field).toHaveAttribute("max", "255");
+    await user.clear(field);
+    await user.type(field, "255");
+
+    expect(onCommit).toHaveBeenLastCalledWith(255);
+  });
+
+  it("does not commit a reading above max", async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    render(<Harness initial={10} max={255} onCommit={onCommit} />);
+
+    const field = screen.getByLabelText("Starting Life");
+    await user.clear(field);
+    await user.type(field, "256");
+
+    // Reach guard: the in-range prefix "25" was committed on the way, so the
+    // handler ran on these keystrokes and only the final reading was refused.
+    expect(onCommit).toHaveBeenLastCalledWith(25);
+    expect(onCommit).not.toHaveBeenCalledWith(256);
+    expect(field).toHaveValue(256);
   });
 });

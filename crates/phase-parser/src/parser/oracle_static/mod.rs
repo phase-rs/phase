@@ -18,12 +18,12 @@ mod prelude {
     pub(super) use super::super::oracle_cost::{
         line_reduces_colored_mana_only, parse_gerund_cost, parse_oracle_cost,
     };
+    #[cfg(test)]
+    pub(super) use super::super::oracle_effect::parse_effect_chain_with_context;
     pub(super) use super::super::oracle_effect::subject::{
         parse_restriction_modes, static_mode_needs_grant_propagation,
     };
-    pub(super) use super::super::oracle_effect::{
-        parse_effect_chain, parse_effect_chain_with_context, strip_trailing_duration,
-    };
+    pub(super) use super::super::oracle_effect::{parse_effect_chain, strip_trailing_duration};
     pub(super) use super::super::oracle_ir::context::ParseContext;
     pub(super) use super::super::oracle_ir::static_ir::StaticIr;
     pub(super) use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
@@ -98,6 +98,7 @@ mod static_helpers;
 mod type_change;
 
 pub(crate) use shared::add_property;
+pub(crate) use shared::parse_affected_scoped_static_condition;
 pub(crate) use shared::parse_commander_subject_filter_prefix;
 pub(crate) use shared::peel_color_quality_prefix;
 
@@ -105,6 +106,7 @@ pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
 pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
+pub(crate) use keyword_grant::is_nth_qualified_spell_flash_permission;
 use prelude::StaticIr;
 pub(crate) use restriction::is_control_players_during_own_library_search;
 pub(crate) use restriction::is_graveyard_cast_permission_lead;
@@ -248,7 +250,10 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 /// transforms below satisfy this today: `populate_active_zones_from_condition`
 /// self-guards on `active_zones.is_empty()` and its collector ignores
 /// `ClassLevelGE`, and `bind_counter_anaphor_to_recipient` rewrites only
-/// `ObjectScope::Anaphoric`, of which none survive the first pass. A
+/// `ObjectScope::Anaphoric`, of which none survive the first pass, and the
+/// counter-kind census's `SelfRef` pronoun placeholder only when binding it to
+/// the recipient — the rewritten filter is no longer `SelfRef`, and a
+/// self-scoped static leaves `SelfRef` as it is, so a second pass is a no-op. A
 /// non-idempotent transform added here would silently double-apply across every
 /// such site.
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {

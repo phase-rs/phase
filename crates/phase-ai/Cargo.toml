@@ -8,6 +8,7 @@ license.workspace = true
 engine = { path = "../engine", package = "phase-engine" }
 serde = { workspace = true }
 serde_json = "1"
+nom = "8.0"
 rand = "0.9"
 rand_chacha = "0.9"
 tracing = "0.1"
@@ -91,6 +92,12 @@ test = false
 [[bin]]
 name = "attack-scaling-bench"
 path = "src/bin/attack_scaling_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
+name = "priority-scaling-bench"
+path = "src/bin/priority_scaling_bench.rs"
 required-features = ["scenario-benches"]
 test = false
 

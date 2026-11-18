@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 
-import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
+import type { AttackTarget, GameObject, ObjectId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { formatLifeReadout, lifeReadout } from "../../hooks/useDisplayedLife.ts";
@@ -149,18 +149,26 @@ export function AttackTargetPicker({
     return sortTargets([...seen.values()]);
   }, [stacks, sortTargets]);
 
-  // The board state supplies each creature's current evaluated power. This is
-  // intentionally only an unblocked, at-this-moment life estimate: blockers
-  // and later game actions still determine the actual combat result.
-  const assignedDamageByPlayer = useMemo(() => {
-    const damageByPlayer = new Map<PlayerId, number>();
+  // Per-target totals over the player's unsubmitted draft. Each attacker's
+  // damage and life loss is the engine's unblocked projection (CR 510.1a +
+  // CR 702.4b + CR 120.3a/b); blockers and later game actions still determine
+  // the actual combat result.
+  const assignedTotalsByTarget = useMemo(() => {
+    const previews = gameState?.derived?.unblocked_attack_previews;
+    const totals = new Map<string, { attackers: number; damage: number; lifeLoss: number }>();
     for (const attackerId of selectedAttackers) {
       const target = assignments.get(attackerId);
-      if (target?.type !== "Player") continue;
-      const damage = Math.max(0, gameState?.objects[attackerId]?.power ?? 0);
-      damageByPlayer.set(target.data, (damageByPlayer.get(target.data) ?? 0) + damage);
+      if (target == null) continue;
+      const key = attackTargetKey(target);
+      const preview = previews?.[String(attackerId)];
+      const current = totals.get(key) ?? { attackers: 0, damage: 0, lifeLoss: 0 };
+      totals.set(key, {
+        attackers: current.attackers + 1,
+        damage: current.damage + (preview?.damage ?? 0),
+        lifeLoss: current.lifeLoss + (preview?.life_loss ?? 0),
+      });
     }
-    return damageByPlayer;
+    return totals;
   }, [assignments, gameState, selectedAttackers]);
 
   // Total attackers still in the Unassigned bucket — gates Confirm.
@@ -182,7 +190,7 @@ export function AttackTargetPicker({
       }
       const currentLife = readout.life;
       const assignedDamage = showProjectedLife
-        ? (assignedDamageByPlayer.get(target.data) ?? 0)
+        ? (assignedTotalsByTarget.get(attackTargetKey(target))?.lifeLoss ?? 0)
         : 0;
       if (assignedDamage > 0) {
         const projectedLife = Math.max(0, currentLife - assignedDamage);
@@ -456,6 +464,31 @@ export function AttackTargetPicker({
                     </div>
                   </div>
 
+                  {/* Per-target totals of the draft assignment (both layouts) */}
+                  <ul aria-label={t("attackTargetPicker.totalsHeading")} className="flex flex-wrap gap-x-3 gap-y-1">
+                    {distributeColumns.map((target) => {
+                      const color = getTargetSeatColor(target);
+                      const totals = assignedTotalsByTarget.get(attackTargetKey(target));
+                      return (
+                        <li
+                          key={attackTargetKey(target)}
+                          className="inline-flex items-center gap-1.5 text-xs text-gray-300"
+                        >
+                          <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
+                          <span className="font-semibold" style={color ? { color } : undefined}>
+                            {getTargetLabel(target, true)}
+                          </span>
+                          <span>
+                            {t("attackTargetPicker.targetTotal", {
+                              count: totals?.attackers ?? 0,
+                              damage: totals?.damage ?? 0,
+                            })}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+
                   {/* Desktop: stacks (rows) × buckets (columns) matrix */}
                   <div className="hidden overflow-x-auto overscroll-x-contain thin-scrollbar md:block">
                     <table className="w-full border-separate border-spacing-0 text-sm">
@@ -477,7 +510,7 @@ export function AttackTargetPicker({
                                     style={color ? { color } : undefined}
                                   >
                                     <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color ?? "#6b7280" }} />
-                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target, true)}</span>
+                                    <span className="max-w-[7rem] truncate">{getTargetLabel(target)}</span>
                                   </span>
                                   <button
                                     type="button"
@@ -533,7 +566,7 @@ export function AttackTargetPicker({
                                   );
                                 }
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target, true);
+                                const label = getTargetLabel(target);
                                 return (
                                   <td key={attackTargetKey(target)} className="px-2 py-1.5">
                                     <StepperCell
@@ -613,7 +646,7 @@ export function AttackTargetPicker({
                               {stack.targets.map((target) => {
                                 const color = getTargetSeatColor(target);
                                 const count = countOnTarget(stack, target);
-                                const label = getTargetLabel(target, true);
+                                const label = getTargetLabel(target);
                                 return (
                                   <div key={attackTargetKey(target)} className="flex items-center justify-between gap-2 rounded px-1 py-1">
                                     <span className="inline-flex min-w-0 items-center gap-1.5 text-sm" style={color ? { color } : undefined}>

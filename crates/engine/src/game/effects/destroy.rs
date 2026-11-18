@@ -6,8 +6,8 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
 };
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    Effect, EffectError, EffectKind, FilterProp, InstructionJoin, ResolvedAbility, TargetFilter,
+    TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 pub(crate) use crate::types::game_state::SimultaneousDeparture;
@@ -105,8 +105,6 @@ fn deliver_destruction_zone_change(
         source_id: source,
         exile_links: ExileLinkSpec::default(),
         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-        // Destroy delivers to the graveyard — never a library placement.
-        library_placement: None,
     };
     !matches!(
         zone_pipeline::deliver(state, approved, ctx, events),
@@ -171,23 +169,7 @@ pub(crate) fn destroy_single_object(
     cant_regenerate: bool,
     events: &mut Vec<GameEvent>,
 ) -> DestroyOutcome {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return DestroyOutcome::Skipped;
-    };
-
-    // CR 114.5: Emblems are neither cards nor permanents — cannot be destroyed.
-    if obj.is_emblem {
-        return DestroyOutcome::Skipped;
-    }
-
-    // CR 701.8a: Destroy moves a permanent from the battlefield to its owner's
-    // graveyard — only battlefield objects are destroyable.
-    if obj.zone != Zone::Battlefield {
-        return DestroyOutcome::Skipped;
-    }
-
-    // CR 702.12b: A permanent with indestructible can't be destroyed.
-    if obj.has_keyword(&crate::types::keywords::Keyword::Indestructible) {
+    if !is_destroyable(state, object_id) {
         return DestroyOutcome::Skipped;
     }
 
@@ -219,6 +201,18 @@ pub(crate) fn destroy_single_object(
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             DestroyOutcome::NeedsChoice
         }
+    }
+}
+
+/// CR 608.2c + CR 603.10a: where the simultaneous-departure group of a destroy
+/// node begins. A further slot of a target list ("destroy target artifact,
+/// target creature, ...") is part of the instruction its first slot began, so
+/// its group reaches back to that instruction's start and the list's last slot
+/// groups every slot; any other node groups only its own events.
+fn destroy_group_start(state: &GameState, ability: &ResolvedAbility, events_len: usize) -> usize {
+    match ability.instruction_join {
+        InstructionJoin::ListSlot => crate::game::zones::open_instruction_start(state, events_len),
+        InstructionJoin::Own => events_len,
     }
 }
 
@@ -688,7 +682,7 @@ pub(crate) fn resume_parked_departure_consult(
     // the consult to queue with the member.
     let rider = match parked.rider_custody {
         DepartureRiderCustody::OuterPending => None,
-        DepartureRiderCustody::PerMember => state.detach_ready_post_replacement_drain(),
+        DepartureRiderCustody::PerMember => state.take_ready_post_replacement_drain(),
     };
     let taken = state.take_active_simultaneous_departure();
     if let Some(rider) = rider {
@@ -926,7 +920,7 @@ fn queue_departure(
 ) {
     let rider = match pending.rider_custody {
         DepartureRiderCustody::OuterPending => None,
-        DepartureRiderCustody::PerMember => state.detach_ready_post_replacement_drain(),
+        DepartureRiderCustody::PerMember => state.take_ready_post_replacement_drain(),
     };
     pending.queued.push(QueuedSimultaneousDeparture {
         object_id: member.object_id,
@@ -982,10 +976,10 @@ fn complete_simultaneous_departure(
     // Zulaport Cutthroat) observe each other. CR 701.19a/b: a regenerated
     // member (and any other prevented departure) stays on the battlefield, so
     // `departed_subset` excludes it from every co-departed group.
-    let departed = crate::game::zones::departed_subset(state, &pending.announced);
     match &pending.owner {
         SimultaneousDepartureOwner::Destruction { producer } => {
-            crate::game::zones::mark_simultaneous_departures(&mut events[stamp_from..], &departed);
+            let group_start = destroy_group_start(state, producer, stamp_from);
+            crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[group_start..]);
             // CR 608.2c: "destroyed this way" names exactly what this
             // instruction destroyed. A paused batch's earlier deliveries were
             // held back from the instruction's own publication, so the
@@ -997,6 +991,7 @@ fn complete_simultaneous_departure(
                 super::TrackedSetPublicationInput::ResolvedEvents {
                     ability: producer,
                     events: &events[stamp_from..],
+                    selection: &[],
                 },
             );
             events.push(GameEvent::EffectResolved {
@@ -1007,6 +1002,7 @@ fn complete_simultaneous_departure(
         }
         SimultaneousDepartureOwner::StateBasedDeaths => {
             crate::game::sba::settle_redirected_state_based_deaths(state, &pending.delivered);
+            let departed = crate::game::zones::departed_subset(state, &pending.announced);
             crate::game::zones::mark_simultaneous_departures(&mut events[stamp_from..], &departed);
         }
     }

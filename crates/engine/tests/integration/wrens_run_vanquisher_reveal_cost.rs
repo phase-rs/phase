@@ -6,6 +6,9 @@
 //!    and selecting an Elf card from hand successfully completes the cast for {1}{G}.
 //! 2. Choosing to pay {3} instead charges {4}{G} total ({1}{G} base + {3} additional).
 //! 3. Casting with no Elf card in hand falls through directly to the {3} additional cost.
+//! 4. Casting with an Elf but only the {1}{G} base available applies the reveal
+//!    branch directly: paying {3} is not possible (CR 601.2h), so there is no
+//!    choice to announce.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
@@ -37,9 +40,15 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Provide 2 lands for {1}{G} base cost.
+    // Provide 5 lands: enough for the {1}{G} base plus {3}, so both branches
+    // are payable and the caster must elect one.
     let forest = add_forest(&mut scenario);
     let wastes = add_wastes(&mut scenario);
+    let spare = [
+        add_wastes(&mut scenario),
+        add_wastes(&mut scenario),
+        add_wastes(&mut scenario),
+    ];
 
     // An Elf card in hand to reveal.
     let elf = scenario
@@ -83,7 +92,7 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     match runner.state().waiting_for.clone() {
         WaitingFor::OptionalCostChoice { cost, .. } => {
             assert!(
-                matches!(cost, engine::types::ability::AdditionalCost::Choice(_, _)),
+                matches!(cost, engine::types::ability::AdditionalCost::Choice(_)),
                 "must offer AdditionalCost::Choice"
             );
         }
@@ -92,7 +101,7 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
 
     // 2. Choose to pay the preferred cost (reveal an Elf).
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("deciding to reveal must be accepted");
 
     // 3. Must prompt to select the Elf card from hand.
@@ -142,6 +151,12 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     assert!(
         runner.state().objects[&wastes].tapped,
         "Wastes must be tapped to pay {{1}}{{G}}"
+    );
+    assert!(
+        spare
+            .iter()
+            .all(|land| !runner.state().objects[land].tapped),
+        "revealing replaces the {{3}}: only the {{1}}{{G}} base is paid"
     );
 
     // CR 701.20a: A CardsRevealed event must be emitted for the revealed Elf.
@@ -208,7 +223,7 @@ fn wrens_run_vanquisher_cast_by_paying_three() {
 
     // Choose to pay {3} instead of revealing an Elf.
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("deciding to pay {3} must be accepted");
 
     // Cast completes immediately by paying the full {4}{G}.
@@ -306,4 +321,86 @@ fn wrens_run_vanquisher_auto_falls_through_when_no_elf_in_hand() {
             "all 5 lands must be tapped to pay fallback {{4}}{{G}} (land {land:?})"
         );
     }
+}
+
+/// CR 601.2b + CR 601.2h: with only the {1}{G} base available the {3} branch
+/// can't be paid, so revealing an Elf is the sole payable alternative and is
+/// applied without an election prompt.
+#[test]
+fn wrens_run_vanquisher_reveals_without_prompt_when_three_is_unpayable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let forest = add_forest(&mut scenario);
+    let wastes = add_wastes(&mut scenario);
+    let elf = scenario
+        .add_creature_to_hand(P0, "Llanowar Elves", 1, 1)
+        .with_subtypes(vec!["Elf"])
+        .id();
+    scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+
+    let mut builder = scenario.add_creature_to_hand_from_oracle(
+        P0,
+        "Wren's Run Vanquisher",
+        3,
+        3,
+        WRENS_RUN_VANQUISHER_ORACLE,
+    );
+    builder.with_mana_cost(ManaCost::Cost {
+        generic: 1,
+        shards: vec![ManaCostShard::Green],
+    });
+    builder.with_subtypes(vec!["Elf", "Warrior"]);
+    let spell = builder.id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Wren's Run Vanquisher must be accepted");
+
+    // No election: the reveal branch's card selection is the next prompt.
+    match runner.state().waiting_for.clone() {
+        WaitingFor::PayCost {
+            kind: PayCostKind::Reveal { .. },
+            choices,
+            count,
+            ..
+        } => {
+            assert_eq!(count, 1, "must reveal 1 card");
+            assert_eq!(choices, vec![elf], "only the Elf card is eligible");
+        }
+        other => panic!("expected PayCost(Reveal) without a choice prompt, got {other:?}"),
+    }
+
+    let reveal_outcome = runner
+        .act(GameAction::SelectCards { cards: vec![elf] })
+        .expect("selecting the Elf card to reveal must succeed");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "cast must finish after reveal payment"
+    );
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&elf].zone, Zone::Hand);
+    assert!(
+        runner.state().objects[&forest].tapped && runner.state().objects[&wastes].tapped,
+        "the {{1}}{{G}} base must be paid"
+    );
+    assert!(
+        reveal_outcome.events.iter().any(|e| matches!(
+            e,
+            engine::types::events::GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&elf)
+        )),
+        "a CardsRevealed event containing the revealed Elf card must be emitted"
+    );
 }

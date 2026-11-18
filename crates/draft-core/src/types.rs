@@ -21,11 +21,25 @@ pub enum TournamentFormat {
 /// Controls timer, disconnect handling, and round-advancement behavior.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PodPolicy {
-    /// Timed picks, auto-pick on timeout, 10s disconnect grace period, auto-advance rounds.
+    /// Timed picks, auto-pick on timeout, 10s disconnect grace period, auto-advance
+    /// rounds; submitted decks are final (MTR 7.3).
     #[default]
     Competitive,
-    /// No timer, no auto-pick, host controls round advancement, host notified on disconnect.
+    /// No timer, no auto-pick, host controls round advancement, host notified on
+    /// disconnect; decks may be revised between rounds (MTR 7.3).
     Casual,
+}
+
+impl PodPolicy {
+    /// MTR 7.3: at events without decklists players may change their decks between
+    /// matches; "This option is not available at Competitive or Professional Rules
+    /// Enforcement Level tournaments." A Competitive pod's submitted deck is final.
+    pub fn permits_deck_changes_between_matches(self) -> bool {
+        match self {
+            PodPolicy::Competitive => false,
+            PodPolicy::Casual => true,
+        }
+    }
 }
 
 /// Controls what spectators can see during a draft. Defaults to Public.
@@ -156,7 +170,8 @@ pub enum PackDistribution {
 /// Those spellings agreed on the four kinds that existed when they were
 /// written and disagree on any fifth, so the axis is named here instead.
 /// Not persisted: `DraftProcedure` is computed from `kind`, never stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// `Deserialize` exists only because `DraftPlayerView` publishes it to clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PostDraftPlay {
     /// The draft session ends at `DraftStatus::Complete`; play is arranged
     /// outside it. CR 903.13a: Commander Draft is "a draft ... followed by a
@@ -1286,6 +1301,24 @@ pub enum DraftStatus {
     Abandoned,
 }
 
+impl DraftStatus {
+    /// Every status, in declaration order. The [`DraftKind::ALL`] idiom: the
+    /// serde round-trip folds this instead of a hand-written array, and
+    /// `draft_status_all_lists_every_variant` guards the list.
+    pub const ALL: [DraftStatus; 10] = [
+        DraftStatus::Lobby,
+        DraftStatus::Drafting,
+        DraftStatus::Review,
+        DraftStatus::Paused,
+        DraftStatus::Deckbuilding,
+        DraftStatus::Pairing,
+        DraftStatus::MatchInProgress,
+        DraftStatus::RoundComplete,
+        DraftStatus::Complete,
+        DraftStatus::Abandoned,
+    ];
+}
+
 /// A single card instance in a draft pack or pool.
 /// Lightweight collation type — NOT engine CardFace.
 /// Enriched with colors/cmc/type_line for bot AI color preference (Medium+),
@@ -1680,6 +1713,11 @@ pub enum DraftAction {
         /// [`MAX_COMMANDER_DESIGNATIONS`](crate::types::MAX_COMMANDER_DESIGNATIONS).
         #[serde(default)]
         commanders: Vec<String>,
+        /// CR 702.139a: the optional companion card name designated outside the
+        /// main deck from the player's pool. Absent when none is designated, so a
+        /// companion-free submission keeps its pre-companion bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        companion: Option<String>,
         /// Optional owner choices; native ingress bounds them before dispatch.
         /// Name-only and server-generated submissions carry no annotations.
         #[serde(
@@ -2002,6 +2040,9 @@ pub struct DraftDeckSubmission {
     /// `validate_limited_deck`.
     #[serde(default)]
     pub commanders: Vec<String>,
+    /// CR 702.139a: the optional companion designation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion: Option<String>,
     /// Snapshotted with the accepted names. Every accepted resubmission replaces
     /// this vector, including an empty vector clearing previous owner choices.
     #[serde(
@@ -3153,24 +3194,52 @@ mod tests {
         }
     }
 
+    /// `DraftStatus::ALL` must list every status once, in the form of
+    /// `draft_kind_all_lists_every_variant`. The `match` has no wildcard, so a
+    /// new status is a compile error here; the array type fixes the length;
+    /// and the sorted indices, derived from `DraftStatus::ALL.len()`, catch a
+    /// duplicate, or a status left out while a later one is listed.
+    #[test]
+    fn draft_status_all_lists_every_variant() {
+        fn index_of(status: DraftStatus) -> usize {
+            match status {
+                DraftStatus::Lobby => 0,
+                DraftStatus::Drafting => 1,
+                DraftStatus::Review => 2,
+                DraftStatus::Paused => 3,
+                DraftStatus::Deckbuilding => 4,
+                DraftStatus::Pairing => 5,
+                DraftStatus::MatchInProgress => 6,
+                DraftStatus::RoundComplete => 7,
+                DraftStatus::Complete => 8,
+                DraftStatus::Abandoned => 9,
+            }
+        }
+        let mut indices: Vec<usize> = DraftStatus::ALL.into_iter().map(index_of).collect();
+        // Reach: the fold saw the array. An empty array would pass the
+        // equality below without covering anything.
+        assert!(!indices.is_empty());
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            (0..DraftStatus::ALL.len()).collect::<Vec<_>>(),
+            "DraftStatus::ALL must list every variant exactly once"
+        );
+    }
+
     #[test]
     fn serde_roundtrip_draft_status() {
-        let statuses = [
-            DraftStatus::Lobby,
-            DraftStatus::Drafting,
-            DraftStatus::Paused,
-            DraftStatus::Deckbuilding,
-            DraftStatus::Pairing,
-            DraftStatus::MatchInProgress,
-            DraftStatus::RoundComplete,
-            DraftStatus::Complete,
-            DraftStatus::Abandoned,
-        ];
-        for status in statuses {
+        for status in DraftStatus::ALL {
             let json = serde_json::to_string(&status).unwrap();
             let back: DraftStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(status, back);
         }
+        // Reach: the fold covers Review, and Review keeps its wire name.
+        assert!(DraftStatus::ALL.contains(&DraftStatus::Review));
+        assert_eq!(
+            serde_json::to_string(&DraftStatus::Review).unwrap(),
+            "\"Review\""
+        );
     }
 
     #[test]
