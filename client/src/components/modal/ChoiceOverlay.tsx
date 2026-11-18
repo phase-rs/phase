@@ -23,10 +23,10 @@ type ChoiceOverlayProps = {
        * Opt-in single-line header, for a short screen where every line of
        * chrome takes height from the cards. The title is the header's only
        * text and these actions sit at the end of its line, so the prompt
-       * passes its instruction as the title and its confirm (a
-       * ChoiceHeaderConfirm) here. The eyebrow, subtitle and footer are left
-       * out: the title already says what to do, and the confirm has moved up
-       * beside it.
+       * passes its instruction as the title, after any context its usual
+       * title adds, and its confirm (a ChoiceHeaderConfirm) here. The
+       * eyebrow, subtitle and footer are left out: the title already says
+       * what to do, and the confirm has moved up beside it.
        */
       headerActions: React.ReactElement;
       subtitle?: never;

@@ -68,7 +68,9 @@ type EffectZoneCase = {
 // The effect-zone modes the card strip draws. The header line treats every mode
 // alike, so this does not list them all: a sacrifice or an untap is usually
 // chosen on the board instead, and the strip's other sacrifice-mode prompts
-// (a Blight) still use sacrifice wording, which is its own issue.
+// (a Blight) still use sacrifice wording. The return case keeps today's
+// "permanent" wording for cards from a graveyard. Both wordings are their own
+// issue; these cases pin only the header layout.
 const EFFECT_ZONE_CASES: EffectZoneCase[] = [
   {
     prompt: "an exile from a graveyard",
@@ -176,7 +178,9 @@ function expectOneHeaderLine(title: string, confirmName: string): HTMLElement {
   expect(within(header).queryByText("Game Choice")).toBeNull();
 
   const confirm = within(header).getByRole("button", { name: confirmName });
-  expect(confirm).toHaveClass("min-h-11");
+  // The shared header confirm: a 44px touch height, at the compact size rather than the footer's full width.
+  expect(confirm).toHaveClass("min-h-11", "text-sm");
+  expect(confirm).not.toHaveClass("w-full");
   expect(screen.getByRole("heading").parentElement).toContainElement(confirm);
   // A footer would draw a second confirm.
   expect(screen.getAllByRole("button", { name: confirmName })).toHaveLength(1);
@@ -250,7 +254,7 @@ describe("Search Library on a landscape phone", () => {
 
     // Positive guard: the taller layout is drawn now.
     expect(screen.getByText("Game Choice")).toBeInTheDocument();
-    // The body was not remounted, so the filter keeps its element (and any focus) and its text.
+    // The body was not remounted, so the filter is the same element, which is what keeps its focus.
     expect(screen.getByRole("searchbox", { name: "Filter cards by name" })).toBe(filter);
     expect(filter).toHaveValue("India");
     expect(screen.getByText("Choose")).toBeInTheDocument();
@@ -334,6 +338,16 @@ describe("Search Library and the effect-zone prompts on a taller screen", () => 
     setViewportHeight(DESKTOP_HEIGHT);
   });
 
+  // The positive side of each case's short-screen check that its title is gone.
+  it.each(EFFECT_ZONE_CASES)("keep $prompt's own title over its instruction", (prompt) => {
+    showPrompt(tableState().effectZoneChoice({ player: 0, ...prompt.data }).build());
+
+    expect(screen.getByRole("heading").textContent).toBe(prompt.tallTitle);
+    expect(within(overlayHeader()).getByText(prompt.title)).toBeInTheDocument();
+    expect(within(overlayHeader()).queryByRole("button")).toBeNull();
+    expect(screen.getAllByRole("button", { name: prompt.confirm })).toHaveLength(1);
+  });
+
   it("keep Search Library's eyebrow, title, instruction and footer confirm", () => {
     showPrompt(tableState().searchChoice({ player: 0, cards: LIBRARY_IDS, count: 1 }).build());
 
@@ -364,7 +378,8 @@ describe("ChoiceHeaderConfirm", () => {
 
     const confirm = screen.getByRole("button", { name: "Confirm" });
     expect(confirm).toHaveAttribute("type", "button");
-    expect(confirm).toHaveClass("min-h-11");
+    expect(confirm).toHaveClass("min-h-11", "text-sm");
+    expect(confirm).not.toHaveClass("w-full");
 
     rerender(<ChoiceHeaderConfirm onClick={vi.fn()} label="Exile (1/1)" />);
     expect(screen.getByRole("button", { name: "Exile (1/1)" })).toHaveClass("min-h-11");
@@ -377,11 +392,14 @@ describe("ChoiceHeaderConfirm", () => {
 
     const confirm = screen.getByRole("button", { name: "Confirm" });
     expect(confirm).toBeDisabled();
+    // It looks disabled too, not only refuses the click.
+    expect(confirm).toHaveClass("cursor-not-allowed");
     fireEvent.click(confirm);
     expect(onClick).not.toHaveBeenCalled();
 
     rerender(<ChoiceHeaderConfirm onClick={onClick} />);
     expect(confirm).toBeEnabled();
+    expect(confirm).not.toHaveClass("cursor-not-allowed");
     fireEvent.click(confirm);
     expect(onClick).toHaveBeenCalledTimes(1);
   });

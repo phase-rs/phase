@@ -1536,7 +1536,9 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     return (
       <ChoiceOverlay
         title={subtitle}
-        headerActions={<ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={actionLabel} />}
+        headerActions={
+          <ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={actionLabel} />
+        }
       >
         {body}
       </ChoiceOverlay>
