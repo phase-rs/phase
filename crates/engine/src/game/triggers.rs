@@ -54,7 +54,7 @@ use super::conditions::{
     eval_is_initiative, eval_is_monarch, eval_no_monarch, eval_source_is_attacking,
 };
 use super::filter::{
-    matches_target_filter, matches_target_filter_on_damage_record_source,
+    damage_record_for_event, matches_target_filter, matches_target_filter_on_damage_record_source,
     matches_target_filter_on_lki_snapshot, spell_record_matches_filter, FilterContext,
 };
 use super::game_object::GameObject;
@@ -21628,10 +21628,14 @@ fn evaluate_trigger_condition_with_source(
         // dealt. Reuse the same DamageRecord snapshot matcher as
         // PlayerFilter::OpponentDealtDamage so later type changes or zone
         // moves do not change what "that damage was dealt by" refers to.
+        // CR 400.7: `damage_record_for_event` is the single locator of the
+        // record an event wrote — the same source incarnation, recipient,
+        // amount, and combat class — shared with the damage trigger matchers.
         TriggerCondition::EventDamageSourceMatchesFilter { filter } => trigger_event
             .and_then(|event| match event {
                 GameEvent::DamageDealt {
                     source_id: dmg_src,
+                    source_incarnation,
                     target,
                     amount,
                     is_combat,
@@ -21640,33 +21644,44 @@ fn evaluate_trigger_condition_with_source(
                     let ctx = source_context.map_or_else(FilterContext::neutral, |source| {
                         FilterContext::from_trigger_source_with_controller(source, controller)
                     });
-                    state.damage_dealt_this_turn.iter().rev().find(|record| {
-                        record.source_id == *dmg_src
-                            && record.target == *target
-                            && record.amount == *amount
-                            && record.is_combat == *is_combat
-                            && matches_target_filter_on_damage_record_source(
-                                state, record, filter, &ctx,
-                            )
+                    damage_record_for_event(
+                        state,
+                        *dmg_src,
+                        *source_incarnation,
+                        target,
+                        *amount,
+                        *is_combat,
+                    )
+                    .filter(|record| {
+                        matches_target_filter_on_damage_record_source(state, record, filter, &ctx)
                     })
                 }
                 GameEvent::CombatDamageDealtToPlayer {
                     player_id,
                     source_amounts,
+                    source_incarnations,
                     ..
                 } => {
                     let ctx = source_context.map_or_else(FilterContext::neutral, |source| {
                         FilterContext::from_trigger_source_with_controller(source, controller)
                     });
+                    let recipient = TargetRef::Player(*player_id);
                     source_amounts.iter().find_map(|(dmg_src, amount)| {
-                        state.damage_dealt_this_turn.iter().rev().find(|record| {
-                            record.source_id == *dmg_src
-                                && record.target == TargetRef::Player(*player_id)
-                                && record.amount == *amount
-                                && record.is_combat
-                                && matches_target_filter_on_damage_record_source(
-                                    state, record, filter, &ctx,
-                                )
+                        damage_record_for_event(
+                            state,
+                            *dmg_src,
+                            super::trigger_matchers::combat_source_incarnation(
+                                source_incarnations,
+                                *dmg_src,
+                            ),
+                            &recipient,
+                            *amount,
+                            true,
+                        )
+                        .filter(|record| {
+                            matches_target_filter_on_damage_record_source(
+                                state, record, filter, &ctx,
+                            )
                         })
                     })
                 }

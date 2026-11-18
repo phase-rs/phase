@@ -6535,8 +6535,8 @@ mod tests {
 
     #[test]
     fn open_board_exact_limit_completes_and_next_attacker_falls_back_without_work() {
-        let mut exact_state = setup_multiplayer(3);
-        let exact_attackers: Vec<_> = (0..2048)
+        let mut exact_state = setup_multiplayer(5);
+        let exact_attackers: Vec<_> = (0..1024)
             .map(|_| add_creature(&mut exact_state, PlayerId(0), "Attacker", 2, 2, vec![]))
             .collect();
         let exact_opponents = players::opponents(&exact_state, PlayerId(0));
@@ -6564,10 +6564,10 @@ mod tests {
         assert!(matches!(exact.attackers, Some(ref ids) if !ids.is_empty()));
         assert_eq!(exact_receipt.attacker_evaluations, 4096);
         assert_eq!(exact_receipt.pairs, 0);
-        assert_eq!(exact_receipt.completed_proposals, 2);
+        assert_eq!(exact_receipt.completed_proposals, 4);
 
-        let mut above_state = setup_multiplayer(3);
-        let above_attackers: Vec<_> = (0..2049)
+        let mut above_state = setup_multiplayer(5);
+        let above_attackers: Vec<_> = (0..1025)
             .map(|_| add_creature(&mut above_state, PlayerId(0), "Attacker", 2, 2, vec![]))
             .collect();
         let above_opponents = players::opponents(&above_state, PlayerId(0));
@@ -6607,14 +6607,14 @@ mod tests {
         let public_fallback = choose_attackers_with_targets(&above_state, PlayerId(0));
         assert_eq!(
             public_fallback.len(),
-            2049,
+            1025,
             "the public fallback retains every legal open attacker"
         );
         assert_eq!(
             expanded_comparison_receipt().attacker_evaluations
                 + expanded_comparison_receipt().pairs,
             0,
-            "the public 4098-unit admission rejection still performs no comparison work"
+            "the public 4100-unit admission rejection still performs no comparison work"
         );
         above_state.phase = engine::types::phase::Phase::DeclareAttackers;
         above_state.waiting_for = WaitingFor::DeclareAttackers {
@@ -6623,6 +6623,8 @@ mod tests {
             valid_attack_targets: vec![
                 AttackTarget::Player(PlayerId(1)),
                 AttackTarget::Player(PlayerId(2)),
+                AttackTarget::Player(PlayerId(3)),
+                AttackTarget::Player(PlayerId(4)),
             ],
             valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
