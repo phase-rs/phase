@@ -13,7 +13,7 @@ use engine::types::zones::Zone;
 
 const THE_GAFFER: &str =
     "At the beginning of each end step, if you gained 3 or more life this turn, draw a card.";
-const GAIN_THREE: &str = "You gain 3 life.";
+const HEALING_SALVE: &str = "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage that would be dealt to any target this turn.";
 
 fn hand_size(runner: &GameRunner, player: PlayerId) -> usize {
     runner
@@ -56,11 +56,11 @@ fn pass_to_main_of(runner: &mut GameRunner, player: PlayerId) {
     });
 }
 
-/// In P0's precombat main: gain 3 life with `spell`, then finish the turn, and return how
+/// In P0's precombat main: gain 3 life with `spell` (Healing Salve's first mode, targeting P0), then finish the turn, and return how
 /// many cards P0 drew after the main phase (only The Gaffer draws there).
 fn gain_three_then_finish_turn(runner: &mut GameRunner, spell: ObjectId) -> usize {
     let before = runner.life(P0);
-    runner.cast(spell).resolve();
+    runner.cast(spell).modes(&[0]).target_player(P0).resolve();
     assert_eq!(runner.life(P0), before + 3, "reach: the spell gains 3 life");
     let hand_before = hand_size(runner, P0);
     pass_until(runner, |state| state.active_player == P1);
@@ -73,16 +73,16 @@ fn the_gaffer_draws_at_every_qualifying_end_step_not_only_the_first() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "The Gaffer", 2, 3, THE_GAFFER);
     let first = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gain Three A", true, GAIN_THREE)
+        .add_spell_to_hand_from_oracle(P0, "Healing Salve", true, HEALING_SALVE)
         .id();
     let second = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gain Three B", true, GAIN_THREE)
+        .add_spell_to_hand_from_oracle(P0, "Healing Salve", true, HEALING_SALVE)
         .id();
     let third = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gain Three C", true, GAIN_THREE)
+        .add_spell_to_hand_from_oracle(P0, "Healing Salve", true, HEALING_SALVE)
         .id();
     let on_their_turn = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gain Three D", true, GAIN_THREE)
+        .add_spell_to_hand_from_oracle(P0, "Healing Salve", true, HEALING_SALVE)
         .id();
     for player in [P0, P1] {
         scenario.with_library_top(player, &["Card"; 12]);
@@ -126,7 +126,11 @@ fn the_gaffer_draws_at_every_qualifying_end_step_not_only_the_first() {
             && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
     });
     let before = runner.life(P0);
-    runner.cast(on_their_turn).resolve();
+    runner
+        .cast(on_their_turn)
+        .modes(&[0])
+        .target_player(P0)
+        .resolve();
     assert_eq!(runner.life(P0), before + 3, "reach: the spell gains 3 life");
     let hand_before = hand_size(&runner, P0);
     pass_until(&mut runner, |state| state.active_player == P0);
