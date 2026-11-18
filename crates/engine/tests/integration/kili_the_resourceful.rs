@@ -40,10 +40,12 @@ fn activate_equip(
             ability_index: 0,
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect(&format!(
-            "Equip activation should be legal for {equipment:?} with mana {}",
-            runner.state().players[0].mana_pool.total()
-        ))
+        .unwrap_or_else(|_| {
+            panic!(
+                "Equip activation should be legal for {equipment:?} with mana {}",
+                runner.state().players[0].mana_pool.total()
+            )
+        })
 }
 
 fn advance_to_postcombat(runner: &mut engine::game::scenario::GameRunner) {
