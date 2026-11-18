@@ -87,7 +87,7 @@ describe("restoreGameState", () => {
         // rows authored before presentation metadata existed.
       }],
       nextLogSeq: 1,
-      stateHistory: [oldState],
+      stateHistory: [{ state: oldState, logSeq: 1 }],
       turnCheckpoints: [oldState],
     });
 

@@ -3883,8 +3883,8 @@ mod tests {
     /// serialized state. A v109 peer would leave a spell paused on its own
     /// free-cast window on the stack in no zone, so the handshake must refuse
     /// the mismatch before it receives v110 state. The same version adds
-    /// `WaitingFor::SpellCopyOrderChoice` and
-    /// `PendingRepeatIteration.copy_order_fixed` (CR 405.3).
+    /// `WaitingFor::MemberOrderChoice` and
+    /// `PendingRepeatIteration.order_fixed` (CR 405.3).
     /// The CR 201.5a granter binding adds `ObjectScope::GrantingObject` /
     /// `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
     /// `PlayerFilter::GrantingObjectCaster` and the `granting_object` stamp; v108 state

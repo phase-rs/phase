@@ -161,6 +161,7 @@
     "flip": "Pivoter",
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
+    "reportNotSent": "Non envoyé",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -1811,6 +1812,10 @@
     "spellCopyOrder": {
       "title": "Ordonner les copies",
       "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
+    },
+    "memberOrder": {
+      "title": "Ordonnez les cartes",
+      "subtitle": "Choisissez la carte traitée ensuite"
     },
     "collectEvidence": {
       "title": "Collecter des preuves",

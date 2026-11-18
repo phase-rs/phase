@@ -10,6 +10,10 @@
  *   immediately and nothing is ever queued.
  * - **Runtime gate.** The `telemetryEnabled` preference (default on) is checked
  *   at enqueue time, so a mid-session toggle takes effect immediately.
+ * - **Honest result.** `trackEvent` returns whether it queued the event, so a
+ *   caller that shows the player a confirmation (the card report button) never
+ *   claims a send that a gate or cap dropped. Callers that only record may
+ *   ignore it.
  * - **No identity.** No install id, no IP, no user-agent — the events carry only
  *   the operational fields their call sites pass. The batch envelope adds build
  *   metadata (version, hash, release, platform) and nothing request-derived.
@@ -79,16 +83,17 @@ function platform(): string {
 }
 
 /**
- * Enqueue a telemetry event. Silently drops when telemetry is build-disabled,
- * runtime-disabled, or over a session cap. Never throws.
+ * Enqueue a telemetry event. Returns `true` when the event was queued, and
+ * `false` when it was dropped: telemetry is build-disabled, runtime-disabled,
+ * over a session cap, or hit an internal error. Never throws.
  */
-export function trackEvent(name: string, fields: Record<string, unknown> = {}): void {
+export function trackEvent(name: string, fields: Record<string, unknown> = {}): boolean {
   try {
-    if (DISABLED) return;
-    if (!usePreferencesStore.getState().telemetryEnabled) return;
-    if (eventsThisSession >= MAX_EVENTS_PER_SESSION) return;
+    if (DISABLED) return false;
+    if (!usePreferencesStore.getState().telemetryEnabled) return false;
+    if (eventsThisSession >= MAX_EVENTS_PER_SESSION) return false;
     const cap = PER_EVENT_CAPS[name];
-    if (cap !== undefined && (perEventCounts[name] ?? 0) >= cap) return;
+    if (cap !== undefined && (perEventCounts[name] ?? 0) >= cap) return false;
 
     const event: QueuedEvent = { event: name, ts: Date.now() };
     for (const [key, value] of Object.entries(fields)) {
@@ -104,8 +109,10 @@ export function trackEvent(name: string, fields: Record<string, unknown> = {}): 
     } else if (flushTimer === null) {
       flushTimer = setTimeout(flushNow, FLUSH_AFTER_MS);
     }
+    return true;
   } catch {
     // Telemetry must never surface an error into app code.
+    return false;
   }
 }
 

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Granted extra turns carry a minted ExtraTurnId (GameState.extra_turns entries, current_extra_turn, DelayedTriggerCondition::AtBeginningOfGrantedTurn) so a delayed effect binds to its specific extra turn; older peers drop the id and mis-time or reject it"
+}

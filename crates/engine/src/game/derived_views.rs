@@ -5840,10 +5840,12 @@ mod tests {
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(2),
             anchor: PlayerId(0),
+            id: crate::types::identifiers::ExtraTurnId(1),
         });
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(0),
             anchor: PlayerId(0),
+            id: crate::types::identifiers::ExtraTurnId(2),
         });
 
         let views = derive_views(&state, None);
@@ -10767,6 +10769,7 @@ mod tests {
             effect_description: None,
             remaining: Vec::new(),
             repeat,
+            affected_object: None,
         };
         for (count, repeat, expected) in [
             (QuantityExpr::Fixed { value: 1 }, None, (1, 1)),

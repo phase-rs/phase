@@ -986,7 +986,7 @@ mod tests {
     }
 
     /// The fence the chat prompt draws with delimiters is drawn structurally
-    /// here: the position (which carries Oracle text and player names) is the
+    /// here: the position (which carries Oracle text and log lines) is the
     /// question's `state`, and only engine-authored text is its instructions.
     #[test]
     fn jev_keeps_the_position_in_state_and_out_of_the_instructions() {
