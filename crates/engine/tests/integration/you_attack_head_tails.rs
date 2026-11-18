@@ -4,9 +4,9 @@
 //! Sol, Advocate Eternal (#11044): "Teamwork — Whenever you attack or block
 //! with both Sol, Advocate Eternal and its partner, support 4 and investigate
 //! four times." The parser used to read the attack leg as a bare "whenever you
-//! attack", so Sol attacking alone supported 4. "Its partner" needs Legendary
-//! partner (CR 702.124), which the engine does not model, so both legs fail
-//! closed as `Unknown` and never fire.
+//! attack", so Sol attacking alone supported 4. "Its partner" depends on Sol's
+//! printed Legendary partner ability, which the engine does not model, so both
+//! legs fail closed as `Unknown` and never fire.
 //!
 //! Ainok Strike Leader: "Whenever you attack with this creature and/or your
 //! commander, ..." used to fire on any attack. It now fires only when Ainok or
