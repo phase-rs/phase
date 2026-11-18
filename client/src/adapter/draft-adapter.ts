@@ -875,6 +875,12 @@ export interface DraftPlayerViewFields {
   /** Engine-owned selection interaction, independent of the current count. */
   pick_selection_mode: "Direct" | "Ordered";
   pool: DraftCardInstance[];
+  /**
+   * CR 702.139a: the companion the viewer's host-ACCEPTED deck submission
+   * designated. Engine-published on the viewer's own view only; absent when
+   * nothing is accepted or the accepted deck designated none.
+   */
+  submitted_companion?: string;
   draft_effects: DraftCardInstance[];
   /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
   pool_groups: DraftPoolGroups;
@@ -935,6 +941,22 @@ export interface DraftPlayerViewFields {
   next_pairing_round: number;
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
+  /**
+   * Engine-published procedure fact: whether a submitted deck faces in-session
+   * rounds (`TournamentPairings`) or the pod completes after deckbuilding
+   * (`CompleteImmediately`, Commander Draft). Optional because hosts predating
+   * the field omit it; absent is read as "unknown", which the submit
+   * confirmation words as a final deck — the wording that promises no later
+   * change the pod may not offer.
+   */
+  post_draft_play?: PostDraftPlay;
+  /**
+   * Whether the viewer may submit (or revise) a deck now. Engine-derived from
+   * `DraftSession::deck_submission_open` so clients never re-derive it from
+   * `status` + `pod_policy`. Defaulted for views from hosts predating it:
+   * absent is false.
+   */
+  deck_submission_open?: boolean;
   pairings: PairingView[];
   match_config: MatchConfig;
   /**
@@ -1116,6 +1138,18 @@ export class DraftEngineOperationLease {
     return this.wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
   }
 
+  companionHasDraftedCopyOutsideDeck(
+    poolNames: readonly string[],
+    mainDeck: readonly string[],
+    companion: string,
+  ): boolean {
+    return this.wasm.companion_has_drafted_copy_outside_deck(
+      JSON.stringify(poolNames),
+      JSON.stringify(mainDeck),
+      companion,
+    );
+  }
+
   checkRestorableSession(json: string): RestorableDraftSessionVerdict {
     return this.wasm.check_restorable_draft_session(json) as RestorableDraftSessionVerdict;
   }
@@ -1196,7 +1230,14 @@ export class DraftEngineOperationLease {
     return this.wasm.get_view() as DraftPlayerView;
   }
 
-  submitDeck(mainDeck: string[], commanders: string[]): DraftPlayerView {
+  submitDeck(mainDeck: string[], commanders: string[] = [], companion?: string | null): DraftPlayerView {
+    if (companion !== undefined && companion !== null) {
+      return this.wasm.submit_deck(
+        JSON.stringify(mainDeck),
+        JSON.stringify(commanders),
+        companion,
+      ) as DraftPlayerView;
+    }
     return this.wasm.submit_deck(
       JSON.stringify(mainDeck),
       JSON.stringify(commanders),
@@ -1340,8 +1381,17 @@ export class DraftEngineOperationLease {
   submitDeckForSeat(
     seat: number,
     mainDeck: string[],
-    commanders: string[],
+    commanders: string[] = [],
+    companion?: string | null,
   ): DraftPlayerView {
+    if (companion !== undefined && companion !== null) {
+      return this.wasm.submit_deck_for_seat(
+        seat,
+        JSON.stringify(mainDeck),
+        JSON.stringify(commanders),
+        companion,
+      ) as DraftPlayerView;
+    }
     return this.wasm.submit_deck_for_seat(
       seat,
       JSON.stringify(mainDeck),
@@ -1457,6 +1507,20 @@ export class DraftAdapter {
   }
 
   /**
+   * CR 702.139a + CR 100.4b: whether a companion designation is backed by a
+   * drafted pool copy outside the main deck. The engine's one rule (the same
+   * one submission enforces); stateless, so P2P guests can ask it too.
+   */
+  async companionHasDraftedCopyOutsideDeck(
+    poolNames: readonly string[],
+    mainDeck: readonly string[],
+    companion: string,
+  ): Promise<boolean> {
+    return withDraftEngineOperation((lease) =>
+      lease.companionHasDraftedCopyOutsideDeck(poolNames, mainDeck, companion));
+  }
+
+  /**
    * Ask the draft engine whether a saved session passes its legacy admission,
    * without restoring it. Stateless: no draft session is installed, read or
    * changed.
@@ -1509,8 +1573,8 @@ export class DraftAdapter {
     return withDraftEngineOperation((lease) => lease.getView());
   }
 
-  async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
-    return withDraftEngineOperation((lease) => lease.submitDeck(mainDeck, commanders));
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
+    return withDraftEngineOperation((lease) => lease.submitDeck(mainDeck, commanders, companion));
   }
 
   async suggestDeck(): Promise<SuggestedDeck> {
@@ -1619,8 +1683,9 @@ export class DraftAdapter {
     seat: number,
     mainDeck: string[],
     commanders: string[],
+    companion?: string | null,
   ): Promise<DraftPlayerView> {
-    return withDraftEngineOperation((lease) => lease.submitDeckForSeat(seat, mainDeck, commanders));
+    return withDraftEngineOperation((lease) => lease.submitDeckForSeat(seat, mainDeck, commanders, companion));
   }
 
   async getViewForSeat(seat: number): Promise<DraftPlayerView> {

@@ -476,6 +476,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::ChooseStartingPlayer { player: a0 } => {
+            let GameAction::ChooseStartingPlayer { player: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChooseOption { choice: a0 } => {
             let GameAction::ChooseOption { choice: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -543,8 +549,8 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
                 cmp_val(a0, b0)
             }
         }
-        GameAction::DecideOptionalCost { pay: a0 } => {
-            let GameAction::DecideOptionalCost { pay: b0 } = b else {
+        GameAction::DecideOptionalCost { index: a0 } => {
+            let GameAction::DecideOptionalCost { index: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
             cmp_val(a0, b0)

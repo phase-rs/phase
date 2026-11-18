@@ -166,16 +166,15 @@ fn pool_count(runner: &GameRunner, color: ManaType) -> usize {
 }
 
 /// CR 605.4a + CR 608.2d: a nested mana sub-cost auto-tap that taps a
-/// multi-type land pauses for the echo choice through the ultimate mana-ability
+/// multi-type land selects its echo through the ultimate mana-ability
 /// root settlement (the nested path carries `resume=None` by construction, so
 /// the inline pre-spend gate skips it by design). Mirari's Wake plus Simic
 /// Growth Chamber ({G}{U}) plus Darkwater Catacombs ("{1}, {T}: Add {U}{B}"),
 /// empty pool: activating Catacombs auto-taps the chamber for its {1}
-/// sub-cost, the echo pauses, answering funds the activation, and Catacombs'
-/// own {U}{B} production triggers a second (production) echo that the
-/// activation settles through.
+/// sub-cost and settles that selected echo inline. Catacombs' raw {U}{B}
+/// activation still owes its own, unselected production echo.
 #[test]
-fn nested_sub_cost_echo_choice_precedes_catacombs_production() {
+fn nested_sub_cost_echo_settles_inline_before_catacombs_production_echo_prompt() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_enchantment_from_oracle(P0, "Mirari's Wake", MIRARI_ECHO_ORACLE);
@@ -196,36 +195,36 @@ fn nested_sub_cost_echo_choice_precedes_catacombs_production() {
             ability_index,
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("nested sub-cost tap must pause for echo choice");
+        .expect("funding settles inline before the raw Catacombs echo prompts");
     match &runner.state().waiting_for {
-        WaitingFor::ChooseManaColor { player, .. } => {
+        WaitingFor::ChooseManaColor {
+            player,
+            choice: engine::types::game_state::ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
             assert_eq!(*player, P0, "P0 activates, so P0 chooses");
+            assert_eq!(options.len(), 2);
+            assert!(options.contains(&ManaType::Blue) && options.contains(&ManaType::Black));
         }
         other => panic!("expected a SingleColor echo choice, got {other:?}"),
     }
-
-    runner
-        .act(GameAction::ChooseManaColor {
-            choice: ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        })
-        .expect("answering Green must continue the activation");
-    // Catacombs is itself a land: its own {U}{B} production triggers Mirari's
-    // Wake again, so the activation only settles after that second echo is
-    // chosen.
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseManaColor { player, .. } => {
-            assert_eq!(*player, P0, "P0 activates, so P0 chooses");
-        }
-        other => panic!("expected the production echo choice, got {other:?}"),
-    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        4,
+        "Chamber GU plus its selected bonus minus 1, then Catacombs UB"
+    );
+    assert_eq!(
+        pool_count(&runner, ManaType::Black),
+        1,
+        "Catacombs has already produced its base black before the raw echo"
+    );
     runner
         .act(GameAction::ChooseManaColor {
             choice: ManaChoice::SingleColor(ManaType::Blue),
             count: 1,
         })
         .expect("answering the production echo must complete the activation");
-    // Base {G}{U} + first bonus {G}, minus {1} for the sub-cost, plus
+    // Base {G}{U} plus the selected first bonus, minus {1}, plus
     // Catacombs' {U}{B} production, plus the production echo's bonus: five mana
     // with the produced colors present.
     assert_eq!(

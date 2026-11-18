@@ -337,6 +337,11 @@ fn an_opposing_blocker_makes_the_same_activation_available_again() {
 /// Build the `AntiSelfHarmPolicy` verdict for the Expendable Troops activation
 /// on `board`.
 fn anti_self_harm_verdict(board: &Board) -> PolicyVerdict {
+    activation_verdict(&board.state, board.troops)
+}
+
+/// The `AntiSelfHarmPolicy` verdict for activating `source`'s first ability.
+fn activation_verdict(state: &GameState, source: ObjectId) -> PolicyVerdict {
     let config = AiConfig::default();
     let mut session = AiSession::empty();
     session.features.insert(AI, Default::default());
@@ -346,7 +351,7 @@ fn anti_self_harm_verdict(board: &Board) -> PolicyVerdict {
 
     let candidate = CandidateAction {
         action: GameAction::ActivateAbility {
-            source_id: board.troops,
+            source_id: source,
             ability_index: 0,
             payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
@@ -357,7 +362,7 @@ fn anti_self_harm_verdict(board: &Board) -> PolicyVerdict {
         candidates: Vec::new(),
     };
     let ctx = PolicyContext {
-        state: &board.state,
+        state,
         decision: &decision,
         candidate: &candidate,
         ai_player: AI,
@@ -404,6 +409,68 @@ fn the_own_board_veto_is_silent_when_an_opponent_is_reachable() {
         None,
         "with an opposing blocker legal for the same 'attacking or blocking creature' \
          filter, the own-board veto must not fire"
+    );
+}
+
+/// Words of Wind ("{1}: The next time you would draw a card this turn, each
+/// player returns a permanent they control to its owner's hand instead.") names
+/// no target (CR 115.10a: the choice is made as the replacement applies, by
+/// each player). Its bounce filter is a resolution-time population, so the
+/// AI's own-board veto must not read it as a target pool that reaches only the
+/// AI's board. Oracle text read from `data/card-data.json` (card "Words of
+/// Wind"), parsed through the shipped Oracle parser.
+fn wind_board() -> (GameState, ObjectId) {
+    let mut ids = Ids::new();
+    let mut state = GameState::new_two_player(4242);
+    state.phase = Phase::PreCombatMain;
+    state.active_player = AI;
+    state.priority_player = AI;
+    state.waiting_for = WaitingFor::Priority { player: AI };
+
+    let words = create_object(
+        &mut state,
+        ids.next(),
+        AI,
+        "Words of Wind".to_string(),
+        Zone::Battlefield,
+    );
+    let parsed = parse_oracle_text(
+        "{1}: The next time you would draw a card this turn, each player returns a permanent          they control to its owner's hand instead.",
+        "Words of Wind",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    {
+        let obj = state.objects.get_mut(&words).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        *Arc::make_mut(&mut obj.abilities) = parsed.abilities;
+    }
+    // AI's and the opponent's permanents: both populations are returned by the
+    // printed effect, so neither is a "target".
+    vanilla_creature(&mut state, &mut ids, AI, "AI Bear", 2, 2);
+    vanilla_creature(&mut state, &mut ids, OPP, "Opposing Bear", 2, 2);
+    (state, words)
+}
+
+#[test]
+fn words_of_wind_activation_is_not_vetoed_as_hitting_only_the_ai_board() {
+    let (state, words) = wind_board();
+    // Non-vacuity: the fixture really parsed an activated draw replacement.
+    assert!(
+        state.objects[&words]
+            .abilities
+            .iter()
+            .any(|ability| matches!(
+                *ability.effect,
+                engine::types::ability::Effect::CreateDrawReplacement { .. }
+            )),
+        "Words of Wind must parse to a draw-replacement activation"
+    );
+    assert_eq!(
+        reject_kind(&activation_verdict(&state, words)),
+        None,
+        "CR 115.10a + CR 101.4: Words of Wind targets nothing and returns every          player's permanent, so the own-board-only veto must not fire"
     );
 }
 

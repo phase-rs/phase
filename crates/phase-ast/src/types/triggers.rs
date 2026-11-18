@@ -88,11 +88,13 @@ pub enum TriggerEventKey {
     /// CR 613.1b: a permanent's controller changed — the `ControllerChanged`
     /// event published by the control-changing instruction handlers
     /// (`GainControl`, `ExchangeControl`, the cleanup reversion of an "until end
-    /// of turn" control effect).
-    /// NOTE: Control changes that publish no `ControllerChanged` event
-    /// (static / Aura control, a lapsed `ForAsLongAs` duration, CR 800.4a
-    /// elimination) do NOT flow through this bucket — they are not caught by
-    /// `TriggerMode::ChangesController` either (see `match_changes_controller`).
+    /// of turn" control effect) and by a full layer evaluation's controller diff
+    /// for control it derives without an instruction (static / Aura control, a
+    /// lapsed `ForAsLongAs` duration).
+    /// NOTE: this publishes every control change actually derived by a full
+    /// layer evaluation, without duplicating existing instruction publication.
+    /// It does not guarantee that every rules-required control transition is
+    /// derived; phase-rs/phase#10947 remains.
     ChangesController,
     /// CR 701.9: A player discarded a card.
     Discarded,
@@ -178,11 +180,105 @@ pub enum TriggerEventKey {
     PhaseOut,
 }
 
+impl TriggerEventKey {
+    /// CR 603.10: whether an ability that triggers on an event with this key
+    /// "looks back in time", so a permanent that left the battlefield in the
+    /// same event (or the same instruction) as the event still sees it.
+    /// Every other trigger checks the objects that exist immediately after the
+    /// event.
+    pub fn is_look_back(&self) -> bool {
+        match self {
+            // CR 603.10a: leaves-the-battlefield abilities (dying included) and
+            // abilities that trigger when a player sacrifices a permanent.
+            Self::LeaveBattlefield(_) | Self::Dies(_) | Self::Sacrificed => true,
+            // CR 603.10b: abilities that trigger when a permanent phases out.
+            Self::PhaseOut => true,
+            // CR 603.10c: abilities that trigger when an object becomes
+            // unattached. The key is coarse (attach and unattach share it), so
+            // this over-approximates toward observation.
+            Self::AttachmentChanged => true,
+            // CR 603.10d: abilities that trigger when a player loses control of
+            // an object.
+            Self::ChangesController => true,
+            // CR 603.10f: abilities that trigger when a player loses the game.
+            Self::PlayerLost => true,
+            Self::EnterBattlefield(_)
+            | Self::SpellCast(_)
+            | Self::BecomesTarget
+            | Self::Attacks
+            | Self::Blocks
+            | Self::DealsDamage
+            | Self::DamagePrevented
+            | Self::CardsDrawn
+            | Self::LifeChanged
+            | Self::ManaProduced
+            | Self::ManaSpent
+            | Self::CounterAdded
+            | Self::CounterRemoved
+            | Self::BeginningOfPhase(_)
+            | Self::Taps
+            | Self::TapsForMana
+            | Self::Untaps
+            | Self::Destroyed
+            | Self::Discarded
+            | Self::Milled
+            | Self::TokenCreated
+            | Self::FaceOrTransform
+            | Self::PlayerCounterChanged
+            | Self::DieOrCoin
+            | Self::MonarchOrInitiative
+            | Self::VisitAttraction
+            | Self::Specializes
+            | Self::Clashed
+            | Self::Voted
+            | Self::DayNightChanged
+            | Self::DungeonOrClassOrCase
+            | Self::PlayerActionPerformed
+            | Self::Bending
+            | Self::TurnStarted
+            | Self::Exiled
+            | Self::Revealed
+            | Self::AbilityOrCopyActivated
+            | Self::Renowned
+            | Self::BecomesMonstrous
+            | Self::ManifestDreadResolved
+            | Self::Explored
+            | Self::DiscoverResolved
+            | Self::AdaptResolved
+            | Self::ConniveResolved
+            | Self::Exerted
+            | Self::Enlisted
+            | Self::Foretold
+            | Self::Fight
+            | Self::PhaseIn => false,
+        }
+    }
+}
+
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
+///
+/// Decoded through a normalizing `Deserialize` (`remote = "Self"`): the legacy
+/// unit form `"Planeswalker"` (written before the variant carried a `subtype`;
+/// it always meant every planeswalker the protected player controls) still
+/// loads as `Planeswalker { subtype: None }`. This is a deliberate, narrow
+/// departure from the strict card-data / transport decode policy in
+/// `game_state.rs` (obsolete tags stay rejected): the tag only ever had one
+/// meaning, so accepting it loses nothing. Precedent: the `TriggerMode` shim
+/// below and the `WardCost` shim in `keywords.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum AttackTargetFilter {
     Player,
-    Planeswalker,
+    /// CR 508.1c: "can't attack planeswalkers you control" — attacks against
+    /// planeswalkers the protected player controls. Controller-anchored (the
+    /// matcher compares against `source_controller`, never `source_owner`).
+    /// CR 205.3j: `subtype: Some(_)` narrows to planeswalkers bearing the
+    /// named subtype (a planeswalker subtype, canonicalized by
+    /// `parse_subtype`), e.g. "can't attack Jaces you control"; `None`
+    /// defends all of them.
+    Planeswalker {
+        subtype: Option<String>,
+    },
     PlayerOrPlaneswalker,
     Battle,
     /// CR 506.2 + CR 508.1a: "can't attack its owner" — the permanent may not
@@ -227,6 +323,54 @@ pub enum AttackTargetFilter {
     /// restriction, so the runtime matcher needs that object's id, not the
     /// controller the `you`-scoped variants resolve.
     PlayerAttackedBySourceThisTurn,
+}
+
+impl Serialize for AttackTargetFilter {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        AttackTargetFilter::serialize(self, serializer)
+    }
+}
+
+/// Non-buffering visitor behind `AttackTargetFilter`'s normalizing
+/// `Deserialize`. Routes every current-shape payload to the derived
+/// implementation and maps the one legacy unit tag (`"Planeswalker"`) onto
+/// its only historical meaning. Uses `deserialize_any`, so it needs a
+/// self-describing format (serde_json, serde-wasm-bindgen — the only ones in
+/// use); bincode / postcard cannot decode an `AttackTargetFilter`.
+struct AttackTargetFilterVisitor;
+
+impl<'de> serde::de::Visitor<'de> for AttackTargetFilterVisitor {
+    type Value = AttackTargetFilter;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an AttackTargetFilter (variant name string or externally tagged map)")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<AttackTargetFilter, E> {
+        use serde::de::IntoDeserializer;
+        match v {
+            // CR 508.1c: before the `subtype` axis existed, the unit
+            // `Planeswalker` filter was only ever every planeswalker the
+            // protected player controls.
+            "Planeswalker" => Ok(AttackTargetFilter::Planeswalker { subtype: None }),
+            other => {
+                AttackTargetFilter::deserialize(IntoDeserializer::<E>::into_deserializer(other))
+            }
+        }
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        map: A,
+    ) -> Result<AttackTargetFilter, A::Error> {
+        AttackTargetFilter::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+    }
+}
+
+impl<'de> Deserialize<'de> for AttackTargetFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(AttackTargetFilterVisitor)
+    }
 }
 
 /// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the
@@ -514,6 +658,11 @@ pub enum TriggerMode {
     /// "Gotcha!" — the "When you do" reflexive trigger. The watched condition lives
     /// in `TriggerDefinition::gotcha_condition`.
     GotchaSaid,
+    /// Un-card touch (no CR entry): fires when a player touches an object —
+    /// "Whenever a player's skin or fingernail touches this creature" (Vile Bile).
+    /// The touched object is matched by `valid_card`, the touching player by
+    /// `valid_target`; the player is the event's triggering player ("that player").
+    Touched,
     /// CR 701.44: Triggers when a creature explores.
     Explored,
     /// CR 702.110: Exploit trigger — when a creature exploits another creature.
@@ -851,6 +1000,7 @@ impl FromStr for TriggerMode {
             "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
             "GotchaSaid" => TriggerMode::GotchaSaid,
+            "Touched" => TriggerMode::Touched,
             "ExcessDamage" => TriggerMode::ExcessDamage,
             "ExcessDamageAll" => TriggerMode::ExcessDamageAll,
             "Exerted" => TriggerMode::Exerted,
@@ -1297,6 +1447,7 @@ mod tests {
             "Evolve",
             "Evolved",
             "GotchaSaid",
+            "Touched",
             "ExcessDamage",
             "ExcessDamageAll",
             "Exerted",
@@ -1403,5 +1554,52 @@ mod tests {
             known_count >= 147,
             "Expected 147+ known trigger modes, got {known_count}"
         );
+    }
+
+    /// CR 508.1c: the subtype axis round-trips through serde in the
+    /// struct-variant form, and the legacy unit tag written before the axis
+    /// existed still decodes as its only historical meaning (every
+    /// planeswalker the protected player controls). Committed card-data and
+    /// integration fixtures may hold the legacy form, so removing the
+    /// `Deserialize` shim fails their consumers.
+    #[test]
+    fn planeswalker_subtype_round_trips_and_legacy_unit_decodes_as_unscoped() {
+        for (subtype, json) in [
+            (None, r#"{"Planeswalker":{"subtype":null}}"#),
+            (
+                Some("Jace".to_string()),
+                r#"{"Planeswalker":{"subtype":"Jace"}}"#,
+            ),
+        ] {
+            let filter = AttackTargetFilter::Planeswalker { subtype };
+            assert_eq!(serde_json::to_string(&filter).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<AttackTargetFilter>(json).unwrap(),
+                filter
+            );
+        }
+
+        // Legacy unit form -> unscoped (the shim under test).
+        assert_eq!(
+            serde_json::from_str::<AttackTargetFilter>(r#""Planeswalker""#).unwrap(),
+            AttackTargetFilter::Planeswalker { subtype: None }
+        );
+        // The legacy tag also decodes when nested, the shape fixtures hold.
+        let nested: Vec<AttackTargetFilter> = serde_json::from_str(
+            r#"["Planeswalker",{"Planeswalker":{"subtype":"Jace"}},"Player"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nested,
+            vec![
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
+                },
+                AttackTargetFilter::Player,
+            ]
+        );
+        // Unknown tags still fail: the shim maps exactly one legacy form.
+        assert!(serde_json::from_str::<AttackTargetFilter>(r#""NotAFilter""#).is_err());
     }
 }

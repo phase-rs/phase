@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ProposedEvent::ZoneChange, PendingBatchZoneMoveRequest, PendingChangeZoneIteration and WaitingFor::EffectZoneChoice carry library_shuffle (TerminalShuffle) so a merged permanent's components share the terminal shuffle's transient library position across replacement pauses and resolution-time zone choices. Older full-game and P2P peers silently drop the optional field and resume with per-component zone-default delivery, producing extra shuffle events and trigger opportunities; refuse that silent capability loss."
+}

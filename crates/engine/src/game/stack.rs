@@ -2,8 +2,8 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousEffectOnset, ContinuousModification,
     CopyCountStatus, DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition,
-    KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
+    InstructionJoin, KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition,
+    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
     TargetSelectionMode, TriggerCondition, TriggerDefinitionRef,
 };
 use crate::types::card_type::CoreType;
@@ -104,6 +104,13 @@ pub(super) fn finish_resolving_stack_entry(
     if let Some(entry) = entry.as_ref() {
         state.release_stack_bound_reveals(entry.id);
     }
+    // CR 701.20a: instruction-owned transient reveals end at the resolution
+    // completion boundary before publishing viewer projections.
+    if !super::engine::transient_reveal_outlives_action_boundary(state)
+        && !super::engine::ripple_resolution_cast_in_flight(state)
+    {
+        state.revealed_cards.clear();
+    }
     debug_assert!(
         firing.is_none()
             || entry
@@ -191,6 +198,10 @@ pub(super) fn abandon_active_resolution_carrier(
         state.resolving_stack_object = object;
     }
     state.resolution_source_relatch = None;
+    // CR 614.12a: these entries had not happened yet; abandoning the family
+    // abandons them. Entries held in `unsettled_entry_batch_events` did happen
+    // (CR 603.2), so they stay and are checked at the next collector; CR 800.4a
+    // removes the departed player's own abilities there.
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }
@@ -319,6 +330,8 @@ pub(crate) fn push_copy_to_stack(
         let announcement = state.mint_spell_announcement();
         if let Some(object) = state.objects.get_mut(&entry.id) {
             object.cast_occurrence = None;
+            // CR 707.10: the copy wasn't cast, so it wasn't cast "this way".
+            object.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
             object.spell_announcement = Some(announcement);
         }
         if let Some(ability) = entry.ability_mut() {
@@ -3229,9 +3242,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                     exile_links: zone_pipeline::ExileLinkSpec::default(),
                                     drain:
                                         crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                                    // Spell resolution delivers to the battlefield
-                                    // or graveyard — never a library placement.
-                                    library_placement: None,
                                 },
                                 events,
                             ) {
@@ -3530,7 +3540,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                 .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
                 .unwrap_or(false);
             if is_aura {
-                let attached = match spell_targets.first() {
+                match spell_targets.first() {
                     // CR 608.3c + CR 608.2b: Object Aura — verify the target is
                     // still a legal host per the Aura's own zone-scoped enchant
                     // ability (`is_valid_attachment_target`, the single legality
@@ -3549,11 +3559,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                             state, entry.id, *target_id,
                         ) =>
                     {
-                        effects::attach::attach_to_reporting_change(state, entry.id, *target_id)
+                        effects::attach::attach_to_with_events(state, entry.id, *target_id, events);
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
-                        false
                     }
                     // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
                     // Fetters-class). Validity check is "player still in game"
@@ -3561,29 +3570,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                     // `check_unattached_auras` (CR 303.4c) will detach + grave
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
-                        effects::attach::attach_to_player_reporting_change(
-                            state, entry.id, *player_id,
-                        )
+                        effects::attach::attach_to_player_with_events(
+                            state, entry.id, *player_id, events,
+                        );
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
-                        false
                     }
-                };
-                if attached {
-                    // CR 608.3c / CR 603.2e: an Aura spell resolves and becomes
-                    // attached — is an effect resolution — emit
-                    // `EffectResolved { kind: Attach }` so "whenever an Aura
-                    // becomes attached" triggers (e.g. Bramble Elemental) fire on
-                    // spell-resolution attach, not only on effect-resolver attach
-                    // via `deliver_attach`.
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::Attach,
-                        source_id: entry.id,
-                        subject: state.capture_event_object_snapshot(entry.id).map(Box::new),
-                    });
                 }
             }
 
@@ -3995,14 +3990,12 @@ fn resolve_keyword_action(
                         && t.card_types.core_types.contains(&CoreType::Creature)
                 });
             if still_valid {
-                if let Some(old_target) =
-                    effects::attach::attach_to(state, equipment_id, target_creature_id)
-                {
-                    events.push(GameEvent::Unattached {
-                        attachment_id: equipment_id,
-                        old_target,
-                    });
-                }
+                effects::attach::attach_to_with_events(
+                    state,
+                    equipment_id,
+                    target_creature_id,
+                    events,
+                );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,
@@ -4864,6 +4857,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _, // transport only; batch candidacy is shape-only
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
@@ -4916,6 +4910,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5015,6 +5010,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5122,6 +5119,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _, // transport only; batch candidacy is shape-only
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
@@ -5174,6 +5172,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5250,6 +5249,8 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5359,6 +5360,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         chosen_target_slots: _, // CR 115.1 chosen-target record; batch candidacy is shape-only
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _, // transport only; batch candidacy is shape-only
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
@@ -5411,6 +5413,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5426,6 +5429,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
             count: QuantityExpr::Fixed { .. },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            ..
         }
     );
 
@@ -5491,6 +5495,8 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5761,6 +5767,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         target_reads: a_target_reads,
         entry_onset: a_entry_onset,
         sibling_condition: a_sibling_condition,
+        instruction_join: a_instruction_join,
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
@@ -5769,6 +5776,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_target_slots: a_chosen_target_slots,
         activation_cost_reduction: a_activation_cost_reduction,
         activation_record: a_activation_record,
+        announced_usage_key: _, // transport only; never participates
         illegal_target_slots: a_illegal_target_slots,
         unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
@@ -5855,6 +5863,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         target_reads: b_target_reads,
         entry_onset: b_entry_onset,
         sibling_condition: b_sibling_condition,
+        instruction_join: b_instruction_join,
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
@@ -5863,6 +5872,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         chosen_target_slots: b_chosen_target_slots,
         activation_cost_reduction: b_activation_cost_reduction,
         activation_record: b_activation_record,
+        announced_usage_key: _, // transport only; never participates
         illegal_target_slots: b_illegal_target_slots,
         unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
@@ -5971,6 +5981,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_target_reads == b_target_reads
         && a_entry_onset == b_entry_onset
         && a_sibling_condition == b_sibling_condition
+        && a_instruction_join == b_instruction_join
         && a_modal == b_modal
         && a_mode_abilities == b_mode_abilities
         && a_parent_target_missing_reason == b_parent_target_missing_reason
@@ -6354,6 +6365,7 @@ pub(crate) fn create_warp_delayed_trigger(
     let exile_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
@@ -10224,6 +10236,7 @@ mod tests {
 
         let resolved = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -10275,6 +10288,7 @@ mod tests {
 
         let resolved = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -11008,6 +11022,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             }
         }
 
@@ -11450,8 +11465,8 @@ mod tests {
                     batch_events: Vec::new(),
                     damage_to_players: Vec::new(),
                     prevention_tally: Vec::new(),
-                    lives_before: vec![20, 20],
                     sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                    replacement: None,
                     phase_c_remnant: None,
                 }));
             assert!(
@@ -17952,6 +17967,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,

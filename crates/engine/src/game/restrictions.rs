@@ -7,7 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{BattlefieldEntryRecord, CastOccurrence, CastingVariant};
+use crate::types::game_state::{
+    AbilityUsageKey, BattlefieldEntryRecord, CastOccurrence, CastTimingRoute, CastingVariant,
+};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -208,21 +210,50 @@ pub fn spell_confined_to_sorcery_timing(
     // blockers step. Its unblocked-creature cost can exist only in that step, so
     // the keyword's presence decides, not the cost's payability now.
     let instant_speed_route_open =
-        super::casting::spell_has_effective_flash(state, player, object_id, false)
-            || (flash_timing_cost(state, player, obj).is_some()
-                && target_dependent_flash_permission_feasible(state, player, object_id, false))
-            || super::casting_costs::payable_spell_alternative_cost_for_timing(
-                state,
-                player,
-                object_id,
-                CastTimingPermission::AsThoughHadFlash,
-            )
-            .is_some()
+        !open_flash_timing_routes(state, player, object_id, CastingVariant::Normal).is_empty()
             || super::casting_costs::can_pay_offering_additional_cost(state, player, object_id)
             || (obj.zone == Zone::Hand
                 && obj.owner == player
                 && super::keywords::effective_sneak_cost(state, object_id).is_some());
     !instant_speed_route_open
+}
+
+/// CR 601.3 + CR 601.3c + CR 601.3d + CR 702.8a: the "as though it had flash" routes by which
+/// this cast could begin now, in the order a cast proposal records them.
+pub(crate) fn open_flash_timing_routes(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> Vec<CastTimingRoute> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    [
+        (
+            CastTimingRoute::Permission,
+            super::casting::spell_has_effective_flash(state, player, object_id, false),
+        ),
+        (
+            CastTimingRoute::SpellOption,
+            flash_timing_cost(state, player, obj).is_some()
+                && target_dependent_flash_permission_feasible(state, player, object_id, false),
+        ),
+        (
+            CastTimingRoute::AlternativeCost,
+            super::casting_costs::payable_spell_alternative_cost_for_timing(
+                state,
+                player,
+                object_id,
+                casting_variant,
+                CastTimingPermission::AsThoughHadFlash,
+            )
+            .is_some(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(route, open)| open.then_some(route))
+    .collect()
 }
 
 /// CR 307.5 + CR 602.5d: Is `player`'s activation of ability `ability_index`
@@ -380,6 +411,9 @@ pub(crate) fn spell_cast_record_for(
         // history record carries provenance so own-cast exclusion (CR 601.2i)
         // can identify a permanent's own pending cast positionally.
         spell_object_id: Some(obj.id),
+        // CR 601.2a + CR 707.13: an outside-the-game copy is staged in a zone but
+        // is not cast from it; every "cast from [zone]" record predicate reads this.
+        from_outside_game: obj.created_outside_game,
         // CR 722.3d + CR 601.2i: capture the prepare-spell designation the
         // spell has as it becomes cast (the CR 722.3c linked copy's marker), so
         // `FilterProp::PrepareSpell` and its negation are exact on the history
@@ -520,6 +554,15 @@ pub(crate) fn battlefield_entry_record_for(
         // for an attached token). See the field doc on `BattlefieldEntryRecord.keywords`.
         keywords: obj.keywords.clone(),
         controller: obj.controller,
+        // CR 708.2: snapshot the object's face state at entry time — morph,
+        // disguise, manifest, and cloak creatures enter face down. This enables
+        // data-driven ETB condition queries like "if a face-down creature entered
+        // the battlefield under your control this turn" (Tunnel Tipster).
+        face_state: if obj.face_down {
+            crate::types::game_state::FaceState::FaceDown
+        } else {
+            crate::types::game_state::FaceState::FaceUp
+        },
     }
 }
 
@@ -537,6 +580,46 @@ pub fn record_battlefield_entry(
 
     let record = battlefield_entry_record_for(obj);
     state.battlefield_entries_this_turn.push_back(record);
+}
+
+/// CR 608.2i: Refresh the entry-time snapshot of the object's CURRENT
+/// battlefield occurrence, after its entry characteristics are installed.
+///
+/// Needed because a face-down profile (morph/manifest/disguise/cloak) is
+/// applied AFTER `record_battlefield_entry` pushed the row: a manifested land
+/// would otherwise be recorded as a face-down LAND even though CR 701.40a
+/// makes it a 2/2 face-down creature as it enters.
+///
+/// CR 400.7: a zone change preserves `ObjectId` and bumps the incarnation, so one
+/// object can hold several rows in this turn's ledger. Only the NEWEST row is the
+/// occurrence being delivered here — earlier rows are history that look-back reads
+/// still see (CR 608.2i: an object need not "currently meet the criteria described
+/// in the action, as long as [it] did so at the specified time"). Refreshing the
+/// first matching row would rewrite that history: casting a morph face down and
+/// then blinking it would turn the original `FaceDown` row `FaceUp`, and Tunnel
+/// Tipster would never see the face-down entry. Selecting the latest occurrence is
+/// the same authority `apply_battlefield_entry_controller_override` uses
+/// (`zones.rs`, `rposition`).
+pub fn update_battlefield_entry_record_for_object(
+    state: &mut crate::types::game_state::GameState,
+    object_id: ObjectId,
+) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    let new_record = battlefield_entry_record_for(obj);
+
+    // CR 400.7: bind the refresh to the newest row for this object, not the first.
+    let Some(index) = state
+        .battlefield_entries_this_turn
+        .iter()
+        .rposition(|record| record.object_id == object_id)
+    else {
+        return;
+    };
+    if let Some(record) = state.battlefield_entries_this_turn.get_mut(index) {
+        *record = new_record;
+    }
 }
 
 fn entry_controller_matches(
@@ -641,6 +724,16 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // (record.keywords) — "a creature with flying entered this turn".
                 // allow-raw-authority: entry-time snapshot lookup on BattlefieldEntryRecord.keywords; no live object to consult
                 FilterProp::WithKeyword { value } => record.keywords.contains(value),
+                // CR 708.2: face-down status at entry time — "a face-down creature
+                // entered this turn" (Tunnel Tipster). The entry snapshot captures
+                // whether the object was face down when it entered (morph, disguise,
+                // manifest, cloak), before any turn-face-up replacement applies.
+                FilterProp::FaceDown => {
+                    matches!(
+                        record.face_state,
+                        crate::types::game_state::FaceState::FaceDown
+                    )
+                }
                 // CR 109.1: "another [type]" is a same-object identity check —
                 // excludes the ability's own source object (e.g. Flying Drone's
                 // "another creature with flying entered this turn"). Mirrors the
@@ -932,16 +1025,98 @@ pub(crate) fn tap_permanent_for_cost(
 /// CR 602.5b: If an activated ability has a restriction on its use (e.g., "Activate only once
 /// each turn"), the restriction continues to apply even if its controller changes.
 ///
-/// CR 602.2 + CR 601.2i: `record` is the activation's facts captured before
-/// its cost was paid; it joins the activator's turn journal here.
-pub fn record_ability_activation(
-    state: &mut crate::types::game_state::GameState,
+/// CR 602.5b + CR 602.5c + CR 113.2c: the per-instance usage key for the
+/// ability at `ability_index` on `source_id`, bound at activation-check or
+/// record time from the resolved definition — never stored on the def. The
+/// index is not in the key: layer recomputes shift indices while the
+/// acquisition (provenance stamp + rules text) stays the same. `None` when
+/// the source or slot no longer resolves (e.g. the source was sacrificed to
+/// pay its own cost before the placement recorded): the check side then reads
+/// a missing entry as count 0 and the record side skips, matching today's
+/// missing-entry semantics.
+///
+/// Shared with phase-ai's AI loop guards, which fold the same per-acquisition
+/// budget through this helper rather than rebuilding the key. Keep the
+/// `None` => count-0 / record-skip contract when changing this.
+pub fn ability_usage_key(
+    state: &crate::types::game_state::GameState,
     source_id: ObjectId,
     ability_index: usize,
+) -> Option<AbilityUsageKey> {
+    let definition =
+        super::casting::activation_ability_definition(state, source_id, ability_index)?;
+    Some(ability_usage_key_for_definition(source_id, &definition))
+}
+
+/// CR 602.2a + CR 602.5c: stable identity of an announced ability
+/// definition's `(cost, effect, ability_tag)` triple. Pure function of the
+/// definition body: identical at load synthesis, runtime synthesis, layer
+/// recompute, and index shift — cost concretization runs inside
+/// `activation_ability_definition` before this is computed, so Brawl-style
+/// placeholders never fingerprint as `{0}`.
+///
+/// CR 612.1 + CR 612.2: the triple is deworded through the engine's own
+/// carrier classifier before fingerprinting — every serialized string leaf
+/// sitting at a `Word`-classified carrier position (the exact positions a
+/// text-changing effect may rewrite) is blanked, in BOTH word domains. A
+/// Magical Hack rewrite moves only those leaves, so the post-rewrite live
+/// re-derivation equals the announced key and the acquisition budget follows
+/// the ability through the rewrite (CR 602.5c). Non-carrier leaves are
+/// touched by neither rewrite nor dewording, so distinct bodies (two equip
+/// costs, reconfigure's attach vs unattach modes) still fingerprint apart.
+/// The normalized triple prints as its canonical JSON `Value`
+/// (`serde_json::Map` is key-sorted, so the encoding is deterministic within
+/// a save-compatible binary — saves already fail closed across binaries).
+pub fn ability_fingerprint(definition: &AbilityDefinition) -> String {
+    use crate::types::ability::TextWordDomain;
+    use crate::types::text_word_carriers::{carrier_class, walk_strings, WordClass};
+    let mut value = serde_json::to_value((
+        &definition.cost,
+        &definition.effect,
+        &definition.ability_tag,
+    ))
+    .expect("ability triple serializes");
+    walk_strings(&mut value, None, "", &mut |tag, key, leaf| {
+        let is_word = [TextWordDomain::ColorWord, TextWordDomain::BasicLandType]
+            .iter()
+            .any(|domain| carrier_class(tag, key, *domain) == Some(WordClass::Word));
+        if is_word {
+            leaf.clear();
+        }
+    });
+    format!("{value:?}")
+}
+
+/// CR 602.2a: pure constructor for the per-instance usage key from an
+/// already-resolved definition (the announcement's own def, or the check
+/// side's live re-derivation). The announcement capture path binds the key
+/// here; the check side reaches the same value through `ability_usage_key`.
+pub fn ability_usage_key_for_definition(
+    source_id: ObjectId,
+    definition: &AbilityDefinition,
+) -> AbilityUsageKey {
+    AbilityUsageKey {
+        source: source_id,
+        provenance: definition.granting_object,
+        description: definition.description.clone(),
+        fingerprint: ability_fingerprint(definition),
+        grant_chain: definition.grant_chain.clone(),
+    }
+}
+
+/// CR 602.2 + CR 601.2i: `record` is the activation's facts captured before
+/// its cost was paid; it joins the activator's turn journal here. `key` is
+/// the announcement-bound usage key the placement consumed off the placed
+/// entry — never re-derived here, so a cost that moved the source cannot
+/// unresolve the slot (CR 400.7).
+pub fn record_ability_activation(
+    state: &mut crate::types::game_state::GameState,
+    key: AbilityUsageKey,
     record: Option<crate::types::game_state::AbilityActivationRecord>,
-) {
-    crate::game::ledger::record_ability_activation(state, source_id, ability_index, record)
+) -> AbilityUsageKey {
+    crate::game::ledger::record_ability_activation(state, key.clone(), record)
         .expect("activated ability must have a valid ledger prefix");
+    key
 }
 
 /// CR 702.142b: Compute the effective per-turn activation limit for an ability.
@@ -1220,7 +1395,9 @@ fn activation_restriction_applies(
     restriction: &ActivationRestriction,
     gates: &ActivationRestrictionStaticGates,
 ) -> bool {
-    let key = (source_id, ability_index);
+    // CR 602.5c: the usage budget is per acquisition, not per index. A slot
+    // that no longer resolves reads a missing entry as count 0.
+    let key = ability_usage_key(state, source_id, ability_index);
 
     match restriction {
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
@@ -1270,10 +1447,9 @@ fn activation_restriction_applies(
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
         // CR 702.142b: ModifyActivationLimit statics may raise the limit for tagged abilities.
         ActivationRestriction::OnlyOnceEachTurn => {
-            let current_count = state
-                .activated_abilities_this_turn
-                .get(&key)
-                .copied()
+            let current_count = key
+                .as_ref()
+                .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                 .unwrap_or(0);
             let limit = effective_activation_limit(state, player, source_id, ability_index, gates);
             current_count < limit
@@ -1283,10 +1459,9 @@ fn activation_restriction_applies(
         // ModifyActivationLimit statics (Wonder Man) may raise the per-game cap
         // above 1, so the gate is `count < limit`, not `count == 0`.
         ActivationRestriction::OnlyOnce => {
-            let count = state
-                .activated_abilities_this_game
-                .get(&key)
-                .copied()
+            let count = key
+                .as_ref()
+                .and_then(|key| state.activated_abilities_this_game.get(key).copied())
                 .unwrap_or(0);
             count
                 < effective_activation_limit_per_game(
@@ -1299,10 +1474,8 @@ fn activation_restriction_applies(
         }
         // CR 602.5b: Per-turn activation count limit (e.g. "Activate only twice each turn").
         ActivationRestriction::MaxTimesEachTurn { count } => {
-            state
-                .activated_abilities_this_turn
-                .get(&key)
-                .copied()
+            key.as_ref()
+                .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
                 .unwrap_or(0)
                 < u32::from(*count)
         }
@@ -1385,16 +1558,13 @@ fn casting_restriction_applies(
         // Under shared team turns a turn where a teammate holds `active_player`
         // still belongs to the caster's own team, so `active_player != player`
         // over-permits. Same authority as `ParsedCondition::IsOpponentsTurn`.
-        CastingRestriction::DuringOpponentsTurn => {
-            super::players::is_opponent(state, player, state.active_player)
-        }
+        CastingRestriction::DuringOpponentsTurn => super::players::is_opponents_turn(state, player),
         CastingRestriction::DuringYourTurn => state.active_player == player,
         CastingRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringOpponentsUpkeep => {
-            super::players::is_opponent(state, player, state.active_player)
-                && state.phase == Phase::Upkeep
+            super::players::is_opponents_turn(state, player) && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringAnyUpkeep => state.phase == Phase::Upkeep,
         CastingRestriction::DuringYourEndStep => {
@@ -2043,9 +2213,7 @@ fn evaluate_condition_for_granter(
         // where a TEAMMATE holds `active_player` (CR 805.4 shared team turns —
         // the active team is still `player`'s own team) is NOT reported as an
         // opponent's turn, which `active_player != player` would do.
-        ParsedCondition::IsOpponentsTurn => {
-            super::players::is_opponent(state, player, state.active_player)
-        }
+        ParsedCondition::IsOpponentsTurn => super::players::is_opponents_turn(state, player),
         // CR 500.1 + CR 602.5: the game is in one of the named steps; player
         // scope, if any, is composed by the caller via `And`.
         ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
@@ -2252,40 +2420,20 @@ pub(crate) fn triggering_spell_targets_filter(
 /// `condition` is a `SpellTargetsFilter` either does not gate this cast or
 /// passes against the targets.
 ///
-/// Called at `finish_pending_cast_cost_or_pay` after `assign_targets_in_chain`
-/// has committed the player's choices. If a target-dependent flash permission
-/// authorized the cast (i.e., the cast is outside the sorcery-speed window via
-/// `cast_timing_permission == AsThoughHadFlash`) AND no flash permission's
-/// condition currently passes, the cast is illegal under CR 601.3d and must be
+/// Consulted only when the cast was proposed under the spell's own option
+/// (`CastTimingRoute::SpellOption`); an independent flash route recorded at
+/// proposal never reaches it (CR 601.6). If no flash option's condition passes
+/// against the chosen targets, the cast is illegal under CR 601.3d and must be
 /// aborted.
-/// `fused` projects the COMBINED characteristics of a pre-payment fused split
-/// spell (CR 702.102b) into the `has_real_flash` short-circuit so a value-keyed
-/// `CastWithKeyword{Flash}` grant (CR 702.8a) is seen for the fused spell. This
-/// re-validation runs before the `fused_split_spell` marker is set at
-/// `finalize_cast_with_phyrexian_choices`, so pre-payment fused callers pass
-/// `casting_variant == CastingVariant::Fuse`; all non-fused / single-face callers
-/// pass `false` (byte-identical to the pre-fix behavior).
 pub(crate) fn target_dependent_flash_permission_satisfied(
     state: &crate::types::game_state::GameState,
-    player: PlayerId,
     object_id: ObjectId,
     ability: &crate::types::ability::ResolvedAbility,
-    fused: bool,
 ) -> bool {
     use crate::types::ability::{ParsedCondition, SpellCastingOptionKind, TargetRef};
     let Some(obj) = state.objects.get(&object_id) else {
         return true;
     };
-    // CR 702.8a: A real Flash keyword (printed or granted via continuous effect)
-    // authorizes instant-speed casting independent of any conditional flash
-    // option. If the spell has Flash, the cast is legal regardless of any
-    // `AsThoughHadFlash` option's condition.
-    let has_real_flash =
-        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
-            .contains(&crate::types::keywords::KeywordKind::Flash);
-    if has_real_flash {
-        return true;
-    }
     let targets = super::ability_utils::declared_targets_in_chain(ability);
     let ctx = super::filter::FilterContext::from_source(state, object_id);
     let evaluate_target_filter = |filter: &crate::types::ability::TargetFilter| -> bool {
@@ -2343,12 +2491,10 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 ) -> bool {
     use crate::types::ability::{SpellCastingOptionKind, TargetRef};
 
-    // CR 702.8a: A real Flash keyword (printed or granted via continuous
-    // effect) authorizes instant-speed casting independent of any conditional
-    // flash option — short-circuit before any feasibility analysis.
-    let has_real_flash =
-        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
-            .contains(&crate::types::keywords::KeywordKind::Flash);
+    // CR 702.8a / CR 601.3b: an unconditional flash route (keyword or as-though
+    // permission) authorizes instant-speed casting independent of any
+    // conditional flash option — short-circuit before any feasibility analysis.
+    let has_real_flash = super::casting::spell_has_effective_flash(state, player, object_id, fused);
     if has_real_flash {
         return true;
     }
@@ -2745,8 +2891,20 @@ pub(crate) fn attack_target_matches_defended_scope(
         |id: ObjectId| -> Option<PlayerId> { state.objects.get(&id).map(|obj| obj.controller) };
     match (filter, target) {
         (AttackTargetFilter::Player, AttackTarget::Player(p)) => *p == source_controller,
-        (AttackTargetFilter::Planeswalker, AttackTarget::Planeswalker(pw_id)) => {
+        // CR 205.3j + CR 508.1c: `subtype: None` defends every planeswalker
+        // the protected player controls; `Some(_)` ("can't attack
+        // [Subtype]s you control") additionally requires the named subtype.
+        // Live controller comparison (not the `Owner*` exception): only a
+        // planeswalker the protected player currently controls is defended.
+        // Every other pairing (players, battles) is false.
+        (AttackTargetFilter::Planeswalker { subtype }, AttackTarget::Planeswalker(pw_id)) => {
             permanent_controller(*pw_id) == Some(source_controller)
+                && subtype.as_ref().is_none_or(|s| {
+                    state
+                        .objects
+                        .get(pw_id)
+                        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|sub| sub == s))
+                })
         }
         (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Player(p)) => {
             *p == source_controller
@@ -2920,13 +3078,40 @@ mod tests {
     #[test]
     fn activation_once_each_turn_uses_shared_counter() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        record_ability_activation(&mut state, ObjectId(10), 1, None);
+        // CR 602.5c: the counter is keyed by the resolved acquisition, so the
+        // fixture installs a real printed ability — a bare id records nothing.
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("just created")
+                .abilities,
+        )
+        .push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
+        );
+        let announced = ability_usage_key(&state, source, 0).expect("fixture slot resolves");
+        record_ability_activation(&mut state, announced, None);
 
         let result = check_activation_restrictions(
             &state,
             PlayerId(0),
-            ObjectId(10),
-            1,
+            source,
+            0,
             &[ActivationRestriction::OnlyOnceEachTurn],
         );
 
@@ -3384,6 +3569,7 @@ mod tests {
             colors: vec![],
             keywords: vec![],
             controller: PlayerId(0),
+            face_state: crate::types::game_state::FaceState::FaceUp,
         };
 
         assert!(
@@ -3656,6 +3842,7 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 keywords: vec![],
                 controller: PlayerId(1),
+                face_state: crate::types::game_state::FaceState::FaceUp,
             });
         let mut filter = crate::types::ability::TypedFilter::creature();
         filter.controller = Some(ControllerRef::Opponent);
@@ -3725,6 +3912,7 @@ mod tests {
                             colors: vec![],
                             keywords: vec![],
                             controller: *controller,
+                            face_state: crate::types::game_state::FaceState::FaceUp,
                         });
                     next_id += 1;
                 }
@@ -4323,6 +4511,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }]),
         );
@@ -4361,6 +4550,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
@@ -4377,6 +4567,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
@@ -4393,6 +4584,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -4575,8 +4767,6 @@ mod tests {
     /// SpellTargetsFilter { IsCommander })` and verifies the post-target gate:
     /// - targets containing a commander → permission satisfied (cast legal)
     /// - targets without a commander → permission unsatisfied (cast illegal)
-    /// - real Flash keyword on the spell → permission satisfied regardless
-    ///   (printed Flash trumps the conditional flash option per CR 702.8a)
     #[test]
     fn target_dependent_flash_permission_satisfied_against_commander_target() {
         use crate::game::game_object::GameObject;
@@ -4661,99 +4851,14 @@ mod tests {
         assert!(
             target_dependent_flash_permission_satisfied(
                 &state,
-                caster,
                 ObjectId(10),
-                &ability_with_commander,
-                false
+                &ability_with_commander
             ),
             "casting at instant speed targeting a commander must satisfy the flash condition"
         );
         assert!(
-            !target_dependent_flash_permission_satisfied(
-                &state,
-                caster,
-                ObjectId(10),
-                &ability_with_plain,
-                false
-            ),
+            !target_dependent_flash_permission_satisfied(&state, ObjectId(10), &ability_with_plain),
             "casting at instant speed targeting a non-commander must FAIL the flash condition"
-        );
-    }
-
-    /// CR 702.8a: A real Flash keyword on the spell short-circuits the
-    /// target-dependent flash permission check — printed Flash authorizes
-    /// instant-speed casting irrespective of any `AsThoughHadFlash` option's
-    /// condition.
-    #[test]
-    fn real_flash_keyword_overrides_target_dependent_flash_condition() {
-        use crate::game::game_object::GameObject;
-        use crate::types::ability::{
-            FilterProp, ParsedCondition, ResolvedAbility, SpellCastingOption, TargetFilter,
-            TargetRef, TypedFilter,
-        };
-        use crate::types::keywords::Keyword;
-
-        let mut state = crate::types::game_state::GameState::new_two_player(42);
-        let caster = PlayerId(0);
-        let opponent = PlayerId(1);
-
-        let mut spell = GameObject::new(
-            ObjectId(10),
-            CardId(10),
-            caster,
-            "Hypothetical With Both".to_string(),
-            Zone::Hand,
-        );
-        spell.card_types.core_types.push(CoreType::Enchantment);
-        spell.keywords.push(Keyword::Flash);
-        spell
-            .casting_options
-            .push(SpellCastingOption::as_though_had_flash().condition(
-                ParsedCondition::SpellTargetsFilter {
-                    filter: TargetFilter::Typed(TypedFilter {
-                        properties: vec![FilterProp::IsCommander],
-                        ..Default::default()
-                    }),
-                },
-            ));
-        state.objects.insert(spell.id, spell);
-
-        // A non-commander target — the conditional flash option's filter would
-        // FAIL against this target, but the printed Flash keyword should
-        // independently authorize the cast.
-        let plain = create_object(
-            &mut state,
-            CardId(21),
-            opponent,
-            "Ordinary Bear".to_string(),
-            Zone::Battlefield,
-        );
-        state
-            .objects
-            .get_mut(&plain)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Creature);
-
-        let ability = ResolvedAbility::new(
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 0 },
-                target: TargetFilter::Controller,
-            },
-            vec![TargetRef::Object(plain)],
-            ObjectId(10),
-            caster,
-        );
-        assert!(
-            target_dependent_flash_permission_satisfied(
-                &state,
-                caster,
-                ObjectId(10),
-                &ability,
-                false
-            ),
-            "printed Flash keyword must short-circuit the target-dependent flash check"
         );
     }
 
@@ -5239,9 +5344,7 @@ mod tests {
     #[test]
     fn is_source_blocked_reads_blocked_flag_not_assignments() {
         // CR 509.1h: `is_source_blocked` must read the attacker's `blocked` flag,
-        // so a creature made blocked by an effect (with NO blocker_assignments)
-        // reads true. This assertion fails if the body is reverted to the old
-        // `blocker_assignments`-non-empty check.
+        // so a creature made blocked by an effect reads true without assignments.
         use crate::game::combat::{
             mark_attacker_blocked, place_blocking, AttackTarget, AttackerInfo, CombatState,
         };
@@ -5269,6 +5372,15 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&blocker).unwrap().controller = PlayerId(1);
+        for id in [effect_blocked, normally_blocked, blocker] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
 
         let mut combat = CombatState::default();
         combat.attackers.push(AttackerInfo::new(
@@ -5292,7 +5404,12 @@ mod tests {
 
         // Reach-guard: a normally place_blocking-blocked attacker also reads true,
         // proving the assertion above is not vacuous.
-        assert!(place_blocking(&mut state, blocker, normally_blocked));
+        assert!(place_blocking(
+            &mut state,
+            blocker,
+            normally_blocked,
+            &mut Vec::new()
+        ));
         assert!(is_source_blocked(&state, normally_blocked));
     }
 
@@ -5660,8 +5777,9 @@ mod tests {
     fn ledger_guard_agrees_with_matcher() {
         let player = PlayerId(0);
         let source_id = ObjectId(99);
-        // Positively satisfies all four answerable props: green, on the
-        // battlefield, flying, and not the ability source. Also legendary and
+        // Positively satisfies four of the five answerable props: green, on the
+        // battlefield, flying, and not the ability source. FaceDown is covered by
+        // the separate face-down record below. Also legendary and
         // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
         let record = BattlefieldEntryRecord {
             object_id: ObjectId(10),
@@ -5672,6 +5790,7 @@ mod tests {
             colors: vec![ManaColor::Green],
             keywords: vec![Keyword::Flying],
             controller: player,
+            face_state: crate::types::game_state::FaceState::FaceUp,
         };
         let typed = |properties: Vec<FilterProp>, controller: Option<ControllerRef>| {
             TargetFilter::Typed(crate::types::ability::TypedFilter {
@@ -5706,6 +5825,42 @@ mod tests {
             );
         }
 
+        // FaceDown — test with a face-down record.
+        let face_down_record = BattlefieldEntryRecord {
+            object_id: ObjectId(11),
+            name: "Face Down Creature".to_string(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+            controller: player,
+            face_state: crate::types::game_state::FaceState::FaceDown,
+        };
+        let face_down_filter = typed(vec![FilterProp::FaceDown], None);
+        assert!(ledger_filter_is_evaluable(&face_down_filter));
+        assert!(
+            battlefield_entry_matches_filter(
+                &face_down_record,
+                &face_down_filter,
+                player,
+                &[],
+                Some(source_id)
+            ),
+            "FaceDown must MATCH a face-down record"
+        );
+        // FaceDown should NOT match a face-up record.
+        assert!(
+            !battlefield_entry_matches_filter(
+                &record,
+                &face_down_filter,
+                player,
+                &[],
+                Some(source_id)
+            ),
+            "FaceDown must NOT match a face-up record"
+        );
+
         // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
         // refuse. (The record IS legendary and nontoken, so the matcher's `false`
         // for those is the fail-closed arm, not a genuine mismatch.)
@@ -5713,7 +5868,6 @@ mod tests {
             FilterProp::NonToken,
             FilterProp::Token,
             FilterProp::Tapped,
-            FilterProp::FaceDown,
             FilterProp::HasSupertype {
                 value: Supertype::Legendary,
             },

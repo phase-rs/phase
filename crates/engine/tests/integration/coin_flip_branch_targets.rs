@@ -789,10 +789,13 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
         let error = serde_json::from_value::<ResolutionStateWire>(malformed)
             .expect_err("missing stack binding is never reconstructed")
             .to_string();
-        // CR 601.2c + CR 608.2b: every pre-current wire version (<= 10) cannot
-        // prove the outcome bindings announced at cast, so a carrier-less coin
-        // ability is refused as incompatible; the current version is malformed.
-        let expected = if version < RESOLUTION_STATE_WIRE_VERSION {
+        // CR 601.2c + CR 608.2b: every wire version that predates coin-branch
+        // bindings (<= 10) cannot prove the outcome bindings announced at cast,
+        // so a carrier-less coin ability is refused as incompatible; every later
+        // version (v11 and v12 bound coin branches too, before the with-entry
+        // effect carrier, and the current version) is malformed.
+        const LAST_UNBOUND_COIN_BRANCH_WIRE_VERSION: u64 = 10;
+        let expected = if version <= LAST_UNBOUND_COIN_BRANCH_WIRE_VERSION {
             "RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"
         } else {
             "INVALID_COIN_BRANCH_BINDINGS:"
@@ -941,7 +944,10 @@ fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch(
             };
             let install = match family {
                 ReplacementEvent::Draw => Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(substitute),
+                    replacement_effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        substitute,
+                    )),
                 },
                 ReplacementEvent::Planeswalk => Effect::CreatePlaneswalkReplacement {
                     replacement_effect: Box::new(substitute),
@@ -2163,9 +2169,11 @@ fn empty_coin_binding_scenario(
                 "counter payoff object={id:?}; illegal B={remove_b}",
             ),
             EmptyCoinRider::BecomeBlocked => {
-                let became_blocked = payoff_events.iter().any(|event| matches!(
-                    event, GameEvent::AttackerBecameBlockedByEffect { attacker } if *attacker == id
-                ));
+                let became_blocked = payoff_events.iter().any(|event| {
+                    matches!(
+                        event, GameEvent::AttackerBecameBlocked { attacker, .. } if *attacker == id
+                    )
+                });
                 assert_eq!(
                     became_blocked, selected,
                     "blocked payoff object={id:?}; illegal B={remove_b}"
@@ -7970,7 +7978,7 @@ fn choose_then_flip_outcome_reads_the_named_card() {
     // Synthetic: a card name answered through the interactive continuation
     // (CR 608.2d) reaches the bound coin outcome that reads it (CR 608.2c).
     let case = ChooseThenFlip {
-        choice_type: ChoiceType::CardName,
+        choice_type: ChoiceType::card_name(),
         persist: false,
         counted: TargetFilter::And {
             filters: vec![

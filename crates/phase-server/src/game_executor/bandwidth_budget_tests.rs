@@ -661,7 +661,7 @@ impl ScriptedGame {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -671,6 +671,7 @@ impl ScriptedGame {
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::BetweenGamesSideboard { .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+            | WaitingFor::ChooseStartingPlayer { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::OpponentGuess { .. }
             | WaitingFor::SpellbookDraft { .. }

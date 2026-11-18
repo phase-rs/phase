@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../adapter/types";
+import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
+import { U8_MAX } from "../adapter/types";
 import {
   formatMetadata,
   formatSuppliesDeck,
@@ -109,7 +110,8 @@ export function GameSetupPage() {
   const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen here at creation and
   // immutable once the game starts. Available at every player count.
-  const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>({ type: "Off" });
+  const loopDetection = usePreferencesStore((s) => s.lastLoopDetection);
+  const setLoopDetection = usePreferencesStore((s) => s.setLastLoopDetection);
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   // We only ever read the active deck's compat (see `selectedCompat` below),
   // so MyDecks pushes up just that one entry instead of the entire map. Holding
@@ -585,6 +587,35 @@ export function GameSetupPage() {
                       className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
                     />
                   </label>
+
+                  {formatConfig.commander_damage_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.commanderDamage")}</span>
+                      <IntegerField
+                        value={formatConfig.commander_damage_threshold}
+                        min={1}
+                        onCommit={(commander_damage_threshold) =>
+                          setFormatConfig({ ...formatConfig, commander_damage_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
+
+                  {formatConfig.poison_counter_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.poisonCounters")}</span>
+                      <IntegerField
+                        value={formatConfig.poison_counter_threshold}
+                        min={1}
+                        max={U8_MAX}
+                        onCommit={(poison_counter_threshold) =>
+                          setFormatConfig({ ...formatConfig, poison_counter_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
 
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">

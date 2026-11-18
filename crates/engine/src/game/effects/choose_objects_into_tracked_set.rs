@@ -84,6 +84,11 @@ pub fn resolve(
             let achievable = count.min(available);
             (achievable, Some(achievable))
         }
+        // CR 107.1c: "any number" — any positive number of the eligible
+        // objects, or zero.
+        Some(ObjectSelectionCardinality::AnyNumber) => {
+            (0, Some(u32::try_from(eligible.len()).unwrap_or(u32::MAX)))
+        }
         None => {
             let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
             let max = max.map(|maximum| maximum.min(available));
@@ -333,6 +338,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: crate::types::identifiers::TrackedSetId(0),
                 },
+                scope: crate::types::ability::EffectScope::Single,
             },
         );
         let choice = AbilityDefinition::new(

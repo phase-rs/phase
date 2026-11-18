@@ -1,6 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
+use engine::ai_support::{PaymentSurplusDecision, PaymentSurplusSeeds};
+use engine::game::bracket_estimate::EffectiveBracketTier;
 use engine::game::DeckEntry;
+use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
 use crate::deck_profile::ArchetypeMultipliers;
@@ -38,6 +41,82 @@ pub struct AiContext {
     /// deadline ticks down we fall back to cached-only lookups and a
     /// heuristic score.
     pub deadline: engine::util::Deadline,
+    /// The payment-step surplus certificate's decision-level preparation
+    /// (`SelfCostValuePolicy`'s payment arm), shared by every candidate of
+    /// the decision this context scores.
+    pub(crate) payment_surplus: PaymentSurplusMemo,
+}
+
+/// One root decision's [`PaymentSurplusDecision`]: the finisher and the
+/// offered-mana-action enumeration every activation offered at a payment step
+/// is certified against, prepared on first use, with the activations the root
+/// already applied ([`Self::seed`]). `PlannerServices` builds an `AiContext`
+/// per root decision; the preparation's own binding
+/// (`PaymentSurplusDecision::prepared_for`) re-prepares for any other state,
+/// so an entry is never read for a decision it wasn't made for, and seeds
+/// attach only to the decision they were made for. A clone starts empty.
+#[derive(Default)]
+pub(crate) struct PaymentSurplusMemo(Mutex<PaymentSurplusSlot>);
+
+#[derive(Default)]
+struct PaymentSurplusSlot {
+    decision: Option<Arc<PaymentSurplusDecision>>,
+    seeds: Option<PaymentSurplusSeeds>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test witness: payment-surplus preparations made on this thread.
+    pub(crate) static PAYMENT_SURPLUS_PREPARATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Test witness: preparations on this thread that were offered seeds.
+    pub(crate) static PAYMENT_SURPLUS_SEEDED_PREPARATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+impl PaymentSurplusMemo {
+    /// Offer the next preparation the root's already-applied activations.
+    pub(crate) fn seed(&self, seeds: PaymentSurplusSeeds) {
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.decision = None;
+        slot.seeds = Some(seeds);
+    }
+
+    /// `state`'s prepared payment decision.
+    pub(crate) fn decision(&self, state: &GameState) -> Arc<PaymentSurplusDecision> {
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(decision) = slot
+            .decision
+            .as_ref()
+            .filter(|decision| decision.prepared_for(state))
+        {
+            return Arc::clone(decision);
+        }
+        #[cfg(test)]
+        PAYMENT_SURPLUS_PREPARATIONS.with(|count| count.set(count.get() + 1));
+        let decision = Arc::new(match slot.seeds.take() {
+            Some(seeds) => {
+                #[cfg(test)]
+                PAYMENT_SURPLUS_SEEDED_PREPARATIONS.with(|count| count.set(count.get() + 1));
+                PaymentSurplusDecision::prepare_seeded(state, seeds)
+            }
+            None => PaymentSurplusDecision::prepare(state),
+        });
+        slot.decision = Some(Arc::clone(&decision));
+        decision
+    }
+}
+
+impl Clone for PaymentSurplusMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for PaymentSurplusMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PaymentSurplusMemo")
+    }
 }
 
 static EMPTY_SYNERGY_GRAPH: std::sync::OnceLock<SynergyGraph> = std::sync::OnceLock::new();
@@ -45,7 +124,13 @@ static EMPTY_SYNERGY_GRAPH: std::sync::OnceLock<SynergyGraph> = std::sync::OnceL
 impl AiContext {
     /// Analyze a deck list to build the context.
     pub fn analyze(deck: &[DeckEntry], base_weights: &EvalWeightSet) -> Self {
-        Self::analyze_with(deck, base_weights, &ArchetypeMultipliers::default())
+        Self::analyze_for_player(
+            deck,
+            base_weights,
+            &ArchetypeMultipliers::default(),
+            PlayerId(0),
+            EffectiveBracketTier::default(),
+        )
     }
 
     /// Analyze a deck list with custom archetype multipliers.
@@ -57,7 +142,13 @@ impl AiContext {
         base_weights: &EvalWeightSet,
         multipliers: &ArchetypeMultipliers,
     ) -> Self {
-        Self::analyze_for_player(deck, base_weights, multipliers, PlayerId(0))
+        Self::analyze_for_player(
+            deck,
+            base_weights,
+            multipliers,
+            PlayerId(0),
+            EffectiveBracketTier::default(),
+        )
     }
 
     /// Analyze a deck list for a specific AI player. Keys the session's
@@ -69,6 +160,7 @@ impl AiContext {
         base_weights: &EvalWeightSet,
         multipliers: &ArchetypeMultipliers,
         player: PlayerId,
+        tier: EffectiveBracketTier,
     ) -> Self {
         let deck_profile = DeckProfile::analyze(deck);
         let adjusted_weights = EvalWeightSet {
@@ -77,15 +169,7 @@ impl AiContext {
             late: deck_profile.adjust_weights_with(multipliers, &base_weights.late),
         };
         let strategy = StrategyProfile::for_profile(&deck_profile);
-        // Analysis paths (deck evaluation, draft AI, test contexts) that call
-        // `analyze_for_player` don't carry a declared bracket tier — default to
-        // `Core`. The production path (`AiSession::from_game`) reads the real
-        // tier from `PlayerDeckPool::bracket_tier`.
-        let session = Arc::new(AiSession::from_single_deck(
-            player,
-            deck,
-            engine::game::bracket_estimate::CommanderBracketTier::Core,
-        ));
+        let session = Arc::new(AiSession::from_single_deck(player, deck, tier));
         Self {
             deck_profile,
             adjusted_weights,
@@ -94,6 +178,7 @@ impl AiContext {
             session,
             player,
             deadline: engine::util::Deadline::none(),
+            payment_surplus: PaymentSurplusMemo::default(),
         }
     }
 
@@ -108,6 +193,7 @@ impl AiContext {
             session: Arc::new(AiSession::empty()),
             player: PlayerId(0),
             deadline: engine::util::Deadline::none(),
+            payment_surplus: PaymentSurplusMemo::default(),
         }
     }
 
@@ -118,5 +204,45 @@ impl AiContext {
             .synergy
             .get(&self.player)
             .unwrap_or_else(|| EMPTY_SYNERGY_GRAPH.get_or_init(SynergyGraph::empty))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::game::bracket_estimate::{effective_tier, CommanderBracketTier};
+
+    #[test]
+    fn analyze_for_player_uses_supplied_effective_tier() {
+        let weights = EvalWeightSet::default();
+        let multipliers = ArchetypeMultipliers::default();
+
+        let core = AiContext::analyze_for_player(
+            &[],
+            &weights,
+            &multipliers,
+            PlayerId(0),
+            EffectiveBracketTier::default(),
+        );
+        assert_eq!(
+            core.session.features[&PlayerId(0)]
+                .effective_bracket_tier
+                .tier(),
+            CommanderBracketTier::Core
+        );
+
+        let optimized = AiContext::analyze_for_player(
+            &[],
+            &weights,
+            &multipliers,
+            PlayerId(0),
+            effective_tier(Some(CommanderBracketTier::Optimized), None),
+        );
+        assert_eq!(
+            optimized.session.features[&PlayerId(0)]
+                .effective_bracket_tier
+                .tier(),
+            CommanderBracketTier::Optimized
+        );
     }
 }

@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import type {
   ChallengeDeck,
   GameFormat,
+  LoopDetectionMode,
   MatchType,
   PhaseStop,
   PriorityPassingMode,
@@ -345,6 +346,7 @@ function buildDefaultPreferences(): PreferencesState {
     aiPoolSelection: emptyPoolSelection(),
     lastFormat: null,
     lastMatchType: "Bo1",
+    lastLoopDetection: { type: "Off" },
     lastPlayerCount: 2,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
@@ -382,7 +384,9 @@ interface PreferencesState {
   phaseStops: PhaseStop[];
   priorityPassingMode: PriorityPassingMode;
   /** Glow the turn-status pill and pass button (stronger once unanswered) when
-   *  a meaningful priority window opens after you were waiting on someone else. */
+   *  a meaningful priority window opens after you were waiting on someone else,
+   *  and pulse the pill's border while the decision is yours (the border stays,
+   *  static, when this is off). */
   priorityAlertVisual: boolean;
   /** Play a short cue when a meaningful priority window opens. */
   priorityAlertSound: boolean;
@@ -482,6 +486,7 @@ interface PreferencesState {
   aiPoolSelection: RandomPoolSelection;
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
+  lastLoopDetection: LoopDetectionMode;
   lastPlayerCount: number;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
@@ -577,6 +582,7 @@ interface PreferencesActions {
   setAiPoolSelection: (selection: RandomPoolSelection) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
+  setLastLoopDetection: (mode: LoopDetectionMode) => void;
   setLastPlayerCount: (count: number) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
@@ -781,6 +787,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setAiPoolSelection: (selection) => set({ aiPoolSelection: selection }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
+      setLastLoopDetection: (mode) => set({ lastLoopDetection: mode }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),

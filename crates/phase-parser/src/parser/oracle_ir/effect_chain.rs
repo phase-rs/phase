@@ -16,10 +16,10 @@ use crate::parser::oracle_nom::filter::ChosenColorGrantReference;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ChosenGroupId,
-    ControllerRef, CostReduction, DelayedTriggerCondition, Duration, Effect, ManaSpendPermission,
-    MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ReturnResultReadSpec, RoundingMode, SiblingCondition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
+    ControllerRef, CostReduction, DelayedTriggerCondition, Duration, Effect, InstructionJoin,
+    ManaSpendPermission, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
+    QuantityRef, ReturnResultReadSpec, RoundingMode, SiblingCondition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -903,6 +903,11 @@ pub(crate) struct ClauseIr {
     /// chunk loop's trailing-guard pass.
     #[serde(skip_serializing_if = "SiblingCondition::is_default")]
     pub(crate) sibling_condition: SiblingCondition,
+    /// CR 608.2c: lowered onto the node's `instruction_join`; written only by
+    /// the chunk loop when a verbless target chunk takes the previous chunk's
+    /// verb ("destroy target artifact, target creature, ...").
+    #[serde(skip_serializing_if = "InstructionJoin::is_own")]
+    pub(crate) instruction_join: InstructionJoin,
     /// The prior return instruction whose actual results a delayed clause names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_return_result: Option<(ClauseId, ReturnResultReadSpec)>,
@@ -1075,6 +1080,7 @@ impl ClauseIr {
             reads_chosen_clause,
             target_reads,
             sibling_condition,
+            instruction_join,
             reads_return_result,
             source: _,
             disposition,
@@ -1107,6 +1113,7 @@ impl ClauseIr {
         *reads_chosen_clause = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
         *sibling_condition = SiblingCondition::Dependent;
+        *instruction_join = InstructionJoin::Own;
         *reads_return_result = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,
@@ -1405,6 +1412,7 @@ impl ClauseIrBuilder {
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.target_reads = c.target_reads;
             absorbed.sibling_condition = c.sibling_condition;
+            absorbed.instruction_join = c.instruction_join;
         }
     }
 
@@ -1763,8 +1771,23 @@ impl ClauseDraft<'_> {
             .builder
             .slot
             .allocator()
-            .allocate_with_span(span, Some(&self.source_text))
+            .allocate_with_span(span.clone(), Some(&self.source_text))
             .expect("chain-relative clause span is contained by its chain item");
+        // Seal the history occurrence's clause envelope with the same source unit
+        // that owns its parsed instruction. Reminting an absorbed clause transports
+        // this envelope too; nested logical lineage remains on the pending record.
+        for record in &mut self.parsed.history {
+            // Rebase once per enclosing clause, preserving the same printed
+            // offsets for all fan-out copies while distinguishing later clauses.
+            if span.end_byte > span.start_byte {
+                record.occurrence.printed.enclose(
+                    &self.source_text.to_ascii_lowercase(),
+                    &self.builder.chain_text.to_ascii_lowercase(),
+                    span.start_byte,
+                );
+            }
+            record.occurrence.source = Some(source.clone());
+        }
         self.builder.next_clause_id += 1;
         self.builder.clauses.push(ClauseIr {
             id,
@@ -1772,6 +1795,7 @@ impl ClauseDraft<'_> {
             reads_chosen_clause,
             target_reads: TargetReadOrigin::OwnAnnouncement,
             sibling_condition: SiblingCondition::Dependent,
+            instruction_join: InstructionJoin::Own,
             reads_return_result,
             source,
             disposition: self.disposition,

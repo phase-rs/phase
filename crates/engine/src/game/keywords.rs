@@ -13,7 +13,7 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
-    GiftKind, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
+    GiftKind, Keyword, KeywordGrantPolicy, KeywordKind, ProtectionColorSet, ProtectionTarget,
 };
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -69,12 +69,44 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
         .any(|k| std::mem::discriminant(k) == std::mem::discriminant(keyword))
 }
 
+/// CR 702.16: borrowed traversal over an object's protection qualities.
+/// Shared by targeting and attachment legality so both read the same list
+/// without cloning or re-looking-up the host.
+pub(crate) fn protection_qualities(
+    obj: &GameObject,
+) -> impl Iterator<Item = &crate::types::keywords::ProtectionTarget> {
+    obj.keywords.iter().filter_map(|keyword| match keyword {
+        Keyword::Protection(quality) => Some(quality),
+        _ => None,
+    })
+}
+
 /// Object-scoped keyword-kind query — same battlefield-only caveat as
 /// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
 /// that can be off-battlefield.
 pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     // allow-raw-authority: this IS the object-scoped authority
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
+}
+
+/// CR 702.5a + CR 702.5c: the object's own enchant restrictions — the filter of
+/// each `Enchant [object or player]` keyword it has. CR 702.5c: with multiple
+/// instances, all of them apply, so a host is legal only when it matches every
+/// filter this yields (empty when the object has no enchant ability).
+///
+/// Object-scoped, with the same battlefield caveat as [`has_keyword`]: it reads
+/// the keywords of the object the caller holds. Attachment legality holds either
+/// a battlefield permanent or a CR 614.12 entry projection whose characteristics
+/// (including a token's intrinsic Enchant, CR 111.3) are already materialized;
+/// both answer from their own keyword list.
+pub(crate) fn enchant_restrictions(
+    obj: &GameObject,
+) -> impl Iterator<Item = &crate::types::ability::TargetFilter> {
+    // allow-raw-authority: this IS the object-scoped Enchant-payload authority
+    obj.keywords.iter().filter_map(|keyword| match keyword {
+        Keyword::Enchant(filter) => Some(filter),
+        _ => None,
+    })
 }
 
 /// Whether generic keyword removal strips this candidate.
@@ -374,6 +406,53 @@ fn effective_keyword_for_object(
     crate::game::off_zone_characteristics::effective_off_zone_keyword(state, object_id, kind)
 }
 
+/// Which entry survives when a grant is identical to an entry already on the
+/// keyword list ([`KeywordGrantPolicy::DedupeIdentical`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedundantGrant {
+    /// Keep the existing entry where it is and drop the incoming one (the
+    /// battlefield list, whose first-match readers read the earliest entry).
+    KeepEarlier,
+    /// Remove the existing entry and append the incoming one, so the last entry
+    /// of a kind is the latest applied grant (the off-zone list, whose entries
+    /// also carry the producing effect).
+    KeepLater,
+}
+
+/// Applies one granted keyword instance to a keyword list under the shared
+/// [`Keyword::grant_policy`]. `keyword_of` projects an entry to its keyword, so
+/// the battlefield's `Vec<Keyword>` and the off-zone contribution list share the
+/// policy.
+pub(crate) fn grant_keyword_instance_into<T>(
+    entries: &mut Vec<T>,
+    incoming: T,
+    keyword_of: impl Fn(&T) -> &Keyword,
+    redundant: RedundantGrant,
+) {
+    let keyword = keyword_of(&incoming);
+    match keyword.grant_policy() {
+        KeywordGrantPolicy::Accumulate => {}
+        KeywordGrantPolicy::ReplaceSameVariant => {
+            let variant = std::mem::discriminant(keyword);
+            entries.retain(|entry| std::mem::discriminant(keyword_of(entry)) != variant);
+        }
+        KeywordGrantPolicy::DedupeIdentical => {
+            if let Some(index) = entries
+                .iter()
+                .position(|entry| keyword_of(entry) == keyword)
+            {
+                match redundant {
+                    RedundantGrant::KeepEarlier => return,
+                    RedundantGrant::KeepLater => {
+                        entries.remove(index);
+                    }
+                }
+            }
+        }
+    }
+    entries.push(incoming);
+}
+
 /// CR 601.2f + CR 118.9c: Single authority for concretizing a granted keyword's
 /// placeholder mana cost against the recipient object's own printed mana cost.
 /// `SelfManaCost` → the card's mana cost; `SelfManaValue` → that mana value as
@@ -668,21 +747,19 @@ pub fn protection_prevents_from_with_source_name(
     source: Option<&GameObject>,
     source_name: Option<&str>,
 ) -> bool {
-    for kw in &target.keywords {
-        if let Keyword::Protection(ref pt) = kw {
-            match pt {
-                ProtectionTarget::ChosenCardName => {
-                    if target.chosen_card_name().is_some_and(|chosen| {
-                        crate::game::filter::source_has_chosen_name(source, source_name, chosen)
-                    }) {
-                        return true;
-                    }
+    for pt in protection_qualities(target) {
+        match pt {
+            ProtectionTarget::ChosenCardName => {
+                if target.chosen_card_name().is_some_and(|chosen| {
+                    crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                }) {
+                    return true;
                 }
-                _ => {
-                    if let Some(source_obj) = source {
-                        if source_matches_protection_target(pt, target, source_obj) {
-                            return true;
-                        }
+            }
+            _ => {
+                if let Some(source_obj) = source {
+                    if source_matches_protection_target(pt, target, source_obj) {
+                        return true;
                     }
                 }
             }
@@ -872,14 +949,35 @@ pub fn protection_color_set_members(
                 })
                 .unwrap_or_default()
         }
+        // CR 110.1 + CR 702.26b: only existing, phased-in permanents count.
+        // CR 109.5 + CR 611.3a: "you" and colors are live, not owner/base values.
+        // CR 613.1e + CR 613.1f: layer 5 colors feed the layer 6 grant.
+        ProtectionColorSet::AmongPermanentsYouControl => {
+            crate::game::effects::mana::distinct_colors(
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .filter(|obj| is_controlled_color_contributor(obj, you))
+                    .flat_map(|obj| obj.color.iter()),
+            )
+        }
     }
+}
+
+/// CR 110.1 + CR 702.26b + CR 109.5: whether `obj` is one of the "permanents
+/// you control" whose colors `ProtectionColorSet::AmongPermanentsYouControl`
+/// collects. The member census and the layer pass's entrant-escalation probe
+/// share this predicate.
+pub(crate) fn is_controlled_color_contributor(obj: &GameObject, you: PlayerId) -> bool {
+    obj.is_phased_in_permanent() && obj.controller == you
 }
 
 /// CR 702.16 + CR 702.16i + CR 109.5: Resolve a protection quality granted by a
 /// continuous effect from `source_id` whose "you" is `you` into the concrete
-/// qualities it grants. This is the single authority shared by the layer applier
-/// (which bakes the result into `obj.keywords`) and attachment legality (which
-/// reads grant definitions directly), so the two cannot drift.
+/// qualities it grants. The layer applier bakes the result into `obj.keywords`
+/// and records each instance's provenance; attachment legality reads that
+/// recorded result rather than resolving grant definitions again.
 ///
 /// CR 702.16i: a set quality ("each color that's not in ...") is shorthand for
 /// several separate protection abilities, so the result may hold 0..n entries.
@@ -1538,6 +1636,68 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
+    /// The shared grant policy over a tagged list, so the surviving ENTRY (not
+    /// only its keyword) is observable.
+    #[test]
+    fn grant_keyword_instance_into_applies_each_policy() {
+        let grant = |entries: &mut Vec<(Keyword, u8)>, kw: Keyword, tag, redundant| {
+            grant_keyword_instance_into(entries, (kw, tag), |entry| &entry.0, redundant);
+        };
+        let ward = |generic| {
+            Keyword::Ward(crate::types::keywords::WardCost::Mana(ManaCost::generic(
+                generic,
+            )))
+        };
+        let tags = |entries: &[(Keyword, u8)]| entries.iter().map(|e| e.1).collect::<Vec<_>>();
+
+        // DedupeIdentical: distinct values coexist; the duplicate keeps the
+        // earlier entry in place, or the later entry appended last.
+        for (redundant, expected) in [
+            (RedundantGrant::KeepEarlier, vec![0, 1]),
+            (RedundantGrant::KeepLater, vec![1, 2]),
+        ] {
+            let mut entries = Vec::new();
+            grant(&mut entries, ward(1), 0, redundant);
+            grant(&mut entries, ward(2), 1, redundant);
+            grant(&mut entries, ward(1), 2, redundant);
+            assert_eq!(tags(&entries), expected, "{redundant:?}");
+        }
+
+        // Accumulate: identical Toxic instances each stay.
+        let mut toxic = Vec::new();
+        grant(
+            &mut toxic,
+            Keyword::Toxic(1),
+            0,
+            RedundantGrant::KeepEarlier,
+        );
+        grant(
+            &mut toxic,
+            Keyword::Toxic(1),
+            1,
+            RedundantGrant::KeepEarlier,
+        );
+        assert_eq!(tags(&toxic), vec![0, 1]);
+
+        // ReplaceSameVariant: the later Saddle replaces every earlier one and
+        // leaves other keywords alone.
+        let mut saddle = Vec::new();
+        grant(
+            &mut saddle,
+            Keyword::Saddle(1),
+            0,
+            RedundantGrant::KeepEarlier,
+        );
+        grant(&mut saddle, ward(1), 1, RedundantGrant::KeepEarlier);
+        grant(
+            &mut saddle,
+            Keyword::Saddle(3),
+            2,
+            RedundantGrant::KeepEarlier,
+        );
+        assert_eq!(tags(&saddle), vec![1, 2]);
+    }
+
     fn make_obj() -> GameObject {
         GameObject::new(
             ObjectId(1),
@@ -2061,6 +2221,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -3073,6 +3234,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
