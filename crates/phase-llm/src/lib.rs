@@ -11,10 +11,12 @@
 //!
 //! A model never authors a game action or names a card. It is handed the
 //! engine-issued option domain — an `AiDecisionContract`'s candidates in a game,
-//! the pack in front of a seat in a draft — and returns an INDEX into it. The
-//! engine then re-validates that selection through the same authority path the
-//! heuristic AI uses. There is deliberately no route by which a model's text
-//! becomes an action without passing an engine legality check.
+//! the pack in front of a seat in a draft — and returns an INDEX into it. A
+//! combat declaration is composed from the attacks or blocks the engine's
+//! prompt lists, by the indices of those declared. The engine then re-validates
+//! that selection through the same authority path the heuristic AI uses.
+//! There is deliberately no route by which a model's text becomes an action
+//! without passing an engine legality check.
 //!
 //! # Where the network lives
 //!
@@ -36,6 +38,7 @@
 //! stall a game or a draft.
 
 pub mod catalog;
+pub(crate) mod combat_declaration;
 pub mod error;
 pub mod fingerprint;
 pub mod format_guidance;
