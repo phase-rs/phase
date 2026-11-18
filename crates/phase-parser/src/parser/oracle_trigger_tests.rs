@@ -44766,6 +44766,13 @@ fn strings(items: &[&str]) -> Vec<String> {
 /// at that time, X is 0."). Verbatim Oracle text.
 #[test]
 fn where_x_its_characteristic_binds_trigger_event_object() {
+    type SlotCase<'a> = (
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        Vec<(&'a str, QuantityExpr)>,
+    );
     let event = |qty: fn(ObjectScope) -> QuantityRef| QuantityExpr::Ref {
         qty: qty(ObjectScope::EventSource),
     };
@@ -44775,7 +44782,7 @@ fn where_x_its_characteristic_binds_trigger_event_object() {
         inner: Box::new(power.clone()),
         minimum: 0,
     };
-    let cases: [(&str, &str, &[&str], &[&str], Vec<(&str, QuantityExpr)>); 6] = [
+    let cases: [SlotCase<'_>; 6] = [
         (
             "Mask of Griselbrand",
             "Equipped creature has flying and lifelink.\nWhenever equipped creature dies, you may pay X life, where X is its power. If you do, draw X cards.\nEquip {3}",
