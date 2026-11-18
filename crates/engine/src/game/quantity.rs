@@ -6875,22 +6875,43 @@ fn resolve_ref(
             actor,
             counters,
             target,
-        } => u32_to_i32_saturating(
-            state
-                .counter_added_this_turn
-                .iter()
-                .filter(|record| {
-                    count_scope_actor_matches(state, actor, ctx.clone(), controller, record.actor)
-                        && counters.matches(&record.counter_type)
-                        && matches_target_filter_on_counter_added_record(
-                            state,
-                            record,
-                            target,
-                            &filter_ctx,
-                        )
+        } => {
+            // CR 400.7: "on ~" names the source as the object it is now; a counter
+            // put on an earlier incarnation (before a zone change) was put on a
+            // different object. Population recipients keep reading every record;
+            // a legacy record without a stamp keeps the object-id-only match.
+            let self_incarnation = matches!(target, TargetFilter::SelfRef)
+                .then(|| {
+                    trigger_source
+                        .as_ref()
+                        .map(|source| source.identity.reference.incarnation)
+                        .or_else(|| state.objects.get(&source_id).map(|o| o.incarnation))
                 })
-                .fold(0, |total: u32, record| total.saturating_add(record.count)),
-        ),
+                .flatten();
+            u32_to_i32_saturating(
+                state
+                    .counter_added_this_turn
+                    .iter()
+                    .filter(|record| {
+                        self_incarnation.is_none_or(|current| {
+                            record.incarnation.is_none_or(|stamp| stamp == current)
+                        }) && count_scope_actor_matches(
+                            state,
+                            actor,
+                            ctx.clone(),
+                            controller,
+                            record.actor,
+                        ) && counters.matches(&record.counter_type)
+                            && matches_target_filter_on_counter_added_record(
+                                state,
+                                record,
+                                target,
+                                &filter_ctx,
+                            )
+                    })
+                    .fold(0, |total: u32, record| total.saturating_add(record.count)),
+            )
+        }
         // CR 701.9 + CR 603.4: Cards discarded this turn, scoped via PlayerScope.
         QuantityRef::CardsDiscardedThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
