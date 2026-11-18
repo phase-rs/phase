@@ -94878,7 +94878,7 @@ type_line = "Token Enchantment Creature — Spirit Sorcerer"
 rules_text = "Flying"
 
 [token.body]
-display_name = "Spirit Sorcerer Token"
+display_name = "Spirit Sorcerer"
 power = 3
 toughness = 3
 core_types = [
@@ -238034,6 +238034,11 @@ scryfall_id = "a82f5db5-787e-4e4a-ab3c-4a488c6f4990"
 card_name = "Gwyndala, the Progeny"
 scryfall_oracle_id = "852c38fe-8bfa-420b-b961-7b91af9b38d1"
 scryfall_id = "2f1e927f-dd27-4af3-8941-64ce80e16e36"
+
+[[token.source_card_refs]]
+card_name = "Gwyndala, the Progeny"
+scryfall_oracle_id = "852c38fe-8bfa-420b-b961-7b91af9b38d1"
+scryfall_id = "ac18ceea-8fd0-4735-8efb-ec17137db934"
 
 [token.token_image_ref]
 scryfall_id = "d811c3c3-6b5b-4b42-be4f-0a455313ccd3"

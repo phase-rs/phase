@@ -5,7 +5,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     reveal_hand_parks_card_choice, Effect, EffectError, EffectKind, ObjectSelectionCardinality,
-    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef, ZoneChoiceCandidateSource,
 };
 use std::collections::HashSet;
 
@@ -181,6 +181,28 @@ pub fn resolve(
     }
 
     let needs_reveal_choice = reveal_hand_parks_card_choice(&card_filter, choice_optional);
+    // CR 701.20a + CR 608.2c: "reveals each <filter> card in their hand. You
+    // choose one of those cards." reveals only the matching cards, and "those
+    // cards" is exactly that revealed set. The choice is made by the chain's
+    // `ChooseFromZone` (a single `ChooseFromZoneChoice` prompt over the revealed
+    // cards, not a `RevealChoice` acknowledgement first), so narrow the revealed
+    // hand to the filter before it is shown or published as the chain's set.
+    let chosen_by_chain_choose_from_zone = needs_reveal_choice
+        && !choice_optional
+        && is_reveal
+        && ability.sub_ability.as_ref().is_some_and(|sub| {
+            matches!(
+                &sub.effect,
+                Effect::ChooseFromZone {
+                    candidate_source: ZoneChoiceCandidateSource::Legacy,
+                    ..
+                }
+            )
+        });
+    if chosen_by_chain_choose_from_zone && !matches!(card_filter, TargetFilter::Any) {
+        let ctx = FilterContext::from_ability(ability);
+        hand.retain(|&id| matches_target_filter(state, id, &card_filter, &ctx));
+    }
     // CR 109.5 + CR 608.2c + CR 608.2d: the post-reveal choice belongs to the
     // player the choosing instruction addresses. The parser only produces a
     // card-parking reveal inside a player scope when that instruction is
@@ -274,6 +296,18 @@ pub fn resolve(
     // Filter to only eligible cards for the choice (e.g. "nonland card").
     // CR 107.3a + CR 601.2b: ability-context evaluation for dynamic thresholds.
     let eligible = matching_hand_cards(state, ability, hand, &card_filter);
+
+    if chosen_by_chain_choose_from_zone {
+        // The chain's `ChooseFromZone` reads the published set; the revealed
+        // cards stay public until the effect completes (CR 701.20a).
+        super::publish_reveal_result(state, eligible.clone());
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Reveal,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     if eligible.is_empty() {
         if !is_reveal {

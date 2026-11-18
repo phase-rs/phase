@@ -38,8 +38,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedFaceUp, CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest,
-    TokenSpec,
+    CopiedFaceUp, CopyTokenSpec, CounterCause, EntryChoices, ProposedEvent, TokenAttackRequest,
+    TokenHostRequest, TokenSpec,
 };
 use crate::types::resolution::{ChildStackDepth, ResolutionFrame};
 use crate::types::resolved_commands::{
@@ -1994,6 +1994,9 @@ fn apply_create_token_batch(
                     obj_id,
                     counter_type.clone(),
                     *counter_count,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    CounterCause::ReplacementOrPrevention,
                     events,
                 )
             {
@@ -2007,6 +2010,9 @@ fn apply_create_token_batch(
                             object_id: obj_id,
                             counter_type: counter_type.clone(),
                             count: *count,
+                            // CR 614.16: entering-with-counters placements are
+                            // replacement-driven entry modifications.
+                            cause: CounterCause::ReplacementOrPrevention,
                         }
                     })
                     .collect();
@@ -3161,6 +3167,9 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                             object_id: entry_ref,
                             counter_type: counter_type.clone(),
                             count: *count,
+                            // CR 614.16: entering-with-counters placements are
+                            // replacement-driven entry modifications.
+                            cause: CounterCause::ReplacementOrPrevention,
                         })
                         .collect();
                     let mut post_actions = vec![finalization];
@@ -3211,6 +3220,9 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                     entry_ref,
                     counter_type.clone(),
                     *counter_count,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    CounterCause::ReplacementOrPrevention,
                     events,
                 ),
                 // CR 122.6a: the controller puts the counters; CR 306.5b /
@@ -3241,6 +3253,9 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                     object_id: entry_ref,
                     counter_type: counter_type.clone(),
                     count: *count,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    cause: CounterCause::ReplacementOrPrevention,
                 })
                 .collect();
             let mut post_actions = vec![finalization];

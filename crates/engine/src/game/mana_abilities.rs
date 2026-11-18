@@ -69,6 +69,27 @@ pub(crate) enum ManaPayabilityMode {
     Planning,
 }
 
+/// CR 601.2g + CR 605.3a + CR 601.2h: who is choosing a mana activation.
+/// A permanent held for the in-flight spell's deferred tap cost
+/// (`restrictions::payment_tap_reserved`) may still be tapped for mana by the
+/// player's own activation, since it need only be untapped again when the total
+/// cost is paid (the commit revalidates it). Automatic payment, affordability,
+/// capacity and AI planning must not count on tapping it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ManaActivationPurpose {
+    /// The engine or the AI plans the activation; held permanents are excluded.
+    Planning,
+    /// The player activates it; held permanents may pay.
+    Explicit,
+}
+
+impl ManaActivationPurpose {
+    /// CR 601.2h: whether `id` is held from this activation's tap payments.
+    pub(crate) fn excludes_held(self, state: &GameState, id: ObjectId) -> bool {
+        self == Self::Planning && super::restrictions::payment_tap_reserved(state, id)
+    }
+}
+
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
 ///
 /// Also detects a self-`ReturnToHand` cost: either form removes the source from
@@ -2240,19 +2261,27 @@ static MANA_READINESS_CALLS: AtomicUsize = AtomicUsize::new(0);
 pub struct ManaActivationGates {
     has_cant_be_activated: bool,
     has_cant_activate_during: bool,
+    /// Who is choosing the activations this sweep judges.
+    purpose: ManaActivationPurpose,
 }
 
 impl ManaActivationGates {
     /// Reads both presence flags from the O(1) `StaticModePresence` index (Unit 1)
     /// instead of sweeping `game_functioning_statics`. A post-flush-precise superset:
-    /// a spurious `true` falls through to the exact per-source scan.
+    /// a spurious `true` falls through to the exact per-source scan. Planning
+    /// purpose; the player's own offers use [`Self::compute_for`].
     pub fn compute(state: &GameState) -> Self {
+        Self::compute_for(state, ManaActivationPurpose::Planning)
+    }
+
+    pub fn compute_for(state: &GameState, purpose: ManaActivationPurpose) -> Self {
         ManaActivationGates {
             has_cant_be_activated: static_kind_present(state, StaticModeKind::CantBeActivated),
             has_cant_activate_during: static_kind_present(
                 state,
                 StaticModeKind::CantActivateDuring,
             ),
+            purpose,
         }
     }
 }
@@ -2403,6 +2432,13 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
     {
         return false;
     }
+    // CR 601.2g + CR 601.2h: planning must not tap a source held for the
+    // in-flight spell's deferred tap cost; the player may (ManaActivationPurpose).
+    if mana_sources::has_tap_component(&ability_def.cost)
+        && gates.purpose.excludes_held(state, source_id)
+    {
+        return false;
+    }
     // CR 107.6: A {Q}-cost mana ability requires a currently-tapped source — an
     // already-untapped permanent can't be untapped to pay the cost (Pili-Pala).
     if mana_sources::has_untap_component(&ability_def.cost) && !obj.tapped {
@@ -2460,7 +2496,14 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
     if let Some(cost) = &ability_def.cost {
         match payability_mode {
             ManaPayabilityMode::Current => {
-                if !cost.is_payable_for_mana_ability(state, player, source_id, ability_index) {
+                let purpose = gates.purpose;
+                if !cost.is_payable_for_mana_ability(
+                    state,
+                    player,
+                    source_id,
+                    ability_index,
+                    purpose,
+                ) {
                     return false;
                 }
             }
@@ -2474,6 +2517,7 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
                     Some(ability_index),
                     super::cost_payability::ObjectLegPayment::Unguided,
                     super::cost_payability::CostSourceRole::AbilitySource,
+                    gates.purpose,
                 ) {
                     return false;
                 }
@@ -7117,6 +7161,7 @@ mod tests {
     fn post_delivery_mana_cost_pause_preserves_its_live_prompt() {
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,

@@ -998,6 +998,22 @@ pub(crate) fn committed_document(path: &Path) -> serde_json::Value {
     document
 }
 
+/// [`committed_document`] with the capture's legacy table-wide `spells_cast_last_turn` total kept
+/// as recorded (CR 117.1 + CR 603.4), for the walk that pins which committed dumps production
+/// restore refuses.
+pub(crate) fn committed_document_as_recorded(path: &Path) -> serde_json::Value {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(bytes.as_slice())
+        .read_to_string(&mut json)
+        .unwrap_or_else(|error| panic!("{} must inflate to UTF-8 JSON: {error}", path.display()));
+    let mut document: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|error| panic!("{} must parse as JSON: {error}", path.display()));
+    engine::types::game_state::record_captured_onsets_keeping_legacy_snapshot(&mut document);
+    document
+}
+
 pub(crate) fn collect_gz(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries =
         std::fs::read_dir(dir).unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));

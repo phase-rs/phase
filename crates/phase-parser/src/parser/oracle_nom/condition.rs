@@ -7,7 +7,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::character::complete::{multispace1, satisfy};
-use nom::combinator::{cut, eof, map, not, opt, peek, recognize, value, verify};
+use nom::combinator::{cut, eof, map, map_opt, not, opt, peek, recognize, value, verify};
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -28,6 +28,7 @@ use crate::parser::oracle_target::{
     parse_zone_suffix, parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
     AttackedYouScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
@@ -7549,8 +7550,9 @@ fn spell_condition_origin_zones(condition: &StaticCondition) -> Option<Vec<Zone>
         lhs:
             QuantityExpr::Ref {
                 qty:
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         filter: Some(filter),
+                        window: TurnWindow::ThisTurn,
                         ..
                     },
             },
@@ -7593,12 +7595,13 @@ fn parse_youve_spell_history_condition(input: &str) -> OracleResult<'_, StaticCo
         |input| parse_another_spell_cast_this_turn(input, 2),
         parse_cast_repeated_named_spells_this_turn,
         parse_cast_one_spell_this_turn,
-        // "you've cast another spell this turn" → SpellsCastThisTurn >= 2
+        // "you've cast another spell this turn" → SpellsCast >= 2
         value(
             make_quantity_ge(
-                QuantityRef::SpellsCastThisTurn {
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
                 2,
             ),
@@ -7641,9 +7644,7 @@ fn parse_youve_life_history_condition(input: &str) -> OracleResult<'_, StaticCon
         ),
         value(
             make_quantity_ge(
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller,
-                },
+                life_lost_in_window(PlayerScope::Controller, TurnWindow::ThisTurn),
                 1,
             ),
             tag("lost life this turn"),
@@ -8176,27 +8177,23 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         // opponent and other opponents diverge.
         value(
             make_quantity_ge(
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Target,
-                },
+                life_lost_in_window(PlayerScope::Target, TurnWindow::ThisTurn),
                 1,
             ),
             tag("they lost life this turn"),
         ),
-        // "an opponent lost life this turn"
+        // Retain the historical opponent scope for this-turn "that player".
         value(
             make_quantity_ge(
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Opponent {
+                life_lost_in_window(
+                    PlayerScope::Opponent {
                         aggregate: AggregateFunction::Sum,
                     },
-                },
+                    TurnWindow::ThisTurn,
+                ),
                 1,
             ),
-            alt((
-                tag("an opponent lost life this turn"),
-                tag("that player lost life this turn"),
-            )),
+            tag("that player lost life this turn"),
         ),
         // CR 119.3 + CR 603.4: "that player lost less than N life this turn"
         // (Lolth, Spider Queen emblem intervening-if).
@@ -8208,9 +8205,7 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
                 rest,
                 StaticCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn {
-                            player: PlayerScope::ScopedPlayer,
-                        },
+                        qty: life_lost_in_window(PlayerScope::ScopedPlayer, TurnWindow::ThisTurn),
                     },
                     comparator: Comparator::LT,
                     rhs: QuantityExpr::Fixed {
@@ -8219,6 +8214,7 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
                 },
             ))
         },
+        parse_lost_life_in_window,
         parse_opponent_lost_life_this_turn,
         // CR 119.4 + CR 603.4: "an opponent gained life this turn" — sum across
         // opponents, mirroring the lost-life sibling. Unlocks Needlebite Trap
@@ -8241,14 +8237,11 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         // (Y'shtola, Night's Blessed; Knight of the Ebon Legion). The "a
         // player" quantifier covers controller + opponents; the threshold
         // semantic is "any single player crossed N", not "sum across
-        // players" — resolves via `LifeLostThisTurn { player: AllPlayers {
+        // players" — resolves via `LifeLost { player: AllPlayers {
         // aggregate: Max } }`.
         parse_player_lost_life_this_turn,
         // "you gained life this turn" / "you gained N or more life this turn"
         parse_you_gained_life_this_turn,
-        // "you lost life this turn" / "you lost N or more life this turn" — the
-        // controller-scoped mirror of the gained sibling (was the only missing
-        // subject in the gained/lost × you/opponent/player matrix).
         parse_you_lost_life_this_turn,
     ))
     .parse(input)
@@ -8536,10 +8529,10 @@ fn parse_no_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
     ))
 }
 
-/// History windows shared by the cast/draw history conditions: the current
-/// turn, the previous turn, and the "since your last turn ended" window
-/// (I Bask in Your Silent Awe). Each action maps the windows it has counters
-/// for and declines the rest, so related wordings compose without new tags.
+/// History windows shared by the spell, draw, and life-loss conditions: the
+/// current turn, the previous turn, and the "since your last turn ended"
+/// window (I Bask in Your Silent Awe). Each action maps the windows it has
+/// counters for and declines the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryWindow {
     ThisTurn,
@@ -8568,13 +8561,10 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
         // CR 606.1 + CR 603.4: "you activated a loyalty ability of a planeswalker this turn"
         // / "you activated a loyalty ability this turn" — The Chain Veil class.
         parse_you_activated_loyalty_this_turn,
-        // "no spells were cast last turn" (werewolf)
-        value(
-            make_quantity_comparison(QuantityRef::SpellsCastLastTurn, Comparator::EQ, 0),
-            tag("no spells were cast last turn"),
-        ),
-        // "two or more spells were cast last turn" (table-wide only; the
-        // per-player "a player cast N or more spells last turn" is declined)
+        // CR 601.2i + CR 603.4: the werewolf last-turn spell guards, all lowered
+        // through `spells_cast_in_window`: "no spells were cast last turn",
+        // "two or more spells were cast last turn" (table-wide) and "a player
+        // cast N or more spells last turn" (per-player existential).
         parse_spells_cast_last_turn,
         // CR 601.2i + CR 603.4: "no opponent cast a spell <window>"
         // (I Bask in Your Silent Awe).
@@ -8626,7 +8616,7 @@ fn parse_you_activated_loyalty_this_turn(input: &str) -> OracleResult<'_, Static
 /// `OpponentSpellsCastSinceLastTurn` (per-player window counter bumped on
 /// every finalized cast, reset when the controller's turn ends — approximating
 /// as "this turn" would abandon every upkeep unconditionally), and "this turn"
-/// reads `SpellsCastThisTurn` over the `Opponents` scope (EQ-0, so the sum and
+/// reads `SpellsCast` over the `Opponents` scope (EQ-0, so the sum and
 /// the existential coincide). "last turn" has no per-opponent counter and is
 /// declined. Canonical card: I Bask in Your Silent Awe.
 fn parse_no_opponent_cast_spell_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -8640,9 +8630,10 @@ fn parse_no_opponent_cast_spell_in_window(input: &str) -> OracleResult<'_, Stati
         HistoryWindow::SinceYourLastTurnEnded => QuantityRef::OpponentSpellsCastSinceLastTurn {
             player: PlayerScope::Controller,
         },
-        HistoryWindow::ThisTurn => QuantityRef::SpellsCastThisTurn {
+        HistoryWindow::ThisTurn => QuantityRef::SpellsCast {
             scope: CountScope::Opponents,
             filter: None,
+            window: TurnWindow::ThisTurn,
         },
         HistoryWindow::LastTurn => {
             return Err(nom::Err::Error(nom::error::Error::new(
@@ -9292,7 +9283,7 @@ fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondit
 ///
 /// "you [verb1] (and|or) [verb2] life this turn" where each verb is gained/lost.
 /// Example: "you gained and lost life this turn" → And(LifeGainedThisTurn >= 1,
-/// LifeLostThisTurn >= 1); "you gained or lost life this turn" → Or(...) (Star
+/// LifeLost >= 1); "you gained or lost life this turn" → Or(...) (Star
 /// Charter, Starseer Mentor, Starlit Soothsayer).
 fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     // "gained"/"lost" → the matching controller-scoped "life this turn" QuantityRef.
@@ -9305,8 +9296,9 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
                 tag("gained"),
             ),
             value(
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
                 tag("lost"),
             ),
@@ -9369,46 +9361,52 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
     ))
 }
 
-/// CR 119.3 + CR 603.4: Parse "you lost [N or more] life this turn".
-///
-/// Controller-scoped mirror of `parse_you_gained_life_this_turn`. The opponent
-/// and any-player subjects already parse (`parse_opponent_lost_life_this_turn`,
-/// `parse_player_lost_life_this_turn`) and the controller *gained* subject
-/// parses too — only "you lost …" was missing, so phase-trigger intervening-ifs
-/// such as The Book of Vile Darkness ("if you lost 2 or more life this turn,
-/// create a 2/2 black Zombie") silently dropped their condition. Resolves via
-/// the existing `LifeLostThisTurn { Controller }` QuantityRef — no new variants.
-fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        value((), tag("you lost ")),
-        value((), (parse_youve, tag(" lost "))),
-    ))
-    .parse(input)?;
-    // Try "N or more life this turn".
-    if let Ok((after_n, n)) = parse_number(rest) {
-        let after_n = after_n.trim_start();
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("or more life this turn").parse(after_n)
-        {
-            return Ok((
-                rest,
-                make_quantity_ge(
-                    QuantityRef::LifeLostThisTurn {
-                        player: PlayerScope::Controller,
-                    },
-                    n,
-                ),
-            ));
-        }
+fn life_lost_in_window(player: PlayerScope, window: TurnWindow) -> QuantityRef {
+    QuantityRef::LifeLost { player, window }
+}
+
+/// CR 119.3 + CR 603.4: literal, unquantified life loss in the current or
+/// immediately preceding turn. At GE 1, summing across opponents answers
+/// whether any opponent lost life. Quantified and anaphoric siblings stay
+/// this-turn only.
+fn parse_lost_life_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (player, _, window)) = (
+        alt((
+            value(PlayerScope::Controller, tag("you")),
+            value(
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                tag("an opponent"),
+            ),
+        )),
+        tag(" lost life "),
+        map_opt(parse_history_window, history_window_turn_window),
+    )
+        .parse(input)?;
+    if window == TurnWindow::LastTurn {
+        // The pinned last-turn class is a complete clause. Do not claim a
+        // prefix of a longer window or of an unsupported compound condition.
+        peek(alt((eof, tag(","), tag(".")))).parse(rest)?;
     }
-    // "life this turn" (minimum 1).
-    let (rest, _) = tag("life this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(life_lost_in_window(player, window), 1),
+    ))
+}
+
+/// CR 119.3 + CR 603.4: "you [or you've] lost N or more life this turn"
+/// (The Book of Vile Darkness). Unquantified "you've" is handled by
+/// `parse_youve_life_history_condition`.
+fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = (alt((parse_youve, tag("you"))), tag(" lost ")).parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag("or more life this turn").parse(rest.trim_start())?;
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Controller,
-            },
-            1,
+            life_lost_in_window(PlayerScope::Controller, TurnWindow::ThisTurn),
+            n,
         ),
     ))
 }
@@ -9418,7 +9416,7 @@ fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticConditio
 /// Y'shtola, Night's Blessed and Knight of the Ebon Legion use this idiom for
 /// the intervening-`if` clause of a phase trigger. The "a player" quantifier
 /// covers controller + opponents (not just opponents), and the per-player max
-/// semantic is enforced by `LifeLostThisTurn { player: AllPlayers { aggregate:
+/// semantic is enforced by `LifeLost { player: AllPlayers { aggregate:
 /// Max } }` (one player must individually have lost ≥ N — not the sum across
 /// players).
 ///
@@ -9432,12 +9430,13 @@ fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondi
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::AllPlayers {
+            life_lost_in_window(
+                PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
                     exclude: None,
                 },
-            },
+                TurnWindow::ThisTurn,
+            ),
             n,
         ),
     ))
@@ -9450,11 +9449,12 @@ fn parse_opponent_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCon
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Opponent {
+            life_lost_in_window(
+                PlayerScope::Opponent {
                     aggregate: AggregateFunction::Max,
                 },
-            },
+                TurnWindow::ThisTurn,
+            ),
             n,
         ),
     ))
@@ -9564,9 +9564,10 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
         return Ok((
             rest,
             make_quantity_ge(
-                QuantityRef::SpellsCastThisTurn {
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
                 2,
             ),
@@ -9662,9 +9663,10 @@ fn named_spell_history_filter<'a>(
 
 fn make_named_spell_history_condition(filter: TargetFilter) -> StaticCondition {
     make_quantity_ge(
-        QuantityRef::SpellsCastThisTurn {
+        QuantityRef::SpellsCast {
             scope: CountScope::Controller,
             filter: Some(filter),
+            window: TurnWindow::ThisTurn,
         },
         1,
     )
@@ -9675,9 +9677,10 @@ fn parse_one_spell_this_turn_after_cast(input: &str) -> OracleResult<'_, StaticC
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter,
+                window: TurnWindow::ThisTurn,
             },
             1,
         ),
@@ -9741,16 +9744,18 @@ fn parse_you_cast_both_spell_kinds_this_turn(input: &str) -> OracleResult<'_, St
         StaticCondition::And {
             conditions: vec![
                 make_quantity_ge(
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(first_filter),
+                        window: TurnWindow::ThisTurn,
                     },
                     1,
                 ),
                 make_quantity_ge(
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(second_filter),
+                        window: TurnWindow::ThisTurn,
                     },
                     1,
                 ),
@@ -9921,9 +9926,10 @@ fn parse_spell_count_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
         return Ok((
             rest,
             make_quantity_ge(
-                QuantityRef::SpellsCastThisTurn {
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
                 n,
             ),
@@ -9941,9 +9947,10 @@ fn parse_spell_count_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(filter),
+                window: TurnWindow::ThisTurn,
             },
             n,
         ),
@@ -9971,9 +9978,10 @@ fn parse_opponent_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCo
         return Ok((
             rest,
             make_quantity_ge(
-                QuantityRef::SpellsCastThisTurn {
+                QuantityRef::SpellsCast {
                     scope: CountScope::Opponents,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
                 n,
             ),
@@ -9991,9 +9999,10 @@ fn parse_opponent_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCo
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Opponents,
                 filter: Some(filter),
+                window: TurnWindow::ThisTurn,
             },
             1,
         ),
@@ -10034,9 +10043,10 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter,
+                window: TurnWindow::ThisTurn,
             },
             minimum,
         ),
@@ -10047,7 +10057,7 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
 /// "another"): Parse "you('ve) cast another [<filter>] spell this turn" and
 /// return the controller-scoped spell-history filter (`None` = any spell).
 /// Used by the ETB "unless" replacement parser to build the own-cast-excluding
-/// `SpellsCastThisTurn` reference; the exclusion marker is injected by the
+/// `SpellsCast` reference; the exclusion marker is injected by the
 /// caller via `TargetFilter::with_own_cast_exclusion`.
 pub(crate) fn parse_you_cast_another_spell_filter_this_turn(
     input: &str,
@@ -10122,7 +10132,7 @@ fn parse_spell_history_filter_with_zone_suffix(type_text: &str) -> Option<Target
     let (props, consumed) = parse_spell_history_origin_props(suffix)?;
     // CR 601.2a + CR 400.1: The cast-origin qualifier ("from anywhere other than
     // your hand") and the timing qualifier ("this turn") are independent axes and
-    // may appear in either order. The `SpellsCastThisTurn` ref already encodes the
+    // may appear in either order. The `SpellsCast` ref already encodes the
     // "this turn" window, so a trailing time qualifier after the cast-origin zone
     // suffix carries no extra filter information — accept and discard it. This is
     // the qualifier-then-time word order (Impending Flux: "spells you've cast from
@@ -10233,21 +10243,90 @@ fn strip_spell_history_noun(type_text: &str) -> &str {
     type_text
 }
 
-/// CR 603.4: "two or more spells were cast last turn" — the table-wide count
-/// of spells cast during the previous turn (`QuantityRef::SpellsCastLastTurn`).
+/// The `QuantityRef::SpellsCast` constructor every spell-history window clause
+/// lowers through (CR 601.2i + CR 500): the one place a parsed "spells cast
+/// <window>" becomes a windowed quantity.
+fn spells_cast_in_window(
+    scope: CountScope,
+    filter: Option<TargetFilter>,
+    window: TurnWindow,
+) -> QuantityRef {
+    QuantityRef::SpellsCast {
+        scope,
+        filter,
+        window,
+    }
+}
+
+/// The turn windows a per-player history quantity has data for. The parser's
+/// three-valued [`HistoryWindow`] also names "since your last turn ended",
+/// which has its own per-player counter family and so maps to `None` here.
+fn history_window_turn_window(window: HistoryWindow) -> Option<TurnWindow> {
+    match window {
+        HistoryWindow::ThisTurn => Some(TurnWindow::ThisTurn),
+        HistoryWindow::LastTurn => Some(TurnWindow::LastTurn),
+        HistoryWindow::SinceYourLastTurnEnded => None,
+    }
+}
+
+/// CR 601.2i + CR 603.4 + CR 800.4i: the werewolf last-turn spell guards.
 ///
-/// The per-player wording "a player cast two or more spells last turn" is
-/// deliberately NOT recognized here: it is true only when a single player cast
-/// that many spells, which a table-wide total cannot express (two players
-/// casting one spell each would wrongly satisfy it). Declining leaves that
-/// guard unparsed, so the trigger fails closed as an `unparsed_condition` gap
-/// instead of lowering to the wrong count.
+/// - "no spells were cast last turn" (Gatstaf Shepherd): the table-wide
+///   total of the per-player snapshots is 0.
+/// - "two or more spells were cast last turn": the table-wide total is at
+///   least 2 (the table-wide wording: two players casting one spell each
+///   satisfy it).
+/// - "a player cast two or more spells last turn" (Gatstaf Howler): true only
+///   when ONE player cast that many, which a table-wide total cannot express
+///   (two players casting one spell each would wrongly satisfy it, the misread
+///   #10004 fixed). It is the existential over players `PlayerCount{
+///   PlayerAttribute{All, SpellsCast{ScopedPlayer, None, LastTurn}, GE n}} >= 1`;
+///   the runtime reads each candidate's own snapshot
+///   (`effects::candidate_player_scalar`). Only the last-turn window has
+///   per-player data, so this-turn and "since your last turn ended" wordings
+///   decline and the trigger fails closed.
 fn parse_spells_cast_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    value(
-        make_quantity_ge(QuantityRef::SpellsCastLastTurn, 2),
-        tag("two or more spells were cast last turn"),
-    )
+    alt((
+        value(
+            make_quantity_comparison(
+                spells_cast_in_window(CountScope::All, None, TurnWindow::LastTurn),
+                Comparator::EQ,
+                0,
+            ),
+            tag("no spells were cast last turn"),
+        ),
+        value(
+            make_quantity_ge(
+                spells_cast_in_window(CountScope::All, None, TurnWindow::LastTurn),
+                2,
+            ),
+            tag("two or more spells were cast last turn"),
+        ),
+        parse_player_cast_spells_last_turn,
+    ))
     .parse(input)
+}
+
+/// "a player cast `<N or more>` spells last turn" — see
+/// [`parse_spells_cast_last_turn`].
+fn parse_player_cast_spells_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("a player cast ").parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let (rest, _) = tag("spells ").parse(rest)?;
+    let (rest, window) = verify(
+        map_opt(parse_history_window, history_window_turn_window),
+        |window| *window == TurnWindow::LastTurn,
+    )
+    .parse(rest)?;
+    Ok((
+        rest,
+        existential_player_predicate(
+            PlayerRelation::All,
+            spells_cast_in_window(CountScope::ScopedPlayer, None, window),
+            Comparator::GE,
+            QuantityExpr::Fixed { value: n as i32 },
+        ),
+    ))
 }
 
 /// Parse "you [put/ve put] [a counter/one or more counters] on a
@@ -10271,9 +10350,10 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
             rest,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -10289,9 +10369,10 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
             rest,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -10303,9 +10384,10 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         value(
             make_quantity_comparison(
-                QuantityRef::SpellsCastThisTurn {
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
                 Comparator::EQ,
                 0,
@@ -10314,8 +10396,9 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         ),
         value(
             make_quantity_comparison(
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
                 Comparator::EQ,
                 0,
@@ -15011,19 +15094,17 @@ mod tests {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            window: TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 1 },
         } = &conditions[1]
         else {
-            panic!(
-                "expected SpellsCastThisTurn condition, got {:?}",
-                conditions[1]
-            );
+            panic!("expected SpellsCast condition, got {:?}", conditions[1]);
         };
 
         // CR 601.2a + CR 400.11: the spell half is the negation of a cast from the hand.
@@ -15097,15 +15178,16 @@ mod tests {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            window: TurnWindow::ThisTurn,
                             ..
                         },
                 },
             ..
         } = condition
         else {
-            panic!("expected SpellsCastThisTurn condition, got {condition:?}");
+            panic!("expected SpellsCast condition, got {condition:?}");
         };
         assert!(properties.iter().any(|prop| prop
             == &FilterProp::InZone {
@@ -18260,20 +18342,90 @@ mod tests {
         );
     }
 
+    // SHAPE: CR 119.3 + CR 603.4. Literal and historical unquantified
+    // conditions keep their subject binding and use a GE 1 life-loss check.
     #[test]
-    fn test_youve_lost_life() {
-        let (rest, c) = parse_inner_condition("you've lost life this turn").unwrap();
-        assert_eq!(rest, "");
-        match c {
-            StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn { .. },
+    fn unquantified_life_loss_preserves_scope_across_supported_windows() {
+        for (text, rest_expected, player, window) in [
+            (
+                "you lost life last turn",
+                "",
+                PlayerScope::Controller,
+                TurnWindow::LastTurn,
+            ),
+            (
+                "an opponent lost life last turn,",
+                ",",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                TurnWindow::LastTurn,
+            ),
+            (
+                "you lost life this turn",
+                "",
+                PlayerScope::Controller,
+                TurnWindow::ThisTurn,
+            ),
+            (
+                "an opponent lost life this turn",
+                "",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                TurnWindow::ThisTurn,
+            ),
+            (
+                "that player lost life this turn",
+                "",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                TurnWindow::ThisTurn,
+            ),
+            (
+                "you've lost life this turn",
+                "",
+                PlayerScope::Controller,
+                TurnWindow::ThisTurn,
+            ),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, rest_expected, "{text}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLost { player, window },
                     },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 1 },
-            } => {}
-            other => panic!("expected LifeLostThisTurn GE 1, got {other:?}"),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                "{text}",
+            );
+        }
+    }
+
+    // SHAPE: last-turn life loss does not claim quantities, other subjects or
+    // windows, or prefixes of longer conditions. The possessive window has
+    // its own legacy trigger parser, not this condition.
+    #[test]
+    fn unquantified_last_turn_life_loss_declines_out_of_scope_clauses() {
+        for text in [
+            "you lost 2 or more life last turn",
+            "an opponent lost at least 2 life last turn",
+            "a player lost 4 or more life last turn",
+            "that player lost life last turn",
+            "they lost life last turn",
+            "you've lost life last turn",
+            "you’ve lost life last turn",
+            "an opponent lost life during their last turn",
+            "you lost life since your last turn ended",
+            "you lost life last turnover",
+            "an opponent lost life last turn before combat",
+            "you lost life last turn and something else",
+        ] {
+            assert!(parse_inner_condition(text).is_err(), "{text}");
         }
     }
 
@@ -21423,9 +21575,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { filters }),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -21441,7 +21594,7 @@ mod tests {
                         if type_filters == &vec![TypeFilter::Sorcery]
                 ))
             ),
-            other => panic!("expected filtered SpellsCastThisTurn GE 2, got {other:?}"),
+            other => panic!("expected filtered SpellsCast GE 2, got {other:?}"),
         }
     }
 
@@ -21457,9 +21610,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { filters }),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -21475,7 +21629,7 @@ mod tests {
                         if type_filters == &vec![TypeFilter::Sorcery]
                 ))
             ),
-            other => panic!("expected filtered SpellsCastThisTurn GE 3, got {other:?}"),
+            other => panic!("expected filtered SpellsCast GE 3, got {other:?}"),
         }
     }
 
@@ -21488,15 +21642,16 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
             } => assert!(properties.contains(&FilterProp::Historic)),
-            other => panic!("expected historic SpellsCastThisTurn GE 1, got {other:?}"),
+            other => panic!("expected historic SpellsCast GE 1, got {other:?}"),
         }
     }
 
@@ -21511,9 +21666,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -21522,7 +21678,7 @@ mod tests {
                 comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 4 },
             })),
-            other => panic!("expected mana-value filtered SpellsCastThisTurn, got {other:?}"),
+            other => panic!("expected mana-value filtered SpellsCast, got {other:?}"),
         }
     }
 
@@ -21540,10 +21696,9 @@ mod tests {
                     condition,
                     StaticCondition::QuantityComparison {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
-                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
-                            },
+                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },
@@ -21553,17 +21708,16 @@ mod tests {
                     condition,
                     StaticCondition::QuantityComparison {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
-                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
-                            },
+                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },
                     } if type_filters == &vec![TypeFilter::Non(Box::new(TypeFilter::Creature))]
                 )));
             }
-            other => panic!("expected compound SpellsCastThisTurn condition, got {other:?}"),
+            other => panic!("expected compound SpellsCast condition, got {other:?}"),
         }
     }
 
@@ -21583,10 +21737,9 @@ mod tests {
                             condition,
                             StaticCondition::QuantityComparison {
                                 lhs: QuantityExpr::Ref {
-                                    qty: QuantityRef::SpellsCastThisTurn {
+                                    qty: QuantityRef::SpellsCast {
                                         scope: CountScope::Controller,
-                                        filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                                    },
+                                        filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), window: TurnWindow::ThisTurn },
                                 },
                                 comparator: Comparator::GE,
                                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -21618,9 +21771,10 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -21639,9 +21793,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::EQ,
@@ -22101,7 +22256,7 @@ mod tests {
     }
 
     /// CR 601.2i + CR 603.4: the composed cast window — "no opponent cast a
-    /// spell this turn" reads `SpellsCastThisTurn` over the `Opponents` scope
+    /// spell this turn" reads `SpellsCast` over the `Opponents` scope
     /// (EQ-0, so the sum and the existential coincide), mirroring the
     /// pre-existing "an opponent cast N or more spells this turn" mapping.
     #[test]
@@ -22112,9 +22267,10 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Opponents,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -22132,9 +22288,10 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Opponents,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -22179,9 +22336,10 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Opponents,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -22200,15 +22358,16 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Opponents,
                                 filter: Some(TargetFilter::Or { filters }),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
             } => assert_eq!(filters.len(), 2),
-            other => panic!("expected opponent scoped filtered SpellsCastThisTurn, got {other:?}"),
+            other => panic!("expected opponent scoped filtered SpellsCast, got {other:?}"),
         }
     }
 
@@ -22224,9 +22383,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Opponents,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -22270,9 +22430,10 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
-                            filter: None
+                            filter: None,
+                            window: TurnWindow::ThisTurn
                         }
                     }
                 ));
@@ -22296,7 +22457,7 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn { .. }
+                        qty: QuantityRef::LifeLost { .. }
                     }
                 ));
                 assert_eq!(comparator, Comparator::EQ);
@@ -25507,7 +25668,7 @@ mod tests {
     }
 
     /// CR 119.3 + CR 603.4: Y'shtola's "a player lost 4 or more life this
-    /// turn" must parse to `LifeLostThisTurn { player: AllPlayers { Max } } ≥ 4`
+    /// turn" must parse to `LifeLost { player: AllPlayers { Max } } ≥ 4`
     /// — the per-player-max semantic, not the cross-opponent sum semantic of
     /// `Opponent { Sum }`.
     #[test]
@@ -25518,11 +25679,12 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
                             exclude: None,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -25539,10 +25701,11 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Opponent {
                             aggregate: AggregateFunction::Max,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -25562,11 +25725,12 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
                             exclude: None,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -25587,11 +25751,12 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
                             exclude: None,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -27416,8 +27581,9 @@ mod tests {
             c,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Target,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
