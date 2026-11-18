@@ -2253,17 +2253,7 @@ fn parse_as_enters_behold_tapped(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
-        value(
-            (),
-            preceded(
-                tag("as "),
-                alt((
-                    tag("~ enters, you may "),
-                    tag("~ enters the battlefield, you may "),
-                )),
-            ),
-        )
-        .parse(i)
+        value((), preceded(parse_as_self_enters_frame, tag("you may "))).parse(i)
     })?;
 
     let after_prefix_lower = after_prefix.to_lowercase();
