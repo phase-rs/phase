@@ -284,6 +284,7 @@ mod zenos_yae_galvus_chosen_object;
 
 mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
+mod issue_10958_repeatable_mana_castability;
 
 mod resolution_progress_contract;
 

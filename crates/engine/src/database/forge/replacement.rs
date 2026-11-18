@@ -1,5 +1,6 @@
 use crate::types::ability::{DrawReplacementScope, ReplacementDefinition};
 use crate::types::replacements::ReplacementEvent;
+use crate::types::Zone;
 
 use super::filter::translate_filter;
 use super::svar::SvarResolver;
@@ -60,12 +61,48 @@ pub(crate) fn translate_replacement(
         }
     }
 
+    // ActiveZones$ → active_zones (CR 113.6b / CR 614.12)
+    // Comma-separated list of zone names (e.g., "Library,Hand,Battlefield,Graveyard,Stack,Exile,Command")
+    // "All" or "Anywhere" expands to all seven zones.
+    if let Some(zones_str) = params.get("ActiveZones") {
+        def.active_zones = parse_active_zones(zones_str);
+    }
+
     // Description$ → description
     if let Some(desc) = params.get("Description") {
         def.description = Some(desc.to_string());
     }
 
     Ok(def)
+}
+
+/// Parse a comma-separated list of zone names into a `Vec<Zone>`.
+///
+/// Supports "All" / "Anywhere" as a shorthand for all seven zones.
+fn parse_active_zones(zones_str: &str) -> Vec<Zone> {
+    let zones_str = zones_str.trim();
+    if zones_str.eq_ignore_ascii_case("All") || zones_str.eq_ignore_ascii_case("Anywhere") {
+        return Zone::ALL.to_vec();
+    }
+    zones_str
+        .split(',')
+        .map(|s| s.trim())
+        .filter_map(|s| parse_zone(s))
+        .collect()
+}
+
+/// Parse a single zone name (case-insensitive).
+fn parse_zone(name: &str) -> Option<Zone> {
+    match name.to_lowercase().as_str() {
+        "library" => Some(Zone::Library),
+        "hand" => Some(Zone::Hand),
+        "battlefield" => Some(Zone::Battlefield),
+        "graveyard" => Some(Zone::Graveyard),
+        "stack" => Some(Zone::Stack),
+        "exile" => Some(Zone::Exile),
+        "command" => Some(Zone::Command),
+        _ => None,
+    }
 }
 
 /// Map Forge `Event$` string to `ReplacementEvent`.
@@ -138,6 +175,7 @@ mod tests {
 
         assert_eq!(def.event, ReplacementEvent::CreateToken);
         assert!(def.valid_card.is_some());
+        assert_eq!(def.active_zones, vec![Zone::Battlefield]);
     }
 
     #[test]
@@ -164,5 +202,51 @@ mod tests {
         let def = translate_replacement(&line, &mut resolver).unwrap();
 
         assert!(matches!(def.event, ReplacementEvent::ChangeZone));
+    }
+
+    #[test]
+    fn test_active_zones_all() {
+        let raw = "Event$ Moved | ActiveZones$ All | ValidCard$ Card.Self | Destination$ Graveyard | ReplaceWith$ Exile | Description$ If CARDNAME would be put into a graveyard from anywhere, exile it instead.";
+        let line = ForgeAbilityLine {
+            raw: raw.to_string(),
+            params: parse_params(raw),
+        };
+        let mut resolver = make_resolver(&[("Exile", "DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Exile | Defined$ ReplacedCard")]);
+        let def = translate_replacement(&line, &mut resolver).unwrap();
+
+        assert_eq!(def.active_zones.len(), 7);
+        assert!(def.active_zones.contains(&Zone::Library));
+        assert!(def.active_zones.contains(&Zone::Hand));
+        assert!(def.active_zones.contains(&Zone::Battlefield));
+        assert!(def.active_zones.contains(&Zone::Graveyard));
+        assert!(def.active_zones.contains(&Zone::Stack));
+        assert!(def.active_zones.contains(&Zone::Exile));
+        assert!(def.active_zones.contains(&Zone::Command));
+    }
+
+    #[test]
+    fn test_active_zones_anywhere() {
+        let raw = "Event$ Moved | ActiveZones$ Anywhere | ValidCard$ Card.Self | Destination$ Graveyard | ReplaceWith$ Exile | Description$ If CARDNAME would be put into a graveyard from anywhere, exile it instead.";
+        let line = ForgeAbilityLine {
+            raw: raw.to_string(),
+            params: parse_params(raw),
+        };
+        let mut resolver = make_resolver(&[("Exile", "DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Exile | Defined$ ReplacedCard")]);
+        let def = translate_replacement(&line, &mut resolver).unwrap();
+
+        assert_eq!(def.active_zones.len(), 7);
+    }
+
+    #[test]
+    fn test_active_zones_comma_separated() {
+        let raw = "Event$ Moved | ActiveZones$ Library, Hand, Graveyard | ValidCard$ Card.Self | Destination$ Graveyard | ReplaceWith$ Exile | Description$ Test.";
+        let line = ForgeAbilityLine {
+            raw: raw.to_string(),
+            params: parse_params(raw),
+        };
+        let mut resolver = make_resolver(&[("Exile", "DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Exile | Defined$ ReplacedCard")]);
+        let def = translate_replacement(&line, &mut resolver).unwrap();
+
+        assert_eq!(def.active_zones, vec![Zone::Library, Zone::Hand, Zone::Graveyard]);
     }
 }

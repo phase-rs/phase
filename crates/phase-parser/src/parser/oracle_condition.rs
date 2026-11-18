@@ -449,7 +449,10 @@ fn static_condition_to_restriction_condition(
         // you), the same failure mode this match rejects for
         // `TopOfLibraryMatches` above.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
-        | StaticCondition::CastingAsVariant { .. } => None,
+        | StaticCondition::CastingAsVariant { .. }
+        // CR 122.1f: defending player poison status is combat-context dependent
+        // and cannot be evaluated at a cast/activation gate.
+        | StaticCondition::DefendingPlayerIsPoisoned => None,
     }
 }
 

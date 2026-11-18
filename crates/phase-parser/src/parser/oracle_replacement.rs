@@ -7275,6 +7275,9 @@ fn replacement_condition_from_static(
         // CR 500.8 + CR 506.1 + CR 608.2c: a per-turn phase-occurrence gate is
         // not a replacement condition; fail closed.
         | StaticCondition::FirstCombatPhaseOfTurn
+        // CR 122.1f: defending player poison status is combat-context dependent
+        // and cannot be used in replacement effects.
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => None,
     }
 }

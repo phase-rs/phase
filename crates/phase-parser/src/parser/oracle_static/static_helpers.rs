@@ -1834,9 +1834,10 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::HasCounters { .. }
         | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::RecipientHasCounters { .. }
-        | StaticCondition::ClassLevelGE { .. }
-        | StaticCondition::DefendingPlayerControls { .. }
-        | StaticCondition::SourceAttackingAlone
+| StaticCondition::ClassLevelGE { .. }
+            | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::DefendingPlayerIsPoisoned
+            | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked

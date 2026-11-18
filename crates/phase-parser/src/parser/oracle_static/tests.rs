@@ -31071,22 +31071,19 @@ fn cant_be_blocked_fallback_arm_defers_unenforceable_payment_gate() {
     );
 }
 
-/// Chained Throatseeker's defending-player poison gate is preserved as an
-/// undecomposed unless rider until attack legality can evaluate the candidate
-/// defending player before attackers are committed.
-#[test]
-fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
-    let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
-        .expect("Chained Throatseeker should parse");
-    assert_eq!(def.mode, StaticMode::CantAttack);
-    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
-        panic!("expected Not(Unrecognized), got {:?}", def.condition);
-    };
-    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
-        panic!("expected preserved unrecognized rider, got {condition:?}");
-    };
-    assert_eq!(text, "unless defending player is poisoned");
-}
+/// Chained Throatseeker's defending-player poison gate is parsed as a typed condition.
+    #[test]
+    fn chained_throatseeker_defending_player_poisoned_parsed() {
+        let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
+            .expect("Chained Throatseeker should parse");
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+            panic!("expected Not(DefendingPlayerIsPoisoned), got {:?}", def.condition);
+        };
+        let StaticCondition::DefendingPlayerIsPoisoned = condition.as_ref() else {
+            panic!("expected DefendingPlayerIsPoisoned, got {condition:?}");
+        };
+    }
 
 /// Arboria's turn-history rider is preserved in the AST, but not yet decomposed
 /// into runtime semantics.

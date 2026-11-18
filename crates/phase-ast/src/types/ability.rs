@@ -16788,6 +16788,9 @@ pub enum StaticCondition {
     DefendingPlayerControls {
         filter: TargetFilter,
     },
+    /// CR 122.1f: True when the defending player has one or more poison counters.
+    /// Used for conditional evasion ("can't attack unless defending player is poisoned").
+    DefendingPlayerIsPoisoned,
     /// CR 506.5: True when the source creature is the only attacking creature.
     SourceAttackingAlone,
     /// CR 508.1k + CR 506.4: True when the source creature is currently an attacking creature.
@@ -17182,8 +17185,9 @@ impl StaticCondition {
             | StaticCondition::HasCounters { .. }
             | StaticCondition::CastVariantPaid { .. }
             | StaticCondition::RecipientHasCounters { .. }
-            | StaticCondition::ClassLevelGE { .. }
+| StaticCondition::ClassLevelGE { .. }
             | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::DefendingPlayerIsPoisoned
             | StaticCondition::SourceAttackingAlone
             | StaticCondition::SourceIsAttacking
             | StaticCondition::SourceIsBlocking
@@ -17297,6 +17301,7 @@ impl StaticCondition {
             | StaticCondition::RecipientHasCounters { .. }
             | StaticCondition::ClassLevelGE { .. }
             | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::DefendingPlayerIsPoisoned
             | StaticCondition::SourceAttackingAlone
             | StaticCondition::SourceIsAttacking
             | StaticCondition::SourceIsBlocking
@@ -17534,6 +17539,7 @@ impl StaticCondition {
             | StaticCondition::RecipientHasCounters { .. }
             | StaticCondition::ClassLevelGE { .. }
             | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::DefendingPlayerIsPoisoned
             | StaticCondition::SourceAttackingAlone
             | StaticCondition::SourceIsAttacking
             | StaticCondition::SourceIsBlocking
@@ -17655,6 +17661,7 @@ impl StaticCondition {
             | StaticCondition::RecipientHasCounters { .. }
             | StaticCondition::ClassLevelGE { .. }
             | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::DefendingPlayerIsPoisoned
             | StaticCondition::SourceAttackingAlone
             | StaticCondition::SourceIsAttacking
             | StaticCondition::SourceIsBlocking
@@ -38336,6 +38343,10 @@ pub enum TriggerCondition {
     /// defending player in the current combat controls no permanents matching the filter.
     DefendingPlayerControlsNone { filter: TargetFilter },
 
+    /// CR 122.1f + CR 603.4: "if defending player is poisoned" — true when the
+    /// defending player in the current combat has one or more poison counters.
+    DefendingPlayerIsPoisoned,
+
     /// CR 702.104a: "if tribute wasn't paid" — Tribute mechanic intervening-if.
     TributeNotPaid,
     /// CR 207.2c + CR 601.2: "if you cast this spell during your [phase/step]".
@@ -38656,6 +38667,7 @@ impl TriggerCondition {
             | TriggerCondition::CounterAddedThisTurn
             | TriggerCondition::LostLifeLastTurn
             | TriggerCondition::DefendingPlayerControlsNone { .. }
+            | TriggerCondition::DefendingPlayerIsPoisoned
             | TriggerCondition::TributeNotPaid
             | TriggerCondition::CastDuringPhase { .. }
             | TriggerCondition::CurrentPhaseIs { .. }

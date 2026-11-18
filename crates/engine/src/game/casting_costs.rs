@@ -9726,13 +9726,31 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 pending.additional_cost_flow =
                     imposed_required_cost.clone().map(AdditionalCost::Required);
                 // CR 601.2b: Try each choice in order until one is payable.
-                for choice_cost in costs {
+                for (choice_index, choice_cost) in costs.iter().enumerate() {
                     if additional_cost_declaration_is_offerable(
                         state,
                         player,
                         &pending,
                         choice_cost.clone(),
                     )? {
+                        // CR 601.2b: If the preferred choice (index 0) is unpayable and
+                        // a fallback is payable, apply it automatically with no prompt.
+                        // In Manual mode, always prompt so the player can choose.
+                        if choice_index > 0 && payment_mode == CastPaymentMode::Auto {
+                            // Apply the fallback choice directly without prompting.
+                            let instance = AdditionalCostInstance::new(
+                                AdditionalCostOrigin::Other,
+                                AdditionalCost::Choice(vec![choice_cost.clone()]),
+                            );
+                            pending.additional_cost_queue.insert(0, instance);
+                            return pay_additional_cost(
+                                state,
+                                player,
+                                choice_cost.clone(),
+                                pending,
+                                events,
+                            );
+                        }
                         return Ok(make_optional_cost_choice(
                             state,
                             player,

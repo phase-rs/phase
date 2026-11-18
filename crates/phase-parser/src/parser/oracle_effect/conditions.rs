@@ -6727,6 +6727,9 @@ pub(crate) fn static_condition_to_ability_condition(
         // so there is no attacker whose latched record could answer. The anchor
         // is structurally unavailable here, not merely unused.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // CR 122.1f: defending player poison status is combat-context dependent
+        // and cannot be evaluated at effect resolution time.
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => None,
     }
 }

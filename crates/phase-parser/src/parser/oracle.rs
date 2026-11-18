@@ -5819,9 +5819,9 @@ fn parse_normalized_oracle_ir(
             let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
             let cost = parse_oracle_cost(&normalized_cost_text);
 
-            ctx.subject = None;
-            ctx.actor = None;
-            // The self-ref-normalized retry, and the one place in this tranche
+ctx.subject = Some(TargetFilter::SelfRef);
+    ctx.actor = None;
+    // The self-ref-normalized retry, and the one place in this tranche
             // where the *decision* is made on a LOWERED definition while the
             // *retained artifact* must stay an IR.
             //
@@ -6508,7 +6508,7 @@ fn parse_normalized_oracle_ir(
                 // the CR 602.1 envelope: it must keep firing here, before the
                 // parse, and so stays at the call site rather than moving into
                 // the shell.
-                ctx.subject = None;
+                ctx.subject = Some(TargetFilter::SelfRef);
                 ctx.actor = None;
                 let mut ir =
                     parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
@@ -6543,7 +6543,7 @@ fn parse_normalized_oracle_ir(
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
-                ctx.subject = None;
+                ctx.subject = Some(TargetFilter::SelfRef);
                 ctx.actor = None;
                 let mut ir =
                     parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
@@ -6591,7 +6591,7 @@ fn parse_normalized_oracle_ir(
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
-                ctx.subject = None;
+                ctx.subject = Some(TargetFilter::SelfRef);
                 ctx.actor = None;
                 let mut ir =
                     parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
@@ -6638,7 +6638,7 @@ fn parse_normalized_oracle_ir(
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
-                ctx.subject = None;
+                ctx.subject = Some(TargetFilter::SelfRef);
                 ctx.actor = None;
                 let mut ir =
                     parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
@@ -6676,7 +6676,7 @@ fn parse_normalized_oracle_ir(
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
-                ctx.subject = None;
+                ctx.subject = Some(TargetFilter::SelfRef);
                 ctx.actor = None;
                 let mut ir =
                     parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
@@ -6732,7 +6732,7 @@ fn parse_normalized_oracle_ir(
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
-                ctx.subject = None;
+                ctx.subject = Some(TargetFilter::SelfRef);
                 ctx.actor = None;
                 let mut ir =
                     parse_ability_ir_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
@@ -11858,7 +11858,7 @@ fn parse_loyalty_ability_ir(
     cost: AbilityCost,
     ctx: &mut ParseContext,
 ) -> AbilityIr {
-    ctx.subject = None;
+    ctx.subject = Some(TargetFilter::SelfRef);
     ctx.actor = None;
     let mut ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
     ir.shell.cost = Some(cost);
@@ -13310,7 +13310,7 @@ pub(super) fn parse_activated_ability_ir_with_self_ref_fallback(
     // Pre-diagnostics stay in ctx naturally — only manage trial-parse diagnostics.
     let pre_snapshot = ctx.diagnostics.len();
 
-    ctx.subject = None;
+    ctx.subject = Some(TargetFilter::SelfRef);
     ctx.actor = None;
     let ir = parse_ability_ir_with_context(effect_text, AbilityKind::Activated, ctx);
     let first_has_target_fallback = ctx.diagnostics[pre_snapshot..]
@@ -13333,7 +13333,7 @@ pub(super) fn parse_activated_ability_ir_with_self_ref_fallback(
     let first_diagnostics: Vec<OracleDiagnostic> = ctx.diagnostics[pre_snapshot..].to_vec();
     ctx.diagnostics.truncate(pre_snapshot);
 
-    ctx.subject = None;
+    ctx.subject = Some(TargetFilter::SelfRef);
     ctx.actor = None;
     let alt = parse_ability_ir_with_context(&normalized, AbilityKind::Activated, ctx);
     let alt_has_target_fallback = ctx.diagnostics[pre_snapshot..]

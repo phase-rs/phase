@@ -14,10 +14,12 @@
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::cost_payability::{cost_filter_before_x_announcement, eligible_exile_cost_objects, exile_cost_effective_zone};
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
-    CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
+    CostPaidObjectSnapshot, Effect, EXILE_COST_X, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
     SacrificeCost, SacrificeRequirement, TargetFilter, TriggerDefinition, TriggerDefinitionRef,
     TypedFilter,
 };
@@ -1408,6 +1410,216 @@ fn cost_life_payment_amount(cost: &Option<AbilityCost>) -> Option<Option<u16>> {
     }
 }
 
+
+/// CR 605.3a: True when an activated mana ability can be legally activated
+/// multiple times in the current turn. A repeatable mana ability has no {T}
+/// or {Q} component, no unambiguous self-sacrifice (which consumes the source),
+/// and no activation-frequency restriction (OnlyOnceEachTurn, OnlyOnce,
+/// MaxTimesEachTurn).
+///
+/// Such abilities (Treasonous Ogre's "Pay 3 life: Add {R}", Ashnod's Altar's
+/// "Sacrifice a creature: Add {C}{C}", Phyrexian Altar's "Sacrifice a creature:
+/// Add {B}") draw on a shared resource pool (life total, sacrificeable
+/// permanents, hand cards) and can be activated repeatedly until that pool is
+/// exhausted.
+fn is_repeatable_mana_ability(ability: &AbilityDefinition) -> bool {
+    if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+        return false;
+    }
+    // Tap or untap component means once per turn per source (summoning sickness
+    // also gates {T}/{Q} but the symbol itself is the hard limit).
+    if has_tap_component(&ability.cost) || has_untap_component(&ability.cost) {
+        return false;
+    }
+    // Self-sacrifice consumes the source (Gold, Treasure without {T}).
+    if has_unambiguous_self_sacrifice_component(&ability.cost) {
+        return false;
+    }
+    // Activation-frequency restrictions cap the number of activations.
+    if ability
+        .activation_restrictions
+        .iter()
+        .any(|r| {
+            matches!(
+                r,
+                ActivationRestriction::OnlyOnceEachTurn
+                    | ActivationRestriction::OnlyOnce
+                    | ActivationRestriction::MaxTimesEachTurn { .. }
+            )
+        })
+    {
+        return false;
+    }
+    true
+}
+
+/// Maximum number of times a repeatable mana ability can be activated right
+/// now, given the current game state. Returns `None` if the ability is not
+/// repeatable or if any cost component has a dynamic amount that cannot be
+/// resolved to a fixed value.
+///
+/// For a Composite cost, the limit is the minimum across all resource-consuming
+/// components (PayLife, Sacrifice, Discard, Exile). Mana sub-costs are ignored
+/// because they are paid from the mana pool during the payment step (CR 601.2g),
+/// not from a finite external supply.
+fn max_activations_for_mana_ability(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Option<u32> {
+    if !is_repeatable_mana_ability(ability) {
+        return None;
+    }
+
+    // Walk the cost tree collecting the maximum activations each resource
+    // component allows. The overall limit is the minimum of these.
+    let mut max_activations: Option<u32> = None;
+
+    fn walk_cost(
+        cost: &AbilityCost,
+        state: &GameState,
+        controller: PlayerId,
+        object_id: ObjectId,
+        ability: &AbilityDefinition,
+        max_activations: &mut Option<u32>,
+    ) {
+        match cost {
+            AbilityCost::PayLife { amount } => {
+                // CR 119.4: A player can't pay more life than they have (minus 1,
+                // since paying to 0 loses the game). The cost amount is per activation.
+                let life_per_activation =
+                    super::quantity::resolve_quantity(state, amount, controller, object_id)
+                        .max(0) as u32;
+                if life_per_activation > 0 {
+                    let player_data = &state.players[controller.0 as usize];
+                    let available_life = player_data.life.saturating_sub(1) as u32;
+                    let activations = available_life / life_per_activation;
+                    *max_activations = Some(max_activations.map_or(activations, |m| m.min(activations)));
+                }
+            }
+            AbilityCost::Sacrifice(cost) => {
+                // Number of eligible sacrifice targets divided by sacrifices per activation.
+                let granting_object =
+                    super::casting::activated_ability_granting_object(state, object_id, None);
+                let eligible = super::casting::find_eligible_sacrifice_targets(
+                    state,
+                    controller,
+                    object_id,
+                    granting_object,
+                    &cost.target,
+                );
+                let sacrifices_per_activation = match &cost.requirement {
+                    SacrificeRequirement::Count { count } => *count as usize,
+                    SacrificeRequirement::Aggregate { .. } => {
+                        // Aggregate requirements (e.g., "total power 4 or greater") are
+                        // complex; conservatively assume 1 activation if any eligible targets.
+                        if eligible.is_empty() {
+                            0
+                        } else {
+                            1
+                        }
+                    }
+                    SacrificeRequirement::All => eligible.len(),
+                };
+                if sacrifices_per_activation > 0 {
+                    let activations = eligible.len() / sacrifices_per_activation;
+                    *max_activations = Some(max_activations.map_or(activations as u32, |m| m.min(activations as u32)));
+                }
+            }
+            AbilityCost::Discard { count, filter, self_scope, .. } => {
+                let Some(p) = state.players.get(controller.0 as usize) else {
+                    *max_activations = Some(0);
+                    return;
+                };
+                let discards_per_activation =
+                    super::quantity::resolve_quantity(state, count, controller, object_id)
+                        .max(0) as usize;
+                if discards_per_activation == 0 {
+                    return;
+                }
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let ctx = FilterContext::from_source_with_controller(object_id, controller);
+                let available = if self_scope.is_source_card() {
+                    // Self-discard (e.g., Channel): only the source card itself.
+                    if p.hand.contains(&object_id) { 1 } else { 0 }
+                } else {
+                    p.hand
+                        .iter()
+                        .filter(|&&id| {
+                            id != object_id
+                                && !super::casting::is_spell_being_cast(state, id)
+                                && effective_filter
+                                    .as_ref()
+                                    .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
+                        })
+                        .count()
+                };
+                let activations = available / discards_per_activation;
+                *max_activations = Some(max_activations.map_or(activations as u32, |m| m.min(activations as u32)));
+            }
+            AbilityCost::Exile { count, zone, filter } => {
+                if *count == EXILE_COST_X {
+                    // X in exile cost: unknown at planning time, assume 1 if any targets.
+                    *max_activations = Some(max_activations.unwrap_or(1).min(1));
+                    return;
+                }
+                let exiles_per_activation = *count as usize;
+                if exiles_per_activation == 0 {
+                    return;
+                }
+                if matches!(filter, Some(TargetFilter::SelfRef)) {
+                    // Self-exile: only the source itself.
+                    let available = match zone {
+                        Some(z) => {
+                            state.objects.get(&object_id).is_some_and(|o| o.zone == *z) as usize
+                        }
+                        None => state.objects.contains_key(&object_id) as usize,
+                    };
+                    let activations = available / exiles_per_activation;
+                    *max_activations = Some(max_activations.map_or(activations as u32, |m| m.min(activations as u32)));
+                    return;
+                }
+                let zone = exile_cost_effective_zone(*zone, filter.as_ref());
+                let effective_filter = cost_filter_before_x_announcement(filter.as_ref());
+                let eligible = eligible_exile_cost_objects(
+                    state,
+                    controller,
+                    object_id,
+                    super::casting::activated_ability_granting_object(state, object_id, None),
+                    zone,
+                    effective_filter.as_ref(),
+                    *count,
+                );
+                let activations = eligible.len() / exiles_per_activation;
+                *max_activations = Some(max_activations.map_or(activations as u32, |m| m.min(activations as u32)));
+            }
+            AbilityCost::Composite { costs } => {
+                for c in costs {
+                    walk_cost(c, state, controller, object_id, ability, max_activations);
+                }
+            }
+            // Other cost types don't consume a finite external resource:
+            // Mana (paid from pool), Tap/Untap (already excluded), Loyalty,
+            // TapCreatures (taps but doesn't consume), RemoveCounter, etc.
+            _ => {}
+        }
+    }
+
+    if let Some(cost) = &ability.cost {
+        walk_cost(cost, state, controller, object_id, ability, &mut max_activations);
+    }
+
+    max_activations.filter(|&n| n > 0)
+}
+
+/// Helper to count the number of a specific leaf cost component in a cost tree.
+fn count_leaf_cost_components(cost: &Option<AbilityCost>, pred: &impl Fn(&AbilityCost) -> bool) -> usize {
+    cost.as_ref()
+        .map(|c| count_leaf_components(c, pred))
+        .unwrap_or(0)
+}
+
 /// Contribution of a single `Effect` to the controller-harm amount.
 /// `None` = not a controller-harming effect; `Some(None)` = harming but
 /// amount is dynamic (poisons the caller's sum); `Some(Some(n))` = fixed
@@ -2364,7 +2576,15 @@ fn mana_capacity(
                 )
         })
         .filter_map(|(_, ability)| {
-            usable_mana_ability_net(state, object_id, controller, ability, capacity_use)
+            let net = usable_mana_ability_net(state, object_id, controller, ability, capacity_use)?;
+            if capacity_use == CapacityUse::Castability {
+                if let Some(max_acts) = max_activations_for_mana_ability(state, controller, object_id, ability) {
+                    if max_acts > 1 {
+                        return Some(net.saturating_mul(max_acts));
+                    }
+                }
+            }
+            Some(net)
         })
         .max()
         .unwrap_or(0)
@@ -2556,6 +2776,10 @@ struct ActivatableManaProfile {
     /// the generic-mana sum counts for it. A shard assignment that uses an
     /// activation producing less than this is charged the difference.
     capacity: u32,
+    /// Maximum number of times this ability can be activated (for repeatable
+    /// mana abilities like PayLife or Sacrifice). For non-repeatable abilities,
+    /// this is 1.
+    max_activations: u32,
     kind: ActivatableManaProfileKind,
 }
 
@@ -2743,8 +2967,31 @@ fn activatable_mana_profiles_for_object(
                 && mana_abilities::mana_sub_cost_of(&ability.cost).is_some())
         });
 
-    let mut capacity = 0;
-    let mut kinds: Vec<ActivatableManaProfileKind> = Vec::new();
+    // Compute the object's max capacity from capacity-only abilities (filter lands).
+    // This is used as the capacity for non-repeatable profiled abilities.
+    let mut capacity_only_max = 0;
+    for (idx, ability) in capacity_only {
+        if mana_ability_usable_for_payment(
+            state,
+            controller,
+            object_id,
+            idx,
+            ability,
+payment_context,
+        ) {
+            if let Some(net) = usable_mana_ability_net(
+                state,
+                object_id,
+                controller,
+                ability,
+                CapacityUse::Castability,
+            ) {
+                capacity_only_max = capacity_only_max.max(net);
+            }
+        }
+    }
+
+    let mut profiles = Vec::new();
     for (idx, ability) in profiled {
         if !mana_ability_usable_for_payment(
             state,
@@ -2759,17 +3006,25 @@ fn activatable_mana_profiles_for_object(
         let Effect::Mana { produced, .. } = &*ability.effect else {
             continue;
         };
-        if let Some(net) = usable_mana_ability_net(
+        let net = usable_mana_ability_net(
             state,
             object_id,
             controller,
             ability,
             CapacityUse::Castability,
-        ) {
-            capacity = capacity.max(net);
+        ).unwrap_or(0);
+        if net == 0 {
+            continue;
         }
-        // Candidates whose yields match are one profile, since the shard
-        // backtracker branches on every profile.
+
+        // Check if this is a repeatable mana ability.
+        let max_activations = if is_repeatable_mana_ability(ability) {
+            max_activations_for_mana_ability(state, controller, object_id, ability).unwrap_or(1)
+        } else {
+            1
+        };
+
+        // Collect unique kinds for this ability.
         let mut ability_kinds: Vec<ActivatableManaProfileKind> = Vec::new();
         for kind in sizing_resolutions(state, ability, object_id, controller)
             .iter()
@@ -2782,39 +3037,20 @@ fn activatable_mana_profiles_for_object(
                 ability_kinds.push(kind);
             }
         }
-        kinds.extend(ability_kinds);
-    }
-    if kinds.is_empty() {
-        return Vec::new();
-    }
-    for (idx, ability) in capacity_only {
-        if mana_ability_usable_for_payment(
-            state,
-            controller,
-            object_id,
-            idx,
-            ability,
-            payment_context,
-        ) {
-            if let Some(net) = usable_mana_ability_net(
-                state,
+
+        // For repeatable abilities, create one profile with max_activations > 1.
+        // For non-repeatable abilities, create one profile with max_activations = 1.
+        let profile_capacity = if max_activations > 1 { net } else { net.max(capacity_only_max) };
+        for kind in ability_kinds {
+            profiles.push(ActivatableManaProfile {
                 object_id,
-                controller,
-                ability,
-                CapacityUse::Castability,
-            ) {
-                capacity = capacity.max(net);
-            }
+                capacity: profile_capacity,
+                max_activations,
+                kind: kind.clone(),
+            });
         }
     }
-    kinds
-        .into_iter()
-        .map(|kind| ActivatableManaProfile {
-            object_id,
-            capacity,
-            kind,
-        })
-        .collect()
+    profiles
 }
 
 /// CR 106.6: An activation's mana-color rider constrains actual produced mana,
@@ -2901,21 +3137,22 @@ fn shard_payment_options(shard: ManaCostShard) -> Option<Vec<ManaType>> {
 
 fn group_profiles_by_object(
     profiles: Vec<ActivatableManaProfile>,
-) -> Vec<(ObjectId, u32, Vec<ActivatableManaProfileKind>)> {
+) -> Vec<(ObjectId, u32, Vec<ActivatableManaProfile>)> {
     // Issue #4878: BTreeMap (not HashMap) so the grouped Vec below is
     // ObjectId-sorted and deterministic across processes, rather than
     // following per-process HashMap iteration order.
     use std::collections::BTreeMap;
-    let mut grouped: BTreeMap<ObjectId, (u32, Vec<ActivatableManaProfileKind>)> = BTreeMap::new();
+    let mut grouped: BTreeMap<ObjectId, (u32, Vec<ActivatableManaProfile>)> = BTreeMap::new();
     for profile in profiles {
         let entry = grouped
             .entry(profile.object_id)
             .or_insert_with(|| (profile.capacity, Vec::new()));
-        entry.1.push(profile.kind);
+        entry.0 = entry.0.max(profile.capacity);
+        entry.1.push(profile);
     }
     grouped
         .into_iter()
-        .map(|(object_id, (capacity, kinds))| (object_id, capacity, kinds))
+        .map(|(object_id, (capacity, profiles))| (object_id, capacity, profiles))
         .collect()
 }
 
@@ -2923,13 +3160,14 @@ fn group_profiles_by_object(
 /// units it places there, leaving later sources the remainder; an application
 /// placing none is the caller's skip.
 fn profile_applications(
-    profile: &ActivatableManaProfileKind,
+    profile: &ActivatableManaProfile,
     requirements: &[Vec<ManaType>],
 ) -> Vec<ProfileApplication> {
+    let max_activations = profile.max_activations;
     // Interchangeable units beyond the shard count can only be surplus.
     let placeable = |count: &u32| (*count as usize).min(requirements.len());
     // Each unit list is one way to activate, with the mana that activation adds.
-    let unit_lists: Vec<(Vec<&[ManaType]>, u32)> = match profile {
+    let unit_lists: Vec<(Vec<&[ManaType]>, u32)> = match &profile.kind {
         ActivatableManaProfileKind::Exact(types) => {
             vec![(
                 types.iter().map(std::slice::from_ref).collect(),
@@ -2955,8 +3193,10 @@ fn profile_applications(
     };
     let mut applications = Vec::new();
     for (units, output) in &unit_lists {
+        // For repeatable abilities, generate applications for 1 to max_activations activations.
+        let _max_units = (units.len() as u32).saturating_mul(max_activations);
         let mut placements = Vec::new();
-        place_units(units, requirements.to_vec(), 0, 0, &mut placements);
+        place_units_repeatable(units, units, requirements.to_vec(), 0, 0, max_activations, &mut placements);
         applications.extend(
             placements
                 .into_iter()
@@ -3016,6 +3256,85 @@ fn place_units(
     }
 }
 
+/// Version of `place_units` that handles repeatable abilities by allowing
+/// up to `max_activations` repetitions of the unit list.
+fn place_units_repeatable(
+    original_units: &[&[ManaType]],
+    units: &[&[ManaType]],
+    requirements: Vec<Vec<ManaType>>,
+    from: usize,
+    consumed: u32,
+    max_activations: u32,
+    applications: &mut Vec<(Vec<Vec<ManaType>>, u32)>,
+) {
+    if max_activations == 0 {
+        if !applications
+            .iter()
+            .any(|(remaining, placed)| *placed == consumed && *remaining == requirements)
+        {
+            applications.push((requirements, consumed));
+        }
+        return;
+    }
+    if units.is_empty() {
+        // No more units in this activation, start a new activation with the full unit list
+        place_units_repeatable(
+            original_units,
+            original_units,
+            requirements,
+            0,
+            consumed,
+            max_activations - 1,
+            applications,
+        );
+        return;
+    }
+    let Some((unit, rest)) = units.split_first().filter(|_| !requirements.is_empty()) else {
+        // Requirements are empty, or no more units to place
+        if !applications
+            .iter()
+            .any(|(remaining, placed)| *placed == consumed && *remaining == requirements)
+        {
+            applications.push((requirements, consumed));
+        }
+        return;
+    };
+    // An identical next unit takes only later shards, so each placement set is
+    // enumerated once rather than once per ordering.
+    let next_from = |index: usize| if rest.first() == Some(unit) { index } else { 0 };
+    let mut placed = false;
+    for (index, payment_options) in requirements.iter().enumerate().skip(from) {
+        if payment_options
+            .iter()
+            .any(|mana_type| unit.contains(mana_type))
+        {
+            placed = true;
+            let mut remaining = requirements.clone();
+            remaining.remove(index);
+            place_units_repeatable(
+                original_units,
+                rest,
+                remaining,
+                next_from(index),
+                consumed + 1,
+                max_activations,
+                applications,
+            );
+        }
+    }
+    if !placed {
+        place_units_repeatable(
+            original_units,
+            rest,
+            requirements,
+            next_from(from),
+            consumed,
+            max_activations,
+            applications,
+        );
+    }
+}
+
 /// CR 117.1d + CR 601.2g + CR 106.4: The cheapest way for the objects to
 /// cover `requirements`, measured as the generic capacity it uses up. Each
 /// covered shard costs one unit; an activation whose output is below the
@@ -3027,7 +3346,7 @@ fn place_units(
 /// it is solved once per invocation: identical profiles reach the same
 /// residuals by many paths.
 struct ResidualShardSearch<'a> {
-    objects: &'a [(ObjectId, u32, Vec<ActivatableManaProfileKind>)],
+    objects: &'a [(ObjectId, u32, Vec<ActivatableManaProfile>)],
     memo: std::collections::HashMap<(usize, Vec<Vec<ManaType>>), Option<u32>>,
     /// Subproblems actually solved (memo misses).
     #[cfg(test)]
@@ -3035,7 +3354,7 @@ struct ResidualShardSearch<'a> {
 }
 
 impl<'a> ResidualShardSearch<'a> {
-    fn new(objects: &'a [(ObjectId, u32, Vec<ActivatableManaProfileKind>)]) -> Self {
+    fn new(objects: &'a [(ObjectId, u32, Vec<ActivatableManaProfile>)]) -> Self {
         Self {
             objects,
             memo: std::collections::HashMap::new(),

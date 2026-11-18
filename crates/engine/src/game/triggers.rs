@@ -17983,6 +17983,25 @@ fn evaluate_trigger_condition_with_source(
                 false
             }
         }
+        // CR 122.1f + CR 603.4: "if defending player is poisoned" — true when the
+        // defending player in the current combat has one or more poison counters.
+        TriggerCondition::DefendingPlayerIsPoisoned => {
+            if let Some(combat) = &state.combat {
+                let defenders: std::collections::HashSet<PlayerId> = combat
+                    .attackers
+                    .iter()
+                    .map(|a| a.defending_player)
+                    .collect();
+                defenders.iter().any(|&def_pid| {
+                    state
+                        .players
+                        .get(def_pid.0 as usize)
+                        .is_some_and(|p| p.poison_counters > 0)
+                })
+            } else {
+                false
+            }
+        }
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser only emits
         // `ControllerRef::You` (Radiant Smite's Cycling trigger — "if you

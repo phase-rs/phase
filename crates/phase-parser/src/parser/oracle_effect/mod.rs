@@ -50743,6 +50743,7 @@ fn try_parse_put_zone_change_parts(
     text: &str,
     ctx: &ParseContext,
 ) -> Option<(Effect, Option<MultiTargetSpec>, EntersUnderSpec)> {
+    eprintln!("DEBUG try_parse_put_zone_change_parts: ctx.subject={:?}", ctx.subject);
     let tp = TextPair::new(text, lower);
     let (_, after_put_tp) = tp.split_at(4);
 
@@ -50770,6 +50771,7 @@ fn try_parse_put_zone_change_parts(
         (" on top of", Zone::Library),
     ] {
         if let Some((before, after)) = after_put_tp.split_around(needle) {
+            eprintln!("DEBUG try_parse_put_zone_change_parts: matched needle='{}', target_text='{}'", needle, before.original.trim());
             let target_text = before.original.trim();
             if target_text.is_empty() {
                 return None;
@@ -50842,6 +50844,7 @@ fn try_parse_put_zone_change_parts(
             let target = match plural_pool {
                 Some(pool) => pool,
                 None => {
+                    eprintln!("DEBUG try_parse_put_zone_change_parts: calling parse_target_with_ctx with target_text='{}', ctx.subject={:?}", target_text, ctx.subject);
                     let parsed =
                         parse_target_with_ctx(target_text, &mut ctx.clone_player_antecedents()).0;
                     // CR 608.2c: a definite plural subject ("the nonland cards

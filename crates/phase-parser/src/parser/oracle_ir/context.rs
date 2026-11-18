@@ -1007,6 +1007,8 @@ impl ParseContext {
     /// `object_pronoun_ref`, …) or inheriting any other caller state.
     pub(crate) fn clone_player_antecedents(&self) -> Self {
         Self {
+            subject: self.subject.clone(),
+            object_pronoun_ref: self.object_pronoun_ref.clone(),
             relative_player_scope: self.relative_player_scope.clone(),
             declared_player_scope: self.declared_player_scope.clone(),
             prior_player_declaration: self.prior_player_declaration,

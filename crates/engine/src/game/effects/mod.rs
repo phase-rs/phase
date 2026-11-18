@@ -9617,6 +9617,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
@@ -10046,6 +10047,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::EchoDue
         | TriggerCondition::SolveConditionMet
         | TriggerCondition::ClassLevelGE { .. }
+        | TriggerCondition::DefendingPlayerIsPoisoned
         | TriggerCondition::SourceIsHarnessed
         | TriggerCondition::AttractionVisitRoll { .. }
         | TriggerCondition::WasCast { .. }

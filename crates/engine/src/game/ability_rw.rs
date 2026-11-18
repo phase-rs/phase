@@ -2091,7 +2091,8 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
         | TriggerCondition::PlacedByAbilitySource
-        | TriggerCondition::AddedManaWithThisAbilityThisTurn => false,
+        | TriggerCondition::AddedManaWithThisAbilityThisTurn
+        | TriggerCondition::DefendingPlayerIsPoisoned => false,
     }
 }
 
@@ -2248,6 +2249,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => false,
     }
 }
@@ -7278,6 +7280,9 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // holder's installed boons; like the monarch designation the read
         // profile is entirely determined by the subject scope.
         TriggerCondition::HasBoon { player } => rw_player_scope(player),
+        // CR 122.1f: defending player poison status reads the defending player's
+        // poison counter state.
+        TriggerCondition::DefendingPlayerIsPoisoned => reads_player_of(StateKind::PlayerLife),
         TriggerCondition::GainedLife { minimum: _ }
         | TriggerCondition::LostLife
         | TriggerCondition::LostLifeLastTurn => reads_player_of(StateKind::JournalLife),
@@ -7433,6 +7438,9 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             None => reads_zone_membership(),
         },
         StaticCondition::DefendingPlayerControls { filter } => board_membership_read(filter),
+        // CR 122.1f: defending player poison status reads the defending player's
+        // poison counter state.
+        StaticCondition::DefendingPlayerIsPoisoned => reads_player_of(StateKind::PlayerLife),
         StaticCondition::QuantityComparison {
             lhs,
             rhs,

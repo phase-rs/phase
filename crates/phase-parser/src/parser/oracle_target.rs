@@ -810,6 +810,7 @@ pub fn parse_target_with_syntax<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str, TargetSyntax) {
+    eprintln!("DEBUG parse_target_with_syntax: text='{}', ctx.subject={:?}", text, ctx.subject);
     let mut syntax = TargetSyntax::Descriptor;
     let text = text.trim_start();
     let lower = text.to_lowercase();
@@ -1171,6 +1172,7 @@ pub fn parse_target_with_syntax<'a>(
     // handled by the anaphoric-pronoun block above, so this primarily covers
     // "~", "itself", and typed self-reference phrases.
     if let Some((filter, rest)) = nom_on_lower(text, &lower, nom_target::parse_self_reference) {
+        eprintln!("DEBUG parse_target_with_syntax: self-reference matched, filter={:?}, rest='{}'", filter, rest);
         return (filter, rest, syntax);
     }
 
@@ -1480,7 +1482,17 @@ pub fn parse_target_with_syntax<'a>(
         // is recognized as a typed-phrase prefix inside `parse_type_phrase_folding_with_ctx`
         // — it pushes `IsCommander` and composes uniformly with the existing
         // suffix machinery (ownership, control, counters, "with X", etc.).
-        let (filter, rest) = parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
+        // First, check for a leading self-reference ("~", "this creature", etc.) which
+        // `parse_type_phrase_folding_with_ctx` does not handle. If present, use it as
+        // the head and parse the rest as coordinated legs.
+        let (filter, rest) = {
+            let target_text = &text[target_offset..];
+            if let Some((self_filter, self_rest)) = nom_on_lower(target_text, &target_text.to_lowercase(), nom_target::parse_self_reference) {
+                (self_filter, self_rest)
+            } else {
+                parse_type_phrase_folding_with_ctx(target_text, ctx)
+            }
+        };
         // CR 115.1: an object-headed coordinated list whose later leg is a
         // player ("creature token, player, or planeswalker") is still one
         // target slot. Extend only when a player leg actually appears, so
@@ -3262,6 +3274,16 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // Handles "or" compound as a property disjunction: "attacking or blocking
     // creature" means attacking creature OR blocking creature, not both.
     while let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
+        // CR 509.1g: "blocking or blocked by" is a compound combat-relation
+        // phrase, not a "blocking" status + "or blocked by" disjunction. If the
+        // text at this position is "blocking or blocked by", skip the combat
+        // status prefix parse so the combat-relation suffix logic can handle it.
+        if prop == FilterProp::Blocking {
+            let after_blocking = &lower[pos + consumed..].trim_start();
+            if after_blocking.starts_with("or blocked by") {
+                break;
+            }
+        }
         let disjunction_start = properties.len();
         properties.push(prop);
         pos += consumed;
@@ -3813,10 +3835,12 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
 
     let combat_relation_consumed =
         if let Some((prop, consumed)) = parse_combat_relation_suffix(&lower[pos..], ctx) {
+            eprintln!("DEBUG combat_relation_suffix: pos={}, text='{}', prop={:?}, consumed={}", pos, &lower[pos..], prop, consumed);
             properties.push(prop);
             pos += consumed;
             true
         } else {
+            eprintln!("DEBUG combat_relation_suffix: pos={}, text='{}' - NO MATCH", pos, &lower[pos..]);
             false
         };
 
@@ -3843,7 +3867,19 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     ];
     for separator in TYPE_SEPARATORS {
         if let Ok((after_sep, _)) = tag::<_, _, OracleError<'_>>(*separator).parse(rest_lower) {
+            // CR 509.1g: "blocking or blocked by" is a compound combat-relation
+            // phrase, not a type disjunction. If the left side ends with "blocking"
+            // and the right side starts with "blocked by", do not split here.
+            if *separator == "or " {
+                let left_text = &lower[..pos + rest_offset];
+                let after_trimmed = after_sep.trim_start();
+                eprintln!("DEBUG combat check: separator='or ', left_text='{}', after_trimmed='{}', left_ends_blocking={}, after_starts_blocked_by={}", left_text, after_trimmed, left_text.trim_end().ends_with("blocking"), after_trimmed.starts_with("blocked by"));
+                if left_text.trim_end().ends_with("blocking") && after_trimmed.starts_with("blocked by") {
+                    continue;
+                }
+            }
             let after_trimmed = after_sep.trim_start();
+            eprintln!("DEBUG type_separator: separator='{}', after_trimmed='{}', left_card_suffix={}", separator, after_trimmed, left_card_suffix);
             let can_recurse = if separator.starts_with(',') {
                 starts_with_or_article_type_segment(after_trimmed)
             } else {
@@ -3904,10 +3940,16 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                     // "basic Plains card").
                     || nom_target::parse_supertype_prefix(after_trimmed)
                         .is_ok_and(|(rest, _)| starts_with_type_phrase_lead(rest))
+                    // Quantifier-led right conjunct: "each creature", "all permanents",
+                    // "every artifact", "any number of creatures". The quantifier is
+                    // consumed by `parse_type_phrase_folding_with_ctx`, so we must
+                    // recognize it here to authorize the recursion.
+                    || starts_with_quantifier_type_phrase(after_trimmed)
                     || (left_card_suffix
                         && !is_article_led_bare_card(after_trimmed)
                         && starts_with_or_article_type_segment(after_trimmed))
             };
+            eprintln!("DEBUG: separator='{}', after_trimmed='{}', can_recurse={}, left_card_suffix={}", separator, after_trimmed, can_recurse, left_card_suffix);
             if can_recurse {
                 let sep_text = &text[pos + rest_offset + separator.len()..];
                 let (other_filter, final_rest) = parse_type_phrase_folding_with_ctx(sep_text, ctx);
@@ -5142,34 +5184,64 @@ fn parse_coordinated_target_tail<'a>(
     mut rest: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str, bool) {
+    eprintln!("DEBUG parse_coordinated_target_tail: head={:?}, rest='{}'", head, rest);
     let mut combined = head;
     let mut saw_player = false;
     loop {
         let rest_lower = rest.to_lowercase();
-        let Ok((leg_lower, _)) = alt((
+        // Try comma-separated separators first
+        let comma_sep = alt((
             tag::<_, _, OracleError<'_>>(", and/or "),
             tag(", and "),
             tag(", or "),
             tag(", "),
         ))
-        .parse(rest_lower.as_str()) else {
-            return (combined, rest, saw_player);
-        };
-        let leg_text = &rest[rest_lower.len() - leg_lower.len()..];
-        if let Ok((after_leg, player_leg)) = parse_coordinated_player_leg(leg_lower) {
-            combined = merge_or_filters(combined, player_leg);
-            saw_player = true;
-            rest = &leg_text[leg_lower.len() - after_leg.len()..];
-        } else if starts_with_type_word(leg_lower) {
-            let (leg, after_leg) = parse_type_phrase_folding_with_ctx(leg_text, ctx);
-            if matches!(leg, TargetFilter::Any) {
+        .parse(rest_lower.as_str());
+        if let Ok((leg_lower, _)) = comma_sep {
+            let leg_text = &rest[rest_lower.len() - leg_lower.len()..];
+            if let Ok((after_leg, player_leg)) = parse_coordinated_player_leg(leg_lower) {
+                combined = merge_or_filters(combined, player_leg);
+                saw_player = true;
+                rest = &leg_text[leg_lower.len() - after_leg.len()..];
+            } else if starts_with_type_word(leg_lower) {
+                let (leg, after_leg) = parse_type_phrase_folding_with_ctx(leg_text, ctx);
+                if matches!(leg, TargetFilter::Any) {
+                    return (combined, rest, saw_player);
+                }
+                combined = merge_or_filters(combined, leg);
+                rest = after_leg;
+            } else {
                 return (combined, rest, saw_player);
             }
-            combined = merge_or_filters(combined, leg);
-            rest = after_leg;
-        } else {
-            return (combined, rest, saw_player);
+            continue;
         }
+        // Try bare "and/or ", "and ", "or " separators (no comma)
+        let bare_sep = alt((
+            tag::<_, _, OracleError<'_>>("and/or "),
+            tag("and "),
+            tag("or "),
+        ))
+        .parse(rest_lower.as_str());
+        if let Ok((leg_lower, _)) = bare_sep {
+            let leg_text = &rest[rest_lower.len() - leg_lower.len()..];
+            eprintln!("DEBUG parse_coordinated_target_tail: bare separator, leg_text='{}'", leg_text);
+            if let Ok((after_leg, player_leg)) = parse_coordinated_player_leg(leg_lower) {
+                combined = merge_or_filters(combined, player_leg);
+                saw_player = true;
+                rest = &leg_text[leg_lower.len() - after_leg.len()..];
+            } else if starts_with_quantifier_type_phrase(leg_lower) || starts_with_type_word(leg_lower) {
+                let (leg, after_leg) = parse_type_phrase_folding_with_ctx(leg_text, ctx);
+                if matches!(leg, TargetFilter::Any) {
+                    return (combined, rest, saw_player);
+                }
+                combined = merge_or_filters(combined, leg);
+                rest = after_leg;
+            } else {
+                return (combined, rest, saw_player);
+            }
+            continue;
+        }
+        return (combined, rest, saw_player);
     }
 }
 
@@ -5268,6 +5340,40 @@ fn starts_with_or_article_type_segment(text: &str) -> bool {
         return starts_with_article_core_type_segment(rest);
     }
     starts_with_type_phrase_lead(text)
+}
+
+/// Recognize a quantifier-led type phrase: "each creature", "all permanents",
+/// "every artifact", "any number of creatures", "a creature", "an artifact",
+/// "any creature". The quantifier is consumed by `parse_type_phrase_folding_with_ctx`,
+/// so we must recognize it here to authorize coordinated type disjunction recursion.
+fn starts_with_quantifier_type_phrase(text: &str) -> bool {
+    let text = text.trim_start();
+    // Universal quantifiers
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("each "),
+        tag("all "),
+        tag("every "),
+    ))
+    .parse(text)
+    {
+        return starts_with_type_phrase_lead(rest);
+    }
+    // "any number of " + type phrase
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(text) {
+        return starts_with_type_phrase_lead(rest);
+    }
+    // Article quantifiers (also handled by starts_with_or_article_type_segment
+    // when left_card_suffix is true, but needed here for bare "and"/"or" branch)
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag("an "),
+        tag("any "),
+    ))
+    .parse(text)
+    {
+        return starts_with_type_phrase_lead(rest);
+    }
+    false
 }
 
 /// True when `text` is an article-led BARE-card segment: "a/an card(s) …" with

@@ -1210,6 +1210,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::RecipientHasCounters { .. }
             | StaticCondition::ClassLevelGE { .. }
             | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::DefendingPlayerIsPoisoned
             | StaticCondition::SourceAttackingAlone
             | StaticCondition::SourceIsAttacking
             | StaticCondition::SourceIsBlocking

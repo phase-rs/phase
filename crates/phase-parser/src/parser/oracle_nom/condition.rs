@@ -8801,6 +8801,7 @@ fn parse_color_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondi
 fn parse_combat_context_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_defending_player_controls,
+        parse_defending_player_is_poisoned,
         value(
             StaticCondition::SourceAttackingAlone,
             (parse_it_is, tag(" attacking alone")),
@@ -8826,6 +8827,15 @@ fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondit
         &rest[consumed..],
         StaticCondition::DefendingPlayerControls { filter },
     ))
+}
+
+/// CR 122.1f: "defending player is poisoned" → DefendingPlayerIsPoisoned.
+fn parse_defending_player_is_poisoned(input: &str) -> OracleResult<'_, StaticCondition> {
+    value(
+        StaticCondition::DefendingPlayerIsPoisoned,
+        tag("defending player is poisoned"),
+    )
+    .parse(input)
 }
 
 /// Parse compound-verb event conditions: "you [verb1] and [verb2] [object] this turn".
