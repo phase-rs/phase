@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameEvent::DieRolled gains pre_entry_source so an entrant is not an observer of its own as-enters roll. An older reader drops the field and a held event then lets that entrant observe the roll."
+}
