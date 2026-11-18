@@ -45062,3 +45062,40 @@ fn for_each_kind_of_counter_on_permanents_you_control_is_simultaneous_instances(
     assert_eq!(counted_definitions(execute).len(), 1, "{execute:#?}");
     assert_repeat_timing_invariant(execute);
 }
+
+/// CR 608.2c + CR 101.4: Tolarian Contempt's "for each opponent, choose up to
+/// one target creature they control ..." is a for-each prefix peel whose clause
+/// lowers to a bare `TargetOnly`, so the count and its `SimultaneousInstances`
+/// timing transfer to the def through the `TargetOnly` arm of the ClauseIr
+/// assembly (no sub-ability). The sibling arm that places the count on a
+/// `TargetOnly` clause's sub-ability has no printed-card row and is covered by
+/// the compiler only.
+#[test]
+fn for_each_opponent_choose_target_transfers_simultaneous_instances_on_target_only() {
+    let contempt = parse_trigger_line(
+        "At the beginning of your end step, for each opponent, choose up to one target creature they control with a rejection counter on it. That creature's owner puts it on their choice of the top or bottom of their library.",
+        "Tolarian Contempt",
+    );
+    let execute = contempt.execute.as_deref().expect("execute");
+    let counted = collect_definitions(execute)
+        .into_iter()
+        .find(|node| matches!(&*node.effect, Effect::TargetOnly { .. }))
+        .expect("a TargetOnly node");
+    // Reach guards: the TargetOnly node carries the opponent count and a
+    // "choose up to one" multi-target spec.
+    assert_eq!(
+        counted.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        }),
+        "{counted:#?}"
+    );
+    assert!(counted.multi_target.is_some(), "{counted:#?}");
+    assert_eq!(
+        counted.repeat_timing,
+        RepeatForTiming::SimultaneousInstances
+    );
+    assert_repeat_timing_invariant(execute);
+}

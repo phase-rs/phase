@@ -38396,9 +38396,9 @@ impl InstructionJoin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum RepeatForTiming {
     /// CR 608.2e: each iteration is a separate step, completed before the next
-    /// begins. Default for every producer except the for-each prefix peel
-    /// ("repeat the following process", "twice" / "N times", difference counts,
-    /// lifted and copy counts).
+    /// begins. Every producer other than the for-each prefix peel stamps this:
+    /// "repeat the following process", "twice" / "N times", difference counts,
+    /// and lifted and copy counts.
     #[default]
     Sequential,
     /// CR 608.2c + CR 101.4: a leading "for each <count>, <instruction>" —

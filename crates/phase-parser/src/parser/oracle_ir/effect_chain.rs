@@ -939,8 +939,10 @@ pub(crate) struct ClauseIr {
     pub(crate) accepting_player_bindings: Vec<AcceptingPlayerBinding>,
     /// CR 608.2c: "for each" / "N times" repeat quantity.
     pub(crate) repeat_for: Option<QuantityExpr>,
-    /// CR 608.2: the iteration relation of `repeat_for`; written only through
-    /// [`RepeatCount`] so a timing never exists without its count.
+    /// CR 608.2: the iteration relation of `repeat_for`. Set from a [`RepeatCount`]
+    /// at push; a direct write only resets it to `Sequential` beside its count
+    /// ("repeat this process" counts, `replace_with_gap`), so a
+    /// `SimultaneousInstances` never exists without its count.
     #[serde(skip_serializing_if = "RepeatForTiming::is_sequential")]
     pub(crate) repeat_timing: RepeatForTiming,
     /// Player scope iteration ("each opponent", "each player").
