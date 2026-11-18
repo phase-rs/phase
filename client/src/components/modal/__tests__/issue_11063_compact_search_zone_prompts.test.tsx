@@ -20,8 +20,9 @@ import { ChoiceHeaderConfirm } from "../ChoiceOverlay.tsx";
 // keeps its title before the instruction, because the instruction alone does
 // not say where the cards come from; an effect-zone title only repeats the
 // instruction's verb, so the instruction stands alone. The confirm sits at the
-// end of that line with its usual label, and there is no footer. A taller
-// screen keeps the full layout. The header confirm is one shared component,
+// end of that line, and there is no footer. It keeps its usual label, except
+// that a library order counts its picks there, since the cards show the order.
+// A taller screen keeps the full layout. The header confirm is one shared component,
 // ChoiceHeaderConfirm, which the discard prompt uses too.
 
 const dispatchMock = vi.fn();
@@ -167,9 +168,28 @@ function overlayHeader(): HTMLElement {
   return header!;
 }
 
+/** Put both hand cards on top of the library, in the order the player picks them. */
+function topdeckChoiceState() {
+  return tableState()
+    .effectZoneChoice({
+      player: 0,
+      cards: HAND_IDS,
+      count: 2,
+      effect_kind: "PutAtLibraryPosition",
+      zone: "Hand",
+      destination: null,
+      library_position: { type: "Top" },
+    })
+    .build();
+}
+
 /** These strips wrap each card in a plain button, so find it from the card's label. */
+function cardButton(name: string): HTMLElement {
+  return screen.getByLabelText(new RegExp(name)).closest("button")!;
+}
+
 function clickCard(name: string) {
-  fireEvent.click(screen.getByLabelText(new RegExp(name)).closest("button")!);
+  fireEvent.click(cardButton(name));
 }
 
 /** The single header line: its heading, and its confirm beside it on the same line. */
@@ -289,24 +309,20 @@ describe("effect-zone prompts on a landscape phone", () => {
     expect(dispatchMock).toHaveBeenCalledWith({ type: "SelectCards", data: { cards: [4] } });
   });
 
-  it("keeps the library order in the header confirm", () => {
-    showPrompt(
-      tableState()
-        .effectZoneChoice({
-          player: 0,
-          cards: HAND_IDS,
-          count: 2,
-          effect_kind: "PutAtLibraryPosition",
-          zone: "Hand",
-          destination: null,
-          library_position: { type: "Top" },
-        })
-        .build(),
-    );
+  it("counts the picks in the header confirm and shows the library order on the cards", () => {
+    showPrompt(topdeckChoiceState());
+    expect(within(overlayHeader()).getByRole("button", { name: "Top (0/2)" })).toBeDisabled();
 
     clickCard("Bravo");
+    expect(within(overlayHeader()).getByRole("button", { name: "Top (1/2)" })).toBeDisabled();
     clickCard("Alpha");
-    fireEvent.click(within(overlayHeader()).getByRole("button", { name: "Put on top (Top -> 2nd)" }));
+
+    // The order is on the cards, so the confirm's label keeps its length as the picks grow
+    // and never pushes the instruction beside it onto a second line.
+    expect(within(cardButton("Bravo")).getByText("Top")).toBeInTheDocument();
+    expect(within(cardButton("Alpha")).getByText("2nd")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Put on top/ })).toBeNull();
+    fireEvent.click(within(overlayHeader()).getByRole("button", { name: "Top (2/2)" }));
     expect(dispatchMock).toHaveBeenCalledWith({ type: "SelectCards", data: { cards: [2, 1] } });
   });
 
@@ -370,6 +386,17 @@ describe("Search Library and the effect-zone prompts on a taller screen", () => 
     expect(within(header).getByText("Choose 1 card to exile")).toBeInTheDocument();
     expect(within(header).queryByRole("button")).toBeNull();
     expect(screen.getAllByRole("button", { name: "Exile (0/1)" })).toHaveLength(1);
+  });
+
+  it("keep the library order in an effect-zone prompt's footer confirm", () => {
+    showPrompt(topdeckChoiceState());
+
+    clickCard("Bravo");
+    clickCard("Alpha");
+    const confirm = screen.getByRole("button", { name: "Put on top (Top -> 2nd)" });
+    expect(overlayHeader()).not.toContainElement(confirm);
+    fireEvent.click(confirm);
+    expect(dispatchMock).toHaveBeenCalledWith({ type: "SelectCards", data: { cards: [2, 1] } });
   });
 });
 

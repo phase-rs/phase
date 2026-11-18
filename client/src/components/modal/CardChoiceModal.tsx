@@ -1464,23 +1464,29 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     : `cardChoice.effectZone.subtitle${mode}Exact`;
   const title = t(`cardChoice.effectZone.title${mode}`);
   const subtitle = t(subtitleKey, { min: minCount, count: data.count });
-  const actionLabel =
+  // Skip or Decline when the prompt may end with nothing chosen.
+  const declineLabel =
     selected.size === 0 && isUpTo && minCount === 0
       ? isSacrifice
         ? t("cardChoice.effectZone.labelSkip")
         : t("cardChoice.effectZone.labelDecline")
-      : isTopdeck && selectedOrderLabels.length > 0
+      : null;
+  // Only a library-order choice has order labels, so an empty list means no order.
+  const orderLabel =
+    selectedOrderLabels.length === 0
+      ? null
+      : isTopdeck
         ? t("cardChoice.effectZone.labelPutOnTop", {
             order: selectedOrderLabels.join(" -> "),
           })
-        : isBottomdeck && selectedOrderLabels.length > 0
-          ? t("cardChoice.effectZone.labelPutOnBottom", {
-              order: selectedOrderLabels.join(" -> "),
-            })
-          : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
-              selected: selected.size,
-              count: data.count,
-            });
+        : t("cardChoice.effectZone.labelPutOnBottom", {
+            order: selectedOrderLabels.join(" -> "),
+          });
+  const countLabel = t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
+    selected: selected.size,
+    count: data.count,
+  });
+  const actionLabel = declineLabel ?? orderLabel ?? countLabel;
 
   const body = (
     <ScrollableCardStrip>
@@ -1536,14 +1542,16 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   // from the cards. One header line carries the instruction alone: every
   // effect-zone title ("Exile", "Put on Library", "Return", ...) only names
   // the action the instruction already states. The confirm sits at the end of
-  // that line with its usual label, which turns to Skip or Decline when the
-  // prompt may end with nothing chosen.
+  // that line. It counts the selection, or reads Skip or Decline, but never
+  // spells out a library order: each chosen card's badge already shows its
+  // place, and a label that grew with every pick would push the instruction
+  // beside it onto a second line, taking height from the cards mid-choice.
   if (isCompactHeight) {
     return (
       <ChoiceOverlay
         title={subtitle}
         headerActions={
-          <ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={actionLabel} />
+          <ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={declineLabel ?? countLabel} />
         }
       >
         {body}
