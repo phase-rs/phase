@@ -152,7 +152,8 @@
     "loading": "Caricamento {{name}}",
     "unimplemented": "Non implementato: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "TAPpata"
+    "tapped": "TAPpata",
+    "reloadArt": "Tocca per ricaricare l'illustrazione"
   },
   "preview": {
     "holdCtrlBack": "Tieni premuto Ctrl per il retro",
@@ -162,6 +163,7 @@
     "report": "Segnala un problema",
     "reported": "Segnalato ✓",
     "reportNotSent": "Non inviato",
+    "reloadArt": "Ricarica l'illustrazione",
     "altParsedAbilities": "Alt: abilità analizzate",
     "debugId": "ID: {{id}}",
     "engineParse": "Analisi del motore",
@@ -1857,6 +1859,13 @@
       "titleExact_one": "Scarta una carta",
       "titleExact_other": "Scarta {{count}} carte",
       "titleWard": "Difesa — Scarta una carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Difesa",
+        "connive": "Connivere",
+        "additionalCost": "Costo aggiuntivo",
+        "manaAbility": "Abilità di mana"
+      },
       "subtitleUpTo_one": "Scegli fino a {{count}} carta da scartare",
       "subtitleUpTo_other": "Scegli fino a {{count}} carte da scartare",
       "subtitleUnless": "Scegli {{count}} carte o 1 carta corrispondente da scartare",

@@ -12792,6 +12792,82 @@ fn visit_mana_ability_resume_events(
     }
 }
 
+impl WaitingFor {
+    /// CR 400.2 + CR 603.2: every trigger event a prompt itself holds, so a per-viewer
+    /// projection reaches all of them through one traversal: the prompts that copy the
+    /// resolving trigger's event, and the paused mana abilities (with their unless-payment
+    /// resume) a payment prompt carries. The prompt-held counterpart of
+    /// [`GameState::for_each_trigger_event_carrier_mut`], which covers the state-level
+    /// carriers.
+    pub(crate) fn for_each_prompt_trigger_event_mut(&mut self, f: &mut impl FnMut(&mut GameEvent)) {
+        match self {
+            WaitingFor::TriggerTargetSelection {
+                trigger_event,
+                trigger_events,
+                ..
+            } => {
+                trigger_event.iter_mut().for_each(&mut *f);
+                trigger_events.iter_mut().for_each(&mut *f);
+            }
+            WaitingFor::UnlessPayment {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::UnlessPaymentChooseCost {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::ChooseObjectsSelection {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::EachPlayerCopyChosenSelection {
+                trigger_event: Some(event),
+                ..
+            } => f(event),
+            WaitingFor::PayManaAbilityMana {
+                pending_mana_ability,
+                ..
+            }
+            | WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            } => visit_pending_mana_ability_events(pending_mana_ability, f),
+            WaitingFor::PayAmountChoice {
+                pending_mana_ability,
+                ..
+            }
+            | WaitingFor::RevealChoice {
+                pending_mana_ability,
+                ..
+            } => {
+                if let Some(pending) = pending_mana_ability.as_deref_mut() {
+                    visit_pending_mana_ability_events(pending, f);
+                }
+            }
+            WaitingFor::ChooseManaColor {
+                context: ManaChoiceContext::ManaAbility(pending),
+                ..
+            } => visit_pending_mana_ability_events(pending, f),
+            WaitingFor::PayCost {
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            } => visit_pending_mana_ability_events(mana_ability, f),
+            WaitingFor::CollectEvidenceChoice { resume, .. } => {
+                if let CollectEvidenceResume::ManaAbility {
+                    pending_mana_ability,
+                } = resume.as_mut()
+                {
+                    visit_pending_mana_ability_events(pending_mana_ability, f);
+                }
+            }
+            // Every other prompt holds no trigger event: it is a field-by-field choice with
+            // no resolving trigger's event or paused mana ability behind it.
+            _ => {}
+        }
+    }
+}
+
 impl ManaAbilityResume {
     /// CR 601.2g-h: Whether this mana ability was activated while paying a
     /// cast's or activation's cost, so finishing it returns to that payment
@@ -26333,11 +26409,20 @@ impl AbilityOnsetRecord {
 pub const ABILITY_ONSET_RECORD_FIELD: &str = "ability_onset_record";
 
 /// Test support: declares a committed game-state capture written before onsets were recorded
-/// (CR 611.2e) as onset-recorded, for a test whose subject does not depend on onsets. The capture
-/// then decodes exactly as it did before `admit_entry_onset_record` existed: every unrecorded node
-/// keeps the `WhenFollowed` default. Never call it on a payload whose onsets the test observes, and
-/// never outside tests; production admission refuses the same bytes
-/// (`a_frozen_v78_mode_choice_keeps_its_announcement_fold`).
+/// (CR 611.2e) as onset-recorded, and drops its legacy table-wide `spells_cast_last_turn` total,
+/// for a test whose subject depends on neither. The capture then decodes exactly as it did before
+/// `admit_entry_onset_record` existed: every unrecorded node keeps the `WhenFollowed` default.
+/// Never call it on a payload whose onsets the test observes, and never outside tests; production
+/// admission refuses the same bytes (`a_frozen_v78_mode_choice_keeps_its_announcement_fold`).
+///
+/// CR 117.1 + CR 603.4: a capture from a build before the per-player
+/// `Player.spells_cast_last_turn` snapshot persisted one table-wide total of the previous turn,
+/// which production restore refuses when nonzero (`LEGACY_SPELLS_CAST_LAST_TURN_ERROR`: it cannot
+/// say which player cast the spells). The committed captures stay byte-for-byte as recorded and
+/// `committed_dump_walk` pins each nonzero one as an expected refusal through
+/// [`record_captured_onsets_keeping_legacy_snapshot`]; a test whose subject does not read last
+/// turn's casts declares the total absent here, the state a save taken after a turn without casts
+/// has.
 ///
 /// Marks each game-state root of the document, by the committed capture shapes:
 /// - a debug export `{gameState, turnCheckpoints?, …}`: `gameState` and every `turnCheckpoints`
@@ -26349,28 +26434,53 @@ pub const ABILITY_ONSET_RECORD_FIELD: &str = "ability_onset_record";
 /// Any other document (a card export, a CR 733 census map) is left unchanged.
 #[cfg(any(test, feature = "test-support"))]
 pub fn record_captured_onsets(document: &mut serde_json::Value) {
-    fn mark(root: &mut serde_json::Value) {
-        let recorded = serde_json::to_value(AbilityOnsetRecord::Recorded)
-            .expect("AbilityOnsetRecord serializes");
-        root.as_object_mut()
-            .expect("a committed capture's game-state root is a JSON object")
-            .insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
-    }
+    for_each_captured_root(document, |root| {
+        mark_onsets_recorded(root);
+        root.remove("spells_cast_last_turn");
+    });
+}
+
+/// [`record_captured_onsets`] that keeps the capture's legacy table-wide `spells_cast_last_turn`
+/// total as recorded, so a restore sees (and refuses, when nonzero) exactly what the build that
+/// wrote the capture persisted.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_captured_onsets_keeping_legacy_snapshot(document: &mut serde_json::Value) {
+    for_each_captured_root(document, mark_onsets_recorded);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn mark_onsets_recorded(root: &mut serde_json::Map<String, serde_json::Value>) {
+    let recorded =
+        serde_json::to_value(AbilityOnsetRecord::Recorded).expect("AbilityOnsetRecord serializes");
+    root.insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn for_each_captured_root(
+    document: &mut serde_json::Value,
+    mut visit: impl FnMut(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    let mut visit_root = |root: &mut serde_json::Value| {
+        visit(
+            root.as_object_mut()
+                .expect("a committed capture's game-state root is a JSON object"),
+        );
+    };
     let Some(object) = document.as_object_mut() else {
         return;
     };
     if let Some(game_state) = object.get_mut("gameState") {
-        mark(game_state);
+        visit_root(game_state);
         if let Some(checkpoints) = object
             .get_mut("turnCheckpoints")
             .and_then(serde_json::Value::as_array_mut)
         {
-            checkpoints.iter_mut().for_each(mark);
+            checkpoints.iter_mut().for_each(visit_root);
         }
     } else if let Some(state) = object.get_mut("state") {
-        mark(state);
+        visit_root(state);
     } else if object.contains_key("objects") && object.contains_key("turn_number") {
-        mark(document);
+        visit_root(document);
     }
 }
 
@@ -27034,10 +27144,6 @@ declare_game_state! {
     pub day_night: Option<DayNight>,
     #[serde(default)]
     pub spells_cast_this_turn: u8,
-    /// CR 603.4: Snapshot of `spells_cast_this_turn` from the previous turn.
-    /// Used by werewolf "if no/two or more spells were cast last turn" conditions.
-    #[serde(default)]
-    pub spells_cast_last_turn: Option<u8>,
     /// CR 502.2 + CR 502.2a + CR 731.2: the most spells any one active player of the previous
     /// turn cast during it: the active player alone, or each member of the active team when the
     /// game uses shared team turns (CR 805.4a). CR 731.2a's "no player ... cast a spell" is a
@@ -29717,6 +29823,9 @@ pub(crate) struct GameStateDecode;
 const LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR: &str =
     "CreatureExploited snapshot lacks authoritative victim record; restore a save that contains the exploit departure record";
 
+const LEGACY_SPELLS_CAST_LAST_TURN_ERROR: &str =
+    "legacy spells_cast_last_turn snapshot cannot say which player cast the spells of the previous turn; restore a save taken after a turn in which no spell was cast";
+
 const LEGACY_DEFERRED_SPELL_DELIVERY_ERROR: &str =
     "legacy deferred_spell_delivery snapshot cannot prove which on-resolution hooks already ran; restore a save taken after the spell's free-cast window closed";
 
@@ -29822,6 +29931,29 @@ fn reject_legacy_deferred_spell_delivery(value: &serde_json::Value) -> Result<()
     match state.get("deferred_spell_delivery") {
         None | Some(serde_json::Value::Null) => Ok(()),
         Some(_) => Err(LEGACY_DEFERRED_SPELL_DELIVERY_ERROR.to_string()),
+    }
+}
+
+/// Rejects a snapshot that carries a nonzero table-wide `spells_cast_last_turn`.
+///
+/// CR 117.1 + CR 603.4: builds before the per-player window persisted one
+/// table-wide total (`GameState.spells_cast_last_turn: Option<u8>`) and cleared
+/// the per-player distribution of that turn at the boundary, with no turn stamp
+/// on any record. For a total of 1 or more the split between players cannot be
+/// recovered, and "a player cast two or more spells last turn" tells 2+0 from
+/// 1+1 (Gatstaf Howler), "no spells were cast last turn" needs the exact sum
+/// (Gatstaf Shepherd): any default distribution would be a fabricated one. The
+/// snapshot is therefore refused rather than guessed at (the same pattern as
+/// `deferred_spell_delivery`). Absent, `null` and `0` are exact: no completed
+/// turn, or a turn without a cast, has only one distribution (all zeros), which
+/// is also what the new per-player `Player.spells_cast_last_turn` defaults to.
+/// The key is the discriminator: a current build never writes it.
+fn reject_legacy_spells_cast_last_turn(value: &serde_json::Value) -> Result<(), String> {
+    let state = value.get("state").unwrap_or(value);
+    match state.get("spells_cast_last_turn") {
+        None | Some(serde_json::Value::Null) => Ok(()),
+        Some(serde_json::Value::Number(total)) if total.as_u64() == Some(0) => Ok(()),
+        Some(_) => Err(LEGACY_SPELLS_CAST_LAST_TURN_ERROR.to_string()),
     }
 }
 
@@ -31791,6 +31923,7 @@ impl GameStateDecode {
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
         reject_legacy_deferred_spell_delivery(&value)?;
+        reject_legacy_spells_cast_last_turn(&value)?;
         reject_legacy_deferred_random_discard_cost(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
@@ -31854,6 +31987,7 @@ impl GameStateDecode {
         reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
         reject_legacy_deferred_spell_delivery(value)?;
+        reject_legacy_spells_cast_last_turn(value)?;
         reject_legacy_deferred_random_discard_cost(value)?;
         if matches!(
             mode,
@@ -37881,7 +38015,6 @@ impl GameState {
             remote_type_layer_recipients: im::HashSet::new(),
             day_night: None,
             spells_cast_this_turn: 0,
-            spells_cast_last_turn: None,
             most_spells_cast_by_one_previous_active_player: None,
             pending_trigger: None,
             pending_trigger_firing: None,
@@ -40091,6 +40224,13 @@ impl GameState {
         /// already-ranked value and panic in `above`.
         fn named_incarnations(event: &mut GameEvent, f: &mut impl FnMut(ObjectId, &mut u64)) {
             match event {
+                // CR 603.2: an observed ability's cause events carry the same
+                // pins as the top-level events they copy.
+                GameEvent::AbilityTriggered { causes, .. } => {
+                    for cause in causes {
+                        named_incarnations(cause, f);
+                    }
+                }
                 GameEvent::PermanentTapped {
                     object_id,
                     incarnation: Some(incarnation),
@@ -40503,6 +40643,11 @@ impl GameState {
             f: &mut impl FnMut(ObjectId, &mut u64),
         ) {
             match event {
+                GameEvent::AbilityTriggered { causes, .. } => {
+                    for cause in causes {
+                        event_entered_incarnations(cause, f);
+                    }
+                }
                 GameEvent::ZoneChanged { record, .. }
                 | GameEvent::CreatureExploited { record, .. } => {
                     record_entered_incarnation(record, f);
@@ -40673,6 +40818,11 @@ impl GameState {
             G: FnMut(ObjectId, &mut u64),
         {
             match event {
+                GameEvent::AbilityTriggered { causes, .. } => {
+                    for cause in causes {
+                        event_record_incarnations(cause, incarnations, grant_generations);
+                    }
+                }
                 GameEvent::ZoneChanged { record, .. }
                 | GameEvent::CreatureExploited { record, .. } => {
                     record_incarnations(record, incarnations, grant_generations);
@@ -41803,7 +41953,6 @@ impl GameState {
             day_night: _,
             most_spells_cast_by_one_previous_active_player: _,
             spells_cast_this_turn: _,
-            spells_cast_last_turn: _,
             cancelled_casts: _,
             pending_activations: _,
             pending_trigger_entry: _,
@@ -42395,6 +42544,8 @@ impl GameState {
                 f(event);
             }
             context.trigger_events.iter_mut().for_each(&mut *f);
+            // CR 603.2: the cause record is a second copy of the firing's events.
+            context.causes.iter_mut().for_each(&mut *f);
         }
         if let Some(event) = self.current_trigger_event.as_mut() {
             f(event);
@@ -42445,6 +42596,7 @@ impl GameState {
                     f(event);
                 }
                 context.trigger_events.iter_mut().for_each(&mut *f);
+                context.causes.iter_mut().for_each(&mut *f);
             }
             context_events(&mut resume.current, f);
             for context in resume.accepted_tail.iter_mut() {
@@ -43393,7 +43545,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         remote_type_layer_recipients: _,
         day_night: _,
         spells_cast_this_turn: _,
-        spells_cast_last_turn: _,
         most_spells_cast_by_one_previous_active_player: _,
         cancelled_casts: _,
         pending_activations: _,
@@ -44118,7 +44269,6 @@ impl PartialEq for GameState {
             && self.state_revision == other.state_revision
             && self.day_night == other.day_night
             && self.spells_cast_this_turn == other.spells_cast_this_turn
-            && self.spells_cast_last_turn == other.spells_cast_last_turn
             && self.most_spells_cast_by_one_previous_active_player
                 == other.most_spells_cast_by_one_previous_active_player
             && self.pending_trigger == other.pending_trigger
@@ -47122,6 +47272,81 @@ mod tests {
             error.contains(LEGACY_DEFERRED_SPELL_DELIVERY_ERROR),
             "{error}"
         );
+    }
+
+    /// A current-build state serialized to JSON, with the legacy table-wide
+    /// `spells_cast_last_turn` key set to `legacy` (`None` leaves it absent, which is
+    /// what every current build writes).
+    fn state_with_legacy_spells_cast_last_turn(
+        legacy: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut value =
+            serde_json::to_value(GameState::new_two_player(7)).expect("a state serializes");
+        assert!(
+            value.get("spells_cast_last_turn").is_none(),
+            "a current build never writes the table-wide snapshot"
+        );
+        if let Some(legacy) = legacy {
+            value
+                .as_object_mut()
+                .expect("a state is an object")
+                .insert("spells_cast_last_turn".to_string(), legacy);
+        }
+        value
+    }
+
+    /// T1: the legacy table-wide snapshot cannot say which player cast the spells of the previous
+    /// turn (CR 117.1 + CR 603.4), so a nonzero total is refused at BOTH restore hosting points
+    /// (`GameState::deserialize` -> `GameStateDecode::decode`, and
+    /// `GameStateDecode::prepare_resolution_wire`) while an absent key, `null` and `0` (one
+    /// distribution only: all zeros) restore. Each row is its own assertion.
+    #[test]
+    fn legacy_spells_cast_last_turn_snapshot_is_refused_unless_it_is_exactly_zero() {
+        let restore = |legacy: Option<serde_json::Value>| {
+            serde_json::from_value::<GameState>(state_with_legacy_spells_cast_last_turn(legacy))
+                .map_err(|error| error.to_string())
+        };
+        let wire = |legacy: Option<serde_json::Value>| {
+            let mut value = state_with_legacy_spells_cast_last_turn(legacy);
+            GameStateDecode::prepare_resolution_wire(
+                &mut value,
+                GameStateDecodeMode::ResolutionWireV4,
+            )
+        };
+        // Reach: the same state restores with no legacy key, so every refusal below is the key's.
+        assert!(restore(None).is_ok(), "{:?}", restore(None).err());
+        assert!(wire(None).is_ok(), "{:?}", wire(None).err());
+        assert!(restore(Some(serde_json::Value::Null)).is_ok());
+        assert!(wire(Some(serde_json::Value::Null)).is_ok());
+        assert!(restore(Some(serde_json::json!(0))).is_ok());
+        assert!(wire(Some(serde_json::json!(0))).is_ok());
+        for total in [1, 2, 255] {
+            let error = restore(Some(serde_json::json!(total)))
+                .expect_err("a nonzero legacy total is refused by decode");
+            assert!(
+                error.contains(LEGACY_SPELLS_CAST_LAST_TURN_ERROR),
+                "{total}: {error}"
+            );
+            let error = wire(Some(serde_json::json!(total)))
+                .expect_err("a nonzero legacy total is refused by the wire preparation");
+            assert!(
+                error.contains(LEGACY_SPELLS_CAST_LAST_TURN_ERROR),
+                "{total}: {error}"
+            );
+        }
+    }
+
+    /// T3: the policy is by data, not by which card is on the battlefield: a total of 1 is refused
+    /// even though Gatstaf Shepherd's and Howler's answers would both be decidable from it, and
+    /// the trusted envelope nests the key under `state`.
+    #[test]
+    fn legacy_spells_cast_last_turn_refusal_reads_the_enveloped_state_too() {
+        let bare = serde_json::json!({ "spells_cast_last_turn": 1 });
+        assert!(reject_legacy_spells_cast_last_turn(&bare).is_err());
+        let envelope = serde_json::json!({ "state": bare });
+        assert!(reject_legacy_spells_cast_last_turn(&envelope).is_err());
+        let zero = serde_json::json!({ "state": { "spells_cast_last_turn": 0 } });
+        assert!(reject_legacy_spells_cast_last_turn(&zero).is_ok());
     }
 
     fn legacy_exploited_definition(marker: &str, actor_id: u64) -> serde_json::Value {

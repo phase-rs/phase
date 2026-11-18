@@ -16233,7 +16233,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
 
     // CR 611.2f: Snapshot the spell's effective keywords NOW, while the spell is
     // not yet in `spells_cast_this_turn_by_player`, so that
-    // `SpellsCastThisTurn == 0`-gated `CastWithKeyword` grants (first-qualifying-
+    // `SpellsCast == 0`-gated `CastWithKeyword` grants (first-qualifying-
     // spell each turn) evaluate against the pre-record count and correctly attach
     // to this spell. The post-record SpellCast trigger seams (Cascade, Demonstrate)
     // read this snapshot instead of re-querying the now-incremented grant. Uses

@@ -4035,6 +4035,19 @@ export type GameEvent =
   | { type: "PermanentUntapped"; data: { object_id: ObjectId } }
   | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId; from_zone: Zone } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
+  // CR 603.2: a triggered ability triggered (pushed, or `stack_entry: null`
+  // when removed during placement). Bookkeeping for observer triggers; the
+  // engine never sends `causes` on the event stream, but state carriers hold it.
+  | {
+      type: "AbilityTriggered";
+      data: {
+        stack_entry: ObjectId | null;
+        source_id: ObjectId;
+        controller: PlayerId;
+        origin: "SourceAbility" | "Delayed";
+        causes: GameEvent[];
+      };
+    }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
   // CR 714.2: a Saga's chapter ability finished resolving. Bookkeeping the
   // engine publishes for meta-triggers (Narci, Fable Singer); non-visual, since

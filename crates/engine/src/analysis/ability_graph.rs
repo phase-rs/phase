@@ -1299,7 +1299,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::ExcessDamageAll
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
+        | TriggerMode::AbilityTriggered { .. }
         | TriggerMode::Countered
         | TriggerMode::YouAttackUnblocked
         | TriggerMode::AttackerBlocked

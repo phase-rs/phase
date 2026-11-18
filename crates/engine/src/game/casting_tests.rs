@@ -9,6 +9,7 @@ use crate::parser::oracle::parse_oracle_text;
 use crate::parser::oracle_effect::parse_effect_chain;
 use crate::parser::oracle_static::parse_static_line;
 use crate::parser::oracle_util::normalize_card_name_refs_reporting;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
     AttackedYouScope, BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
@@ -13046,9 +13047,10 @@ fn self_cost_reduction_applies_from_graveyard() {
                 shards: vec![ManaCostShard::Blue],
             },
             spell_filter: None,
-            dynamic_count: Some(QuantityRef::SpellsCastThisTurn {
+            dynamic_count: Some(QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(instant_sorcery_filter),
+                window: TurnWindow::ThisTurn,
             }),
             reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
@@ -25880,9 +25882,10 @@ fn install_first_kicked_spell_reducer(state: &mut GameState, player: PlayerId) -
             ))
             .condition(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(kicked_filter),
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -26147,7 +26150,7 @@ fn first_kicked_spell_reducer_recomputes_after_kicker_declared() {
 #[test]
 fn second_kicked_spell_not_reduced_after_first_kicked_this_turn() {
     // CR 702.33d: a "first kicked spell you cast each turn costs {1} less"
-    // reducer is gated on `SpellsCastThisTurn{WasKicked} == 0`. With one kicked
+    // reducer is gated on `SpellsCast{WasKicked} == 0`. With one kicked
     // spell already recorded this turn, the gate count is 1, so a second kicked
     // spell must NOT be reduced even after its kicker is declared. This pins the
     // once-per-turn semantics that the recompute-after-kicker path rides on.
@@ -53584,7 +53587,7 @@ fn firion_reduces_self_equip_ability_cost() {
 
 // --- cluster-04: first-qualifying-spell keyword grant, cast-time snapshot
 // (CR 611.2f). These tests would FAIL if the Cascade/Demonstrate seams
-// re-queried the grant post-record (the `SpellsCastThisTurn == 0` gate would
+// re-queried the grant post-record (the `SpellsCast == 0` gate would
 // be false for the first spell), and pass only because `finalize_cast`
 // snapshots the cast-time keywords into `cast_spell_keywords`. ---
 
@@ -53663,7 +53666,7 @@ fn install_first_spell_cascade_grant(state: &mut GameState) {
     // static — otherwise this test silently stops exercising the gate.
     assert!(
         grant.condition.is_some(),
-        "first-spell grant must carry the SpellsCastThisTurn gate"
+        "first-spell grant must carry the SpellsCast gate"
     );
     state
         .objects

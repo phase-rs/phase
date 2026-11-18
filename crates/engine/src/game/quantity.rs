@@ -28,7 +28,8 @@ use crate::types::ability::{
     QuantityRef, RecipientRead, RepeatContinuation, ResolvedAbility, RoundingMode,
     SpellCastingOption, StaticCondition, StaticDefinition, SubtypeExclusion,
     TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
-    TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    TriggerCondition, TriggerDefinition, TurnJournalKind, TurnWindow, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet};
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -776,7 +777,7 @@ fn visit_characteristic_leaf<'s>(
         // players. Characteristics come from the cast-time snapshot because a
         // resolved spell is no longer an object (CR 400.7).
         //
-        // Deliberately does NOT replicate `QuantityRef::SpellsCastThisTurn`'s
+        // Deliberately does NOT replicate `QuantityRef::SpellsCast`'s
         // `FilterProp::Another` own-cast exclusion: this population is reached
         // from "spells you've cast", never "OTHER spells you've cast", so a
         // card's own cast is a member (First Family counts itself, CR 112.1 +
@@ -2494,14 +2495,14 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -2523,7 +2524,6 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -2844,13 +2844,13 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -2871,7 +2871,6 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -3170,7 +3169,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -3178,7 +3177,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::EventContextSourceModesChosen
         // CR 117.1: spell-cast journals store each spell's cast-time
         // characteristics.
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         // CR 701.16a: sacrifice-time characteristics.
@@ -3204,7 +3203,6 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         // CR 122.1: counter-addition journal.
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -3460,13 +3458,13 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -3487,7 +3485,6 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -5174,14 +5171,22 @@ fn resolve_ref(
             .unwrap_or(0),
         // CR 119.3 + CR 800.4i: Life lost this turn, including departed players,
         // scoped via PlayerScope (Π-3).
-        QuantityRef::LifeLostThisTurn { player } => resolve_per_player_history_scalar(
+        //
+        // CR 500: `window` picks the live this-turn counter or the snapshot
+        // latched at the turn boundary (`life_lost_last_turn`).
+        QuantityRef::LifeLost { player, window } => resolve_per_player_history_scalar(
             state,
             player,
             controller,
             ctx,
             targets,
             ability,
-            |p| u32_to_i32_saturating(p.life_lost_this_turn),
+            |p| {
+                u32_to_i32_saturating(match window {
+                    TurnWindow::ThisTurn => p.life_lost_this_turn,
+                    TurnWindow::LastTurn => p.life_lost_last_turn,
+                })
+            },
         ),
         // CR 700.8: Number of creatures in `player`'s party. The maximum
         // assignment of creatures to the four party slots (Cleric/Rogue/
@@ -6363,8 +6368,32 @@ fn resolve_ref(
             }
             usize_to_i32_saturating(found.len())
         }
+        // CR 601.2i + CR 603.4 + CR 800.4i: spells cast during the previous turn
+        // by the scoped players, read from the per-player snapshot latched at
+        // the turn boundary. CR 800.4i: a player who has left the game still
+        // counts (the table-wide "no spells were cast last turn" total includes
+        // their casts), so the population is not narrowed by elimination.
+        // No per-spell data survives the boundary, so a filtered last-turn count
+        // is not representable: it reads 0 and `coverage` classifies it
+        // unsupported rather than inventing a value.
+        QuantityRef::SpellsCast {
+            scope,
+            ref filter,
+            window: TurnWindow::LastTurn,
+        } => match filter {
+            None => usize_to_i32_saturating(
+                last_turn_scoped_players(state, scope, ctx, controller)
+                    .map(|p| p.spells_cast_last_turn as usize)
+                    .sum(),
+            ),
+            Some(_) => 0,
+        },
         // CR 117.1: Count spells cast this turn by the scoped players, optionally filtered.
-        QuantityRef::SpellsCastThisTurn { scope, ref filter } => {
+        QuantityRef::SpellsCast {
+            scope,
+            ref filter,
+            window: TurnWindow::ThisTurn,
+        } => {
             // CR 109.1 + CR 614.12: When the filter carries the own-cast
             // exclusion marker (`FilterProp::Another`), count records matching
             // the PEELED filter, then subtract the source's own pending cast.
@@ -6808,16 +6837,13 @@ fn resolve_ref(
                     .unwrap_or(0)
             })
         }
-        // CR 601.2i: spells that became cast during the previous turn, by any player
-        // (table-wide total).
-        QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
         // CR 601.2i: Number of spells that became cast this game by the scoped
         // players, optionally filtered by spell characteristics.
         //
         // `filter: None` reads the fast O(1) `state.spells_cast_this_game`
         // count — preserves the pre-lift Establishing Shot semantics.
         // `filter: Some(_)` scans `state.spells_cast_this_game_by_player`
-        // records, mirroring `SpellsCastThisTurn`'s filtered scan.
+        // records, mirroring `SpellsCast`'s filtered scan.
         QuantityRef::SpellsCastThisGame { scope, ref filter } => match filter {
             None => usize_to_i32_saturating(
                 scoped_players(state, scope, ctx, controller)
@@ -7253,6 +7279,28 @@ fn scoped_players<'a>(
     ctx: QuantityContext,
     controller: PlayerId,
 ) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    scoped_players_matching(state, scope, ctx, controller, false)
+}
+
+/// CR 800.4i: `scoped_players` for a turn-history read that "can find actions
+/// that were taken by a player who has left the game". Same scope selection,
+/// but the `All` / `Opponents` populations keep a departed player's record.
+fn last_turn_scoped_players<'a>(
+    state: &'a GameState,
+    scope: &'a CountScope,
+    ctx: QuantityContext,
+    controller: PlayerId,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    scoped_players_matching(state, scope, ctx, controller, true)
+}
+
+fn scoped_players_matching<'a>(
+    state: &'a GameState,
+    scope: &'a CountScope,
+    ctx: QuantityContext,
+    controller: PlayerId,
+    include_departed: bool,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
     let scoped_player = ctx
         .scoped_player
         .or_else(|| triggering_event_player(state))
@@ -7278,10 +7326,11 @@ fn scoped_players<'a>(
         // silently resolving `Controller` (the "you" axis) or a persisted
         // `SourceChosenPlayer` to the empty set would read 0 instead of that
         // player's actual value.
-        CountScope::All => !p.is_eliminated,
+        CountScope::All => include_departed || !p.is_eliminated,
         // CR 102.3: teammates are not opponents; retain the live-population filter.
         CountScope::Opponents => {
-            crate::game::players::is_opponent(state, controller, p.id) && !p.is_eliminated
+            crate::game::players::is_opponent(state, controller, p.id)
+                && (include_departed || !p.is_eliminated)
         }
     })
 }
@@ -9702,8 +9751,8 @@ where
 /// Rakdos, Belbe, Teysa and Kaito, and Thought Sponge's draw-count ruling.
 /// Opponent aggregates exclude teammates but retain departed opponents;
 /// all-player aggregates retain departed players too. Single-player scopes
-/// delegate to `resolve_per_player_scalar`. The life-only player-count twin is
-/// `player_filter_reads_life_history`.
+/// delegate to `resolve_per_player_scalar`. The player-count twin (life changes and
+/// last-turn spell casts, CR 800.4i) is `player_filter_reads_life_history`.
 fn resolve_per_player_history_scalar<F>(
     state: &GameState,
     scope: &PlayerScope,
@@ -9769,9 +9818,20 @@ fn player_filter_reads_life_history(filter: &PlayerFilter) -> bool {
         // narrow: other `PlayerAttribute` scalars (hand size, graveyard size,
         // player counters, …) keep excluding departed players, matching the
         // `AllPlayers` aggregate form in `resolve_per_player_history_scalar`.
+        //
+        // CR 800.4i: "If an effect requires information from the game about
+        // actions players have taken, the effect can find actions that were
+        // taken by a player who has left the game." A spell cast last turn is
+        // such an action ("a player cast two or more spells last turn", Gatstaf
+        // Howler), so the last-turn spell attr joins the life-change attrs.
         PlayerFilter::PlayerAttribute { attr, .. } => matches!(
             attr.as_ref(),
-            QuantityRef::LifeLostThisTurn { .. } | QuantityRef::LifeGainedThisTurn { .. }
+            QuantityRef::LifeLost { .. }
+                | QuantityRef::LifeGainedThisTurn { .. }
+                | QuantityRef::SpellsCast {
+                    window: TurnWindow::LastTurn,
+                    ..
+                }
         ),
         _ => false,
     }
@@ -10779,9 +10839,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         for unknown in [nested_filter_x, spell_ledger] {
@@ -10973,9 +11034,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         let graveyard_cards = QuantityExpr::Ref {
@@ -13201,9 +13263,10 @@ mod tests {
                 player: PlayerScope::Controller,
                 filter: other(),
             },
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(other()),
+                window: TurnWindow::ThisTurn,
             },
             QuantityRef::SpellsCastBeforeTriggeringSpell {
                 scope: CountScope::Controller,
@@ -13275,7 +13338,7 @@ mod tests {
                 | QuantityRef::SacrificedThisTurn { filter, .. }
                 | QuantityRef::TokensCreatedThisTurn { filter, .. }
                 | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => Some(filter),
-                QuantityRef::SpellsCastThisTurn { filter, .. }
+                QuantityRef::SpellsCast { filter, .. }
                 | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
                 | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref(),
                 QuantityRef::ManaSpentToCast {
@@ -13573,9 +13636,10 @@ mod tests {
                 3,
             ),
             (
-                QuantityRef::SpellsCastThisTurn {
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: Some(filter.clone()),
+                    window: TurnWindow::ThisTurn,
                 },
                 1,
             ),
@@ -13597,7 +13661,7 @@ mod tests {
                 | QuantityRef::TokensCreatedThisTurn { filter, .. }
                 | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
                 | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
-                | QuantityRef::SpellsCastThisTurn {
+                | QuantityRef::SpellsCast {
                     filter: Some(filter),
                     ..
                 }
@@ -18782,7 +18846,7 @@ mod tests {
         );
     }
 
-    /// CR 119.3: `LifeLostThisTurn { Opponent { Sum } }` sums life lost across
+    /// CR 119.3: `LifeLost { Opponent { Sum } }` sums life lost across
     /// opponents, excluding the controller. Three players' losses [2, 5, 1]
     /// with controller = 0 → sum of opponents 1+2 = 5+1 = 6. Locks in the
     /// pre-Π-3 `OpponentLifeLostThisTurn` semantic.
@@ -18796,10 +18860,11 @@ mod tests {
         state.players[2].life_lost_this_turn = 1;
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::Opponent {
                     aggregate: AggregateFunction::Sum,
                 },
+                window: TurnWindow::ThisTurn,
             },
         };
         // Controller = player 0: opponents are 1 and 2 → 5 + 1 = 6.
@@ -18808,7 +18873,7 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(1)), 3);
     }
 
-    /// CR 119.3 + CR 603.4: `LifeLostThisTurn { AllPlayers { Max } }` returns
+    /// CR 119.3 + CR 603.4: `LifeLost { AllPlayers { Max } }` returns
     /// the maximum life-loss across all players (controller + opponents),
     /// not the sum. Three players' losses [2, 5, 1] → max = 5.
     /// Critical: 2 + 5 + 1 = 8 would falsely satisfy a >= 8 threshold,
@@ -18823,11 +18888,12 @@ mod tests {
         state.players[2].life_lost_this_turn = 1;
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
                     exclude: None,
                 },
+                window: TurnWindow::ThisTurn,
             },
         };
         // Resolves identically regardless of which player is the controller —
@@ -18843,11 +18909,12 @@ mod tests {
     fn resolve_quantity_max_life_lost_this_turn_none_lost() {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
                     exclude: None,
                 },
+                window: TurnWindow::ThisTurn,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
@@ -19181,7 +19248,7 @@ mod tests {
     /// CR 119.3 + CR 608.2h: discriminating coverage for the all-players
     /// life-change population — "for each player who lost life this turn"
     /// (Reaper's Scythe / Strefan, Maurer Progenitor) lowers to
-    /// `PlayerCount{PlayerAttribute{relation: All, attr: LifeLostThisTurn, GE 1}}`.
+    /// `PlayerCount{PlayerAttribute{relation: All, attr: LifeLost, GE 1}}`.
     /// 3-player board: the CONTROLLER lost 2 (must count — "each player" is not
     /// "each opponent"), opp1 lost 1 (counts), opp2 lost 0 (excluded). Expect 2.
     /// The opponent-only `OpponentLostLife` representation would answer 1 here,
@@ -19200,8 +19267,9 @@ mod tests {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::PlayerAttribute {
                     relation: PlayerRelation::All,
-                    attr: Box::new(QuantityRef::LifeLostThisTurn {
+                    attr: Box::new(QuantityRef::LifeLost {
                         player: PlayerScope::ScopedPlayer,
+                        window: TurnWindow::ThisTurn,
                     }),
                     comparator: Comparator::GE,
                     value: Box::new(QuantityExpr::Fixed { value: 1 }),
@@ -19293,8 +19361,9 @@ mod tests {
             },
         };
 
-        let per_each = lost_life(QuantityRef::LifeLostThisTurn {
+        let per_each = lost_life(QuantityRef::LifeLost {
             player: PlayerScope::ScopedPlayer,
+            window: TurnWindow::ThisTurn,
         });
         assert_eq!(
             resolve_quantity(&state, &per_each, PlayerId(0), ObjectId(1)),
@@ -20102,7 +20171,7 @@ mod tests {
         );
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::creature()
@@ -20116,6 +20185,7 @@ mod tests {
                             },
                         ]),
                 )),
+                window: TurnWindow::ThisTurn,
             },
         };
 
@@ -20182,9 +20252,10 @@ mod tests {
             QuantityExpr::ClampMin {
                 inner: Box::new(QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::All,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     }),
                     offset: -1,
@@ -20234,9 +20305,10 @@ mod tests {
         let controller_only = QuantityExpr::ClampMin {
             inner: Box::new(QuantityExpr::Offset {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 }),
                 offset: -1,
@@ -20250,16 +20322,17 @@ mod tests {
         );
     }
 
-    // --- SpellsCastThisTurn own-cast exclusion marker (CR 400.7 / CR 601.2i) ---
+    // --- SpellsCast own-cast exclusion marker (CR 400.7 / CR 601.2i) ---
 
     fn red_exclusion_expr() -> QuantityExpr {
         let red = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
             color: ManaColor::Red,
         }]));
         QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::with_own_cast_exclusion(Some(red))),
+                window: TurnWindow::ThisTurn,
             },
         }
     }

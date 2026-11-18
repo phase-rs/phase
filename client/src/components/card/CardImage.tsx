@@ -107,8 +107,10 @@ export function CardImage({
     ? getBevelBorderStyle(colors)
     : undefined;
 
-  // Genuinely still resolving art — pulse until the async lookup settles.
-  if (!faceDown && isLoading) {
+  // Genuinely still resolving art: pulse until the async lookup settles. A
+  // card re-resolving its art (a reload of the same card elsewhere, a printings
+  // fetch) keeps showing its last good image, which the hook hands back as `src`.
+  if (!faceDown && isLoading && !src) {
     return (
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
