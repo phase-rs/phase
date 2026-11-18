@@ -6800,6 +6800,12 @@ pub(crate) fn complete_logical_zone_trigger_collection_for(
 
     group.stamp_battlefield_departures()?;
     sync_logical_zone_change_simultaneity_stamps(group, final_events);
+    // CR 603.2c: bring the departure stamps into already-queued observer witnesses
+    // (such as Soulherder) captured by the owner's segment before later collectors
+    // compare them by whole-event equality, keeping the single joint event.
+    for context in &mut state.deferred_triggers {
+        sync_logical_zone_change_simultaneity_stamps(group, &mut context.trigger_events);
+    }
     let settlement = collect_logical_zone_trigger_settlement_for(state, group, collector)?;
     resolve_and_apply_trigger_collection(
         state,
