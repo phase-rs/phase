@@ -41,8 +41,8 @@ use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
-    BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
-    EnterWithGrant, EnterWithGrants, EtbTapState, ProposedEvent, ReplacementId,
+    BoundSearchFoundGrant, CopyTokenSpec, CounterCause, CounterMoveStage, CounterPlacement,
+    DrawEventStage, EnterWithGrant, EnterWithGrants, EtbTapState, ProposedEvent, ReplacementId,
     SearchFoundDisposition, TokenAttackRequest, TokenBatch,
 };
 use crate::types::replacements::ReplacementEvent;
@@ -742,6 +742,7 @@ fn apply_compleated_replacement(
                     actor,
                     object_id,
                     counter_type: CounterType::Loyalty,
+                    cause,
                 },
             count,
             mut applied,
@@ -754,15 +755,16 @@ fn apply_compleated_replacement(
                 source_id: rid.source,
                 event_type: ReplacementEvent::AddCounter.to_string(),
             });
-            ProposedEvent::AddCounter {
+            ProposedEvent::promote_counter_placement_cause(ProposedEvent::AddCounter {
                 placement: CounterPlacement::Object {
                     actor,
                     object_id,
                     counter_type: CounterType::Loyalty,
+                    cause,
                 },
                 count: count.saturating_sub(life_paid.saturating_mul(2)),
                 applied,
-            }
+            })
         }
         other => other,
     }
@@ -5781,11 +5783,13 @@ fn add_counter_applier(
             count,
             applied,
         } => match scale_event_quantity(count, &modification) {
-            ScaledQuantity::Scaled(count) => ApplyResult::Modified(ProposedEvent::AddCounter {
-                placement,
-                count,
-                applied,
-            }),
+            ScaledQuantity::Scaled(count) => ApplyResult::Modified(
+                ProposedEvent::promote_counter_placement_cause(ProposedEvent::AddCounter {
+                    placement,
+                    count,
+                    applied,
+                }),
+            ),
             ScaledQuantity::Prevented => ApplyResult::Prevented,
             ScaledQuantity::Unrepresentable => record_quantity_overflow(
                 state,
@@ -5805,11 +5809,13 @@ fn add_counter_applier(
             placement: placement @ CounterPlacement::Object { .. },
             count,
             applied,
-        } => ApplyResult::Modified(ProposedEvent::AddCounter {
-            placement,
-            count: new_count(count),
-            applied,
-        }),
+        } => ApplyResult::Modified(ProposedEvent::promote_counter_placement_cause(
+            ProposedEvent::AddCounter {
+                placement,
+                count: new_count(count),
+                applied,
+            },
+        )),
         ProposedEvent::MoveCounter {
             actor,
             source_id,
@@ -5818,17 +5824,21 @@ fn add_counter_applier(
             remove_count,
             add_count,
             stage: CounterMoveStage::Add,
+            cause,
             applied,
-        } => ApplyResult::Modified(ProposedEvent::MoveCounter {
-            actor,
-            source_id,
-            destination_id,
-            counter_type,
-            remove_count,
-            add_count: new_count(add_count),
-            stage: CounterMoveStage::Add,
-            applied,
-        }),
+        } => ApplyResult::Modified(ProposedEvent::promote_counter_placement_cause(
+            ProposedEvent::MoveCounter {
+                actor,
+                source_id,
+                destination_id,
+                counter_type,
+                remove_count,
+                add_count: new_count(add_count),
+                stage: CounterMoveStage::Add,
+                cause,
+                applied,
+            },
+        )),
         event => ApplyResult::Modified(event),
     }
 }
@@ -8182,6 +8192,31 @@ fn evaluate_replacement_condition(
                 ..
             }
         ),
+        // CR 614.16: "if an effect would put one or more counters" — true iff
+        // the event is a counter placement (an `AddCounter`, or the add stage
+        // of a `MoveCounter`) whose cause is effect-driven: the resolving
+        // spell/ability effect itself, or another replacement/prevention
+        // effect's modification. Cost payments and turn-based actions stamp
+        // `Other` and fail closed here.
+        ReplacementCondition::EffectCausedPlacement => {
+            let cause = match event {
+                ProposedEvent::AddCounter { placement, .. } => match placement {
+                    CounterPlacement::Object { cause, .. }
+                    | CounterPlacement::Player { cause, .. }
+                    | CounterPlacement::Energy { cause, .. } => Some(*cause),
+                },
+                ProposedEvent::MoveCounter {
+                    stage: CounterMoveStage::Add,
+                    cause,
+                    ..
+                } => Some(*cause),
+                _ => None,
+            };
+            matches!(
+                cause,
+                Some(CounterCause::ResolvingEffect | CounterCause::ReplacementOrPrevention)
+            )
+        }
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
         // Checks the event's `is_extra_turn` flag directly; returns `false` for
         // any non-`BeginTurn` event so a misattached `OnlyExtraTurn` doesn't
@@ -13778,6 +13813,7 @@ impl CounterPlacementProhibitions {
                 actor,
                 object_id,
                 counter_type: counter_type.clone(),
+                cause: CounterCause::Other,
             },
             count,
             applied: HashSet::new(),
@@ -18637,6 +18673,7 @@ mod tests {
                     add_count: 1,
                     stage: CounterMoveStage::Remove,
                     applied: HashSet::new(),
+                    cause: CounterCause::Other,
                 },
                 vec![ReplacementEvent::RemoveCounter],
             ),
@@ -18650,6 +18687,7 @@ mod tests {
                     add_count: 1,
                     stage: CounterMoveStage::Add,
                     applied: HashSet::new(),
+                    cause: CounterCause::Other,
                 },
                 vec![ReplacementEvent::AddCounter],
             ),
@@ -18739,6 +18777,7 @@ mod tests {
                         actor: PlayerId(0),
                         object_id: ObjectId(1),
                         counter_type: CounterType::Plus1Plus1,
+                        cause: CounterCause::Other,
                     },
                     count: 1,
                     applied: HashSet::new(),
@@ -19316,6 +19355,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: compleated,
                 counter_type: CounterType::Loyalty,
+                cause: CounterCause::Other,
             },
             count: 5,
             applied: HashSet::new(),
@@ -19680,6 +19720,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(30),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -19738,6 +19779,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(30),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -20580,6 +20622,7 @@ mod tests {
                 actor: PlayerId(0),
                 player_id: PlayerId(0),
                 counter_kind: crate::types::player::PlayerCounterKind::Experience,
+                cause: CounterCause::Other,
             },
             count,
             applied: HashSet::new(),
@@ -20591,6 +20634,7 @@ mod tests {
             placement: CounterPlacement::Energy {
                 actor: PlayerId(0),
                 player_id: PlayerId(0),
+                cause: CounterCause::Other,
             },
             count,
             applied: HashSet::new(),
@@ -20680,6 +20724,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(10),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: u32::MAX,
             applied: HashSet::new(),
@@ -24229,6 +24274,399 @@ mod tests {
             None,
             &dummy_begin_turn_event(),
         ));
+    }
+
+    /// CR 614.16 (V7): `EffectCausedPlacement` is true iff the event is a
+    /// counter placement — an `AddCounter`, or the add stage of a
+    /// `MoveCounter` — whose `CounterCause` is effect-driven
+    /// (`ResolvingEffect` or `ReplacementOrPrevention`). Cost payments and
+    /// turn-based actions stamp `Other` and fail closed here, as do
+    /// non-placement events and the move's remove stage. Hand-built defs over
+    /// hand-built events: the unit-level arm proof, complementing the
+    /// parser-tagged production rows (V1–V6, V11–V13).
+    #[test]
+    fn effect_caused_placement_matches_effect_driven_counter_placements() {
+        use crate::types::player::PlayerCounterKind;
+
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let condition = ReplacementCondition::EffectCausedPlacement;
+        let check = |event: &ProposedEvent| {
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                event,
+            )
+        };
+        let add_object = |cause| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+                cause,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let add_player = |cause| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                cause,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let add_energy = |cause| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+                cause,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let move_add = |cause| ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(30),
+            destination_id: ObjectId(31),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            stage: CounterMoveStage::Add,
+            cause,
+            applied: HashSet::new(),
+        };
+
+        // Condition x event-kind x cause: effect-driven placements match on
+        // every placement shape; `Other` (cost / turn-based-action / Phase-1
+        // default) fails closed on every shape.
+        for cause in [
+            CounterCause::ResolvingEffect,
+            CounterCause::ReplacementOrPrevention,
+        ] {
+            assert!(
+                check(&add_object(cause)),
+                "{cause:?} object placement must match"
+            );
+            assert!(
+                check(&add_player(cause)),
+                "{cause:?} player placement must match"
+            );
+            assert!(
+                check(&add_energy(cause)),
+                "{cause:?} energy placement must match"
+            );
+            assert!(
+                check(&move_add(cause)),
+                "{cause:?} move-add stage must match"
+            );
+        }
+        for event in [
+            add_object(CounterCause::Other),
+            add_player(CounterCause::Other),
+            add_energy(CounterCause::Other),
+            move_add(CounterCause::Other),
+        ] {
+            assert!(!check(&event), "Other-caused placement must fail closed");
+        }
+
+        // Sibling/negative: the move's remove stage is not a "put" even when
+        // the initiating cause is effect-driven; non-counter events never match
+        // even when they carry their own effect flag (per-arm isolation from
+        // the Leng arm).
+        assert!(
+            !check(&ProposedEvent::MoveCounter {
+                actor: PlayerId(0),
+                source_id: ObjectId(30),
+                destination_id: ObjectId(31),
+                counter_type: CounterType::Plus1Plus1,
+                remove_count: 1,
+                add_count: 1,
+                stage: CounterMoveStage::Remove,
+                cause: CounterCause::ResolvingEffect,
+                applied: HashSet::new(),
+            }),
+            "move-remove stage must not match"
+        );
+        assert!(
+            !check(&ProposedEvent::CreateToken {
+                owner: PlayerId(1),
+                count: 1,
+                spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
+                copy: None,
+                enter_tapped: EtbTapState::Unspecified,
+                appended: Vec::new(),
+                applied: HashSet::new(),
+            }),
+            "CreateToken must fail closed"
+        );
+        assert!(
+            !check(&ProposedEvent::Discard {
+                player_id: PlayerId(1),
+                object_id: ObjectId(40),
+                source_id: None,
+                caused_by_effect: true,
+                discard_frame: None,
+                applied: HashSet::new(),
+            }),
+            "an effect-caused discard must not match the placement gate"
+        );
+
+        // Hostile stacking shape (Selesnya ruling): two copies of the condition
+        // compose — both see the same effect-driven placement.
+        let doubled = ReplacementCondition::And {
+            conditions: vec![condition.clone(), condition],
+        };
+        assert!(
+            evaluate_replacement_condition(
+                &doubled,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                &add_object(CounterCause::ResolvingEffect),
+            ),
+            "stacked copies must both match an effect placement"
+        );
+        assert!(
+            !evaluate_replacement_condition(
+                &doubled,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                &add_object(CounterCause::Other),
+            ),
+            "stacked copies must both reject an Other placement"
+        );
+    }
+
+    /// CR 614.16 (M4): `add_counter_applier` promotes a modified placement's
+    /// cause to `ReplacementOrPrevention` on all four placement shapes
+    /// (Object, Player, Energy, MoveCounter-Add), for every
+    /// `QuantityModification` kind. The scaled count in each assertion is the
+    /// positive control (the applier ran, not a pass-through); the `Prevent`
+    /// arm yields `Prevented` (no placement to promote) and the
+    /// `Unrepresentable` arm leaves the event unchanged. Hand-built defs over
+    /// hand-built events: the unit-level arm proof, complementing the
+    /// production rows (R1–R5).
+    #[test]
+    fn add_counter_applier_promotes_placement_cause_on_modify() {
+        use crate::types::player::PlayerCounterKind;
+
+        let run = |modification: QuantityModification, event: ProposedEvent| {
+            let mut state = test_state_with_object(
+                ObjectId(10),
+                Zone::Battlefield,
+                vec![life_qmod_def(ReplacementEvent::AddCounter, modification)],
+            );
+            add_counter_applier(
+                event,
+                ReplacementId {
+                    source: ObjectId(10),
+                    index: 0,
+                },
+                &mut state,
+                &mut Vec::new(),
+            )
+        };
+        let placement_cause = |placement: &CounterPlacement| match placement {
+            CounterPlacement::Object { cause, .. }
+            | CounterPlacement::Player { cause, .. }
+            | CounterPlacement::Energy { cause, .. } => *cause,
+        };
+        let add_object = |cause, count| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+                cause,
+            },
+            count,
+            applied: HashSet::new(),
+        };
+        let add_player = |cause, count| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                cause,
+            },
+            count,
+            applied: HashSet::new(),
+        };
+        let add_energy = |cause, count| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+                cause,
+            },
+            count,
+            applied: HashSet::new(),
+        };
+        let move_add = |cause, add_count| ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(30),
+            destination_id: ObjectId(31),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 3,
+            add_count,
+            stage: CounterMoveStage::Add,
+            cause,
+            applied: HashSet::new(),
+        };
+
+        // All four placement shapes promote under Times{2}; the scaled count
+        // proves the applier ran.
+        for (label, event, expected) in [
+            ("object", add_object(CounterCause::Other, 3), 6),
+            ("player", add_player(CounterCause::Other, 3), 6),
+            ("energy", add_energy(CounterCause::Other, 3), 6),
+        ] {
+            match run(QuantityModification::Times { factor: 2 }, event) {
+                ApplyResult::Modified(ProposedEvent::AddCounter {
+                    placement, count, ..
+                }) => {
+                    assert_eq!(count, expected, "{label}: the applier must scale the count");
+                    assert_eq!(
+                        placement_cause(&placement),
+                        CounterCause::ReplacementOrPrevention,
+                        "{label}: the modified placement must promote its cause"
+                    );
+                }
+                other => panic!("{label}: expected a modified AddCounter, got {other:?}"),
+            }
+        }
+        match run(
+            QuantityModification::Times { factor: 2 },
+            move_add(CounterCause::Other, 3),
+        ) {
+            ApplyResult::Modified(ProposedEvent::MoveCounter {
+                add_count, cause, ..
+            }) => {
+                assert_eq!(add_count, 6, "move-add: the applier must scale add_count");
+                assert_eq!(
+                    cause,
+                    CounterCause::ReplacementOrPrevention,
+                    "move-add: the modified placement must promote its cause"
+                );
+            }
+            other => panic!("move-add: expected a modified MoveCounter, got {other:?}"),
+        }
+
+        // Every modification kind promotes (object shape, count 4).
+        for (label, modification, expected) in [
+            ("times", QuantityModification::Times { factor: 2 }, 8),
+            ("half", QuantityModification::Half, 2),
+            ("plus", QuantityModification::Plus { value: 1 }, 5),
+            ("minus", QuantityModification::Minus { value: 1 }, 3),
+        ] {
+            match run(modification, add_object(CounterCause::Other, 4)) {
+                ApplyResult::Modified(ProposedEvent::AddCounter {
+                    placement, count, ..
+                }) => {
+                    assert_eq!(count, expected, "{label}: the applier must scale the count");
+                    assert_eq!(
+                        placement_cause(&placement),
+                        CounterCause::ReplacementOrPrevention,
+                        "{label}: the modified placement must promote its cause"
+                    );
+                }
+                other => panic!("{label}: expected a modified AddCounter, got {other:?}"),
+            }
+        }
+
+        // Prevent suppresses the placement outright (CR 614.6) — no placement
+        // to promote.
+        assert!(
+            matches!(
+                run(
+                    QuantityModification::Prevent,
+                    add_object(CounterCause::Other, 3)
+                ),
+                ApplyResult::Prevented
+            ),
+            "Prevent must yield Prevented, not a modified placement"
+        );
+
+        // Unrepresentable leaves the event (count and cause) unchanged; the
+        // pipeline halts at the loop head on the overflow record.
+        match run(
+            QuantityModification::Plus { value: 1 },
+            add_energy(CounterCause::Other, u32::MAX),
+        ) {
+            ApplyResult::Modified(ProposedEvent::AddCounter {
+                placement, count, ..
+            }) => {
+                assert_eq!(count, u32::MAX, "overflow must leave the count unchanged");
+                assert_eq!(
+                    placement_cause(&placement),
+                    CounterCause::Other,
+                    "overflow must leave the cause unchanged"
+                );
+            }
+            other => panic!("overflow must return the event unchanged, got {other:?}"),
+        }
+
+        // Hostile: the move's remove stage is not a placement and passes
+        // through unscaled and unpromoted.
+        match run(
+            QuantityModification::Times { factor: 2 },
+            ProposedEvent::MoveCounter {
+                actor: PlayerId(0),
+                source_id: ObjectId(30),
+                destination_id: ObjectId(31),
+                counter_type: CounterType::Plus1Plus1,
+                remove_count: 3,
+                add_count: 3,
+                stage: CounterMoveStage::Remove,
+                cause: CounterCause::Other,
+                applied: HashSet::new(),
+            },
+        ) {
+            ApplyResult::Modified(ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Remove,
+                cause,
+                remove_count,
+                add_count,
+                ..
+            }) => {
+                assert_eq!(
+                    (remove_count, add_count),
+                    (3, 3),
+                    "the remove stage must pass through unscaled"
+                );
+                assert_eq!(
+                    cause,
+                    CounterCause::Other,
+                    "the remove stage must pass through unpromoted"
+                );
+            }
+            other => panic!("remove stage must pass through, got {other:?}"),
+        }
+
+        // Hostile: a zero count is still a modification — Modified with a
+        // promoted cause (the matcher keeps it ineligible downstream).
+        match run(
+            QuantityModification::Times { factor: 2 },
+            add_object(CounterCause::Other, 0),
+        ) {
+            ApplyResult::Modified(ProposedEvent::AddCounter {
+                placement, count, ..
+            }) => {
+                assert_eq!(count, 0, "zero-count must stay zero");
+                assert_eq!(
+                    placement_cause(&placement),
+                    CounterCause::ReplacementOrPrevention,
+                    "zero-count must still promote its cause"
+                );
+            }
+            other => panic!("zero-count must stay Modified, got {other:?}"),
+        }
     }
 
     #[test]
@@ -28827,6 +29265,7 @@ mod tests {
                 actor: PlayerId(1),
                 object_id: opponent_creature,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 5,
             applied: HashSet::new(),
@@ -28886,6 +29325,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: own_creature,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 5,
             applied: HashSet::new(),
@@ -29174,6 +29614,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(30),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -29242,6 +29683,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(30),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -29740,6 +30182,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Minus1Minus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -29755,6 +30198,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -29802,6 +30246,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -29816,6 +30261,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Minus1Minus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -29867,6 +30313,7 @@ mod tests {
                     actor: PlayerId(0),
                     object_id: target,
                     counter_type: ct.clone(),
+                    cause: CounterCause::Other,
                 },
                 count: 1,
                 applied: HashSet::new(),
@@ -29957,6 +30404,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: host,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -29973,6 +30421,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: other,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -30044,6 +30493,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -30063,6 +30513,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: unrelated,
                 counter_type: CounterType::Loyalty,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -30077,6 +30528,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: exiled_artifact_id,
                 counter_type: CounterType::Generic("egg".to_string()),
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -30113,6 +30565,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -30342,6 +30795,7 @@ mod tests {
                 actor: PlayerId(0),
                 player_id: PlayerId(0),
                 counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -30542,6 +30996,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: planeswalker_id,
                 counter_type: CounterType::Loyalty,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -30665,6 +31120,8 @@ mod tests {
             ObjectIncarnationRef::from_object(&state.objects[&bear]),
             CounterType::Minus1Minus1,
             1,
+            // The blight effect under test is a resolving effect.
+            CounterCause::ResolvingEffect,
         );
         assert!(preview.is_some_and(counters::CounterAdditionPreview::is_prohibited));
         assert!(
@@ -30964,6 +31421,9 @@ mod tests {
                     ObjectIncarnationRef::from_object(&state.objects[&case.object]),
                     CounterType::Minus1Minus1,
                     case.count,
+                    // Untagged defs under test: unobservable, stamped as the
+                    // effect placement the matrix emulates.
+                    CounterCause::ResolvingEffect,
                 )
                 .is_some_and(CounterAdditionPreview::is_prohibited),
                 case.forbidden,
@@ -30987,6 +31447,7 @@ mod tests {
                 actor: PlayerId(0),
                 player_id: PlayerId(1),
                 counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -31006,6 +31467,7 @@ mod tests {
                 actor: PlayerId(1),
                 player_id: PlayerId(0),
                 counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -31034,6 +31496,7 @@ mod tests {
                 actor: PlayerId(0),
                 player_id: PlayerId(0),
                 counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -31047,6 +31510,7 @@ mod tests {
             placement: CounterPlacement::Energy {
                 actor: PlayerId(0),
                 player_id: PlayerId(0),
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),

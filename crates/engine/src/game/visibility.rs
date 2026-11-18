@@ -1989,7 +1989,18 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         {
             redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
         }
+        // CR 400.2 + CR 708.5: a context's cause record names each causing entrant; a
+        // face-down entrant is hidden from this viewer as the object is.
+        for cause in context.causes.iter_mut() {
+            redact_hidden_zone_change_event(cause, &held_entry_hidden_ids);
+        }
     }
+    // CR 400.2 + CR 708.5: an observer's `AbilityTriggered` event nests the observed
+    // firing's cause records, wherever that event is carried. A face-down entrant among
+    // them (a manifested card) is hidden from this viewer as the object is.
+    filtered.for_each_trigger_event_carrier_mut(&mut |event| {
+        redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+    });
     match &mut filtered.waiting_for {
         WaitingFor::TriggerTargetSelection {
             trigger_event,
@@ -3528,6 +3539,18 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // CR 400.2 + CR 708.5: the prompts that copy the resolving trigger's event, and the paused
+    // mana abilities a payment prompt carries, hold an observer's `AbilityTriggered` event too:
+    // one traversal redacts every nested cause record against the face-down-aware set. It runs
+    // after every `waiting_for` rebuild above (`PayCost` re-clones the authoritative resume,
+    // restoring unredacted causes) and before the hidden-identity pass, whose set omits
+    // face-down battlefield entrants.
+    filtered
+        .waiting_for
+        .for_each_prompt_trigger_event_mut(&mut |event| {
+            redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+        });
+
     redact_hidden_library_identity_carriers(&mut filtered, &hidden_library_ids);
 
     // CR 601.2h + CR 113.7a + CR 400.2: prompt-held and root-held paused abilities latch
@@ -3828,6 +3851,21 @@ pub fn filter_events_for_viewer(
                 redact_hidden_library_event(&mut event, &hidden_library);
                 event
             }
+            // `causes` are engine bookkeeping for the observer matcher; no viewer
+            // receives them (same treatment as `CardsRevealed.occurrences`).
+            GameEvent::AbilityTriggered {
+                stack_entry,
+                source_id,
+                controller,
+                origin,
+                ..
+            } => GameEvent::AbilityTriggered {
+                stack_entry: *stack_entry,
+                source_id: *source_id,
+                controller: *controller,
+                origin: *origin,
+                causes: Vec::new(),
+            },
             other => other.clone(),
         })
         .collect()
@@ -4325,7 +4363,26 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
         } => {
             redact_source_context_hidden_members(saga, hidden_ids);
         }
+        // CR 400.2 + CR 708.5: an observer's `AbilityTriggered` event nests the
+        // observed firing's cause events; each is hidden exactly as the same
+        // event is at top level.
+        GameEvent::AbilityTriggered { causes, .. } => {
+            for cause in causes {
+                redact_hidden_zone_change_event(cause, hidden_ids);
+            }
+        }
         _ => {}
+    }
+}
+
+/// CR 400.2 + CR 708.5: redacts the cause records an `AbilityTriggered` event nests,
+/// against `hidden_ids` (the viewer's hidden and face-down ids). No-op for every other
+/// event.
+fn redact_ability_triggered_causes(event: &mut GameEvent, hidden_ids: &HashSet<ObjectId>) {
+    if let GameEvent::AbilityTriggered { causes, .. } = event {
+        for cause in causes {
+            redact_hidden_zone_change_event(cause, hidden_ids);
+        }
     }
 }
 
@@ -4359,7 +4416,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `consumed_before_priority_trigger_events`, `deferred_entry_events` (event; its
 /// `held_triggers` are cleared for every audience), `unsettled_entry_batch_events`, a paused
 /// player-scope sacrifice's `deferred_events`, the pending trigger's `trigger_event`, a
-/// deferred or ordering trigger context's `trigger_event` and `trigger_events`, the
+/// deferred or ordering trigger context's `trigger_event` and `trigger_events` and a
+/// context's `causes`, the
 /// `trigger_event` of the `TriggerTargetSelection` (with its `trigger_events`),
 /// `UnlessPayment`, `UnlessPaymentChooseCost`, `ChooseObjectsSelection` and
 /// `EachPlayerCopyChosenSelection` prompts, and as a creation look-back event; and
@@ -5465,13 +5523,15 @@ fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::Pend
 /// CR 603.3b + CR 400.2: Wrapping-context variant of
 /// [`redact_pending_trigger_for_observer`] that also clears the
 /// `trigger_events` sidecar (the full simultaneous-event set for
-/// batched triggers, which can reference hidden-zone objects). Scheduling
+/// batched triggers, which can reference hidden-zone objects) and the
+/// `causes` record, a second copy of those events. Scheduling
 /// provenance is public metadata and is intentionally preserved.
 fn redact_pending_trigger_context_for_observer(
     ctx: &mut crate::game::triggers::PendingTriggerContext,
 ) {
     redact_pending_trigger_for_observer(&mut ctx.pending);
     ctx.trigger_events.clear();
+    ctx.causes.clear();
 }
 
 /// CR 400.2 + CR 401.2: an `EffectResolved` subject snapshot pairs a hidden
@@ -5713,6 +5773,47 @@ mod tests {
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
     use std::collections::BTreeSet;
+
+    /// Row V21c, building block (CR 400.2 + CR 708.5): a cause nested in an
+    /// observer's `AbilityTriggered` event is hidden exactly as the same
+    /// `ZoneChanged` is at top level.
+    #[test]
+    fn redact_hidden_zone_change_event_redacts_each_nested_cause() {
+        use crate::types::events::TriggeredAbilityOrigin;
+        let hidden = ObjectId(7);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            hidden,
+            Some(crate::types::zones::Zone::Library),
+            crate::types::zones::Zone::Battlefield,
+        );
+        record.name = "Secret Card".to_string();
+        record.core_types.push(CoreType::Creature);
+        let entry = GameEvent::ZoneChanged {
+            object_id: hidden,
+            from: Some(crate::types::zones::Zone::Library),
+            to: crate::types::zones::Zone::Battlefield,
+            record: Box::new(record),
+        };
+        let hidden_ids: HashSet<ObjectId> = [hidden].into_iter().collect();
+
+        let mut top_level = entry.clone();
+        redact_hidden_zone_change_event(&mut top_level, &hidden_ids);
+        // Reach guard: the redaction acts on the top-level copy.
+        assert_ne!(top_level, entry);
+
+        let mut observed = GameEvent::AbilityTriggered {
+            stack_entry: Some(ObjectId(50)),
+            source_id: ObjectId(8),
+            controller: PlayerId(1),
+            origin: TriggeredAbilityOrigin::SourceAbility,
+            causes: vec![entry],
+        };
+        redact_hidden_zone_change_event(&mut observed, &hidden_ids);
+        let GameEvent::AbilityTriggered { causes, .. } = observed else {
+            panic!("the event keeps its variant");
+        };
+        assert_eq!(causes, vec![top_level]);
+    }
 
     /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
     /// entrant's projection carries its card identity), so every viewer projection strips it.
@@ -8555,6 +8656,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

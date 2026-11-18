@@ -4064,7 +4064,14 @@ pub(crate) fn pinned_decisions_to_points(
                 let mut tappable: Vec<crate::types::identifiers::ObjectId> = state
                     .objects
                     .values()
-                    .filter(|o| o.is_convoke_eligible(controller))
+                    .filter(|o| {
+                        super::casting::tap_payment_eligible(
+                            state,
+                            o,
+                            controller,
+                            ConvokeMode::Convoke,
+                        )
+                    })
                     .map(|o| o.id)
                     .collect();
                 tappable.sort_by_key(|id| id.0);
@@ -13447,6 +13454,7 @@ fn apply_non_priority_pass_action(
                             *mode,
                             choices,
                             &chosen,
+                            paid_cost,
                             &mut events,
                         )?
                     }
@@ -15044,9 +15052,9 @@ fn apply_non_priority_pass_action(
                 .get(&object_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
             let is_eligible = match mode {
-                ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
-                ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
-                ConvokeMode::Improvise => obj.is_improvise_eligible(*player),
+                mode @ (ConvokeMode::Convoke | ConvokeMode::Waterbend | ConvokeMode::Improvise) => {
+                    super::casting::tap_payment_eligible(state, obj, *player, mode)
+                }
                 // CR 702.66a: delve has a dedicated handler arm below (exile, not tap).
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };

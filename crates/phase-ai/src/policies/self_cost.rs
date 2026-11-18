@@ -162,6 +162,8 @@ pub(crate) fn self_counter_cost_preview(
         ObjectIncarnationRef::from_object(source),
         counter_type.clone(),
         count,
+        // CR 614.16: this preview projects a cost payment — fail closed.
+        engine::types::proposed_event::CounterCause::Other,
     )? {
         CounterAdditionPreview::Applied { .. } => Some(SelfCounterCostPreview::Applied),
         CounterAdditionPreview::Prevented => Some(SelfCounterCostPreview::Prevented),

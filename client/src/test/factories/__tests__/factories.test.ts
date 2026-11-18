@@ -155,6 +155,22 @@ describe("waitingForFactory", () => {
       },
     });
   });
+
+  it("keeps ReplacementChoice's candidate_count in step with its candidates", () => {
+    const candidates = [
+      { source_id: 10, source_name: "First source", description: "Double" },
+      { source_id: 11, source_name: "Second source", description: "Add one" },
+      { source_id: 12, source_name: "Third source", description: "Add three" },
+    ];
+    expect(waitingForFactory.replacementChoice({ candidates }).build()).toEqual({
+      type: "ReplacementChoice",
+      data: { player: 0, candidate_count: 3, candidates, kind: { type: "Order" } },
+    });
+    // An explicit count is applied after the derived one, so it still wins.
+    expect(
+      waitingForFactory.replacementChoice({ candidates, candidate_count: 5 }).build(),
+    ).toMatchObject({ data: { candidate_count: 5, candidates } });
+  });
 });
 
 describe("gameStateFactory convenience methods", () => {

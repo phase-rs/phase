@@ -22,7 +22,7 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, CounterPlacement, DrawEventStage, ProposedEvent,
+    AppliedReplacementKey, CounterCause, CounterPlacement, DrawEventStage, ProposedEvent,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::ChildStackDepth;
@@ -1072,6 +1072,7 @@ fn handle_replacement_choice_inner(
                         actor,
                         object_id,
                         counter_type,
+                        ..
                     } => effects::counters::apply_counter_addition(
                         state,
                         actor,
@@ -1820,6 +1821,35 @@ fn handle_replacement_choice_inner(
                 if matches!(
                     outcome,
                     crate::game::effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement
+                ) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            // CR 120.3d + CR 120.1 + CR 616.1: a non-combat wither/infect leg
+            // whose `-1/-1` counter placement paused owes its post-counter
+            // remainder (deathtouch flag, `DamageDealt` event, CR 120.1 record,
+            // lifelink gain). Drain here — after the batch drain retires with
+            // no re-park and before outer continuations, so each target
+            // completes before later targets resume (same contract as the
+            // post-loss site above). A lifelink gain that parks is owned by
+            // the pending replacement (the drain consumes the stash);
+            // propagate its prompt. A combat-flagged stash is skipped: the
+            // combat batch remnant owns it, and the outer wrapper resumes that
+            // remnant below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state
+                    .pending_damage_post_counter
+                    .as_ref()
+                    .is_some_and(|stashed| !stashed.is_combat)
+                && state.active_batch_delivery().is_none()
+            {
+                let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_counter(
+                    state, events,
+                );
+                if matches!(
+                    outcome,
+                    crate::game::effects::deal_damage::DamagePostCounterDrainOutcome::PausedForReplacement
                 ) {
                     waiting_for = state.waiting_for.clone();
                 }
@@ -4583,6 +4613,7 @@ pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool 
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -4751,6 +4782,7 @@ fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -5196,6 +5228,7 @@ fn parked_entry_is_of_incarnation(event: &GameEvent, entrant: ObjectIncarnationR
             | GameEvent::PlayerPhasedIn { .. }
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
+            | GameEvent::AbilityTriggered { .. }
             | GameEvent::StackResolved { .. }
             | GameEvent::Discarded { .. }
             | GameEvent::Milled { .. }
@@ -5679,6 +5712,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
             | GameEvent::PlayerPhasedIn { .. }
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
+            | GameEvent::AbilityTriggered { .. }
             | GameEvent::StackResolved { .. }
             | GameEvent::Discarded { .. }
             | GameEvent::Milled { .. }
@@ -5844,6 +5878,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -7130,6 +7165,9 @@ pub(super) fn apply_etb_counters(
             object_id,
             counter_type.clone(),
             *count,
+            // CR 614.16: entering-with-counters placements are
+            // replacement-driven entry modifications.
+            CounterCause::ReplacementOrPrevention,
             events,
         ) {
             let remaining = counters[index + 1..]
@@ -7141,6 +7179,9 @@ pub(super) fn apply_etb_counters(
                         object_id,
                         counter_type: counter_type.clone(),
                         count: *count,
+                        // CR 614.16: entering-with-counters placements are
+                        // replacement-driven entry modifications.
+                        cause: CounterCause::ReplacementOrPrevention,
                     }
                 })
                 .collect();
@@ -7785,6 +7826,9 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Plus1Plus1,
+                // Emulated effect placement under test (untagged def:
+                // unobservable, but semantically an effect event).
+                cause: CounterCause::ResolvingEffect,
             },
             count: 2,
             applied: std::collections::HashSet::new(),

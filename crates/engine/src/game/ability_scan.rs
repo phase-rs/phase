@@ -6953,6 +6953,10 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
             acc
         }
         ReplacementCondition::EffectCausedDiscard => Axes::NONE,
+        // CR 614.16: reads only the event's own `CounterCause` (carried on the
+        // placement) — event-scoped like `EffectCausedDiscard`'s flag, no board
+        // census and no projected player resource.
+        ReplacementCondition::EffectCausedPlacement => Axes::NONE,
         ReplacementCondition::OnlyExtraTurn => Axes::NONE,
         ReplacementCondition::TokenSubtypeMatches { subtypes: _ } => Axes::NONE,
         ReplacementCondition::TokenCoreTypeMatches { core_types: _ } => Axes::NONE,

@@ -182,6 +182,11 @@
 //! with the as-enters dice/counters bookkeeping (#10433) above. That is under
 //! the unchanged 16,384 ceiling.
 //!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
+//! 15,952 B when the two-phase damage batch merged main through `f99eb633`:
+//! main's boxed `pending_damage_post_counter` (#10016) unioned with the branch's
+//! fields. That is under the unchanged 16,384 ceiling.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

@@ -18,7 +18,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ExtraTurnId, ObjectId};
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterCause, ProposedEvent};
 use crate::types::statics::{HandSizeModification, StaticMode, StaticModeKind};
 
 use super::combat;
@@ -799,6 +799,16 @@ fn enter_phase(
         .is_some_and(|stashed| stashed.is_combat)
     {
         state.pending_damage_post_loss = None;
+    }
+    // CR 120.3d + CR 724.1a: same abandonment mirror for a combat-flagged
+    // counter stash (a non-combat stash belongs to an unrelated resolution
+    // and survives).
+    if state
+        .pending_damage_post_counter
+        .as_ref()
+        .is_some_and(|stashed| stashed.is_combat)
+    {
+        state.pending_damage_post_counter = None;
     }
 
     // CR 500.1: captured BEFORE the assignment below, which is the only place
@@ -3993,6 +4003,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
         .collect();
 
     // CR 614.1: Route through replacement pipeline so Vorinclex-class effects apply.
+    // CR 614.16: the lore placement is a turn-based action — fail closed.
     for (index, saga_id) in saga_ids.iter().copied().enumerate() {
         if !super::effects::counters::add_counter_with_replacement(
             state,
@@ -4000,6 +4011,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
             saga_id,
             CounterType::Lore,
             1,
+            CounterCause::Other,
             events,
         ) {
             let remaining = saga_ids[index + 1..]
@@ -4010,6 +4022,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
                     object_id,
                     counter_type: CounterType::Lore,
                     count: 1,
+                    cause: CounterCause::Other,
                 })
                 .collect();
             super::effects::counters::stash_pending_counter_additions(

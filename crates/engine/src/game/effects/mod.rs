@@ -12469,6 +12469,7 @@ fn replacement_condition_reads_filter_population(
         | ReplacementCondition::SourceTappedState { .. }
         | ReplacementCondition::EventSourceControlledBy { .. }
         | ReplacementCondition::EffectCausedDiscard
+        | ReplacementCondition::EffectCausedPlacement
         | ReplacementCondition::OnlyExtraTurn
         | ReplacementCondition::TokenSubtypeMatches { .. }
         | ReplacementCondition::TokenCoreTypeMatches { .. }
