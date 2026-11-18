@@ -79,6 +79,18 @@ fn kilo_tapping_proliferates_dreamtide_whales_time_counters() {
         3,
         "CR 701.34a: proliferate gives the Whale another time counter"
     );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the proliferate choice is done and P0 has priority again, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "Kilo's trigger has finished resolving"
+    );
 }
 
 /// The Whale's own trigger: the second spell a player casts in a turn makes it proliferate,
@@ -92,7 +104,7 @@ fn second_spell_trigger_proliferates_dreamtide_whales_own_time_counters() {
         .from_oracle_text_with_keywords(&["Vanishing"], DREAMTIDE_WHALE)
         .id();
     let second = scenario
-        .add_creature_to_hand_from_oracle(P0, "Second Spell", 1, 1, "")
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
         .id();
     let mut runner = scenario.build();
 
@@ -126,4 +138,18 @@ fn second_spell_trigger_proliferates_dreamtide_whales_own_time_counters() {
         })
         .expect("choosing the Whale is legal");
     assert_eq!(time_counters(&runner, whale), 3);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the proliferate choice is done and P0 has priority again, got {:?}",
+        runner.state().waiting_for
+    );
+    let stack: Vec<ObjectId> = runner.state().stack.iter().map(|entry| entry.id).collect();
+    assert_eq!(
+        stack,
+        vec![second],
+        "the Whale's trigger has finished resolving; only the second spell remains"
+    );
 }
