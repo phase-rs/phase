@@ -816,10 +816,11 @@ describe("TargetingOverlay", () => {
 
   it("keeps the expanded description collapsible when the caption stops overflowing", async () => {
     mockDescriptionOverflow(true);
-    const resizeCallbacks: ResizeObserverCallback[] = [];
+    const resizeObservers: { callback: ResizeObserverCallback; targets: Element[] }[] = [];
     class ControlledResizeObserver {
-      constructor(callback: ResizeObserverCallback) { resizeCallbacks.push(callback); }
-      observe = vi.fn();
+      private readonly targets: Element[] = [];
+      constructor(callback: ResizeObserverCallback) { resizeObservers.push({ callback, targets: this.targets }); }
+      observe = vi.fn((target: Element) => { this.targets.push(target); });
       unobserve = vi.fn();
       disconnect = vi.fn();
     }
@@ -843,10 +844,15 @@ describe("TargetingOverlay", () => {
       name: `Show the full description: ${description}`,
     }));
     expect(screen.getAllByText(description)).toHaveLength(2);
-    expect(resizeCallbacks.length).toBeGreaterThan(0);
+    // The caption line's own observer, not the prompt block's (which publishes
+    // the block's top and bottom edges for the stack panel).
+    const captionObservers = resizeObservers.filter(({ targets }) =>
+      targets.some((target) => !target.hasAttribute("data-targeting-prompt")),
+    );
+    expect(captionObservers.length).toBeGreaterThan(0);
 
     mockDescriptionOverflow(false);
-    act(() => resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver)));
+    act(() => captionObservers.forEach(({ callback }) => callback([], {} as ResizeObserver)));
     fireEvent.click(screen.getByRole("button", { name: `Show less: ${description}` }));
     expect(screen.getAllByText(description)).toHaveLength(1);
     await waitFor(() => expect(screen.queryByRole("button", {
