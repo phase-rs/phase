@@ -410,6 +410,8 @@ fn noctis_runtime_cost_filter_and_finality() {
         1,
         "the artifact cast via Noctis must enter with a finality counter"
     );
+    // CR 110.5b: Noctis prints no tapped rider, so the artifact enters untapped.
+    assert!(!outcome.is_tapped(artifact));
 }
 
 /// Noctis runtime (c): a NORMAL cast of the same artifact from hand enters with
@@ -448,6 +450,7 @@ fn noctis_normal_hand_cast_has_no_finality() {
         0,
         "a normal hand cast must NOT pay the permission's 3-life additional cost"
     );
+    assert!(!outcome.is_tapped(hand_artifact), "CR 110.5b");
 }
 
 /// Leonardo runtime: on the controller's turn, an eligible (P/T ≤ 1) creature is
@@ -498,6 +501,8 @@ fn leonardo_runtime_filter_and_finality_on_your_turn() {
         1,
         "the creature cast via Leonardo must enter with a finality counter"
     );
+    // CR 110.5b: Leonardo prints no tapped rider, so the creature enters untapped.
+    assert!(!outcome.is_tapped(eligible));
 }
 
 /// Leonardo runtime (b): the DuringYourTurn gate blocks the cast on the

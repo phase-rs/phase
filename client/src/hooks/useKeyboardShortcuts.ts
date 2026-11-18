@@ -6,7 +6,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
-import { dispatchAction } from "../game/dispatch";
+import { dispatchAction, undoLastAction } from "../game/dispatch";
 import { getCanActForWaitingState, getPlayerId } from "./usePlayerId";
 import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
@@ -28,11 +28,14 @@ import {
  * - D: Copy game state JSON to clipboard (debug)
  * - Ctrl+D: Export game state JSON as a compressed ZIP (debug)
  * - `: Toggle debug panel
+ * - K: Toggle Click Mode (games with Sandbox Tools available)
  * - Ctrl+Shift+L: Toggle Flex Layout edit mode
  * - Escape (in Flex Layout): Exit edit mode
  * - Triple-tap (touch): Toggle debug panel (iPad/mobile)
  */
-export function useKeyboardShortcuts(): void {
+export function useKeyboardShortcuts({
+  sandboxToolsAvailable = false,
+}: { sandboxToolsAvailable?: boolean } = {}): void {
   useAltToggle();
   useShiftHeld();
 
@@ -79,8 +82,6 @@ export function useKeyboardShortcuts(): void {
         gameState,
         waitingFor,
         dispatch,
-        undo,
-        stateHistory,
         gameMode,
         manaPaymentShortcutActions,
         adapter,
@@ -147,14 +148,12 @@ export function useKeyboardShortcuts(): void {
         case "z":
         case "Z":
           // Only plain Z (no Ctrl/Cmd modifier to avoid conflict with browser undo).
-          // Suppressed in multiplayer — the store's undo() already returns
-          // early in that mode, but gating the shortcut here also avoids
-          // swallowing the keystroke.
+          // Suppressed in multiplayer: undoLastAction() already does nothing
+          // in that mode, but gating the shortcut here also avoids swallowing
+          // the keystroke.
           if (!e.ctrlKey && !e.metaKey && !isAuthorityRemote(gameMode)) {
             e.preventDefault();
-            if (stateHistory.length > 0) {
-              undo();
-            }
+            void undoLastAction();
           }
           break;
 
@@ -225,6 +224,16 @@ export function useKeyboardShortcuts(): void {
           uiState.toggleDebugPanel();
           break;
 
+        case "k":
+        case "K":
+          // Plain K only: Ctrl/Cmd+K are browser shortcuts. Click Mode reroutes card
+          // clicks to debug menus, so it is only offered where debug actions apply.
+          if (sandboxToolsAvailable && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            e.preventDefault();
+            uiState.toggleDebugInteractionMode();
+          }
+          break;
+
         case "l":
         case "L":
           if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
@@ -239,5 +248,5 @@ export function useKeyboardShortcuts(): void {
     return () => {
       window.removeEventListener("keydown", handler);
     };
-  }, []);
+  }, [sandboxToolsAvailable]);
 }

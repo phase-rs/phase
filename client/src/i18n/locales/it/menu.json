@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Riprendi partita",
-      "description": "Continua l'ultima partita salvata dal suo turno e stato del campo attuali."
+      "description": "Continua l'ultima partita salvata dal suo turno e stato del campo attuali.",
+      "viewResult": "Vedi risultato"
     },
     "setup": {
       "title": "Gioca contro l'IA",

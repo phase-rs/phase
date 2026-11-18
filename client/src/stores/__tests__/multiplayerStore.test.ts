@@ -852,6 +852,27 @@ describe("multiplayerStore", () => {
     });
   });
 
+  it("restores a remembered poison-counter threshold for a format with an individual threshold", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "Commander",
+      formatConfig: { format: "Commander", poison_counter_threshold: 15 },
+    });
+
+    expect(normalized?.formatConfig.poison_counter_threshold).toBe(15);
+    // Reach guard: the rest of the config still comes from the defaults.
+    expect(normalized?.formatConfig.starting_life).toBe(FORMAT_DEFAULTS.Commander.starting_life);
+  });
+
+  it("ignores a remembered poison-counter threshold for Two-Headed Giant's team poison", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "TwoHeadedGiant",
+      formatConfig: { format: "TwoHeadedGiant", poison_counter_threshold: 15 },
+    });
+
+    expect(normalized?.format).toBe("TwoHeadedGiant");
+    expect(normalized?.formatConfig.poison_counter_threshold).toBeNull();
+  });
+
   it("drops unknown persisted format names instead of indexing inherited object keys", () => {
     expect(normalizeRememberedHostConfig({ format: "toString" })).toBeNull();
   });
@@ -875,6 +896,7 @@ describe("multiplayerStore", () => {
       singleton: false,
       command_zone: false,
       commander_damage_threshold: null,
+      poison_counter_threshold: 10,
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
@@ -1287,6 +1309,40 @@ describe("multiplayerStore", () => {
     expect(frame.data.ai_seats[0].deck.data.bracket_tier).toBe("cedh");
   });
 
+  it.each(["server", "p2p"] as const)("carries owner printings through %s hosting without changing nonprinting sections", async (transport) => {
+    const printings = [
+      { section: "main_deck" as const, name: "Forest", count: 1, printing: { set_code: "lea", collector_number: "001" } },
+      { section: "companion" as const, name: "Companion", count: 1, printing: { set_code: "iko", collector_number: "002" } },
+    ];
+    const deck = {
+      main_deck: ["Forest"], sideboard: ["Island"], commander: ["Commander"],
+      planar_deck: ["Plane"], scheme_deck: ["Scheme"], bracket_tier: "cedh" as const,
+      companion: ["Companion"], signature_spell: ["Spell"], sticker_sheets: ["Stickers"],
+      attraction_deck: ["Attraction"], contraption_deck: ["Contraption"], printings,
+    };
+    const aiDeck = { type: "DeckList" as const, data: deck };
+    const settings = hostingSettings({
+      aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: null, deck: aiDeck }],
+    });
+    // Hosting hands off every deck list (upstream #10446); the printings ride beside them unchanged.
+    const expected = { ...deck };
+    if (transport === "server") {
+      useMultiplayerStore.getState().startHosting(settings, deck, HOST_URL);
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string);
+      expect(frame.data.deck).toEqual(expected);
+      expect(frame.data.ai_seats[0].deck).toEqual(aiDeck);
+    } else {
+      expect(await useMultiplayerStore.getState().startP2PHostingSession(settings, deck, { brokerUrl: null })).toBe(true);
+      const calls = vi.mocked(P2PHostAdapter).mock.calls;
+      expect(calls[calls.length - 1][0]).toMatchObject({ player: expected });
+      expect(p2pMocks.applySeatMutation).toHaveBeenCalledWith({
+        type: "SetKind",
+        data: { seatIndex: 1, expectedKind: { type: "WaitingHuman" }, kind: { type: "Ai", data: { difficulty: "Hard", deck: aiDeck } } },
+      });
+    }
+  });
+
   it("leaves the host deck's bracket tier off the frame when none is declared", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings(),
@@ -1299,6 +1355,37 @@ describe("multiplayerStore", () => {
       data: { deck: Record<string, unknown> };
     };
     expect(frame.data.deck).not.toHaveProperty("bracket_tier");
+    expect(frame.data.deck).not.toHaveProperty("combo_declaration");
+  });
+
+  it("sends the owner's combo answer on the host deck and each AI seat's deck", async () => {
+    const hostAnswer = { kind: "none_intended" } as const;
+    const seatAnswer = { kind: "intended", window: "early_game" } as const;
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings({
+        aiSeats: [{
+          seatIndex: 1,
+          difficulty: "Medium",
+          deckName: null,
+          deck: {
+            type: "DeckList",
+            data: { main_deck: ["Forest"], sideboard: [], commander: [], combo_declaration: seatAnswer },
+          },
+        }],
+      }),
+      { main_deck: ["Forest"], sideboard: [], commander: [], combo_declaration: hostAnswer },
+      HOST_URL,
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      data: {
+        deck: { combo_declaration?: unknown };
+        ai_seats: { deck: { data: { combo_declaration?: unknown } } }[];
+      };
+    };
+    expect(frame.data.deck.combo_declaration).toEqual(hostAnswer);
+    expect(frame.data.ai_seats[0].deck.data.combo_declaration).toEqual(seatAnswer);
   });
 
   describe("host deck hand-off carries every DeckData list", () => {

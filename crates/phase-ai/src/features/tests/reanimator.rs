@@ -45,6 +45,8 @@ fn spell(effect: Effect) -> AbilityDefinition {
 /// A reanimation effect: graveyard → battlefield, for the given target body.
 fn reanimation_effect(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target,
@@ -120,6 +122,7 @@ fn self_mill_effect() -> Effect {
         count: QuantityExpr::Fixed { value: 3 },
         target: TargetFilter::Controller,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }
 }
 
@@ -193,6 +196,8 @@ fn non_graveyard_changezone_is_not_payoff() {
     // a cheat-into-play effect but NOT reanimation — origin must be the graveyard.
     let mut face = card_face("Sneak Attack", vec![CoreType::Sorcery]);
     face.abilities.push(spell(Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Hand),
         destination: Zone::Battlefield,
         target: creature_target(),
@@ -269,6 +274,7 @@ fn opponent_mill_is_not_self_enabler() {
         count: QuantityExpr::Fixed { value: 3 },
         target: TargetFilter::Player,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }));
     assert!(!is_graveyard_enabler(&face));
 }

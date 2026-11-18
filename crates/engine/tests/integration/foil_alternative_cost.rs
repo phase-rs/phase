@@ -124,7 +124,7 @@ fn cast_with_alternative(b: &mut Board, picks: &[ObjectId]) -> Result<Vec<Vec<Ob
             WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
                 choice: AlternativeCastDecision::Alternative,
             },
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(b.opponent_spell)),
             },
@@ -247,9 +247,9 @@ fn foil_with_affordable_mana_offers_both_costs() {
     else {
         panic!("expected the alternative/printed cost choice, got {waiting:?}");
     };
-    assert_eq!(costs.len(), 2);
-    let alternative = &costs[0];
-    let printed = &costs[1];
+    let [alternative, printed] = costs.as_slice() else {
+        panic!("expected exactly the alternative and printed costs, got {costs:?}");
+    };
     assert!(matches!(
         alternative,
         AbilityCost::Composite { costs } if costs.len() == 2

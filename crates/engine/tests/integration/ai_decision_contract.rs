@@ -560,7 +560,7 @@ fn decision_contract_filters_optional_cost_that_leaves_no_legal_targets() {
         matches!(
             apply_as_current(
                 &mut state.clone(),
-                GameAction::DecideOptionalCost { pay: false },
+                GameAction::DecideOptionalCost { index: 1 },
             ),
             Err(EngineError::ActionNotAllowed(message))
                 if message == "No legal targets available"
@@ -573,7 +573,7 @@ fn decision_contract_filters_optional_cost_that_leaves_no_legal_targets() {
         contract.candidates.iter().any(|candidate| {
             matches!(
                 candidate.action,
-                GameAction::DecideOptionalCost { pay: true }
+                GameAction::DecideOptionalCost { index: 0 }
             )
         }),
         "the target-enabling kicker payment must be issued"
@@ -582,7 +582,7 @@ fn decision_contract_filters_optional_cost_that_leaves_no_legal_targets() {
         !contract.candidates.iter().any(|candidate| {
             matches!(
                 candidate.action,
-                GameAction::DecideOptionalCost { pay: false }
+                GameAction::DecideOptionalCost { index: 1 }
             )
         }),
         "the targetless declining choice must not be issued"

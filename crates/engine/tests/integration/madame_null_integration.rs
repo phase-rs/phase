@@ -114,6 +114,8 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             trigger_definitions: Vec::new(),
             trigger_source_context: None,
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,

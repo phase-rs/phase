@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} of {{total}} repetitions allocated.",
     "evenSplit": "Reset to the even split",
     "customDistribution": "Custom distribution — the engine has not previewed this split.",
-    "announceTitle": "Choose the target every repetition announces:",
-    "announce": "Announce",
-    "announceAria": "Announce {{subject}}",
     "mayTitle": "Optional ability {{group}} — repeat this choice each iteration?",
     "mayTake": "Take it",
     "mayDecline": "Decline it",
     "mayTakeAria": "Take optional ability {{group}}",
     "mayDeclineAria": "Decline optional ability {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Proposed declaration:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}'s replacement effect",
     "respondDecision": {
       "take": "{{subject}} — taken each iteration",
       "decline": "{{subject}} — declined each iteration"
@@ -155,7 +152,8 @@
     "loading": "Loading {{name}}",
     "unimplemented": "Unimplemented: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Tapped"
+    "tapped": "Tapped",
+    "reloadArt": "Tap to reload art"
   },
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
@@ -164,6 +162,8 @@
     "flip": "Flip",
     "report": "Report a problem",
     "reported": "Reported ✓",
+    "reportNotSent": "Not sent",
+    "reloadArt": "Reload art",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
@@ -204,6 +204,14 @@
         "label": "Label",
         "fallback": "Choice"
       }
+    },
+    "attacking": {
+      "you": "Attacking you",
+      "player": "Attacking {{player}}",
+      "yourPlaneswalker": "Attacking your planeswalker {{name}}",
+      "planeswalker": "Attacking {{player}}'s planeswalker {{name}}",
+      "battle": "Attacking battle {{name}}",
+      "nothing": "Attacking, but not any player, planeswalker, or battle"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "None",
     "underAttack_one": "Attacked by {{count}} creature",
     "underAttack_other": "Attacked by {{count}} creatures",
-    "target": "Target",
     "sacrifice": "Sacrifice",
     "token": "Token",
     "tokenTooltip": "Token copy of a real card",
@@ -469,7 +476,12 @@
     "assignRemaining_other": "Assign {{count}} more",
     "confirmDistribute_one": "Declare {{count}} Attacker",
     "confirmDistribute_other": "Declare {{count}} Attackers",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Attack totals",
+    "targetTotal_few": "{{count}} attackers · {{damage}} damage",
+    "targetTotal_many": "{{count}} attackers · {{damage}} damage",
+    "targetTotal_one": "{{count}} attacker · {{damage}} damage",
+    "targetTotal_other": "{{count}} attackers · {{damage}} damage"
   },
   "fullControl": {
     "label": "Control",
@@ -482,7 +494,9 @@
     "done": "Done"
   },
   "lifeTotal": {
-    "playerLabel": "P{{seat}}"
+    "playerLabel": "P{{seat}}",
+    "libraryLabel": "CARDS",
+    "libraryTooltip": "The Horde has no life total. Damage and life loss mill it instead — it's defeated when its library runs out, so this count is its real clock."
   },
   "phaseStop": {
     "untapLabel": "Untap step",
@@ -573,6 +587,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Horde deck rules",
     "monarch": "Monarch",
     "monarchTooltip": "The Monarch — draws an extra card at end of turn",
     "initiative": "Initiative",
@@ -592,7 +607,9 @@
     "dungeonTooltip": "Venturing in {{name}}",
     "poisonAriaLabel_one": "{{count}} poison counter",
     "poisonAriaLabel_other": "{{count}} poison counters",
-    "poisonTooltip": "Poison counters: {{count}}\nA player with ten or more poison counters loses the game.",
+    "poisonTooltip": "Poison counters: {{count}}",
+    "poisonLossPlayer": "A player with {{threshold}} or more poison counters loses the game.",
+    "poisonLossTeam": "A team with {{threshold}} or more poison counters loses the game.",
     "energyAriaLabel_one": "{{count}} energy counter",
     "energyAriaLabel_other": "{{count}} energy counters",
     "energyTooltip": "Energy counters: {{count}}\nEnergy counters are a player-held resource spent by card abilities.",
@@ -681,11 +698,16 @@
   },
   "zone": {
     "commandZone": "Command Zone",
+    "conspiracy": "Conspiracy",
+    "conspiracyTitle": "Conspiracy: {{name}}",
+    "turnFaceUp": "Turn {{name}} face up",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Commander",
     "commanderTitle": "Commander: {{name}}",
     "commanderTitleTax": "Commander: {{name}} (Tax: +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss: {{name}}",
     "castCommander": "Cast {{name}} — double-click or drag to play",
     "castCommanderTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
     "ninjutsuCommander": "Commander ninjutsu: {{name}} — click to return an unblocked attacker to hand and put this commander onto the battlefield tapped and attacking",
@@ -849,7 +871,12 @@
     "lethalBadge": "Lethal",
     "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
     "defendingPlayerTrample": "Defending Player (Trample)",
-    "pwControllerTrample": "PW Controller (Trample Over PW)"
+    "pwControllerTrample": "PW Controller (Trample Over PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_many": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_one": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_other": "Assign the remaining {{count}} damage to {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1194,6 +1221,11 @@
       "drawFirst": "Draw First",
       "drawFirstDescription": "Take the extra draw on your first turn"
     },
+    "startingPlayer": {
+      "title": "Choose Who Plays First",
+      "playerPlaysFirst": "{{name}} plays first",
+      "opponentChoosing": "{{name}} is choosing who plays first…"
+    },
     "mulligan": {
       "opponentDeciding": "Opponent is deciding their opening hand…",
       "londonTitle": "London Mulligan ({{count}} taken)",
@@ -1216,7 +1248,10 @@
       "subtitleKeepWithBottom": "Keep this hand (you'll put {{count}} on the bottom) or mulligan again for a fresh 7.",
       "subtitleKeepFree": "Keep this hand (free mulligan — no cards to the bottom) or mulligan again for a fresh 7.",
       "subtitleOpeningFree": "Keep this hand or take a free mulligan (no cards to the bottom).",
-      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
+      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep).",
+      "onThePlay": "You're on the play",
+      "onTheDraw": "You're on the draw",
+      "takeTurn": "You take turn {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-Game",
@@ -1241,6 +1276,7 @@
       "draw": "DRAW",
       "victory": "VICTORY",
       "defeat": "DEFEAT",
+      "complete": "GAME OVER",
       "lifeSummary": "You: <player>{{playerLife}}</player> <sep>/</sep> Opponent: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turns: {{count}}",
       "duration": "Duration: {{time}}",
@@ -1337,7 +1373,10 @@
         "Ticket": "ticket"
       },
       "generic": "a cost",
-      "pay": "Pay {{cost}}"
+      "pay": "Pay {{cost}}",
+      "draw": "draw a card",
+      "drawCount_one": "draw {{count}} card",
+      "drawCount_other": "draw {{count}} cards"
     },
     "unlessPayment": {
       "defaultEffect": "Counter Unless You Pay",
@@ -1433,6 +1472,8 @@
     },
     "config": {
       "startingLife": "Starting Life",
+      "commanderDamage": "Commander Damage",
+      "poisonCounters": "Poison Counters",
       "players": "Players",
       "whoGoesFirst": "Who Goes First",
       "firstPlayer": {
@@ -1444,6 +1485,11 @@
     "noLegalAiDecks": {
       "withFormat": "Add or import a deck legal in {{format}} for the AI to use.",
       "generic": "Add or import a deck legal in this format for the AI to use."
+    },
+    "hordeDeck": {
+      "title": "Horde Deck",
+      "subtitle": "The self-piloting deck your team faces. The engine supplies it — you don't need an AI deck.",
+      "selected": "Selected"
     }
   },
   "cardChoice": {
@@ -1458,6 +1504,7 @@
       "choose": "Choose",
       "selected": "Selected",
       "keep": "Keep",
+      "destroy": "Destroy",
       "top": "Top",
       "bottom": "Bottom",
       "graveyard": "Graveyard",
@@ -1540,7 +1587,9 @@
       "titleReveal": "Reveal from Hand",
       "titleOpponentHand": "Opponent's Hand",
       "subtitleReveal": "Choose a card to reveal, or decline",
-      "subtitleChoose": "Choose a card"
+      "subtitleRevealAnyNumber": "Choose any number of cards to reveal",
+      "subtitleChoose": "Choose a card",
+      "subtitleChooseCount": "Choose {{count}} cards"
     },
     "search": {
       "title": "Search Library",
@@ -1804,6 +1853,10 @@
       "title": "Order the copies",
       "subtitle": "Choose the spell whose copy goes on the stack next"
     },
+    "memberOrder": {
+      "title": "Order the cards",
+      "subtitle": "Choose which card is handled next"
+    },
     "collectEvidence": {
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
@@ -1830,6 +1883,7 @@
       "searchCardsAria": "Filter cards by name",
       "counterDiscard": "Discard {{selected}} of {{cap}}",
       "counterKeep": "Keep {{selected}} of {{cap}}",
+      "counterChoose": "Choose {{selected}} of {{cap}}",
       "keepInstead": "Keep instead",
       "discardInstead": "Discard instead"
     },
@@ -1843,6 +1897,13 @@
       "titleExact_one": "Discard a card",
       "titleExact_other": "Discard {{count}} cards",
       "titleWard": "Ward — Discard a card",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Ward",
+        "connive": "Connive",
+        "additionalCost": "Additional cost",
+        "manaAbility": "Mana ability"
+      },
       "subtitleUpTo_one": "Choose up to {{count}} card to discard",
       "subtitleUpTo_other": "Choose up to {{count}} cards to discard",
       "subtitleUnless": "Choose {{count}} cards or 1 matching card to discard",
@@ -1850,6 +1911,42 @@
       "subtitleExact_other": "Choose {{count}} cards to discard",
       "subtitleKeep_one": "Choose 1 card to keep — the rest are discarded",
       "subtitleKeep_other": "Choose {{count}} cards to keep — the rest are discarded"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     },
     "harmonize": {
       "title": "Harmonize",
@@ -2090,6 +2187,10 @@
     "title": "Choose Gift Recipient",
     "subtitle": "Choose which opponent receives the promised gift."
   },
+  "costRecipient": {
+    "title": "Choose an Opponent",
+    "subtitle": "Choose the opponent for this cost: {{cost}}."
+  },
   "entryController": {
     "title": "Choose Entry Controller",
     "subtitle": "Choose which opponent controls this permanent as it enters."
@@ -2170,13 +2271,18 @@
   "freeCastWindow": {
     "eyebrow": "Free Cast",
     "title": "Cast a spell for free",
+    "titlePlay": "Play cards for free",
     "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
     "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
+    "subtitlePlay": "Choose a land to play or a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
+    "subtitleNoBudgetPlay": "Choose a land to play or a spell to cast without paying its mana cost ({{remaining}} remaining).",
     "remainingAny": "any number",
     "castNamed": "Cast {{name}}",
+    "playNamed": "Play {{name}}",
     "castSuffix": "(without paying its mana cost)",
     "done": "Done",
-    "doneSuffix": "(stop casting spells this way)"
+    "doneSuffix": "(stop casting spells this way)",
+    "doneSuffixPlay": "(stop playing cards this way)"
   },
   "castingVariant": {
     "eyebrow": "Cast",
@@ -2259,7 +2365,8 @@
     "unitDamage": "damage",
     "unitLife": "life",
     "title": "Distribute {{total}} {{unit}}",
-    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}"
+    "subtitle": "Assign at least 1 {{unit}} to each target. Remaining: {{remaining}}",
+    "subtitleAnyNumber": "Assign at least 1 {{unit}} to each one you choose, among any number of them. Remaining: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Choose a Dungeon",
@@ -2345,6 +2452,8 @@
       "fallback": "Make a Choice"
     },
     "searchSubtitle": "Type to search all cards",
+    "secretAgendaTitle": "Secretly Name a Card ({{current}} of {{total}})",
+    "secretAgendaSubtitle": "Hidden until you turn this conspiracy face up",
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
     "buttonSubtitle": "Select one option",
@@ -2436,6 +2545,8 @@
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
       "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "haveOpponentGainLife": "Have an opponent gain {{amount}} life",
+      "haveEachOtherPlayerGainLife": "Have each other player gain {{amount}} life",
       "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },
@@ -2492,7 +2603,7 @@
     "appliedLast": "Applied last — this wins",
     "resultLabel": "Result: {{outcome}}",
     "confirmOrder": "Confirm Order",
-    "dragHint": "Drag to reorder, or use the arrows.",
+    "dragHint": "Drag the <grip>⠿</grip> handle to reorder, or use the arrows.",
     "chooseSubtitle": "Choose which replacement effect to apply.",
     "candidateFallback": "Replacement Effect {{number}}",
     "orderSubtitleComposing": "These effects all change how this event happens. Drag to set the order they apply in — each one applies, so the order changes the result (CR 616.1).",
@@ -2501,6 +2612,7 @@
     "composesNote": "Every effect applies — the order changes how they combine.",
     "moveUpNamed": "Move {{name}} earlier",
     "moveDownNamed": "Move {{name}} later",
+    "dragHandleNamed": "Drag {{name}} to reorder",
     "positionAnnounce": "Position {{position}} of {{total}}"
   },
   "retargetChoice": {
@@ -2601,6 +2713,7 @@
   },
   "outsideGame": {
     "fromExile": "From exile",
+    "fromCompanion": "From companion",
     "fromSideboard": "From sideboard",
     "fromBoosterPack": "From {{setCode}} booster pack",
     "fromCubeBoosterPack": "From a Cube booster pack"
@@ -2625,6 +2738,20 @@
     "EndCombat": "End Combat",
     "PostCombatMain": "Main Phase 2",
     "End": "End Step",
+    "Cleanup": "Cleanup"
+  },
+  "phaseShortName": {
+    "Untap": "Untap",
+    "Upkeep": "Upkeep",
+    "Draw": "Draw",
+    "PreCombatMain": "Main 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attackers",
+    "DeclareBlockers": "Blockers",
+    "CombatDamage": "Damage",
+    "EndCombat": "End Combat",
+    "PostCombatMain": "Main 2",
+    "End": "End",
     "Cleanup": "Cleanup"
   },
   "counterMoveDistribution": {

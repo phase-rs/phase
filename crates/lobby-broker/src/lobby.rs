@@ -152,7 +152,7 @@ pub enum ListingDelta {
     Unlisted,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct LobbyGameMeta {
     /// `default` loads a snapshot written before the field as host-present.
     #[serde(default)]
@@ -186,6 +186,10 @@ struct LobbyGameMeta {
     host_build_commit: String,
     current_players: u32,
     max_players: u32,
+    #[serde(
+        default,
+        deserialize_with = "engine::types::format::FormatConfig::deserialize_recorded_option"
+    )]
     format_config: Option<engine::types::format::FormatConfig>,
     match_config: engine::types::match_config::MatchConfig,
     room_name: Option<String>,
@@ -238,7 +242,7 @@ impl From<LobbyManagerSnapshot> for LobbyManager {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "LobbyManagerSnapshot")]
 pub struct LobbyManager {
     games: HashMap<String, LobbyGameMeta>,

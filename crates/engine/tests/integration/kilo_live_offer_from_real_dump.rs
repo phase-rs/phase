@@ -267,9 +267,9 @@ fn kilo_migrated_dump_fires_object_growth_offer() {
     let first_play = engine::game::play_trace_view(&state).and_then(|view| {
         view.entries.into_iter().find_map(|entry| match entry.kind {
             engine::game::EntryKind::Play { action, .. } => Some(action),
-            engine::game::EntryKind::Answer { .. } | engine::game::EntryKind::Resolution { .. } => {
-                None
-            }
+            engine::game::EntryKind::Answer { .. }
+            | engine::game::EntryKind::Remembered { .. }
+            | engine::game::EntryKind::Resolution { .. } => None,
         })
     });
     assert_eq!(

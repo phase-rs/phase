@@ -123,8 +123,22 @@ fn spawns_given_an_ability_by_a_following_sentence_have_it_once() {
     assert_eq!((state.players[0].life, state.players[1].life), (23, 17));
     let made = spawns(state);
     assert_eq!(made.len(), 3);
+    // CR 111.3 + CR 113.2c: the creating effect defines the Sacrifice ability
+    // once, but it reaches the token through two paths — the token face's
+    // base ability and the following sentence's quoted grant. Tier-2 dedup
+    // compares grants only against the granted tail, never against the
+    // printed base, so the base instance and the identically worded granted
+    // instance coexist as two independent holdings. Reverting Tier-1 collapses
+    // this back to one (RED). Gameplay is unaffected: the first activation's
+    // Sacrifice cost removes the token, leaving the second instance unpayable.
     for token in &made {
-        assert_one_mana_ability(state, *token);
+        let abilities = &state.objects[token].abilities;
+        assert_eq!(abilities.len(), 2, "{abilities:?}");
+        assert!(abilities.iter().all(is_mana_ability), "{abilities:?}");
+        assert_eq!(
+            abilities[0], abilities[1],
+            "the two holdings are the same defining effect applied twice"
+        );
     }
     sacrifice_for_colorless(&mut runner, made[0]);
 }

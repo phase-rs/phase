@@ -18,6 +18,7 @@ use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
+use engine::game::restrictions::ability_usage_key;
 use engine::game::static_abilities::player_protection_from;
 use engine::game::targeting::player_is_legal_target;
 use engine::game::{extract_mana_leg, max_x_value};
@@ -412,10 +413,11 @@ fn push_activation_sources(
         StepOrder::Activation
     };
     let copies = if is_repeatable(ability) && order != StepOrder::ScalesWithX {
-        let used = state
-            .activated_abilities_this_turn
-            .get(&(source_id, ability_index))
-            .copied()
+        // CR 602.5c: fold the per-acquisition budget; an unresolvable slot
+        // reads a missing entry as count 0.
+        let used = ability_usage_key(state, source_id, ability_index)
+            .as_ref()
+            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
             .unwrap_or(0);
         MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
             .saturating_sub(used)

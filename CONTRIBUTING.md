@@ -31,7 +31,12 @@ pipeline or a narrow inline edit). The last action before pushing is a
 acknowledged. Two checks lead that review and are non-negotiable: (1) the change
 sits at the architecturally correct seam, and (2) the change at that seam is the
 most idiomatic one the codebase allows. A PR that opens without a
-feedback-addressed final review does not meet the bar.
+feedback-addressed final review does not meet the bar. The one exception is
+the pipeline's decline path
+([AI-CONTRIBUTOR.md §5](docs/AI-CONTRIBUTOR.md#5-validate-the-review-actually-happened-and-was-addressed)):
+a LOW or `text` finding left open under it is listed as unresolved, the PR
+claims no clean review for it, and the PR is not approved until its fix is
+verified.
 
 **Narrow exceptions you may edit directly:** non-engine code (frontend,
 transport layers, scripts, docs, CI) and truly mechanical engine edits with no

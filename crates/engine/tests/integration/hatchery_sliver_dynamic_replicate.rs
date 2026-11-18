@@ -137,12 +137,12 @@ fn hatchery_granted_replicate_charges_the_recipient_slivers_mana_cost_once() {
     assert_replicate_prompt(&runner, 0, 0);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the granted Replicate cost must be accepted");
     assert_replicate_prompt(&runner, 0, 1);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining another Replicate payment must finish casting");
 
     assert_replicate_payment_records(&runner, muscle, &[(0, 1)]);
@@ -175,12 +175,12 @@ fn one_hatchery_grant_paid_four_times_creates_exactly_four_tokens() {
     for payment in 0..4 {
         assert_replicate_prompt(&runner, 0, payment);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("each granted Replicate payment must be accepted");
     }
     assert_replicate_prompt(&runner, 0, 4);
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining a fifth payment must finish casting");
 
     assert_replicate_payment_records(&runner, muscle, &[(0, 1), (0, 1), (0, 1), (0, 1)]);
@@ -233,23 +233,23 @@ fn printed_and_granted_replicate_instances_each_copy_only_their_own_payments() {
     for payment in 0..2 {
         assert_replicate_prompt(&runner, 0, payment);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("each printed Replicate payment must be accepted");
     }
     assert_replicate_prompt(&runner, 0, 2);
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining a third printed payment must advance to the granted instance");
 
     for payment in 0..3 {
         assert_replicate_prompt(&runner, 1, payment);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("each granted Replicate payment must be accepted");
     }
     assert_replicate_prompt(&runner, 1, 3);
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining a fourth granted payment must finish casting");
 
     // Reach-guard: both instances really took payments, on their own ordinals.
@@ -287,22 +287,22 @@ fn two_hatchery_grants_keep_replicate_payments_on_distinct_ordinals() {
     assert_replicate_prompt(&runner, 0, 0);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("first granted Replicate payment must be accepted");
     assert_replicate_prompt(&runner, 0, 1);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining another payment for the first grant must advance the queue");
     assert_replicate_prompt(&runner, 1, 0);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("second granted Replicate payment must be accepted");
     assert_replicate_prompt(&runner, 1, 1);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining another payment for the second grant must finish casting");
 
     assert_replicate_payment_records(&runner, muscle, &[(0, 1), (1, 1)]);
@@ -336,12 +336,12 @@ fn printed_hatchery_replicate_keeps_its_fixed_cost() {
     assert_replicate_prompt(&runner, 0, 0);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying printed Replicate must be accepted");
     assert_replicate_prompt(&runner, 0, 1);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining another printed Replicate payment must finish casting");
 
     assert_replicate_payment_records(&runner, hatchery, &[(0, 1)]);

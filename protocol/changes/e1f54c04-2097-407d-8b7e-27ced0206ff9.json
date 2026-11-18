@@ -1,0 +1,8 @@
+{
+  "surfaces": [
+    "full",
+    "lobby",
+    "wire"
+  ],
+  "reason": "Horde (casual co-op): the GameFormat::Horde name and the Horde GameState carriers (wave/turn bookkeeping, Horde seats, boss deck, hero-event prompts); older full-game, P2P and lobby peers cannot decode the new shapes"
+}

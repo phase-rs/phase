@@ -2299,11 +2299,11 @@ fn v1_self_optional_declines_and_missing_zodiac_do_not_return() {
 #[test]
 fn v3_aethermage_decline_no_mana_and_captured_controller() {
     const AGGRESSION: &str = "({R/P} can be paid with either {R} or 2 life.)\nGain control of target creature an opponent controls until end of turn. Untap that creature. It gains haste until end of turn.";
-    for (mana, accept, steal) in [
-        (true, true, true),
-        (true, false, false),
-        (false, true, false),
-    ] {
+    // CR 118.3 + CR 608.2d: the unfunded `(false, …)` leg is the suppression
+    // pin, not a prompt leg — an unfunded {1} offer is never made, so the
+    // shared prompt block below would panic at "must offer its optional
+    // cost". It lives in its own block after the loop.
+    for (mana, accept, steal) in [(true, true, true), (true, false, false)] {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
         let source = s
@@ -2373,6 +2373,54 @@ fn v3_aethermage_decline_no_mana_and_captured_controller() {
                 .mana_pool
                 .total(),
             usize::from(mana && !accept)
+        );
+    }
+
+    // CR 118.3 + CR 608.2d SUPPRESSION PIN: with no mana the {1} offer is
+    // never made — no prompt, no draw, an empty pool, and a settled game.
+    // (The `(true, false)` funded-decline leg above proves the suppression
+    // tracks the payer's poverty, not a dead offer path: prompted there,
+    // silent here.)
+    {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let _source = s
+            .add_creature_from_oracle(P0, "Azorius Aethermage", 1, 1, AETHERMAGE)
+            .id();
+        let victim = s.add_creature(P0, "Returned creature", 2, 2).id();
+        let bounce = s
+            .add_spell_to_hand_from_oracle(P0, "Unsummon", true, UNSUMMON)
+            .id();
+        let drawn = s.add_card_to_library_top(P0, "Drawn card");
+        let mut runner = s.build();
+        assert_settled(&runner);
+        cast_until_resolved(&mut runner, bounce, &[victim]);
+        assert_eq!(trigger_instances(runner.state()), 1);
+        drain_to_optional_or_priority(&mut runner);
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "an unfunded {{1}} offer is never made, got {:?}",
+            runner.state().waiting_for
+        );
+        assert_settled(&runner);
+        assert_eq!(
+            runner.state().objects[&drawn].zone,
+            Zone::Library,
+            "no draw without the offer"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .players
+                .iter()
+                .find(|p| p.id == P0)
+                .unwrap()
+                .mana_pool
+                .total(),
+            0
         );
     }
 }

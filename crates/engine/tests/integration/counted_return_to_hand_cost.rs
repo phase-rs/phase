@@ -262,7 +262,7 @@ fn ensnare_alternative_cost_prompts_for_two_islands() {
         result.waiting_for
     );
     let result = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the alternative cost");
     match &result.waiting_for {
         WaitingFor::PayCost {
@@ -701,7 +701,7 @@ fn counted_return_cost_refuses_a_repeated_permanent() {
         })
         .expect("cast the counted-return witness");
     let result = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the alternative cost");
     assert!(
         matches!(
@@ -751,6 +751,8 @@ fn redirect_land_to_exile(id: ObjectId) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -2017,7 +2019,7 @@ fn delayed_two_land_sibling(
             WaitingFor::OptionalCostChoice { .. }
         ));
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("select counted alternate cost");
     } else {
         runner

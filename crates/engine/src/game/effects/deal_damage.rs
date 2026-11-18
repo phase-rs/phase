@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::ability_utils::append_to_sub_chain;
+use crate::game::effects::counters;
 use crate::game::effects::player_counter;
 use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
 use crate::game::filter;
@@ -19,11 +20,14 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState, TriggerSourceRead};
+use crate::types::game_state::{
+    DamageRecord, DistributionScope, GameState, PendingDamagePostCounter, TriggerSourceRead,
+    WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterCause, ProposedEvent};
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
@@ -312,13 +316,11 @@ fn target_damage_source(state: &GameState, ability: &ResolvedAbility) -> Option<
             Some(TargetRef::Object(id)) => *id,
             _ => return None,
         },
-        // No binding means this clause names its own subject rather than
-        // receiving one from a parent, and that subject is NOT necessarily a
-        // battlefield creature: Volcanic Vision's `Target` source is the
-        // instant card it just returned to hand. Such shapes carry no
-        // battlefield-creature precondition to enforce, so this arm keeps the
-        // historical lookup — first object anywhere in the list, ability source
-        // as the last resort — unchanged.
+        // No binding means this clause's target subject is local to the node,
+        // rather than inherited from an earlier effect. It is not subject to
+        // the battlefield-creature precondition used for a source bound through
+        // chain descent; this arm keeps the local-target lookup — first object
+        // anywhere in the list, ability source as the last resort — unchanged.
         None => {
             return Some(
                 ability
@@ -643,9 +645,20 @@ pub(crate) fn apply_damage_to_target(
                 // can resolve against the prevented event's damage source. Clear
                 // after the call to prevent leakage into unrelated later
                 // replacements.
-                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    state, None, None, None, events,
-                );
+                //
+                // CR 616.1g: the continuation — a prevention rider, or a damage
+                // substitution's substitute (Soul-Scar Mage's counters) — can
+                // raise a prompt of its own (two counter replacements to order).
+                // This event is settled; the prompt is surfaced, and a caller
+                // with more recipients pauses behind it
+                // (`pause_behind_continuation_prompt`).
+                if let Some(waiting_for) =
+                    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                        state, None, None, None, events,
+                    )
+                {
+                    state.waiting_for = waiting_for;
+                }
             }
             Ok(DamageResult::Applied(0))
         }
@@ -678,6 +691,73 @@ pub(crate) fn apply_damage_to_target(
 /// life loss (CR 120.3a), excess damage (CR 120.10), damage record tracking, and
 /// lifelink (CR 702.15b / CR 120.3f).
 ///
+/// CR 120.10: Compute excess damage beyond lethal/loyalty/defense for one
+/// damage leg. If a permanent has multiple card types among creature,
+/// planeswalker, and battle, its excess damage is the greatest calculated
+/// amount among those types.
+///
+/// The planeswalker/battle axes measure against the loyalty/defense the
+/// permanent had BEFORE the damage was dealt, so callers pass the values
+/// captured before any loyalty/defense removal — never a live post-mutation
+/// read. Shared by the inline path (which captured them at the top of
+/// `apply_damage_after_replacement`) and the wither/infect post-counter core
+/// (which receives them as parameters, or from the pause stash on resume), so
+/// there is one calculation of excess, not a second copy that rereads live
+/// state.
+fn damage_excess_beyond_lethal(
+    state: &GameState,
+    target: &TargetRef,
+    actual_amount: u32,
+    has_deathtouch: bool,
+    loyalty_before: Option<u32>,
+    defense_before: Option<u32>,
+) -> u32 {
+    match target {
+        TargetRef::Object(obj_id) => state
+            .objects
+            .get(obj_id)
+            .map(|obj| {
+                let mut excess = 0;
+
+                if obj.card_types.core_types.contains(&CoreType::Creature) {
+                    if let Some(toughness) = obj.toughness {
+                        // damage_marked already includes actual_amount.
+                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
+                        let lethal = if has_deathtouch {
+                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
+                            if damage_before == 0 {
+                                1u32
+                            } else {
+                                0
+                            }
+                        } else {
+                            (toughness as u32).saturating_sub(damage_before)
+                        };
+                        excess = excess.max(actual_amount.saturating_sub(lethal));
+                    }
+                }
+
+                if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
+                    // CR 120.10: Excess for a planeswalker = damage beyond the
+                    // loyalty it had before the damage was dealt (passed in —
+                    // loyalty counters have since been removed).
+                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
+                }
+
+                if obj.card_types.core_types.contains(&CoreType::Battle) {
+                    // CR 120.10: Excess for a battle = damage beyond the defense it
+                    // had before the damage was dealt (passed in — defense
+                    // counters have since been removed).
+                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
+                }
+
+                excess
+            })
+            .unwrap_or(0),
+        TargetRef::Player(_) => 0,
+    }
+}
+
 /// Caller is responsible for emitting `EffectResolved`. This helper only emits
 /// `DamageDealt` (and downstream `LifeChanged` via the life helpers).
 pub(crate) fn apply_damage_after_replacement(
@@ -752,19 +832,89 @@ pub(crate) fn apply_damage_after_replacement(
             }
 
             if is_creature && (ctx.has_wither || ctx.has_infect) {
-                // CR 120.3d + CR 702.80 + CR 702.90: Wither/infect damage to a
-                // creature is dealt as -1/-1 counters.
-                if let Some(target_obj) = state.objects.get_mut(obj_id) {
-                    let entry = target_obj
-                        .counters
-                        .entry(CounterType::Minus1Minus1)
-                        .or_insert(0);
-                    *entry += actual_amount;
-                    if ctx.has_deathtouch {
-                        target_obj.dealt_deathtouch_damage = true;
+                // CR 120.3d + CR 702.80a / CR 702.90c: Wither and infect
+                // damage causes the source's controller to PUT -1/-1 counters
+                // on the creature — a put-counters event, so it routes
+                // through `add_counter_with_replacement` like every other
+                // placement: AddCounter replacements (Solemnity-class
+                // preventions, Constrictor-class modifiers) apply, a
+                // `CounterAdded` event is emitted for triggers, and layers
+                // are marked by the authority. A parked replacement choice
+                // propagates as `NeedsChoice`, as in the infect-to-player
+                // arm below — but unlike that arm, the current leg's
+                // remainder rides `pending_damage_post_counter` so the resume
+                // still owes the deathtouch flag, the CR 120.1 record, and
+                // lifelink exactly once.
+                if !counters::add_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *obj_id,
+                    CounterType::Minus1Minus1,
+                    actual_amount,
+                    // CR 614.16: combat wither/infect is a turn-based-action
+                    // placement (`Other`); non-combat is a resolving effect.
+                    if is_combat {
+                        CounterCause::Other
+                    } else {
+                        CounterCause::ResolvingEffect
+                    },
+                    events,
+                ) {
+                    // CR 120.3d + CR 616.1: stash the post-counter remainder
+                    // (the target, amount, context snapshot, and the CR 120.10
+                    // pre-damage loyalty/defense captured above — loyalty
+                    // removal already ran ahead of this arm) so the resume
+                    // runs it exactly once. Combat-flagged for the batch
+                    // remnant, which the combat resume consumes; the shared
+                    // funnel drain skips combat stashes.
+                    state.pending_damage_post_counter = Some(Box::new(PendingDamagePostCounter {
+                        ctx: DamageContextSnapshot::from(ctx),
+                        target: (*t).clone(),
+                        actual_amount,
+                        loyalty_before,
+                        defense_before,
+                        is_combat,
+                    }));
+                    return DamageResult::NeedsChoice;
+                }
+                // Inline success runs core + lifelink (the F1 split: the
+                // combat remnant resume runs the core ONLY, since the paused
+                // leg's lifelink share was already folded at park time).
+                match wither_infect_post_counter_core(
+                    state,
+                    ctx,
+                    t,
+                    actual_amount,
+                    loyalty_before,
+                    defense_before,
+                    is_combat,
+                    events,
+                ) {
+                    PostCounterFlow::Paused => return DamageResult::NeedsChoice,
+                    PostCounterFlow::Continue {
+                        primary_amount,
+                        redirected,
+                    } => {
+                        if !redirected {
+                            let lifelink_amount = primary_amount + ctx.lifelink_bonus;
+                            if gain_lifelink_for_damage_leg(
+                                state,
+                                ctx.has_lifelink,
+                                lifelink_amount,
+                                ctx.controller,
+                                events,
+                            ) {
+                                // CR 616.1: two or more co-applicable life-gain
+                                // replacements — the gaining player must choose
+                                // which applies first. All damage has already
+                                // been dealt; only this final lifelink gain is
+                                // deferred.
+                                return DamageResult::NeedsChoice;
+                            }
+                        }
+                        return DamageResult::Applied(actual_amount);
                     }
                 }
-                crate::game::layers::mark_layers_full(state);
             } else if is_creature {
                 if let Some(target_obj) = state.objects.get_mut(obj_id) {
                     // CR 120.3e: Damage to a creature marks damage.
@@ -800,6 +950,13 @@ pub(crate) fn apply_damage_after_replacement(
                     *player_id,
                     PlayerCounterKind::Poison,
                     actual_amount,
+                    // CR 614.16: combat infect is a turn-based-action
+                    // placement (`Other`); non-combat is a resolving effect.
+                    if is_combat {
+                        CounterCause::Other
+                    } else {
+                        CounterCause::ResolvingEffect
+                    },
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
@@ -810,8 +967,28 @@ pub(crate) fn apply_damage_after_replacement(
                 if super::life::apply_damage_life_loss(state, *player_id, actual_amount, events)
                     .is_err()
                 {
-                    // CR 616.1: two or more co-applicable life-loss replacements — the
-                    // affected player must choose which applies first.
+                    // CR 616.1: the loss paused — co-applicable life-loss
+                    // replacements, or the Horde damage→mill redirect parking a
+                    // mill/batch choice. The loss, the damage event, and any
+                    // lifelink for this target are deferred until the resume.
+                    // Both combat and non-combat legs stash their post-loss work
+                    // (combat-flagged for the batch remnant, which the combat
+                    // resume consumes; the shared drain skips combat stashes).
+                    // Counter-addition pauses (infect/toxic) return NeedsChoice
+                    // WITHOUT stashing, so the stash's presence after this call
+                    // identifies a loss pause.
+                    state.pending_damage_post_loss =
+                        Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
+                            source_id: ctx.source_id,
+                            source_incarnation: ctx.source_incarnation,
+                            controller: ctx.controller,
+                            target: *player_id,
+                            actual_amount,
+                            has_lifelink: ctx.has_lifelink,
+                            lifelink_bonus: ctx.lifelink_bonus,
+                            stage: crate::types::game_state::DamagePostLossStage::EmitAndRecord,
+                            is_combat,
+                        }));
                     return DamageResult::NeedsChoice;
                 }
             }
@@ -830,6 +1007,8 @@ pub(crate) fn apply_damage_after_replacement(
                     *player_id,
                     PlayerCounterKind::Poison,
                     ctx.combat_damage_poison,
+                    // CR 614.16: combat toxic is a turn-based-action placement.
+                    CounterCause::Other,
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
@@ -839,52 +1018,17 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
-    // CR 120.10: Compute excess damage beyond lethal/loyalty/defense. If a
-    // permanent has multiple card types among creature, planeswalker, and battle,
-    // its excess damage is the greatest calculated amount among those types.
-    let excess = match &t {
-        TargetRef::Object(obj_id) => state
-            .objects
-            .get(obj_id)
-            .map(|obj| {
-                let mut excess = 0;
-
-                if obj.card_types.core_types.contains(&CoreType::Creature) {
-                    if let Some(toughness) = obj.toughness {
-                        // damage_marked already includes actual_amount.
-                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
-                        let lethal = if ctx.has_deathtouch {
-                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
-                            if damage_before == 0 {
-                                1u32
-                            } else {
-                                0
-                            }
-                        } else {
-                            (toughness as u32).saturating_sub(damage_before)
-                        };
-                        excess = excess.max(actual_amount.saturating_sub(lethal));
-                    }
-                }
-
-                if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                    // CR 120.10: Excess for a planeswalker = damage beyond the
-                    // loyalty it had before the damage was dealt (captured above,
-                    // since the loyalty counters have since been removed).
-                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
-                }
-
-                if obj.card_types.core_types.contains(&CoreType::Battle) {
-                    // CR 120.10: Excess for a battle = damage beyond the defense it
-                    // had before the damage was dealt (captured above).
-                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
-                }
-
-                excess
-            })
-            .unwrap_or(0),
-        TargetRef::Player(_) => 0,
-    };
+    // CR 120.10: single excess calculation (shared with the wither/infect
+    // post-counter core): the loyalty/defense axes measure against the values
+    // captured above, before any counter removal.
+    let excess = damage_excess_beyond_lethal(
+        state,
+        t,
+        actual_amount,
+        ctx.has_deathtouch,
+        loyalty_before,
+        defense_before,
+    );
 
     // CR 120.4a: an excess-redirect rider modifies the damage event so that only
     // the lethal portion is dealt to the permanent and the excess is dealt to its
@@ -930,113 +1074,18 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
-    events.push(GameEvent::DamageDealt {
-        source_id: ctx.source_id,
-        target: t.clone(),
-        amount: primary_amount,
+    emit_damage_dealt_and_record(
+        state,
+        ctx.source_id,
+        ctx.source_incarnation,
+        ctx.controller,
+        t,
+        actual_amount,
+        primary_amount,
+        primary_excess,
         is_combat,
-        excess: primary_excess,
-        // CR 400.7: the incarnation captured with the damage context, as the
-        // damage record below uses.
-        source_incarnation: ctx.source_incarnation,
-    });
-
-    // CR 120.1: Record damage for "was dealt damage by" condition queries.
-    if actual_amount > 0 {
-        let target_controller = match t {
-            TargetRef::Player(player_id) => *player_id,
-            TargetRef::Object(object_id) => state
-                .objects
-                .get(object_id)
-                .map(|object| object.controller)
-                .unwrap_or(ctx.controller),
-        };
-        // CR 400.7: Snapshot the target's incarnation at damage time so
-        // subsequent zone-change look-backs do not match a new incarnation.
-        let target_incarnation = match t {
-            TargetRef::Object(object_id) => state
-                .objects
-                .get(object_id)
-                .map(|object| object.incarnation),
-            TargetRef::Player(_) => None,
-        };
-        // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
-        // damage time so look-back source-filter queries ("opponents who were
-        // dealt combat damage by ~ or a Dragon this turn") evaluate against the
-        // source as it was when the damage was dealt — the source may later
-        // change type, leave the battlefield (CR 113.7a LKI), or be removed.
-        let src = state.objects.get(&ctx.source_id);
-        // CR 400.7: Use the incarnation captured with the damage context, not
-        // a post-application live lookup. The latter can name a later object
-        // after a replacement pause or zone change.
-        let source_incarnation = ctx.source_incarnation;
-        let mut record = DamageRecord {
-            source_id: ctx.source_id,
-            source_controller: ctx.controller,
-            target: t.clone(),
-            target_controller,
-            target_incarnation,
-            source_incarnation,
-            // CR 120.4a: the permanent was dealt only the lethal portion; the
-            // excess is recorded against the controller by the redirect below.
-            amount: primary_amount,
-            is_combat,
-            // CR 120.10: Record excess so "was dealt excess damage this turn"
-            // intervening-if conditions can query without re-computing lethal.
-            // Redirected excess is recorded against the controller by the redirect
-            // leg below, so the creature's record reports `primary_excess` (zero
-            // when the rider redirected it).
-            excess: primary_excess,
-            // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
-            // overwrites these when the source still exists; the empty/default
-            // tail (Default::default()) covers the source-already-gone case.
-            source_controller_snapshot: ctx.controller,
-            source_owner: ctx.controller,
-            ..Default::default()
-        };
-        if let Some(obj) = src {
-            record.source_name = obj.name.clone();
-            record.source_core_types = obj.card_types.core_types.clone();
-            record.source_subtypes = obj.card_types.subtypes.clone();
-            record.source_supertypes = obj.card_types.supertypes.clone();
-            record.source_keywords = obj.keywords.clone();
-            record.source_power = obj.power;
-            record.source_toughness = obj.toughness;
-            // CR 202.3d + CR 702.102b: snapshot the source's colors / mana value
-            // through the split-aware authority so a FUSED split spell freezes its
-            // COMBINED colors and mana value for damage-history source filters. For
-            // permanents and non-fused spells these are byte-identical to the prior
-            // `obj.color` / `mana_value_with_x(zone, cost_x_paid)` reads (CR 202.3e:
-            // the non-fused mana-value arm includes the chosen X).
-            record.source_colors = obj.spell_colors();
-            record.source_mana_value = obj.spell_mana_value();
-            record.source_controller_snapshot = obj.controller;
-            record.source_owner = obj.owner;
-            // CR 608.2i: snapshot the source's zone (Stack for a spell,
-            // Battlefield for a permanent) so a zone-discriminating look-back
-            // source filter evaluates against the zone as it was at damage time.
-            record.source_zone = obj.zone;
-        }
-        state.damage_dealt_this_turn.push_back(record);
-        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
-        // actually dealt damage (this branch is gated on `actual_amount > 0`, i.e.
-        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
-        // amount of CR 120.1a). Only battlefield-resident sources carry this
-        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
-        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
-        // so `flush_layers` recomputes the materialized keyword set that
-        // `has_hexproof` reads — otherwise the conditional hexproof grant for
-        // "has hexproof if it hasn't dealt damage yet" would never drop at the
-        // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
-        if state
-            .objects
-            .get(&ctx.source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-            && state.objects_that_dealt_damage.insert(ctx.source_id)
-        {
-            state.layers_dirty.mark_full();
-        }
-    }
+        events,
+    );
 
     // CR 120.4a treats the redirect as ONE modified damage event. The excess is
     // dealt to the controller by a redirect leg that carries `lifelink_bonus` (this
@@ -1109,10 +1158,13 @@ pub(crate) fn apply_damage_after_replacement(
     // gain.
     if !redirected {
         let lifelink_amount = primary_amount + ctx.lifelink_bonus;
-        if ctx.has_lifelink
-            && lifelink_amount > 0
-            && super::life::apply_life_gain(state, ctx.controller, lifelink_amount, events).is_err()
-        {
+        if gain_lifelink_for_damage_leg(
+            state,
+            ctx.has_lifelink,
+            lifelink_amount,
+            ctx.controller,
+            events,
+        ) {
             // CR 616.1: two or more co-applicable life-gain replacements — the gaining
             // player must choose which applies first. All damage has
             // already been dealt; only this final lifelink gain is deferred.
@@ -1123,18 +1175,489 @@ pub(crate) fn apply_damage_after_replacement(
     DamageResult::Applied(actual_amount)
 }
 
+/// CR 120.1: push the `DamageDealt` event and record the damage for "was
+/// dealt damage by" condition queries. `dealt_amount` gates recording (a
+/// nonzero amount actually dealt per CR 120.3/120.6); `record_amount` /
+/// `record_excess` are the lethal-split figures the record carries. Shared by
+/// the synchronous path, the post-loss resume drain, and the combat batch
+/// remnant resume so a paused-then-resumed leg emits and records exactly what
+/// the never-paused leg would.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_damage_dealt_and_record(
+    state: &mut GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    controller: PlayerId,
+    target: &TargetRef,
+    dealt_amount: u32,
+    record_amount: u32,
+    record_excess: u32,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    events.push(GameEvent::DamageDealt {
+        source_id,
+        target: target.clone(),
+        amount: record_amount,
+        is_combat,
+        excess: record_excess,
+        // CR 400.7: the incarnation captured with the damage context, as the
+        // damage record below uses.
+        source_incarnation,
+    });
+
+    // CR 120.1: Record damage for "was dealt damage by" condition queries.
+    if dealt_amount > 0 {
+        let target_controller = match target {
+            TargetRef::Player(player_id) => *player_id,
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.controller)
+                .unwrap_or(controller),
+        };
+        // CR 400.7: Snapshot the target's incarnation at damage time so
+        // subsequent zone-change look-backs do not match a new incarnation.
+        let target_incarnation = match target {
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.incarnation),
+            TargetRef::Player(_) => None,
+        };
+        // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
+        // damage time so look-back source-filter queries ("opponents who were
+        // dealt combat damage by ~ or a Dragon this turn") evaluate against the
+        // source as it was when the damage was dealt — the source may later
+        // change type, leave the battlefield (CR 113.7a LKI), or be removed.
+        let src = state.objects.get(&source_id);
+        // CR 400.7: Use the incarnation captured with the damage context, not
+        // a post-application live lookup. The latter can name a later object
+        // after a replacement pause or zone change.
+        let mut record = DamageRecord {
+            source_id,
+            source_controller: controller,
+            target: target.clone(),
+            target_controller,
+            target_incarnation,
+            source_incarnation,
+            // CR 120.4a: the permanent was dealt only the lethal portion; the
+            // excess is recorded against the controller by the redirect below.
+            amount: record_amount,
+            is_combat,
+            // CR 120.10: Record excess so "was dealt excess damage this turn"
+            // intervening-if conditions can query without re-computing lethal.
+            // Redirected excess is recorded against the controller by the redirect
+            // leg below, so the creature's record reports `primary_excess` (zero
+            // when the rider redirected it).
+            excess: record_excess,
+            // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
+            // overwrites these when the source still exists; the empty/default
+            // tail (Default::default()) covers the source-already-gone case.
+            source_controller_snapshot: controller,
+            source_owner: controller,
+            ..Default::default()
+        };
+        if let Some(obj) = src {
+            record.source_name = obj.name.clone();
+            record.source_core_types = obj.card_types.core_types.clone();
+            record.source_subtypes = obj.card_types.subtypes.clone();
+            record.source_supertypes = obj.card_types.supertypes.clone();
+            record.source_keywords = obj.keywords.clone();
+            record.source_power = obj.power;
+            record.source_toughness = obj.toughness;
+            // CR 202.3d + CR 702.102b: snapshot the source's colors / mana value
+            // through the split-aware authority so a FUSED split spell freezes its
+            // COMBINED colors and mana value for damage-history source filters. For
+            // permanents and non-fused spells these are byte-identical to the prior
+            // `obj.color` / `mana_value_with_x(zone, cost_x_paid)` reads (CR 202.3e:
+            // the non-fused mana-value arm includes the chosen X).
+            record.source_colors = obj.spell_colors();
+            record.source_mana_value = obj.spell_mana_value();
+            record.source_controller_snapshot = obj.controller;
+            record.source_owner = obj.owner;
+            // CR 608.2i: snapshot the source's zone (Stack for a spell,
+            // Battlefield for a permanent) so a zone-discriminating look-back
+            // source filter evaluates against the zone as it was at damage time.
+            record.source_zone = obj.zone;
+        }
+        state.damage_dealt_this_turn.push_back(record);
+        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
+        // actually dealt damage (this branch is gated on `dealt_amount > 0`, i.e.
+        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
+        // amount of CR 120.1a). Only battlefield-resident sources carry this
+        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
+        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
+        // so `flush_layers` recomputes the materialized keyword set that
+        // `has_hexproof` reads — otherwise the conditional hexproof grant for
+        // "has hexproof if it hasn't dealt damage yet" would never drop at the
+        // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
+        if state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+            && state.objects_that_dealt_damage.insert(source_id)
+        {
+            state.layers_dirty.mark_full();
+        }
+    }
+}
+
+/// CR 702.15b / CR 120.3f: gain the lifelink life for one damage leg. Returns
+/// whether the gain parked on co-applicable life-gain replacements (the prompt
+/// is already in `waiting_for`; the LifeGain arm resumes it). Shared by the
+/// synchronous path and the post-loss resume drain.
+fn gain_lifelink_for_damage_leg(
+    state: &mut GameState,
+    has_lifelink: bool,
+    lifelink_amount: u32,
+    controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    has_lifelink
+        && lifelink_amount > 0
+        && super::life::apply_life_gain(state, controller, lifelink_amount, events).is_err()
+}
+
+/// Outcome of [`drain_pending_damage_post_loss`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamagePostLossDrainOutcome {
+    /// The stashed work fully settled (or nothing was stashed).
+    Settled,
+    /// The lifelink gain parked on a life-gain replacement choice. Nothing is
+    /// re-stashed: the gain is owned by `state.pending_replacement` and the
+    /// LifeGain arm settles it — re-stashing would re-propose a second gain on
+    /// the next answer.
+    PausedForReplacement,
+}
+
+/// CR 120.3f + CR 120.1 + CR 616.1: run a non-combat player-damage leg's
+/// stashed post-loss work (the `DamageDealt` event, the CR 120.1 record, the
+/// lifelink gain) once its life loss fully settles. Called from the
+/// post-replacement funnel after the batch drain retires with no re-park.
+/// `EmitAndRecord` is infallible; a lifelink gain that parks hands ownership
+/// to the pending replacement (matching `PendingCombatLifelink`, whose paused
+/// source is deliberately absent from `remaining`) instead of re-stashing, so
+/// the answering drain never proposes the gain twice.
+pub(crate) fn drain_pending_damage_post_loss(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DamagePostLossDrainOutcome {
+    use crate::types::game_state::DamagePostLossStage;
+    let Some(stashed) = state.pending_damage_post_loss.take() else {
+        return DamagePostLossDrainOutcome::Settled;
+    };
+    if matches!(stashed.stage, DamagePostLossStage::EmitAndRecord) {
+        // Players have no excess and the excess-redirect rider is
+        // creature-only, so the dealt, recorded, and excess figures are the
+        // post-replacement amount, that same amount, and zero.
+        emit_damage_dealt_and_record(
+            state,
+            stashed.source_id,
+            stashed.source_incarnation,
+            stashed.controller,
+            &TargetRef::Player(stashed.target),
+            stashed.actual_amount,
+            stashed.actual_amount,
+            0,
+            false,
+            events,
+        );
+    }
+    if gain_lifelink_for_damage_leg(
+        state,
+        stashed.has_lifelink,
+        stashed.actual_amount + stashed.lifelink_bonus,
+        stashed.controller,
+        events,
+    ) {
+        // CR 616.1: the gaining player must choose which replacement applies
+        // first. Nothing was applied for this leg. `state.pending_replacement`
+        // is left populated ON PURPOSE — it is the resume's authority, and
+        // this leg is deliberately NOT re-stashed (that would gain the life
+        // twice) — mirroring `drain_combat_lifelink`'s handoff.
+        return DamagePostLossDrainOutcome::PausedForReplacement;
+    }
+    DamagePostLossDrainOutcome::Settled
+}
+
+/// Outcome of running a wither/infect leg's post-counter remainder up to (but
+/// not including) its own lifelink gain.
+pub(crate) enum PostCounterFlow {
+    /// A downstream leg of the remainder (the CR 120.4a redirect leg) parked
+    /// its own replacement choice; ownership rides that leg's own stash or
+    /// pending replacement.
+    Paused,
+    /// The remainder ran. The caller still owes this leg's lifelink gain for
+    /// `primary_amount` (plus the context bonus) unless `redirected` handed
+    /// both the excess and this leg's lifelink to the redirect leg.
+    Continue {
+        primary_amount: u32,
+        redirected: bool,
+    },
+}
+
+/// CR 120.3d + CR 702.80a / CR 702.90c + CR 702.2b + CR 120.1 + CR 120.10 +
+/// CR 120.4a: everything a wither/infect-to-creature leg owes AFTER its
+/// `-1/-1` counter placement settles — the deathtouch flag, excess, the
+/// `DamageDealt` event + CR 120.1 record, and the redirect-leg passthrough.
+/// Shared by the inline success path, the non-combat funnel drain (which adds
+/// lifelink after), and the combat remnant resume (which runs the core ONLY —
+/// the F1 split — since the paused leg's lifelink share was already folded
+/// into `lifelink_by_source` at park time and drains via the lifelink tail;
+/// running the inline lifelink here would gain twice).
+///
+/// CR 120.10 captured-values contract: the planeswalker/battle excess axes
+/// measure against the loyalty/defense from BEFORE the damage was dealt. The
+/// inline call runs after loyalty/defense removal, and both resume paths run
+/// later still, so all three pass the pre-damage values in — never a live
+/// reread. (Counter placement itself does not touch loyalty/defense; the
+/// creature axis still reads post-counter state, exactly like the inline
+/// path.)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn wither_infect_post_counter_core(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: &TargetRef,
+    actual_amount: u32,
+    loyalty_before: Option<u32>,
+    defense_before: Option<u32>,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) -> PostCounterFlow {
+    // The creature axis needs only the live type flag here (types cannot
+    // change mid-leg: no priority window opens during a replacement answer).
+    let is_creature = match target {
+        TargetRef::Object(obj_id) => state
+            .objects
+            .get(obj_id)
+            .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
+        TargetRef::Player(_) => false,
+    };
+
+    if let TargetRef::Object(obj_id) = target {
+        if is_creature {
+            if let Some(target_obj) = state.objects.get_mut(obj_id) {
+                // CR 702.2b: Track deathtouch for SBA lethal-damage check.
+                if ctx.has_deathtouch {
+                    target_obj.dealt_deathtouch_damage = true;
+                }
+            }
+        }
+    }
+
+    // CR 120.10: single excess calculation, shared with the inline path — the
+    // loyalty/defense axes use the passed pre-damage values, not live state.
+    let excess = damage_excess_beyond_lethal(
+        state,
+        target,
+        actual_amount,
+        ctx.has_deathtouch,
+        loyalty_before,
+        defense_before,
+    );
+
+    // CR 120.4a: an excess-redirect rider modifies the damage event so that only
+    // the lethal portion is dealt to the permanent and the excess is dealt to its
+    // controller *instead* (redirected below), NOT on top. Without this, a 4-damage
+    // hit on a 2-toughness creature would mark 4 on the creature AND deal 2 to the
+    // controller (6 total); the rules-correct outcome is 2 marked + 2 redirected
+    // (4 total). Reduce the primary hit to the lethal portion for the creature's
+    // marked damage, DamageDealt event, and damage record; lifelink and the return
+    // value keep `actual_amount` because the total damage dealt is unchanged.
+    // CR 120.4a "that creature's controller": the rider only redirects when the
+    // damaged permanent is a creature (real class cards all read "target creature").
+    let redirect_excess = if is_creature
+        && matches!(
+            (ctx.excess_recipient, target),
+            (
+                Some(ExcessRecipient::TargetController {
+                    source_keyword: None
+                }),
+                TargetRef::Object(_)
+            )
+        ) {
+        excess
+    } else {
+        0
+    };
+    let primary_amount = actual_amount.saturating_sub(redirect_excess);
+    // CR 120.4a: when the excess is redirected, the creature was dealt only its
+    // lethal portion — it was NOT "dealt excess damage" (the excess went to its
+    // controller instead). Report zero excess on the creature's event and record
+    // so "was dealt excess damage" triggers (Maarika, Rith, Aegar, …) do not
+    // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
+    // normal computed `excess` (e.g. plain overkill still reports its excess).
+    let primary_excess = excess.saturating_sub(redirect_excess);
+    if redirect_excess > 0 {
+        if let TargetRef::Object(obj_id) = target {
+            // Only the marked-damage path over-marks above; wither/infect deal
+            // -1/-1 counters instead (no excess-redirect card uses them).
+            if !ctx.has_wither && !ctx.has_infect {
+                if let Some(o) = state.objects.get_mut(obj_id) {
+                    o.damage_marked = o.damage_marked.saturating_sub(redirect_excess);
+                }
+            }
+        }
+    }
+
+    emit_damage_dealt_and_record(
+        state,
+        ctx.source_id,
+        ctx.source_incarnation,
+        ctx.controller,
+        target,
+        actual_amount,
+        primary_amount,
+        primary_excess,
+        is_combat,
+        events,
+    );
+
+    // CR 120.4a treats the redirect as ONE modified damage event. The excess is
+    // dealt to the controller by a redirect leg that carries `lifelink_bonus` (this
+    // creature's lethal `primary_amount`) plus the source's real lifelink, so THAT
+    // leg gains the COMBINED lifelink (its own dealt + the bonus) when it resolves —
+    // inline OR after its own replacement pause+resume (the bonus is threaded through
+    // the snapshot / PendingReplacement). `redirected` records that the excess and
+    // this leg's lifelink were handed off, so the creature leg gains nothing here.
+    let mut redirected = false;
+    if let (
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        TargetRef::Object(obj_id),
+    ) = (ctx.excess_recipient, target)
+    {
+        if redirect_excess > 0 {
+            if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
+                // CR 120.7: same source object as the primary damage (source_id /
+                // controller / keywords reused). `excess_recipient: None` is a
+                // re-entrancy guard; `lifelink_bonus: primary_amount` hands this
+                // creature leg's lethal to the redirect leg so the combined lifelink
+                // is gained even if the redirected damage itself pauses on a
+                // replacement choice.
+                let redirect_ctx = DamageContext {
+                    excess_recipient: None,
+                    lifelink_bonus: primary_amount,
+                    ..ctx.clone()
+                };
+                redirected = true;
+                // Route through the same non-combat single-target pipeline the
+                // primary player-damage path uses (gate + CR 614/615 replacement).
+                // A pause here propagates NeedsChoice; the redirect leg carries
+                // `lifelink_bonus`, so the combined lifelink is still gained on resume.
+                match apply_damage_to_target(
+                    state,
+                    &redirect_ctx,
+                    TargetRef::Player(controller),
+                    redirect_excess,
+                    false,
+                    events,
+                ) {
+                    // The redirect leg gains the combined lifelink (its own dealt +
+                    // the bonus) itself — but ONLY when it actually reaches its
+                    // lifelink path by dealing damage. A fully prevented, gated, or
+                    // phased redirect returns `Applied(0)` from the prevention/early
+                    // paths BEFORE that gain, so fall through to have the creature leg
+                    // gain lifelink for the lethal `primary_amount` it did deal.
+                    Ok(DamageResult::Applied(0)) => redirected = false,
+                    Ok(DamageResult::Applied(_)) => {}
+                    Ok(DamageResult::NeedsChoice) => return PostCounterFlow::Paused,
+                    // A redirect gate failure must not corrupt the primary result;
+                    // fall through so the source still gains lifelink for the lethal
+                    // portion it actually dealt (the excess was simply not redirected).
+                    Err(_) => redirected = false,
+                }
+            }
+        }
+    }
+
+    PostCounterFlow::Continue {
+        primary_amount,
+        redirected,
+    }
+}
+
+/// Outcome of [`drain_pending_damage_post_counter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamagePostCounterDrainOutcome {
+    /// The stashed work fully settled (or nothing was stashed).
+    Settled,
+    /// The lifelink gain parked on a life-gain replacement choice. Nothing is
+    /// re-stashed: the gain is owned by `state.pending_replacement` and the
+    /// LifeGain arm settles it — re-stashing would re-propose a second gain.
+    PausedForReplacement,
+}
+
+/// CR 120.3d + CR 120.1 + CR 616.1: run a non-combat wither/infect leg's
+/// stashed post-counter work (deathtouch flag, excess, the `DamageDealt`
+/// event, the CR 120.1 record, the lifelink gain) once the counter event fully
+/// settles. Called from the post-replacement funnel after the batch drain
+/// retires with no re-park, before outer continuations (matching sync order:
+/// each damage target completes before later targets resume). A lifelink gain
+/// that parks hands ownership to the pending replacement (mirroring `:1275`),
+/// never re-stashing.
+pub(crate) fn drain_pending_damage_post_counter(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DamagePostCounterDrainOutcome {
+    let Some(stashed) = state.pending_damage_post_counter.take() else {
+        return DamagePostCounterDrainOutcome::Settled;
+    };
+    let ctx = DamageContext::from(stashed.ctx);
+    // CR 120.10: the resume passes the STASHED pre-damage values — never a
+    // live reread (loyalty/defense removal already ran before the park).
+    match wither_infect_post_counter_core(
+        state,
+        &ctx,
+        &stashed.target,
+        stashed.actual_amount,
+        stashed.loyalty_before,
+        stashed.defense_before,
+        stashed.is_combat,
+        events,
+    ) {
+        PostCounterFlow::Paused => DamagePostCounterDrainOutcome::PausedForReplacement,
+        PostCounterFlow::Continue {
+            primary_amount,
+            redirected,
+        } => {
+            if redirected {
+                return DamagePostCounterDrainOutcome::Settled;
+            }
+            if gain_lifelink_for_damage_leg(
+                state,
+                ctx.has_lifelink,
+                primary_amount + ctx.lifelink_bonus,
+                ctx.controller,
+                events,
+            ) {
+                // CR 616.1: the gaining player must choose which replacement
+                // applies first. Nothing was applied for this leg.
+                // `state.pending_replacement` is left populated ON PURPOSE —
+                // it is the resume's authority, and this leg is deliberately
+                // NOT re-stashed (that would gain the life twice) — mirroring
+                // `drain_pending_damage_post_loss` above.
+                return DamagePostCounterDrainOutcome::PausedForReplacement;
+            }
+            DamagePostCounterDrainOutcome::Settled
+        }
+    }
+}
+
 /// CR 120.3 + CR 616.1e: Build a one-shot, single-target non-combat `DealDamage`
 /// node for a remaining-target damage continuation. The node's `source_id` is set
 /// to the original damage-source id so `DamageContext::from_source` reproduces the
 /// original source's keywords at resume time; `amount` is captured as `Fixed` so
 /// it does not re-resolve against mutated state.
 fn build_remaining_damage_node(
+    ability: &ResolvedAbility,
     damage_source_id: ObjectId,
-    controller: PlayerId,
     target: TargetRef,
     amount: u32,
 ) -> ResolvedAbility {
-    ResolvedAbility::new(
+    let mut node = ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed {
                 value: amount as i32,
@@ -1150,14 +1673,26 @@ fn build_remaining_damage_node(
         },
         vec![target],
         damage_source_id,
-        controller,
-    )
+        ability.controller,
+    );
+    carry_instruction_context(&mut node, ability);
+    node
+}
+
+/// CR 608.2c: a remaining-recipient node continues the paused instruction, so
+/// it carries that instruction's casting-time context (cast origin, paid
+/// costs, …). The tail stashed after it is handed this context when the last
+/// node resolves; a fresh context there would make "if this spell was cast
+/// from exile" (Ultimate Magic: Meteor) read false.
+fn carry_instruction_context(node: &mut ResolvedAbility, ability: &ResolvedAbility) {
+    node.context = ability.context.clone();
 }
 
 /// CR 120.4b: Build a one-shot continuation that applies an already-replaced
 /// damage event. Unlike `build_remaining_damage_node`, this does not route back
 /// through the replacement pipeline.
 fn build_post_replacement_damage_node(
+    ability: &ResolvedAbility,
     ctx: &DamageContext,
     event: &ProposedEvent,
 ) -> Option<ResolvedAbility> {
@@ -1171,7 +1706,7 @@ fn build_post_replacement_damage_node(
         return None;
     };
 
-    Some(ResolvedAbility::new(
+    let mut node = ResolvedAbility::new(
         Effect::ApplyPostReplacementDamage {
             context: DamageContextSnapshot::from(ctx),
             target: target.clone(),
@@ -1181,7 +1716,9 @@ fn build_post_replacement_damage_node(
         Vec::new(),
         ctx.source_id,
         ctx.controller,
-    ))
+    );
+    carry_instruction_context(&mut node, ability);
+    Some(node)
 }
 
 /// CR 120.4b + CR 616.1e: Stash remaining already-replaced damage survivors so
@@ -1194,13 +1731,11 @@ fn stash_remaining_post_replacement_damage(
 ) {
     let mut iter = remaining
         .iter()
-        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event));
+        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ability, ctx, event));
     let Some(mut head) = iter.next() else {
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = stashed_tail(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
@@ -1209,9 +1744,77 @@ fn stash_remaining_post_replacement_damage(
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(&mut head, stashed_tail(state, sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
+/// CR 616.1g + CR 608.2c: after one recipient's damage settled, its replacement
+/// continuation (a prevention rider, or a damage substitution's substitute) may
+/// have left a prompt open — Soul-Scar Mage's counters meeting two counter
+/// replacements to order. When the effect still has recipients to damage, it
+/// must stop behind that prompt exactly as it does for a `NeedsChoice` pause:
+/// going on would raise the next recipient's prompt over the open one.
+fn pause_behind_continuation_prompt(state: &GameState, has_remaining: bool) -> bool {
+    has_remaining && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+/// CR 608.2c: who owns the parent's next instruction (`sub_ability`) after a
+/// damage instruction returns. Every pause that stashes remaining work stashes
+/// the tail at the end of that same chain — remaining recipients first, then
+/// the tail — so the stash is its ONE owner and `resolve_ability_chain` must
+/// not place it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamageTail {
+    /// The instruction completed, or paused without stashing anything (its
+    /// last recipient's replacement continuation is still open): the chain
+    /// driver places the tail.
+    Caller,
+    /// The instruction paused and stashed its remaining work followed by the
+    /// tail.
+    Stashed,
+}
+
+/// CR 608.2c: the damage instructions that deal damage to, or from, several
+/// objects or players one event at a time and can therefore pause between two
+/// of their events — exactly the effects [`resolve_instruction`] dispatches.
+/// When one of them returns [`DamageTail::Caller`] with child work pending
+/// (its last recipient's substitute raised a prompt), `resolve_ability_chain`
+/// places the tail outside the whole child stack.
+pub(crate) fn is_multi_event_damage_instruction(effect: &Effect) -> bool {
+    multi_event_damage_resolver(effect).is_some()
+}
+
+type DamageInstructionResolver =
+    fn(&mut GameState, &ResolvedAbility, &mut Vec<GameEvent>) -> Result<DamageTail, EffectError>;
+
+/// The single list of multi-event damage instructions and their resolvers.
+fn multi_event_damage_resolver(effect: &Effect) -> Option<DamageInstructionResolver> {
+    match effect {
+        Effect::DealDamage { .. } => Some(|state, ability, events| {
+            resolve_damage(
+                state,
+                ability,
+                RemainingDamageSplice::AfterContinuation,
+                events,
+            )
+        }),
+        Effect::DamageAll { .. } => Some(resolve_all_damage),
+        Effect::DamageEachPlayer { .. } => Some(resolve_each_player_damage),
+        Effect::EachDealsDamageEqualToPower { .. } => Some(resolve_each_deals_power_damage),
+        Effect::EachSourceDealsDamage { .. } => Some(resolve_each_source_damage),
+        _ => None,
+    }
+}
+
+/// CR 608.2c: resolve one multi-event damage instruction, reporting who owns
+/// the parent's tail; `None` when `ability` is not one.
+pub(crate) fn resolve_instruction(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Option<Result<DamageTail, EffectError>> {
+    multi_event_damage_resolver(&ability.effect).map(|resolve| resolve(state, ability, events))
 }
 
 /// CR 120.3 + CR 616.1e: Build a linked sub_ability chain from a sequence of
@@ -1225,21 +1828,35 @@ fn stash_remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
-    let Some(mut head) = remaining_damage_chain(ability, damage_source_id, remaining) else {
-        // No remaining batch work — still forward the parent's sub_ability so the
-        // downstream chain resumes after the pending replacement choice resolves.
-        if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
-        }
-        return;
-    };
-    if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+    if let Some(head) = remaining_damage_head(state, ability, damage_source_id, remaining) {
+        append_to_pending_continuation(state, Some(Box::new(head)));
     }
-    append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
+/// CR 120.3 + CR 608.2c: the linked chain a paused damage batch leaves behind —
+/// one node per remaining (target, amount) pair, in order, followed by the
+/// parent's `sub_ability` tail. With no remaining batch work the chain is just
+/// the tail, so the downstream chain still resumes after the pending
+/// replacement choice. `None` when there is neither.
+fn remaining_damage_head(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    damage_source_id: ObjectId,
+    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+) -> Option<ResolvedAbility> {
+    let tail = ability
+        .sub_ability
+        .as_ref()
+        .map(|sub| stashed_tail(state, sub, ability));
+    match remaining_damage_chain(ability, damage_source_id, remaining) {
+        Some(mut head) => {
+            if let Some(tail) = tail {
+                append_to_sub_chain(&mut head, tail);
+            }
+            Some(head)
+        }
+        None => tail,
+    }
 }
 
 /// CR 113.7a + CR 608.2h: Link the remaining (target, amount) recipients into a
@@ -1251,8 +1868,7 @@ fn remaining_damage_chain(
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) -> Option<ResolvedAbility> {
     let node = |target, amount| {
-        let mut node =
-            build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
+        let mut node = build_remaining_damage_node(ability, damage_source_id, target, amount);
         node.trigger_source = ability.trigger_source.clone();
         node
     };
@@ -1277,7 +1893,8 @@ fn remaining_damage_chain(
 /// false and no object target leaks; for Lady Loki's `CastFromZone
 /// { target: ParentTarget }` tail (empty targets, non-`Resolution` timing) it
 /// returns true and the hit is preserved so the free cast still addresses it.
-fn cast_tail_with_parent_targets(
+fn stashed_tail(
+    state: &mut GameState,
     sub: &ResolvedAbility,
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
@@ -1285,6 +1902,10 @@ fn cast_tail_with_parent_targets(
     if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
         tail.mirror_targets_from(ability);
     }
+    // CR 608.2c: the tail is handed its context by the REAL parent — the paused
+    // instruction — exactly as the chain driver would hand it on completion
+    // (ability index, chosen players, casting-time facts).
+    crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
     tail
 }
 
@@ -1301,15 +1922,13 @@ fn stash_each_source_combined_continuation(
     already_replaced: &[(DamageContext, ProposedEvent)],
     raw_remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
-
     // Build the head node: prioritise already-replaced (ApplyPostReplacementDamage)
     // over raw (DealDamage) so Phase-C application fires before Phase-B for any
     // remaining-raw sources.
     let mut head_opt: Option<ResolvedAbility> = None;
 
     for (ctx, event) in already_replaced {
-        if let Some(node) = build_post_replacement_damage_node(ctx, event) {
+        if let Some(node) = build_post_replacement_damage_node(ability, ctx, event) {
             match head_opt.as_mut() {
                 None => head_opt = Some(node),
                 Some(h) => append_to_sub_chain(h, node),
@@ -1318,7 +1937,7 @@ fn stash_each_source_combined_continuation(
     }
 
     for (source_id, target, amount) in raw_remaining {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = build_remaining_damage_node(ability, source_id, target, amount);
         match head_opt.as_mut() {
             None => head_opt = Some(node),
             Some(h) => append_to_sub_chain(h, node),
@@ -1329,13 +1948,11 @@ fn stash_each_source_combined_continuation(
         match head_opt.as_mut() {
             None => {
                 // Nothing to stash — forward sub_ability so downstream fires.
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = stashed_tail(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
                 return;
             }
-            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(sub, ability)),
+            Some(h) => append_to_sub_chain(h, stashed_tail(state, sub, ability)),
         }
     }
 
@@ -1357,28 +1974,24 @@ fn stash_remaining_each_source_damage(
     ability: &ResolvedAbility,
     remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
     let mut iter = remaining.into_iter();
     let Some((first_source, first_target, first_amount)) = iter.next() else {
         // No remaining batch work — forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = stashed_tail(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
 
-    let mut head =
-        build_remaining_damage_node(first_source, controller, first_target, first_amount);
+    let mut head = build_remaining_damage_node(ability, first_source, first_target, first_amount);
     for (source_id, target, amount) in iter {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = build_remaining_damage_node(ability, source_id, target, amount);
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(&mut head, stashed_tail(state, sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1408,6 +2021,20 @@ fn active_excess_recipient(
     }
 }
 
+/// CR 608.2c: where the not-yet-applied portions of a division go when a
+/// replacement choice pauses it. Instructions are followed in the order
+/// written, so a resumed CR 608.2d division runs ahead of the tail its own
+/// pause already parked in the continuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemainingDamageSplice {
+    /// The node still carries its own `sub_ability` tail; remaining portions
+    /// (then the tail) go to the END of the continuation.
+    AfterContinuation,
+    /// A resumed CR 608.2d division whose tail the pause already parked;
+    /// remaining portions go AHEAD of the continuation.
+    BeforeContinuation,
+}
+
 /// CR 120.1: Deal N damage — reduces life for players, marks damage on creatures.
 /// Reads amount from `Effect::DealDamage { amount }`.
 pub fn resolve(
@@ -1415,6 +2042,144 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_damage(
+        state,
+        ability,
+        RemainingDamageSplice::AfterContinuation,
+        events,
+    )
+    .map(|_| ())
+}
+
+/// CR 608.2d + CR 608.2c: resume a resolution-time division paused by
+/// [`pause_for_resolution_division`]. The chosen portions are stamped into the
+/// stored node's `distribution`; no player receives priority between the choice
+/// and the damage (the division is part of applying the effect).
+pub(crate) fn resume_resolution_division(
+    state: &mut GameState,
+    pending_effect: &ResolvedAbility,
+    distribution: &[(TargetRef, u32)],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let mut stamped = pending_effect.clone();
+    stamped.distribution = Some(distribution.to_vec());
+    resolve_damage(
+        state,
+        &stamped,
+        RemainingDamageSplice::BeforeContinuation,
+        events,
+    )
+    .map(|_| ())
+}
+
+/// CR 608.2d + CR 115.10a: the objects an untargeted resolution-time division
+/// may be made among — the node's recipient population (a tracked set bound
+/// earlier in this resolution) as it exists on the battlefield now.
+fn resolution_division_candidates(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    let Effect::DealDamage { target, .. } = &ability.effect else {
+        return Vec::new();
+    };
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+    let ctx = filter::FilterContext::from_ability(ability);
+    state
+        .battlefield_phased_in_ids()
+        .into_iter()
+        .filter(|id| filter::matches_target_filter(state, *id, &effective_filter, &ctx))
+        .collect()
+}
+
+/// CR 608.2d + CR 608.2h + CR 115.10a: an untargeted division is chosen while the
+/// effect is applied. `total` was determined once, before the choice (CR 608.2h).
+/// With nothing to divide or nobody to divide it among, the effect does as much
+/// as possible — nothing (CR 609.3). With exactly one candidate the only legal
+/// division is applied directly. Otherwise the chooser (`target_chooser`, e.g.
+/// the target's controller; default the controller) is asked; the paused node is
+/// stored without its tail, which the chain's auto-stash parks in the
+/// continuation. The damage follows the choice with no priority window.
+fn pause_for_resolution_division(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    unit: crate::types::game_state::DistributionUnit,
+    total: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let candidates = resolution_division_candidates(state, ability);
+    if total == 0 || candidates.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+    if let [only] = candidates.as_slice() {
+        let mut stamped = ability.clone();
+        stamped.distribution = Some(vec![(TargetRef::Object(*only), total)]);
+        // CR 608.2c: instructions are followed in order. The enclosing chain
+        // owns the trailing instruction; a replacement-choice pause inside this
+        // recursive resolution must not park a second copy of it.
+        stamped.sub_ability = None;
+        return resolve_damage(
+            state,
+            &stamped,
+            RemainingDamageSplice::AfterContinuation,
+            events,
+        )
+        .map(|_| ());
+    }
+    let player = ability
+        .target_chooser
+        .as_ref()
+        .and_then(|chooser| {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, chooser)
+        })
+        .unwrap_or(ability.controller);
+    let mut node = ability.clone();
+    node.sub_ability = None;
+    node.else_ability = None;
+    state.waiting_for = crate::types::game_state::WaitingFor::DistributeAmong {
+        player,
+        total,
+        targets: candidates.into_iter().map(TargetRef::Object).collect(),
+        unit,
+        scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
+            pending_effect: Box::new(node),
+        },
+    };
+    Ok(())
+}
+
+/// CR 120.3 + CR 616.1e + CR 608.2c: park the not-yet-applied portions of a
+/// division while a replacement choice is pending. `AfterContinuation` is the
+/// announced-division behaviour (the tail is still attached to this node, so the
+/// remaining portions and then the tail go to the END of the continuation);
+/// `BeforeContinuation` is a resumed CR 608.2d division, whose tail the pause
+/// already parked — the remaining portions must run AHEAD of it.
+fn stash_remaining_distribution(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    damage_source_id: ObjectId,
+    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    splice: RemainingDamageSplice,
+) {
+    match splice {
+        RemainingDamageSplice::AfterContinuation => {
+            stash_remaining_damage_chain(state, ability, damage_source_id, remaining);
+        }
+        RemainingDamageSplice::BeforeContinuation => {
+            if let Some(head) = remaining_damage_head(state, ability, damage_source_id, remaining) {
+                super::prepend_to_pending_continuation(state, head);
+            }
+        }
+    }
+}
+
+fn resolve_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    splice: RemainingDamageSplice,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (num_dmg, damage_source, target_filter): (u32, Option<DamageSource>, &TargetFilter) =
         match &ability.effect {
             Effect::DealDamage {
@@ -1446,7 +2211,7 @@ pub fn resolve(
     // CR 120.3: Determine damage source.
     let Some(mut ctx) = single_damage_source(state, ability, damage_source) else {
         no_damage_source_resolved(ability, events);
-        return Ok(());
+        return Ok(DamageTail::Caller);
     };
 
     // CR 120.4a + CR 608.2c: attach the active excess-redirect rider parsed onto
@@ -1455,6 +2220,15 @@ pub fn resolve(
     // source (for DamageSource::Target, the first object target), not the spell.
     if let Effect::DealDamage { excess, .. } = &ability.effect {
         ctx.excess_recipient = active_excess_recipient(state, &ctx, *excess);
+    }
+
+    // CR 608.2d + CR 115.10a: an untargeted division is chosen while the effect
+    // is applied — pause (or auto-apply) before any of its damage is dealt.
+    if ability.distribution.is_none() {
+        if let Some(unit) = crate::game::ability_utils::resolution_time_division(ability) {
+            return pause_for_resolution_division(state, ability, unit.clone(), num_dmg, events)
+                .map(|()| DamageTail::Caller);
+        }
     }
 
     // CR 120.1 + CR 608.2c: Resolve effective damage targets.
@@ -1475,29 +2249,34 @@ pub fn resolve(
     if let Some(distribution) = &ability.distribution {
         for (i, (target, amount)) in distribution.iter().enumerate() {
             match apply_damage_to_target(state, &ctx, target.clone(), *amount, false, events)? {
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
+                DamageResult::Applied(_)
+                    if !pause_behind_continuation_prompt(state, i + 1 < distribution.len()) => {}
+                _ => {
                     // CR 120.3 + CR 616.1e: Remaining distributed targets must resume
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
-                    return Ok(());
+                    stash_remaining_distribution(state, ability, ctx.source_id, remaining, splice);
+                    return Ok(DamageTail::Stashed);
                 }
             }
         }
     } else {
         for (i, target) in effective_targets.iter().enumerate() {
             match apply_damage_to_target(state, &ctx, target.clone(), num_dmg, false, events)? {
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
+                DamageResult::Applied(_)
+                    if !pause_behind_continuation_prompt(
+                        state,
+                        i + 1 < effective_targets.len(),
+                    ) => {}
+                _ => {
                     // CR 120.3 + CR 616.1e: Remaining targets must resume after the
                     // replacement choice resolves.
                     let remaining = effective_targets[i + 1..]
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
                     stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
-                    return Ok(());
+                    return Ok(DamageTail::Stashed);
                 }
             }
         }
@@ -1509,7 +2288,7 @@ pub fn resolve(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.3 + CR 120.4b: Resume applying a damage event that already completed
@@ -1659,6 +2438,42 @@ fn single_damage_source(
     }
 }
 
+/// CR 608.2d + CR 702.2b + CR 704.5h: does the source dealing a paused
+/// resolution-time division have deathtouch? With deathtouch, any nonzero share
+/// destroys a creature recipient, so the question decides which divisions are
+/// lethal.
+///
+/// The answer binds the source exactly as the resume path does: it asks
+/// [`single_damage_source`] about the same stored node that
+/// [`resume_resolution_division`] resolves, so the prompt-time fact cannot
+/// diverge from the damage actually dealt (a node whose subject is gone deals
+/// no damage and has no deathtouch; a fallback source carries none). Keywords
+/// are read live (CR 702.2d: deathtouch functions from any zone); no player acts
+/// between the prompt and its answer, so the source cannot change in between.
+///
+/// `AnnouncedTargets` answers `false`: the announce-time source lives on the
+/// pending cast or trigger, not on the prompt.
+pub fn division_source_has_deathtouch(state: &GameState, scope: &DistributionScope) -> bool {
+    match scope {
+        DistributionScope::ResolutionCandidates { pending_effect } => {
+            let Effect::DealDamage { damage_source, .. } = &pending_effect.effect else {
+                return false;
+            };
+            match damage_source {
+                // CR 120.1: a multi-source node never pauses for a division (it
+                // resolves through `resolve_each_target_power_damage`); a
+                // deserialized prompt carrying one has no single source.
+                Some(DamageSource::EachTarget) => false,
+                Some(DamageSource::Target | DamageSource::TriggeringSource) | None => {
+                    single_damage_source(state, pending_effect, *damage_source)
+                        .is_some_and(|ctx| ctx.has_deathtouch)
+                }
+            }
+        }
+        DistributionScope::AnnouncedTargets => false,
+    }
+}
+
 /// CR 120.2b: the objects that may deal a `DealDamage` node's damage: the one
 /// `resolve` binds for a single-source node, and every source target of a
 /// multi-source one. Shared with `stack_reach`, which proposes the node's
@@ -1698,6 +2513,17 @@ pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) ->
         return each_target_damage_split(state, ability, target_filter)
             .map(|(recipient, _)| vec![recipient])
             .unwrap_or_default();
+    }
+    // CR 608.2d: a resolution-time division's recipients are exactly the chosen
+    // portions; before the choice none are known (the node's propagated
+    // `targets` name the parent's target, not a recipient).
+    if crate::game::ability_utils::resolution_time_division(ability).is_some() {
+        return ability
+            .distribution
+            .iter()
+            .flatten()
+            .map(|(target, _)| target.clone())
+            .collect();
     }
     if matches!(target_filter, TargetFilter::EventTarget) {
         // CR 115.10a + CR 120.1 + CR 120.3: Ghyrson-style non-target damage
@@ -1892,7 +2718,7 @@ fn resolve_each_target_power_damage(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<DamageTail, EffectError> {
     let amount = match &ability.effect {
         Effect::DealDamage { amount, .. } => amount,
         _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
@@ -1906,7 +2732,7 @@ fn resolve_each_target_power_damage(
             source_id: ability.source_id,
             subject: None,
         });
-        return Ok(());
+        return Ok(DamageTail::Caller);
     };
     let source_ids = source_ids.as_slice();
 
@@ -1966,9 +2792,29 @@ fn resolve_each_target_power_damage(
                 // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
                 // this way") resolves immediately afterward for non-combat damage.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    if let Some(waiting_for) =
+                        crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                            state, None, None, None, events,
+                        )
+                    {
+                        state.waiting_for = waiting_for;
+                        // CR 616.1g: the rider or a damage substitution's
+                        // substitute (Soul-Scar Mage's counters) raised its own
+                        // prompt. This source's event is settled; with sources
+                        // left, pause exactly as the `NeedsChoice` arm below
+                        // does, with the sources AFTER this one stashed.
+                        if pause_behind_continuation_prompt(state, idx + 1 < batch.len()) {
+                            apply_batch_survivors_before_replacement_pause(
+                                state, &survivors, events,
+                            );
+                            let remaining = batch
+                                .iter()
+                                .skip(idx + 1)
+                                .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
+                            stash_remaining_each_source_damage(state, ability, remaining);
+                            return Ok(DamageTail::Stashed);
+                        }
+                    }
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -1989,14 +2835,14 @@ fn resolve_each_target_power_damage(
                     .skip(idx + 1)
                     .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
                 stash_remaining_each_source_damage(state, ability, remaining);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
 
     // --- Phase C: Apply survivors + record per-source identity (CR 120.3). ---
     if !apply_batch_survivors(state, ability, &survivors, events) {
-        return Ok(());
+        return Ok(DamageTail::Stashed);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -2005,7 +2851,7 @@ fn resolve_each_target_power_damage(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// Apply each surviving post-replacement `Damage` event with its source's own
@@ -2070,6 +2916,14 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_all_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_all_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (amount, target_filter, player_filter, damage_source): (
         &QuantityExpr,
         TargetFilter,
@@ -2141,7 +2995,7 @@ pub fn resolve_all(
             Some(source_ctx) => Some(source_ctx),
             None => {
                 no_damage_source_resolved(ability, events);
-                return Ok(());
+                return Ok(DamageTail::Caller);
             }
         }
     } else {
@@ -2230,8 +3084,9 @@ pub fn resolve_all(
 
     for (i, (target, num_dmg)) in recipient_amounts.iter().enumerate() {
         match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
-            DamageResult::Applied(_) => {}
-            DamageResult::NeedsChoice => {
+            DamageResult::Applied(_)
+                if !pause_behind_continuation_prompt(state, i + 1 < recipient_amounts.len()) => {}
+            _ => {
                 // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
@@ -2240,7 +3095,7 @@ pub fn resolve_all(
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
                 mark_pending_continuation_parent(state, EffectKind::DamageAll);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
@@ -2251,7 +3106,7 @@ pub fn resolve_all(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.3: Collect non-eliminated players matching the filter for simultaneous
@@ -2327,22 +3182,18 @@ fn collect_matching_players(
                     // it has no live damage-recipient meaning.
                     PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
-                    // CR 120.2a/120.2b: Each opponent who was dealt damage of the
-                    // given kind this turn, optionally restricted to a matching
-                    // source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        ref source,
-                        min_sources,
-                    } => crate::game::quantity::opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        source_controller,
-                        kind,
-                        source,
-                        min_sources,
-                        source_id,
-                    ),
+                    // CR 120.2a/120.2b: Each player in `relation` who was dealt
+                    // damage of the given kind this turn, optionally restricted
+                    // to a matching source.
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
+                            state,
+                            p.id,
+                            source_controller,
+                            &player_filter,
+                            source_id,
+                        )
+                    }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != source_controller
@@ -2541,6 +3392,14 @@ pub fn resolve_each_player(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_each_player_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_each_player_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (amount_expr, player_filter) = match &ability.effect {
         Effect::DamageEachPlayer {
             amount,
@@ -2622,22 +3481,18 @@ pub fn resolve_each_player(
                     // it has no live damage-recipient meaning.
                     PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
-                    // CR 120.2a/120.2b: Each opponent who was dealt damage of the
-                    // given kind this turn, optionally restricted to a matching
-                    // source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        source,
-                        min_sources,
-                    } => crate::game::quantity::opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        ability.controller,
-                        *kind,
-                        source,
-                        *min_sources,
-                        ability.source_id,
-                    ),
+                    // CR 120.2a/120.2b: Each player in `relation` who was dealt
+                    // damage of the given kind this turn, optionally restricted
+                    // to a matching source.
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
+                            state,
+                            p.id,
+                            ability.controller,
+                            &player_filter,
+                            ability.source_id,
+                        )
+                    }
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
                     // the enchanted player. Delegates to the single scope
                     // authority (live, kind-preserving, team-aware).
@@ -2841,41 +3696,49 @@ pub fn resolve_each_player(
             &ability.targets,
         )
         .max(0) as u32;
-        if dmg > 0 {
-            match apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?
-            {
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
-                    // CR 120.3 + CR 616.1e: Remaining players must resume after the
-                    // replacement choice resolves. Pre-resolve per-player amounts now
-                    // so each continuation node carries a Fixed quantity.
-                    let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
-                        .iter()
-                        .filter_map(|&next_pid| {
-                            // Thread `ability.targets` here too — otherwise every
-                            // opponent AFTER the first (once a replacement pause
-                            // occurs) would pre-resolve an `ObjectManaValue
-                            // { scope: Target }` leaf to 0.
-                            let next_dmg =
-                                crate::game::quantity::resolve_quantity_scoped_with_targets(
-                                    state,
-                                    amount_expr,
-                                    ability.source_id,
-                                    next_pid,
-                                    &ability.targets,
-                                )
-                                .max(0) as u32;
-                            (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
-                        })
-                        .collect();
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
-                    // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
-                    // so the drain re-emits the parent event the non-pause tail fires.
-                    mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
-                    return Ok(());
-                }
-            }
+        if dmg == 0 {
+            continue;
         }
+        let result =
+            apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?;
+        if matches!(result, DamageResult::Applied(_))
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            continue;
+        }
+        // CR 120.3 + CR 616.1e: Remaining players must resume after the
+        // replacement choice resolves. Pre-resolve per-player amounts now so
+        // each continuation node carries a Fixed quantity.
+        let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
+            .iter()
+            .filter_map(|&next_pid| {
+                // Thread `ability.targets` here too — otherwise every opponent
+                // AFTER the first (once a replacement pause occurs) would
+                // pre-resolve an `ObjectManaValue { scope: Target }` leaf to 0.
+                let next_dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
+                    state,
+                    amount_expr,
+                    ability.source_id,
+                    next_pid,
+                    &ability.targets,
+                )
+                .max(0) as u32;
+                (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
+            })
+            .collect();
+        // CR 608.2c + CR 616.1g: behind an open continuation prompt only damage
+        // still to be dealt is stashed; with none left the instruction is
+        // complete and the chain places its next instruction after the prompt.
+        if matches!(result, DamageResult::Applied(_))
+            && !pause_behind_continuation_prompt(state, !remaining.is_empty())
+        {
+            break;
+        }
+        stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+        // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
+        // so the drain re-emits the parent event the non-pause tail fires.
+        mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
+        return Ok(DamageTail::Stashed);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -2884,7 +3747,7 @@ pub fn resolve_each_player(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.1 + CR 120.3: "Up to two target creatures you control each deal damage
@@ -2908,6 +3771,14 @@ pub fn resolve_each_deals_equal_to_power(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_each_deals_power_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_each_deals_power_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     if !matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
         return Err(EffectError::MissingParam(
             "EachDealsDamageEqualToPower".to_string(),
@@ -2934,7 +3805,7 @@ pub fn resolve_each_deals_equal_to_power(
             source_id: ability.source_id,
             subject: None,
         });
-        return Ok(());
+        return Ok(DamageTail::Caller);
     };
 
     for (i, &source_id) in source_ids.iter().enumerate() {
@@ -2955,8 +3826,16 @@ pub fn resolve_each_deals_equal_to_power(
             false,
             events,
         )? {
-            DamageResult::Applied(_) => {}
-            DamageResult::NeedsChoice => {
+            // CR 608.2c + CR 616.1g: behind an open continuation prompt, pause
+            // only while a later source still deals damage (power above 0).
+            DamageResult::Applied(_)
+                if !pause_behind_continuation_prompt(
+                    state,
+                    source_ids[i + 1..]
+                        .iter()
+                        .any(|&next| object_power_with_lki(state, next) > 0),
+                ) => {}
+            _ => {
                 // CR 120.3 + CR 616.1e: This source's damage paused for a
                 // replacement choice. Each remaining source deals its own power
                 // from its own object, so stash one continuation node per
@@ -2969,7 +3848,7 @@ pub fn resolve_each_deals_equal_to_power(
                     recipient_id,
                 );
                 mark_pending_continuation_parent(state, EffectKind::EachDealsDamageEqualToPower);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
@@ -2980,7 +3859,7 @@ pub fn resolve_each_deals_equal_to_power(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated at
@@ -3000,6 +3879,14 @@ pub fn resolve_each_source_deals_damage(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_each_source_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_each_source_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (sources, amount, recipient) = match &ability.effect {
         Effect::EachSourceDealsDamage {
             sources,
@@ -3150,8 +4037,7 @@ pub fn resolve_each_source_deals_damage(
     // continuations and the remaining raw entries are stashed as `DealDamage`
     // continuations (they still need the full replacement pipeline).
     let mut replaced: Vec<(DamageContext, ProposedEvent)> = Vec::new();
-    let mut phase_b_paused_at: Option<usize> = None;
-    let mut phase_b_waiting_for_player: Option<crate::types::player::PlayerId> = None;
+    let mut phase_b_pause: Option<(usize, WaitingFor)> = None;
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
         let Some(proposed) = pre_replacement_damage_gate(state, ctx, target, *dmg, false, events)
         else {
@@ -3167,9 +4053,21 @@ pub fn resolve_each_source_deals_damage(
                 // "-1/-1 counter for each 1 damage prevented") inline so it
                 // resolves "immediately afterward" as the rule requires.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    if let Some(waiting_for) =
+                        crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                            state, None, None, None, events,
+                        )
+                    {
+                        state.waiting_for = waiting_for.clone();
+                        // CR 616.1g: the rider or a damage substitution's
+                        // substitute raised its own prompt. Source `i` is
+                        // settled; with sources left, pause Phase B behind it
+                        // exactly as for a `NeedsChoice`.
+                        if pause_behind_continuation_prompt(state, i + 1 < entries.len()) {
+                            phase_b_pause = Some((i, waiting_for));
+                            break;
+                        }
+                    }
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -3178,18 +4076,21 @@ pub fn resolve_each_source_deals_damage(
                 // (they still need replacement). The `replace_event` call already
                 // registered the pending replacement in state; we just set
                 // `waiting_for` and return.
-                phase_b_paused_at = Some(i);
-                phase_b_waiting_for_player = Some(player);
+                phase_b_pause = Some((
+                    i,
+                    replacement::replacement_choice_waiting_for(player, state),
+                ));
                 break;
             }
         }
     }
 
-    if let (Some(pause_at), Some(player)) = (phase_b_paused_at, phase_b_waiting_for_player) {
-        state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-        // Source `pause_at` is mid-Phase-B (replacement choice in flight via
-        // `waiting_for`); `handle_replacement_choice` will call
-        // `apply_damage_after_replacement` for it directly after resolution.
+    if let Some((pause_at, waiting_for)) = phase_b_pause {
+        state.waiting_for = waiting_for;
+        // Source `pause_at` is either mid-Phase-B (replacement choice in flight
+        // via `waiting_for`; `handle_replacement_choice` will call
+        // `apply_damage_after_replacement` for it directly after resolution) or
+        // already settled with its continuation's prompt open (CR 616.1g).
         // Stash `replaced` (Phase-B-complete) as `ApplyPostReplacementDamage`
         // and `entries[pause_at+1..]` (Phase-B-incomplete) as `DealDamage` in
         // a single combined chain — one `sub_ability` tail so downstream fires
@@ -3199,7 +4100,7 @@ pub fn resolve_each_source_deals_damage(
             .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
         stash_each_source_combined_continuation(state, ability, &replaced, raw_remaining);
         mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
-        return Ok(());
+        return Ok(DamageTail::Stashed);
     }
 
     // Phase C — apply all already-replaced damage events. If any source's
@@ -3220,7 +4121,7 @@ pub fn resolve_each_source_deals_damage(
                     .collect();
                 stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
                 mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
@@ -3231,7 +4132,7 @@ pub fn resolve_each_source_deals_damage(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 208.3 + CR 113.7a: A creature's power from current state, falling back to
@@ -3264,8 +4165,8 @@ fn stash_remaining_each_deals_chain(
             continue;
         }
         let node = build_remaining_damage_node(
+            ability,
             source_id,
-            ability.controller,
             TargetRef::Object(recipient_id),
             power as u32,
         );
@@ -3277,16 +4178,14 @@ fn stash_remaining_each_deals_chain(
     match head {
         Some(mut h) => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_sub_chain(&mut h, cast_tail_with_parent_targets(sub, ability));
+                append_to_sub_chain(&mut h, stashed_tail(state, sub, ability));
             }
             append_to_pending_continuation(state, Some(Box::new(h)));
         }
         None => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = stashed_tail(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
             }
         }
     }
@@ -3295,17 +4194,23 @@ fn stash_remaining_each_deals_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::ability_utils::apply_instead_swap;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DamageChannel, Duration, FilterProp, ObjectScope, PlayerRelation, PlayerScope,
-        QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
+        DamageChannel, Duration, EachDamageRecipient, EffectScope, FilterProp, ObjectScope,
+        PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TapStateChange,
+        TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{WaitingFor, ZoneChangeRecord};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::game_state::{
+        DistributionScope, DistributionUnit, WaitingFor, ZoneChangeRecord,
+    };
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -4003,7 +4908,7 @@ mod tests {
     }
 
     /// CR 608.2c + CR 616.1e: the FALSE-branch pair for the propagation test above.
-    /// `cast_tail_with_parent_targets` gates on `should_propagate_parent_targets`,
+    /// `stashed_tail` gates on `should_propagate_parent_targets`,
     /// which returns false for a `Resolution`-timed sub. When it does, the stashed
     /// tail must NOT inherit the parent's object targets — otherwise a plain
     /// multi-target `DealDamage` tail would silently gain the parent's referents on
@@ -5348,6 +6253,7 @@ mod tests {
                                 qty: QuantityRef::EventContextAmount,
                             },
                             target: TargetFilter::SelfRef,
+                            scope: crate::types::ability::EffectScope::Single,
                         },
                     ))
                     .description("Protean Hydra prevention shield".to_string()),
@@ -7955,7 +8861,7 @@ mod tests {
         .expect("the activated ability")
     }
 
-    /// CR 120.1 + CR 115.4 + CR 208.3 — DISCRIMINATING runtime gate for Iron
+    /// CR 120.1 + CR 115.4 + CR 208.1 — DISCRIMINATING runtime gate for Iron
     /// Fist, Living Weapon's granted "{T}: ~ deals damage equal to his power to
     /// any other target". Attaching that ability to a 4-power Iron Fist and
     /// activating it at an opponent creature must deal exactly 4 damage.
@@ -7988,12 +8894,20 @@ mod tests {
             .target_object(victim)
             .resolve();
 
-        // CR 208.3: damage equals the source's power (4).
-        assert_eq!(
-            outcome.state().objects[&victim].damage_marked,
-            4,
-            "Iron Fist must deal damage equal to his power (4) to the chosen other target"
-        );
+        // CR 120.1 + CR 704.5g: the event preserves damage assignment before
+        // state-based actions move the lethal-damaged Bear to its graveyard.
+        assert!(outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 4,
+                is_combat: false,
+                ..
+            } if *source_id == iron_fist && *target == victim
+        )));
+        assert_eq!(outcome.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(outcome.state().objects[&iron_fist].zone, Zone::Battlefield);
     }
 
     /// CR 115.4 — DISCRIMINATING runtime gate that "any OTHER target" (i.e.
@@ -8159,7 +9073,8 @@ mod tests {
             );
         }
 
-        // CR 122.1: damage equals the number of +1/+1 counters on the source (3).
+        // CR 120.1 + CR 122.1 + CR 704.5g: the event records 3 damage from
+        // Red Hulk, then lethal damage moves the Bear to its graveyard.
         {
             let (mut runner, red_hulk, victim) = build_red_hulk(ability);
             let ability_index = runner.state().objects[&red_hulk].abilities.len() - 1;
@@ -8167,15 +9082,697 @@ mod tests {
                 .activate(red_hulk, ability_index)
                 .target_object(victim)
                 .resolve();
-            assert_eq!(
-                outcome.state().objects[&victim].damage_marked,
-                3,
-                "Red Hulk's reflex must deal damage equal to its +1/+1 counter count (3)"
-            );
+            assert!(outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(target),
+                    amount: 3,
+                    is_combat: false,
+                    ..
+                } if *source_id == red_hulk && *target == victim
+            )));
+            assert_eq!(outcome.state().objects[&victim].zone, Zone::Graveyard);
+            assert_eq!(outcome.state().objects[&red_hulk].zone, Zone::Battlefield);
         }
         // Silence the unused CounterType import on builds where the matches! arm
         // already consumed it via the qualified path.
         let _ = CounterType::Plus1Plus1;
+    }
+
+    /// CR 701.26a + CR 608.2c + CR 120.1: SetTapState{Tap, All} publishes only
+    /// the permanents it actually tapped, stamped `Tapped`; an each-source node
+    /// reading that set deals each newly tapped Wolf's OWN power. Board: untapped
+    /// Wolves 1/2/4, pre-tapped Wolf 3, 5/5 target → exactly 7 (not 10 with the
+    /// pre-tapped Wolf, not 3k for any uniform per-source power).
+    #[test]
+    fn each_wolf_tapped_this_way_deals_own_power_only_newly_tapped() {
+        let mut state = GameState::new_two_player(7);
+        let mk =
+            |state: &mut GameState, id: u64, owner: PlayerId, name: &str, p: i32, wolf: bool| {
+                let o = create_object(
+                    state,
+                    CardId(id),
+                    owner,
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&o).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                if wolf {
+                    obj.card_types.subtypes = vec!["Wolf".to_string()];
+                }
+                obj.base_card_types = obj.card_types.clone();
+                obj.power = Some(p);
+                obj.base_power = Some(p);
+                obj.toughness = Some(p);
+                obj.base_toughness = Some(p);
+                o
+            };
+        let w1 = mk(&mut state, 50, PlayerId(0), "Wolf One", 1, true);
+        let w2 = mk(&mut state, 51, PlayerId(0), "Wolf Two", 2, true);
+        let w4 = mk(&mut state, 52, PlayerId(0), "Wolf Four", 4, true);
+        let w3 = mk(&mut state, 53, PlayerId(0), "Wolf Three", 3, true);
+        state.objects.get_mut(&w3).unwrap().tapped = true;
+        let target = mk(&mut state, 54, PlayerId(1), "Target", 5, false);
+
+        let tap_all = ResolvedAbility::new(
+            Effect::SetTapState {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .subtype("Wolf".to_string())
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Untapped]),
+                ),
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let each_wolf = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Wolf".to_string()),
+                    )),
+                    caused_by: Some(ThisWayCause::Tapped),
+                },
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::BatchSource,
+                    },
+                },
+                recipient: EachDamageRecipient::Shared(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                ),
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = tap_all.sub_ability(each_wolf);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for w in [w1, w2, w4] {
+            assert!(state.objects[&w].tapped, "untapped Wolf becomes tapped");
+        }
+        assert_eq!(
+            state.objects[&target].damage_marked, 7,
+            "only the three newly tapped Wolves deal their own power (1+2+4)"
+        );
+        for w in [w1, w2, w3, w4] {
+            assert_eq!(state.objects[&w].damage_marked, 0);
+        }
+    }
+
+    // ---- CR 608.2d resolution-time untargeted division (Master of the Wild Hunt) ----
+
+    /// Battlefield creature fixture: `power`/`toughness`, optionally a Wolf.
+    fn division_creature(
+        state: &mut GameState,
+        card: u64,
+        owner: PlayerId,
+        power: i32,
+        toughness: i32,
+        wolf: bool,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            owner,
+            format!("Creature {card}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        if wolf {
+            obj.card_types.subtypes = vec!["Wolf".to_string()];
+        }
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.base_power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_toughness = Some(toughness);
+        id
+    }
+
+    /// Master of the Wild Hunt clause 3 as lowered: "That creature deals damage
+    /// equal to its power divided as its controller chooses among any number of
+    /// those Wolves" — the declared target is `targets[0]` (propagated from
+    /// clause 2), the recipients are the chain's tracked Wolves.
+    fn wolves_division_node(target: ObjectId, source: ObjectId) -> ResolvedAbility {
+        let mut node = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Wolf".to_string()),
+                    )),
+                    caused_by: None,
+                },
+                damage_source: Some(DamageSource::Target),
+                excess: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        node.distribute = Some(DistributionUnit::Damage);
+        node.target_chooser = Some(TargetFilter::ParentTargetController);
+        node
+    }
+
+    fn damage_dealt_count(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .count()
+    }
+
+    fn deal_damage_resolved(events: &[GameEvent]) -> bool {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::DealDamage,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// V5a: CR 608.2d + CR 608.2h — with two candidates the effect pauses before
+    /// any damage: the target's controller divides the target's power among the
+    /// tracked Wolves; the stored node has its tail cleared.
+    #[test]
+    fn resolution_division_pauses_for_the_targets_controller() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 2, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+        let mut node = wolves_division_node(giant, master);
+        node.sub_ability = Some(Box::new(make_ability(1, vec![])));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &node, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DistributeAmong {
+                player,
+                total,
+                targets,
+                unit,
+                scope: DistributionScope::ResolutionCandidates { pending_effect },
+            } => {
+                assert_eq!(*player, PlayerId(1), "the target's controller divides");
+                assert_eq!(*total, 5, "the target's power, not a Wolf's");
+                assert_eq!(targets, &vec![TargetRef::Object(w1), TargetRef::Object(w2)]);
+                assert_eq!(unit, &DistributionUnit::Damage);
+                assert!(pending_effect.sub_ability.is_none());
+                assert!(pending_effect.distribution.is_none());
+            }
+            other => panic!("expected a resolution-time DistributeAmong, got {other:?}"),
+        }
+        assert_eq!(
+            damage_dealt_count(&events),
+            0,
+            "no damage before the choice"
+        );
+    }
+
+    /// CR 608.2d + CR 702.2b + CR 704.5h: `division_source_has_deathtouch` reads
+    /// the paused node's damage source — the TARGET creature, not the ability's
+    /// source — exactly as the resume path binds it.
+    #[test]
+    fn division_source_deathtouch_follows_the_paused_nodes_damage_source() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 2, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &wolves_division_node(giant, master),
+            &mut events,
+        )
+        .unwrap();
+        let WaitingFor::DistributeAmong { scope, .. } = state.waiting_for.clone() else {
+            panic!("reach guard: two candidates pause for the division");
+        };
+        assert!(
+            !division_source_has_deathtouch(&state, &scope),
+            "a source without deathtouch"
+        );
+
+        // Deathtouch on the ability's source (Master) is not the damage source's.
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Deathtouch);
+        assert!(!division_source_has_deathtouch(&state, &scope));
+
+        state
+            .objects
+            .get_mut(&giant)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Deathtouch);
+        assert!(
+            division_source_has_deathtouch(&state, &scope),
+            "the target creature deals the divided damage"
+        );
+
+        // Announce-time prompts carry no source; a deserialized multi-source
+        // node never pauses and has no single source.
+        assert!(!division_source_has_deathtouch(
+            &state,
+            &DistributionScope::AnnouncedTargets
+        ));
+        let mut each_target = wolves_division_node(giant, master);
+        if let Effect::DealDamage { damage_source, .. } = &mut each_target.effect {
+            *damage_source = Some(DamageSource::EachTarget);
+        }
+        assert!(!division_source_has_deathtouch(
+            &state,
+            &DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(each_target),
+            }
+        ));
+    }
+
+    /// V5b: one candidate — the only legal division is applied without a prompt.
+    #[test]
+    fn resolution_division_single_candidate_auto_applies() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 8, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &wolves_division_node(giant, master),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+        assert_eq!(state.objects[&w1].damage_marked, 5);
+        assert_eq!(state.objects[&giant].damage_marked, 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5c: CR 609.3 — a target with power 0 has nothing to divide: no prompt,
+    /// no damage, and the effect still reports resolution.
+    #[test]
+    fn resolution_division_zero_total_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 2, true);
+        let wall = division_creature(&mut state, 4, PlayerId(1), 0, 4, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &wolves_division_node(wall, master), &mut events).unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+        assert_eq!(damage_dealt_count(&events), 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5d: CR 609.3 — an empty chain set (no Wolf was tapped this way) leaves
+    /// nobody to divide among: no prompt, no damage, EffectResolved emitted.
+    #[test]
+    fn resolution_division_empty_population_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let untracked = division_creature(&mut state, 2, PlayerId(0), 2, 2, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![]);
+
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &wolves_division_node(giant, master),
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong { .. }
+        ));
+        assert_eq!(state.objects[&untracked].damage_marked, 0);
+        assert_eq!(damage_dealt_count(&events), 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5e + V5r: resuming the paused node with the chosen split deals each
+    /// portion from the target; before the choice the node reports no damage
+    /// recipients (its propagated `targets` name the parent's target, not a
+    /// recipient), after it exactly the chosen ones.
+    #[test]
+    fn resolution_division_resume_applies_chosen_portions() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 9, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 9, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+        let node = wolves_division_node(giant, master);
+
+        assert!(
+            damage_recipients(&state, &node).is_empty(),
+            "V5r: no recipient is known before the division is chosen"
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &node, &mut events).unwrap();
+        let WaitingFor::DistributeAmong {
+            scope: DistributionScope::ResolutionCandidates { pending_effect },
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!("expected the resolution-time pause");
+        };
+
+        let mut stamped = (*pending_effect).clone();
+        stamped.distribution = Some(vec![(TargetRef::Object(w1), 1)]);
+        assert_eq!(
+            damage_recipients(&state, &stamped),
+            vec![TargetRef::Object(w1)],
+            "V5r: after the choice the recipients are the chosen portions"
+        );
+
+        let mut events = Vec::new();
+        state.waiting_for = WaitingFor::Priority {
+            player: state.active_player,
+        };
+        resume_resolution_division(
+            &mut state,
+            &pending_effect,
+            &[(TargetRef::Object(w1), 1), (TargetRef::Object(w2), 4)],
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.objects[&w1].damage_marked, 1);
+        assert_eq!(state.objects[&w2].damage_marked, 4);
+        assert_eq!(state.objects[&giant].damage_marked, 0);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamageDealt { source_id, target: TargetRef::Object(t), amount: 4, .. }
+                if *source_id == giant && *t == w2
+        )));
+        assert!(deal_damage_resolved(&events));
+    }
+
+    /// V5r siblings (R2-F1): announced-target divisions keep reporting their
+    /// targets as recipients — including a `ParentTarget` division node with no
+    /// stamped split (the post-"instead"-swap shape).
+    #[test]
+    fn announced_division_recipients_are_its_targets() {
+        let mut state = GameState::new_two_player(42);
+        let t = division_creature(&mut state, 4, PlayerId(1), 0, 20, false);
+        let mut targeted = make_ability(3, vec![TargetRef::Object(t)]);
+        targeted.distribute = Some(DistributionUnit::Damage);
+        assert_eq!(
+            damage_recipients(&state, &targeted),
+            vec![TargetRef::Object(t)]
+        );
+
+        let mut parent_target = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 12 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(t)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        parent_target.distribute = Some(DistributionUnit::Damage);
+        assert_eq!(
+            damage_recipients(&state, &parent_target),
+            vec![TargetRef::Object(t)]
+        );
+    }
+
+    /// V5n-runtime (R2-F1): the post-`apply_instead_swap` Shatterskull Smashing
+    /// X >= 6 node (`ParentTarget` recipient, `distribute: Damage`, no stamped
+    /// split) with TWO announced targets is not re-divided at resolution — both
+    /// targets are dealt damage and no `DistributeAmong` appears.
+    #[test]
+    fn post_instead_swap_parent_target_division_is_not_rechosen() {
+        let mut state = GameState::new_two_player(42);
+        let spell = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let t1 = division_creature(&mut state, 2, PlayerId(1), 0, 20, false);
+        let t2 = division_creature(&mut state, 3, PlayerId(1), 0, 20, false);
+        let targets = vec![TargetRef::Object(t1), TargetRef::Object(t2)];
+
+        let mut parent = make_ability(6, targets.clone());
+        parent.source_id = spell;
+        parent.distribute = Some(DistributionUnit::Damage);
+        parent.distribution = Some(vec![(TargetRef::Object(t1), 3), (TargetRef::Object(t2), 3)]);
+        let mut sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 12 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        );
+        sub.distribute = Some(DistributionUnit::Damage);
+        let mut swapped = apply_instead_swap(&parent, &sub);
+        assert!(
+            swapped.distribute.is_some() && swapped.distribution.is_none(),
+            "premise: the swap keeps `distribute` and drops the announced split"
+        );
+        swapped.targets = targets.clone();
+        swapped.target_incarnations = targets
+            .iter()
+            .filter_map(|t| {
+                match t {
+                TargetRef::Object(id) => Some(
+                    <crate::types::identifiers::ObjectIncarnationRef as
+                        crate::game::game_object::ObjectIncarnationRefExt>::from_object(
+                        &state.objects[id],
+                    ),
+                ),
+                TargetRef::Player(_) => None,
+            }
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        resolve(&mut state, &swapped, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DistributeAmong { .. }),
+            "an announced division is never re-chosen at resolution"
+        );
+        assert!(state.objects[&t1].damage_marked > 0);
+        assert!(state.objects[&t2].damage_marked > 0);
+        assert!(deal_damage_resolved(&events));
+    }
+
+    fn continuation_marker_tail() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 99 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(777),
+            PlayerId(0),
+        )
+    }
+
+    fn active_chain_summary(state: &GameState) -> Vec<(ObjectId, TargetRef, i32)> {
+        collect_chain_summary(
+            &state
+                .active_ability_continuation()
+                .expect("an active continuation")
+                .chain,
+        )
+    }
+
+    /// V5s (R2-F2): CR 608.2c — a resumed CR 608.2d division's remaining
+    /// portions run AHEAD of the tail its pause already parked
+    /// (`BeforeContinuation`); an announced division's go after it
+    /// (`AfterContinuation`, unchanged).
+    #[test]
+    fn stash_remaining_distribution_orders_by_splice() {
+        let src = ObjectId(500);
+        let r1 = TargetRef::Object(ObjectId(501));
+        let r2 = TargetRef::Object(ObjectId(502));
+        let marker = (ObjectId(777), TargetRef::Player(PlayerId(1)), 99);
+        let node = make_ability(3, vec![]);
+        assert!(node.sub_ability.is_none());
+
+        let seeded = || {
+            let mut state = GameState::new_two_player(42);
+            crate::game::effects::append_to_pending_continuation(
+                &mut state,
+                Some(Box::new(continuation_marker_tail())),
+            );
+            assert_eq!(active_chain_summary(&state), vec![marker.clone()]);
+            state
+        };
+
+        let mut before = seeded();
+        stash_remaining_distribution(
+            &mut before,
+            &node,
+            src,
+            [(r1.clone(), 1), (r2.clone(), 2)],
+            RemainingDamageSplice::BeforeContinuation,
+        );
+        assert_eq!(
+            active_chain_summary(&before),
+            vec![(src, r1.clone(), 1), (src, r2.clone(), 2), marker.clone()]
+        );
+
+        let mut after = seeded();
+        stash_remaining_distribution(
+            &mut after,
+            &node,
+            src,
+            [(r1.clone(), 1), (r2.clone(), 2)],
+            RemainingDamageSplice::AfterContinuation,
+        );
+        assert_eq!(
+            active_chain_summary(&after),
+            vec![marker, (src, r1, 1), (src, r2, 2)]
+        );
+    }
+
+    /// V5s-resume (R2-F2): through `resume_resolution_division` with a real
+    /// replacement pause on the first portion, the remaining portions are parked
+    /// ahead of the already-parked chain tail (CR 608.2c instruction order).
+    #[test]
+    fn resumed_division_replacement_pause_parks_portions_before_tail() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 1, 1, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 1, 1, true);
+        let w3 = division_creature(&mut state, 4, PlayerId(0), 1, 1, true);
+        let giant = division_creature(&mut state, 5, PlayerId(1), 3, 3, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2, w3]);
+        crate::game::effects::append_to_pending_continuation(
+            &mut state,
+            Some(Box::new(continuation_marker_tail())),
+        );
+        install_optional_damage_replacement(&mut state);
+        let pending = wolves_division_node(giant, master);
+
+        let mut events = Vec::new();
+        resume_resolution_division(
+            &mut state,
+            &pending,
+            &[
+                (TargetRef::Object(w1), 1),
+                (TargetRef::Object(w2), 1),
+                (TargetRef::Object(w3), 1),
+            ],
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: the first portion paused on the replacement choice"
+        );
+        let summary = active_chain_summary(&state);
+        let position = |entry: &(ObjectId, TargetRef, i32)| {
+            summary
+                .iter()
+                .position(|e| e == entry)
+                .unwrap_or_else(|| panic!("{entry:?} missing from {summary:?}"))
+        };
+        let at_w2 = position(&(giant, TargetRef::Object(w2), 1));
+        let at_w3 = position(&(giant, TargetRef::Object(w3), 1));
+        let at_tail = position(&(ObjectId(777), TargetRef::Player(PlayerId(1)), 99));
+        assert!(
+            at_w2 < at_w3 && at_w3 < at_tail,
+            "remaining portions run before the parked tail: {summary:?}"
+        );
+    }
+
+    /// CR 608.2c: with exactly one candidate the division is applied directly;
+    /// a replacement-choice pause inside that recursion must not give the
+    /// trailing instruction a second owner. Entered through the production
+    /// chain entry, the tail runs exactly once.
+    #[test]
+    fn single_candidate_division_replacement_pause_runs_tail_once() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 1, 4, true);
+        let giant = division_creature(&mut state, 3, PlayerId(1), 3, 3, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1]);
+        install_optional_damage_replacement(&mut state);
+        let mut node = wolves_division_node(giant, master);
+        node.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            master,
+            PlayerId(0),
+        )));
+        let life_before = state.players[0].life;
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &node, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: the lone portion paused on the replacement choice"
+        );
+        assert_eq!(
+            state.players[0].life, life_before,
+            "tail waits for the choice"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 5,
+            "the trailing instruction resolves exactly once"
+        );
     }
 
     /// CR 608.2b: a declared player with no legal referent is dealt nothing, and the

@@ -31,6 +31,34 @@ pub enum Zone {
 // A new `Zone` variant must be added to `Zone::ALL`: this is a build failure otherwise.
 const _: () = assert!(Zone::ALL.len() == <Zone as strum::EnumCount>::COUNT);
 
+/// CR 601.2a + CR 707.13 + CR 400.11: where a spell was cast from — a zone, or from outside
+/// the game. "Outside the game is not a zone" (CR 400.11), so a copy created outside the
+/// game (Garth One-Eye, CR 707.13) is cast from NO zone: it satisfies "not from your hand"
+/// and fails "from exile". An unknown origin is modelled as `Option<CastProvenance>::None`,
+/// a distinct third state that satisfies neither polarity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CastProvenance {
+    /// Cast from this zone.
+    Zone(Zone),
+    /// CR 707.13 + CR 400.11: cast from outside the game.
+    OutsideGame,
+}
+
+impl CastProvenance {
+    /// CR 601.2a + CR 707.13 + CR 400.11: "cast from [zone]" holds only for a cast that
+    /// started in that zone; a cast from outside the game started in no zone.
+    pub fn is_from(self, zone: Zone) -> bool {
+        matches!(self, Self::Zone(origin) if origin == zone)
+    }
+
+    /// CR 601.2a + CR 707.13 + CR 400.11: "cast from anywhere other than [zone]" — the
+    /// negation of [`Self::is_from`], so a cast from outside the game (not a zone,
+    /// CR 400.11) satisfies it.
+    pub fn is_not_from(self, zone: Zone) -> bool {
+        !self.is_from(zone)
+    }
+}
+
 impl Zone {
     /// CR 400.1: every game zone, in declaration order. Guarded against drift by a
     /// compile-time count assertion against `strum::EnumCount`.
@@ -291,6 +319,19 @@ mod tests {
         let zone = Zone::Battlefield;
         let json = serde_json::to_value(zone).unwrap();
         assert_eq!(json, "Battlefield");
+    }
+
+    #[test]
+    fn cast_provenance_outside_game_is_from_no_zone() {
+        // CR 400.11: outside the game is not a zone.
+        for zone in Zone::ALL {
+            assert!(!CastProvenance::OutsideGame.is_from(zone));
+            assert!(CastProvenance::OutsideGame.is_not_from(zone));
+            assert!(CastProvenance::Zone(zone).is_from(zone));
+            assert!(!CastProvenance::Zone(zone).is_not_from(zone));
+        }
+        assert!(CastProvenance::Zone(Zone::Exile).is_not_from(Zone::Hand));
+        assert!(!CastProvenance::Zone(Zone::Exile).is_from(Zone::Hand));
     }
 
     #[test]

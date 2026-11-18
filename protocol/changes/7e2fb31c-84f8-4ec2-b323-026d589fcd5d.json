@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Persist the Dig silent-remainder policy (DigChoice.rest_remainder, BatchCompletion::RevealRestPile.rest_remainder) so a peer that omits the field cannot apply the graveyard-routing default to unkept looked-at cards"
+}

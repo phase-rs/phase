@@ -10,6 +10,21 @@ use super::zones::Zone;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameLogEntry {
     pub seq: u32,
+    /// The game of the match this entry was logged in
+    /// (`match_flow::game_on_board`), numbered as `GameState::game_number`.
+    ///
+    /// The next game of a best-of-three replaces the game in place while a
+    /// client's log runs on across it, and turn numbers restart with every
+    /// game, so this, not the turn or the text, tells one game's entries from
+    /// another's. The first game's entries leave it off the wire, so a single
+    /// game and a match's first game serialize as they did before the field;
+    /// an entry without it (one of those, a save that predates the field, or
+    /// one the client writes itself) reads as the first game's.
+    #[serde(
+        default = "super::game_state::default_game_number",
+        skip_serializing_if = "super::game_state::is_first_game"
+    )]
+    pub game_number: u8,
     pub turn: u32,
     pub phase: Phase,
     pub category: LogCategory,

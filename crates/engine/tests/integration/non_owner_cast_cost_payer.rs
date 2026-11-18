@@ -181,7 +181,7 @@ impl Board {
             let action = match self.runner.state().waiting_for {
                 WaitingFor::OptionalCostChoice { .. } => {
                     offered = true;
-                    GameAction::DecideOptionalCost { pay: true }
+                    GameAction::DecideOptionalCost { index: 0 }
                 }
                 WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                     target: Some(self.target.clone()),

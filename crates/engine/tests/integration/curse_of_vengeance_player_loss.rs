@@ -89,7 +89,7 @@ fn live_attached_to(
 fn player_lost_emitted(events: &[GameEvent], player: PlayerId) -> bool {
     events
         .iter()
-        .any(|e| matches!(e, GameEvent::PlayerLost { player_id } if *player_id == player))
+        .any(|e| matches!(e, GameEvent::PlayerLost { player_id, .. } if *player_id == player))
 }
 
 /// Stage `count` spite counters on `id`.

@@ -723,6 +723,7 @@ mod tests {
             PlayerId(0),
         )));
         state.push_optional_effect_frame(engine::types::OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(sacrifice),
             trigger_event: None,
             trigger_events: Vec::new(),
