@@ -967,6 +967,20 @@ fn childhood_barn_single_blinked_pick_lets_the_whole_ability_do_nothing() {
         runner.state().objects[&pick].is_phased_in(),
         "the blinked pick is phased in"
     );
+    assert!(
+        runner.state().transient_continuous_effects.is_empty(),
+        "no can't-phase-in rider is installed, got {:?}",
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .map(|effect| effect.affected.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !runner.state().players[P1.0 as usize].is_phased_out(),
+        "the empty population never falls back to the player anchor"
+    );
     // No tappedness assertion here on purpose: this fixture copies only the
     // plane's triggers and statics, not its "Creatures enter tapped"
     // `ReplacementDefinition`, so the blinked object returns untapped whether or
