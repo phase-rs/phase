@@ -118,7 +118,6 @@ function PhaseStopSheet({ onClose }: { onClose: () => void }) {
       title={t("phaseStop.sheetTitle")}
       subtitle={t("phaseStop.sheetSubtitle")}
       size="sm"
-      scrollable
       onClose={onClose}
     >
       <ul className="flex flex-col px-2 py-2">

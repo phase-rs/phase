@@ -161,7 +161,6 @@ export function ModeChoiceModal() {
       title={chooseLabel}
       subtitle={t("modeChoice.subtitle")}
       size="md"
-      scrollable
       footer={footer}
       previewObjectId={sourceObjectId}
     >

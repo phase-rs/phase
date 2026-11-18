@@ -96,7 +96,6 @@ export function CostReductionOrderModal() {
       title={t("costReductionOrder.title")}
       subtitle={t("costReductionOrder.subtitle")}
       size="md"
-      scrollable
       footer={
         <div className="flex w-full items-center justify-between gap-3">
           <button
