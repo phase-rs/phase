@@ -28,6 +28,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
@@ -1300,6 +1301,153 @@ fn vernal_bloom_pays_the_controller_of_a_stolen_forest() {
     let pool = |p: PlayerId| runner.state().players[p.0 as usize].mana_pool.total();
     assert_eq!(pool(P0), 2, "P0 tapped it: {{G}} plus the additional {{G}}");
     assert_eq!(pool(P1), 0);
+}
+
+const TINDER_FARM: &str =
+    "This land enters tapped.\n{T}: Add {G}.\n{T}, Sacrifice this land: Add {R}{W}.";
+const YAVIMAYA: &str = "Each land is a Forest in addition to its other land types.";
+
+/// Issue #9690: A "whenever a Forest is tapped for mana" trigger must fire
+/// when the Forest leaves the battlefield as part of the mana ability's own
+/// cost (CR 603.10a, CR 608.2h: LKI). With Yavimaya, Cradle of Growth making
+/// all lands Forests and Vernal Bloom on the battlefield, activating Tinder
+/// Farm's "{T}, Sacrifice this land: Add {R}{W}." must add {R}{W} plus the
+/// additional {G} from Vernal Bloom, giving {R}{W}{G}.
+#[test]
+fn vernal_bloom_triggers_on_forest_sacrificed_as_part_of_mana_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Vernal Bloom", VERNAL_BLOOM);
+    scenario.add_land_from_oracle(P0, "Yavimaya, Cradle of Growth", YAVIMAYA);
+    let tinder_farm = scenario
+        .add_land_from_oracle(P0, "Tinder Farm", TINDER_FARM)
+        .id();
+    let mut runner = scenario.build();
+    // Untap Tinder Farm (it entered tapped per oracle text).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tinder_farm)
+        .unwrap()
+        .tapped = false;
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    // Find the ability with cost "{T}, Sacrifice this land"
+    let sac_ability_idx = runner.state().objects[&tinder_farm]
+        .abilities
+        .iter()
+        .position(|a| {
+            matches!(
+                &a.cost,
+                Some(engine::types::ability::AbilityCost::Composite { costs })
+                    if costs.iter().any(|c| matches!(c, engine::types::ability::AbilityCost::Sacrifice { .. }))
+            )
+        })
+        .expect("Tinder Farm sacrifice mana ability");
+
+    runner.activate(tinder_farm, sac_ability_idx).resolve();
+
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(
+        pool.count_color(ManaType::Red),
+        1,
+        "Tinder Farm contributed {{R}}"
+    );
+    assert_eq!(
+        pool.count_color(ManaType::White),
+        1,
+        "Tinder Farm contributed {{W}}"
+    );
+    assert_eq!(
+        pool.count_color(ManaType::Green),
+        1,
+        "Vernal Bloom contributed additional {{G}}"
+    );
+    assert_eq!(pool.total(), 3, "Total mana should be {{R}}{{W}}{{G}}");
+    assert_eq!(
+        runner.state().objects[&tinder_farm].zone,
+        Zone::Graveyard,
+        "Tinder Farm was sacrificed to the graveyard"
+    );
+}
+
+/// Issue #9690: Stolen land edge: P0 controls Yavimaya and Vernal Bloom,
+/// steals P1's Tinder Farm, and activates "{T}, Sacrifice this land: Add {R}{W}."
+/// P0 receives {R}{W}{G}, P1 receives nothing, and Tinder Farm ends in P1's graveyard.
+#[test]
+fn vernal_bloom_triggers_on_stolen_forest_sacrificed_as_part_of_mana_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Vernal Bloom", VERNAL_BLOOM);
+    scenario.add_land_from_oracle(P0, "Yavimaya, Cradle of Growth", YAVIMAYA);
+    let tinder_farm = scenario
+        .add_land_from_oracle(P1, "Tinder Farm", TINDER_FARM)
+        .id();
+    let steal_land = free_spell(
+        &mut scenario,
+        P0,
+        "Steal Land",
+        false,
+        "Gain control of target land until end of turn.",
+    );
+    let mut runner = scenario.build();
+    // Untap Tinder Farm.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tinder_farm)
+        .unwrap()
+        .tapped = false;
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    runner.cast(steal_land).target_object(tinder_farm).resolve();
+    assert_eq!(
+        runner.state().objects[&tinder_farm].controller,
+        P0,
+        "reach guard: P0 controls the stolen Tinder Farm"
+    );
+
+    let sac_ability_idx = runner.state().objects[&tinder_farm]
+        .abilities
+        .iter()
+        .position(|a| {
+            matches!(
+                &a.cost,
+                Some(engine::types::ability::AbilityCost::Composite { costs })
+                    if costs.iter().any(|c| matches!(c, engine::types::ability::AbilityCost::Sacrifice { .. }))
+            )
+        })
+        .expect("Tinder Farm sacrifice mana ability");
+
+    runner.activate(tinder_farm, sac_ability_idx).resolve();
+
+    let p0_pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(p0_pool.count_color(ManaType::Red), 1, "P0 received {{R}}");
+    assert_eq!(p0_pool.count_color(ManaType::White), 1, "P0 received {{W}}");
+    assert_eq!(
+        p0_pool.count_color(ManaType::Green),
+        1,
+        "P0 received additional {{G}} from Vernal Bloom"
+    );
+    assert_eq!(
+        p0_pool.total(),
+        3,
+        "P0 total mana should be {{R}}{{W}}{{G}}"
+    );
+
+    let p1_pool = &runner.state().players[P1.0 as usize].mana_pool;
+    assert_eq!(p1_pool.total(), 0, "P1 received no mana");
+
+    assert_eq!(
+        runner.state().objects[&tinder_farm].zone,
+        Zone::Graveyard,
+        "Tinder Farm was sacrificed to the graveyard"
+    );
+    assert_eq!(
+        runner.state().objects[&tinder_farm].owner,
+        P1,
+        "Tinder Farm is in owner P1's graveyard"
+    );
 }
 
 const FORSAKEN_WASTES: &str = "Players can't gain life.\nAt the beginning of each player's upkeep, that player loses 1 life.\nWhenever this enchantment becomes the target of a spell, that spell's controller loses 5 life.";

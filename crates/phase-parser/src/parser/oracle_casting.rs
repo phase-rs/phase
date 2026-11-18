@@ -183,7 +183,17 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         // Further split fragments on cost-separating commas (e.g., "sacrifice a creature, discard a card")
         // EXEMPTION 2 from sacrifice_filter_lost_a_restriction: a comma followed by a cost verb
         // opens a new cost clause, not a filter modifier.
-        let cost_verbs = ["discard", "pay", "sacrifice", "exile", "reveal", "mill", "tap", "untap", "waterbend"];
+        let cost_verbs = [
+            "discard",
+            "pay",
+            "sacrifice",
+            "exile",
+            "reveal",
+            "mill",
+            "tap",
+            "untap",
+            "waterbend",
+        ];
         let mut all_fragments_lower = Vec::new();
         let mut all_fragments_raw = Vec::new();
         for (fragment_lower, fragment_raw) in fragments_lower.into_iter().zip(fragments_raw) {
@@ -197,7 +207,9 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
                 // Check if the text after the comma starts with a cost verb
                 let after_comma = &fragment_lower[absolute_pos + ", ".len()..];
                 let after_comma_trimmed = after_comma.trim_start();
-                let starts_with_cost_verb = cost_verbs.iter().any(|verb| after_comma_trimmed.starts_with(verb));
+                let starts_with_cost_verb = cost_verbs
+                    .iter()
+                    .any(|verb| after_comma_trimmed.starts_with(verb));
                 if starts_with_cost_verb {
                     // This comma separates costs
                     sub_fragments_lower.push(&fragment_lower[sub_last_end..absolute_pos]);
@@ -3372,11 +3384,24 @@ Trample";
             Some(AdditionalCost::Choice(costs)) => {
                 assert_eq!(costs.len(), 3, "expected 3 choices, got {:?}", costs);
                 // First: sacrifice a creature
-                assert!(matches!(&costs[0], AbilityCost::Sacrifice(sac) if sac.requirement.fixed_count() == Some(1)));
+                assert!(
+                    matches!(&costs[0], AbilityCost::Sacrifice(sac) if sac.requirement.fixed_count() == Some(1))
+                );
                 // Second: discard a card
-                assert!(matches!(&costs[1], AbilityCost::Discard { count: QuantityExpr::Fixed { value: 1 }, .. }));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
                 // Third: pay 4 life
-                assert!(matches!(&costs[2], AbilityCost::PayLife { amount: QuantityExpr::Fixed { value: 4 } }));
+                assert!(matches!(
+                    &costs[2],
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 4 }
+                    }
+                ));
             }
             other => panic!("Expected Choice with 3 costs, got {other:?}"),
         }

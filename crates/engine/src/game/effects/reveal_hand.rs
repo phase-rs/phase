@@ -241,10 +241,15 @@ pub fn resolve(
     // RevealChoice. Publish the eligible cards as the chain's tracked set so
     // ChooseFromZone reads them, and skip the redundant RevealChoice prompt.
     // CR 701.20a: the reveal remains public until the effect completes.
-    let has_legacy_choose_from_zone = ability
-        .sub_ability
-        .as_ref()
-        .is_some_and(|sub| matches!(&sub.effect, Effect::ChooseFromZone { candidate_source: ZoneChoiceCandidateSource::Legacy, .. }));
+    let has_legacy_choose_from_zone = ability.sub_ability.as_ref().is_some_and(|sub| {
+        matches!(
+            &sub.effect,
+            Effect::ChooseFromZone {
+                candidate_source: ZoneChoiceCandidateSource::Legacy,
+                ..
+            }
+        )
+    });
     if needs_reveal_choice && !choice_optional && is_reveal && has_legacy_choose_from_zone {
         super::publish_reveal_result(state, eligible.clone());
         events.push(GameEvent::EffectResolved {

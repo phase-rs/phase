@@ -153,15 +153,29 @@ fn selected_optional_life_branch(
                 | AdditionalCost::Required(_) => unreachable!("matched Optional above"),
             },
         )),
-        (AdditionalCost::Choice(costs), true) if costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })) => {
-            let preferred = costs.iter().find(|c| matches!(c, AbilityCost::PayLife { .. })).unwrap();
+        (AdditionalCost::Choice(costs), true)
+            if costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::PayLife { .. })) =>
+        {
+            let preferred = costs
+                .iter()
+                .find(|c| matches!(c, AbilityCost::PayLife { .. }))
+                .unwrap();
             Some((
                 OptionalAdditionalCostBranch::ChoicePreferred,
                 preferred.clone(),
             ))
         }
-        (AdditionalCost::Choice(costs), false) if costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })) => {
-            let fallback = costs.iter().find(|c| matches!(c, AbilityCost::PayLife { .. })).unwrap();
+        (AdditionalCost::Choice(costs), false)
+            if costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::PayLife { .. })) =>
+        {
+            let fallback = costs
+                .iter()
+                .find(|c| matches!(c, AbilityCost::PayLife { .. }))
+                .unwrap();
             Some((
                 OptionalAdditionalCostBranch::ChoiceFallback,
                 fallback.clone(),
@@ -707,7 +721,10 @@ mod tests {
         )
         .is_none());
         assert!(matches!(
-            selected_optional_life_branch(&AdditionalCost::Choice(vec![life.clone(), mana.clone()]), true),
+            selected_optional_life_branch(
+                &AdditionalCost::Choice(vec![life.clone(), mana.clone()]),
+                true
+            ),
             Some((
                 OptionalAdditionalCostBranch::ChoicePreferred,
                 AbilityCost::PayLife { .. }
