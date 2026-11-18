@@ -7,9 +7,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -254,4 +254,93 @@ fn a_copy_of_the_creator_makes_spawns_with_the_ability_its_effect_defines() {
         assert_ability_defined_by_the_effect(state, *token);
     }
     sacrifice_for_colorless(&mut runner, made[0]);
+}
+
+const BROOD_BIRTHING: &str = "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, create one of those tokens.";
+
+/// P0 with `casts` copies of Brood Birthing (verbatim Oracle, {1}{G}) and the mana for them.
+fn brood_board(casts: usize) -> (GameRunner, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let broods: Vec<ObjectId> = (0..casts)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Brood Birthing", false, BROOD_BIRTHING)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 1,
+                })
+                .id()
+        })
+        .collect();
+    let mut pool = mana(broods[0], ManaType::Green, casts);
+    pool.extend(mana(broods[0], ManaType::Colorless, casts));
+    scenario.with_mana_pool(P0, pool);
+    (scenario.build(), broods)
+}
+
+/// CR 111.3: every Spawn Brood Birthing made holds only mana abilities, and the
+/// resolution finished at an empty-stack priority.
+fn assert_brood_spawns(runner: &GameRunner, expected: usize) -> Vec<ObjectId> {
+    let state = runner.state();
+    assert!(state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    let made = spawns(state);
+    assert_eq!(made.len(), expected);
+    for token in &made {
+        let abilities = &state.objects[token].abilities;
+        assert!(
+            !abilities.is_empty() && abilities.iter().all(is_mana_ability),
+            "{abilities:?}"
+        );
+    }
+    made
+}
+
+/// CR 608.2c: Brood Birthing with no Spawn takes its Otherwise branch: one Spawn
+/// with "Sacrifice this token: Add {C}."
+#[test]
+fn brood_birthing_without_a_spawn_creates_one() {
+    let (mut runner, broods) = brood_board(1);
+    runner.cast(broods[0]).resolve();
+    let made = assert_brood_spawns(&runner, 1);
+    sacrifice_for_colorless(&mut runner, made[0]);
+}
+
+/// CR 608.2c: with a Spawn on the battlefield, Brood Birthing creates three more.
+#[test]
+fn brood_birthing_with_a_spawn_creates_three() {
+    let (mut runner, broods) = brood_board(2);
+    runner.cast(broods[0]).resolve();
+    assert_brood_spawns(&runner, 1);
+    runner.cast(broods[1]).resolve();
+    let made = assert_brood_spawns(&runner, 4);
+    sacrifice_for_colorless(&mut runner, made[3]);
+}
+
+/// CR 608.2c: the condition is read as Brood Birthing resolves. Sacrificing the
+/// only Spawn while the second copy is on the stack sends it to the Otherwise
+/// branch: one new Spawn, not three.
+#[test]
+fn brood_birthing_rechecks_the_spawn_on_resolution() {
+    let (mut runner, broods) = brood_board(2);
+    runner.cast(broods[0]).resolve();
+    let first = assert_brood_spawns(&runner, 1)[0];
+    let mut commit = runner.cast(broods[1]).commit();
+    assert_eq!(
+        commit.state().stack.len(),
+        1,
+        "Brood Birthing is on the stack"
+    );
+    assert!(commit.state().battlefield.contains(&first));
+    commit
+        .act(GameAction::ActivateAbility {
+            source_id: first,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("sacrifice the Spawn for mana");
+    assert!(!commit.state().battlefield.contains(&first));
+    commit.resolve();
+    let made = assert_brood_spawns(&runner, 1);
+    assert_ne!(made[0], first);
 }

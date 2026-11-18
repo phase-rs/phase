@@ -104588,3 +104588,28 @@ fn arcane_artisan_exile_from_hand_keeps_scoped_owner() {
         controller: ControllerRef::ScopedPlayer
     }));
 }
+
+/// CR 608.2c: "Otherwise, create one of those tokens" (Brood Birthing) names the
+/// tokens of the instruction it replaces; the else branch clones that token
+/// with count 1 through the shared "of those tokens" anaphor authority.
+#[test]
+fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
+    let parsed = parse_oracle_text(
+        "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, create one of those tokens.",
+        "Brood Birthing",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let otherwise = parsed.abilities[0]
+        .else_ability
+        .as_deref()
+        .expect("reach guard: the Otherwise branch parsed");
+    assert!(
+        matches!(&*otherwise.effect, Effect::Token { name, power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(1), count: QuantityExpr::Fixed { value: 1 }, .. }
+            if name == "Eldrazi Spawn"),
+        "{:?}",
+        otherwise.effect
+    );
+}
