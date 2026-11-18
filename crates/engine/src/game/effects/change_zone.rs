@@ -1187,15 +1187,18 @@ fn member_library_placement(
 /// CR 603.2c + CR 607.2a: Detect the Detention Sphere pattern — a ChangeZone to
 /// Exile whose chained sub_ability is a ChangeZoneAll to Exile targeting
 /// permanents with `FilterProp::SameNameAsParentTarget`.
+/// Only coalesce when both parent and sub are battlefield-coordinated moves:
+/// the parent must be a typed filter with no explicit non-battlefield zones.
 pub(crate) fn same_name_mass_exile_sub(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
     let sub = ability.sub_ability.as_deref()?;
-    let is_parent_exile = matches!(
-        &ability.effect,
+    let parent_target = match &ability.effect {
         Effect::ChangeZone {
             destination: Zone::Exile,
+            target,
             ..
-        }
-    );
+        } => target,
+        _ => return None,
+    };
     let is_sub_same_name_exile = matches!(
         &sub.effect,
         Effect::ChangeZoneAll {
@@ -1207,7 +1210,19 @@ pub(crate) fn same_name_mass_exile_sub(ability: &ResolvedAbility) -> Option<&Res
             TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
         )
     );
-    if is_parent_exile && is_sub_same_name_exile {
+    if !is_sub_same_name_exile {
+        return None;
+    }
+    // Restrict to compatible coordinated moves: parent must be a typed filter
+    // with no explicit non-battlefield zones (i.e., battlefield-only).
+    // This rejects multi-zone chains like Deadly Cover-Up's graveyard + hand/library.
+    let parent_is_battlefield_coordinated = matches!(
+        parent_target,
+        TargetFilter::Typed(tf) if tf.properties.iter().all(|p| {
+            !matches!(p, FilterProp::InAnyZone { .. } | FilterProp::InZone { .. })
+        })
+    );
+    if parent_is_battlefield_coordinated {
         Some(sub)
     } else {
         None
@@ -1924,6 +1939,9 @@ pub fn resolve(
     // with its same-name matches as one population through this logical zone-change
     // group path.
     let mut move_objects = targeted_objects.clone();
+    // Store the absorbed ChangeZoneAll's trailing sub_ability chain to schedule
+    // as a continuation after this resolution completes.
+    let mut absorbed_sub_chain = None;
     if let Some(sub) = same_name_mass_exile_sub(ability) {
         if let Effect::ChangeZoneAll {
             origin: sub_origin,
@@ -1952,6 +1970,8 @@ pub fn resolve(
                 .collect();
             matches.sort();
             move_objects.extend(matches);
+            // Preserve the absorbed node's sub_ability chain for continuation.
+            absorbed_sub_chain = sub.sub_ability.clone();
         }
     }
 
@@ -2190,6 +2210,14 @@ pub fn resolve(
         collector,
     )
     .expect("completed ChangeZone owns every terminal member outcome");
+
+    // CR 603.2c + CR 607.2a: If we absorbed a ChangeZoneAll with a trailing
+    // sub_ability chain (e.g., Legion's End's hand/graveyard exile), schedule
+    // that chain as a continuation so later instructions still execute.
+    if let Some(chain) = absorbed_sub_chain {
+        let pending = crate::types::game_state::PendingContinuation::new(chain, state);
+        state.park_ability_continuation(pending);
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

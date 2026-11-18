@@ -1510,6 +1510,18 @@ fn detention_sphere_exiles_renamed_source_if_it_matches_target_name() {
         sphere_incarnation,
         "renamed Sphere changed incarnation (was exiled by mass clause and returned by LTB)"
     );
+    // Both cards must be on the battlefield after the LTB trigger resolves.
+    // CR 603.2c + CR 607.2a: the mass exile and LTB return form a single logical event.
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Battlefield,
+        "victim returned to battlefield by LTB trigger"
+    );
+    assert_eq!(
+        runner.state().objects[&sphere].zone,
+        Zone::Battlefield,
+        "renamed Sphere returned to battlefield by LTB trigger"
+    );
     assert_eq!(
         runner.state().objects[&bystander].incarnation,
         bystander_incarnation,
