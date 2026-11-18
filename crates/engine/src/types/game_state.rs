@@ -11215,7 +11215,7 @@ pub enum PendingCostMoveResume {
         player: PlayerId,
         pending_effect: Box<ResolvedAbility>,
         resume: WardSacrificePaymentResume,
-        /// CR 608.2k + CR 603.7c: the Ward prompt's trigger-event snapshot,
+        /// CR 608.2k: the Ward prompt's trigger-event snapshot,
         /// carried across the pause so a shortfalling resume settles unpaid
         /// with the same "that spell" context the offer had.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -21818,7 +21818,7 @@ pub enum WaitingFor {
         /// reaches zero.
         #[serde(default)]
         min_total_power: Option<i32>,
-        /// CR 608.2k + CR 603.7c: the trigger event the Ward counter reads
+        /// CR 608.2k: the trigger event the Ward counter reads
         /// "that spell" / "that ability" from when the payment shortfalls and
         /// the Ward settles unpaid — snapshot at offer (the resolving trigger
         /// has left the stack by answer time, and the ambient event is gone
