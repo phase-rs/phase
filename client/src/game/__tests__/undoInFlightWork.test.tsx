@@ -6,6 +6,7 @@ import type {
   GameEvent,
   GameLogEntry,
   GameState,
+  InteractionSubmission,
   PersistedGameState,
   SubmitResult,
 } from "../../adapter/types";
@@ -21,6 +22,7 @@ import {
   abandonPendingDispatches,
   dispatchAction,
   dispatchAiActionProposal,
+  dispatchInteraction,
   isDispatchIdle,
   undoLastAction,
 } from "../dispatch";
@@ -67,6 +69,11 @@ const AI_PROPOSAL: AiActionProposal = {
   semanticOwner: AI_SEAT,
   actor: AI_SEAT,
   action: { type: "CastSpell", data: { object_id: 40, card_id: 7, targets: [] } },
+};
+/** An engine-authored prompt's answer, opaque to the client. */
+const INTERACTION: InteractionSubmission = {
+  interactionId: "interaction-1" as InteractionSubmission["interactionId"],
+  response: { type: "number", data: { value: 1 } },
 };
 /** Normalizes to an animation step, so the action that carries it waits out a real animation. */
 const LIFE_LOSS: GameEvent = { type: "LifeChanged", data: { player_id: HUMAN, amount: -3 } };
@@ -304,6 +311,75 @@ describe("work in flight when Undo is pressed", () => {
     await pass;
     expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the first time"]);
     expect(useGameStore.getState().gameState).toEqual(AFTER_FIRST_PASS);
+  });
+
+  it("refuses a pass made while the undo restores, even when the read after the restore fails", async () => {
+    const { adapter, applies, restoresSlowly } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+
+    const restore = restoresSlowly();
+    const undoing = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
+    const submitsBefore = adapter.submitAction.mock.calls.length;
+
+    // The player passes again while the restore runs, on the board being
+    // undone. Were it let through, the engine would apply it to the restored
+    // game, and the re-sync after the failed read below would show it with
+    // no line in the log and no checkpoint on the ring.
+    applies(AFTER_SECOND_PASS, SECOND_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore);
+
+    const read = adapter.getSnapshot.getMockImplementation()!;
+    adapter.getSnapshot.mockImplementationOnce(async () => {
+      await read();
+      throw new Error("snapshot failed");
+    });
+    restore.finish();
+    await undoing;
+
+    // The board, the log and the ring agree on the restored game.
+    expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
+    expect(loggedLines()).toEqual(EARLIER_LINES);
+    expect(useGameStore.getState().stateHistory).toEqual([]);
+
+    // Reach guard: once the undo is over, the same pass goes through.
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore + 1);
+    expect(useGameStore.getState().gameState).toEqual(AFTER_SECOND_PASS);
+    expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the second time"]);
+  });
+
+  it("refuses a store dispatch and an interaction made while the undo restores", async () => {
+    const { adapter, applies, restoresSlowly } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    const submitInteraction = vi.fn(async (): Promise<SubmitResult> => ({ events: [] }));
+    adapter.submitInteraction = submitInteraction;
+
+    const restore = restoresSlowly();
+    const undoing = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
+    const submitsBefore = adapter.submitAction.mock.calls.length;
+
+    // The Pass button, mana payment and most modals submit through the
+    // store's own dispatch; engine-authored prompts answer as interactions.
+    await expect(useGameStore.getState().dispatch({ type: "PassPriority" })).resolves.toEqual([]);
+    await expect(dispatchInteraction(INTERACTION, HUMAN)).resolves.toEqual({ status: "stale" });
+    expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore);
+    expect(submitInteraction).not.toHaveBeenCalled();
+
+    restore.finish();
+    await undoing;
+    expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
+
+    // Reach guard: once the undo is over, both go through.
+    applies(AFTER_FIRST_PASS, SECOND_PASS);
+    await useGameStore.getState().dispatch({ type: "PassPriority" });
+    await dispatchInteraction(INTERACTION, HUMAN);
+    expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore + 1);
+    expect(submitInteraction).toHaveBeenCalledOnce();
   });
 
   it("ignores a second Undo pressed while the first is restoring", async () => {

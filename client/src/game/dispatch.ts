@@ -886,8 +886,14 @@ async function dispatchActionInternal(
   automated = false,
 ): Promise<void> {
   if (!isBoundGameSessionCurrent(session)) return;
-  const { gameMode } = useGameStore.getState();
+  const { gameMode, pendingUndoId } = useGameStore.getState();
   if (gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return;
+  }
+  // An action chosen on the board an undo is taking back must not reach the
+  // engine, which may already hold the restored game (see `undoLastAction`).
+  if (pendingUndoId !== null) {
+    debugLog(`dispatch refused during an undo: ${action.type}`, "info");
     return;
   }
 
@@ -989,8 +995,13 @@ export async function dispatchInteraction(
   submission: InteractionSubmission,
   actor: number = getPlayerId(),
 ): Promise<{ status: "applied" | "stale" }> {
-  const { adapter, gameState, gameMode, gameSessionGeneration } = useGameStore.getState();
+  const { adapter, gameState, gameMode, gameSessionGeneration, pendingUndoId } = useGameStore.getState();
   if (!adapter || !gameState || gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return { status: "stale" };
+  }
+  // A response to a prompt on the board an undo is taking back (see `undoLastAction`).
+  if (pendingUndoId !== null) {
+    debugLog("interaction refused during an undo", "info");
     return { status: "stale" };
   }
 
@@ -1307,11 +1318,17 @@ let latestUndoId = 0;
  * rewound log, which the next LLM prompt is built from, and its checkpoint onto
  * the ring, where the next undo would redo it. Pressed while one of the
  * player's own undoable actions animates, the undo takes that action back too:
- * it never committed, and the restored checkpoint precedes it. The store's own
- * `dispatch` needs no fence: both engine transports answer in call order, so a
- * store dispatch begun before the press commits before the undo does, and the
- * undo's commit takes its log lines and checkpoint back. The AI controller
- * drops its decision while `pendingUndoId` is set.
+ * it never committed, and the restored checkpoint precedes it. A store
+ * `dispatch` begun before the press needs no fence: both engine transports
+ * answer in call order, so it commits before the undo does, and the undo's
+ * commit takes its log lines and checkpoint back.
+ *
+ * While `pendingUndoId` is set, nothing else reaches the engine: the store
+ * still shows the board being undone, so an action chosen on it could land on
+ * the restored game, and a failed read after the restore would then re-sync a
+ * board holding that action while dropping its log line and checkpoint. The
+ * pipeline, the store's `dispatch` and `dispatchInteraction` refuse every
+ * submit, and the AI controller drops its decision and starts none.
  *
  * Nothing is abandoned when there is nothing to undo, or during an undo, so
  * such a press leaves the work in flight alone. Nothing is rethrown: the Undo

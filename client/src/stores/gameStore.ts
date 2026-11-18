@@ -268,8 +268,9 @@ interface GameStoreState {
    * The undo in flight, from the moment `undoLastAction` begins it, before its
    * first await, until its board is committed or its failure handled; `null`
    * otherwise. Meanwhile the store still shows the state being undone while
-   * the engine may already hold the restored one, so the AI controller drops
-   * the decision under way and starts none. Transient: `reset` clears it.
+   * the engine may already hold the restored one, so no submit reaches the
+   * engine, and the AI controller drops the decision under way and starts
+   * none. Transient: `reset` clears it.
    */
   pendingUndoId: number | null;
   /** Debug rewind targets: trusted envelopes for the same reason. */
@@ -723,9 +724,16 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
-      const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
+      const { adapter, gameState, gameId, gameMode, gameSessionGeneration, pendingUndoId } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
+      }
+      // An action chosen on the board an undo is taking back must not reach
+      // the engine, which may already hold the restored game (see
+      // `undoLastAction` in `dispatch.ts`).
+      if (pendingUndoId !== null) {
+        console.info(`[undo] dispatch refused during an undo: ${submittedAction.type}`);
+        return [];
       }
 
       // Save current state for undo. Three conditions must hold:
