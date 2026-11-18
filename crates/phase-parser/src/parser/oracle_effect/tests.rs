@@ -54450,6 +54450,44 @@ fn detention_sphere_keeps_not_named_target_and_same_name_mass_exile() {
         .contains(&FilterProp::SameNameAsParentTarget));
 }
 
+/// CR 608.2c: The Motherlode, Excavator's reflexive trigger targets only
+/// "target nonbasic land defending player controls". A rejected target-list
+/// extension does not widen the destroy target to include creatures (issue #10125).
+#[test]
+fn the_motherlode_excavator_destroy_target_excludes_creatures() {
+    use crate::types::card_type::Supertype;
+    let parsed = crate::parser::parse_oracle_text(
+        "Whenever The Motherlode attacks, you may pay {E}{E}{E}{E}. When you do, destroy target nonbasic land defending player controls, and creatures that player controls without flying can't block this turn.",
+        "The Motherlode, Excavator",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let mut found_destroy = false;
+    for trig in &parsed.triggers {
+        let mut cur = trig.execute.as_deref();
+        while let Some(node) = cur {
+            if let Effect::Destroy { target, .. } = &*node.effect {
+                let TargetFilter::Typed(typed) = target else {
+                    panic!("expected Typed filter for destroy target, got {target:?}");
+                };
+                assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
+                assert_eq!(typed.controller, Some(ControllerRef::DefendingPlayer));
+                assert_eq!(
+                    typed.properties,
+                    vec![FilterProp::NotSupertype {
+                        value: Supertype::Basic,
+                    }],
+                    "destroy target must be only nonbasic land defending player controls, got {typed:?}"
+                );
+                found_destroy = true;
+            }
+            cur = node.sub_ability.as_deref();
+        }
+    }
+    assert!(found_destroy, "reflexive destroy ability must be present");
+}
+
 /// CR 201.2 + CR 115.1: a "target <type> not named <name>" suffix lowers to
 /// `Not(Named)` on the target filter, ending the name at the shared clause
 /// boundary and leaving trailing text ("from a graveyard") to the caller.

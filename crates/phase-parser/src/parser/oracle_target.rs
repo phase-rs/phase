@@ -1641,7 +1641,7 @@ pub fn parse_target_with_syntax<'a>(
             );
         }
         return (
-            scope_target_spell_phrase(combined, &lower[target_offset..type_phrase_end]),
+            scope_target_spell_phrase(filter, &lower[target_offset..type_phrase_end]),
             rest,
             syntax,
         );
