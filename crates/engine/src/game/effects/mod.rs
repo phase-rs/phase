@@ -15183,7 +15183,7 @@ fn resolve_effect_node(
                     retire_empty_replacement_frames(state, boundary);
                     Ok(result)
                 })?;
-            // CR 603.2c + CR 607.2a: Detention Sphere pattern — ChangeZone to Exile
+            // CR 603.2c + CR 608.2c: Detention Sphere pattern — ChangeZone to Exile
             // resolved the same-name mass exile continuation inline as one logical
             // event, so transfer ownership of the tail to avoid resolving it again.
             let tail = if change_zone::same_name_mass_exile_sub(ability).is_some() {

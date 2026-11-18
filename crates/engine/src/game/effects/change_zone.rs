@@ -1197,7 +1197,7 @@ fn battlefield_scoped_population(target: &TargetFilter) -> bool {
     )
 }
 
-/// CR 603.2c + CR 607.2a: Detect the coordinated same-name mass-exile conjunct —
+/// CR 603.2c + CR 608.2c: Detect the coordinated same-name mass-exile conjunct —
 /// a `ChangeZone` to Exile whose chained sub_ability is the same sentence's
 /// "and all other permanents with the same name as that permanent" mass exile
 /// (a `ChangeZoneAll` to Exile over `FilterProp::SameNameAsParentTarget`): the
@@ -1966,7 +1966,7 @@ pub fn resolve(
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
-    // CR 603.2c + CR 607.2a: Detention Sphere pattern — "exile target [X] and all
+    // CR 603.2c + CR 608.2c: Detention Sphere pattern — "exile target [X] and all
     // other permanents with the same name as that permanent". The targeted exile
     // and the same-name mass exile form a single logical event.
     // If this ChangeZone to Exile has a sub_ability that is a ChangeZoneAll to
@@ -2009,7 +2009,7 @@ pub fn resolve(
             // same resolution. Schedule it through the shared continuation authority:
             // the head's targets and chain context bind the conjunct's own anaphora
             // ("that player", "that name"). `drain_pending_continuation` resumes a
-            // pending change-zone iteration (CR 601.2h) BEFORE any parked
+            // pending change-zone iteration (CR 608.2c) BEFORE any parked
             // continuation, so parking here keeps the written order on both the
             // synchronous path and a mid-move paused group completion.
             if let Some(trailing) = sub.sub_ability.as_deref() {
@@ -2046,7 +2046,7 @@ pub fn resolve(
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
         state,
-        // CR 603.2c + CR 607.2a: the announcement covers the JOINT population —
+        // CR 603.2c + CR 608.2c: the announcement covers the JOINT population —
         // the chosen target and the absorbed same-name conjunct — so all of
         // their moves announce together before any member moves.
         &ZoneChangeAnnouncement::all(&move_objects, dest_zone),

@@ -162,7 +162,7 @@ fn legions_to_ashes_exiles_only_that_players_same_name_tokens() {
     );
 }
 
-/// CR 607.2a + CR 608.2c: Legion's End exiles the target and that
+/// CR 608.2c: Legion's End exiles the target and that
 /// player's same-name creatures; the caster's same-name creature is untouched.
 #[test]
 fn legions_end_spares_the_casters_same_name_creature() {
