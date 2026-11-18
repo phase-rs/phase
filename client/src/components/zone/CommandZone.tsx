@@ -256,8 +256,9 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
       }
     >
       {/* No-delay custom hover tooltip — the chip is too small to show "where
-          it came from" and "what it does" inline. */}
-      <GameplayTooltip>
+          it came from" and "what it does" inline. A tap on an activatable chip
+          activates it, so only an inert chip opens its tooltip on a tap. */}
+      <GameplayTooltip touch={isActivatable ? "ignore" : "toggle"}>
         <span className="font-semibold text-amber-200">
           {label}
           {group.sourceName ? ` — ${group.sourceName}` : ""}

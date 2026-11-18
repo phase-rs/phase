@@ -14,8 +14,9 @@ import { ActionButton } from "../ActionButton.tsx";
 // it appears (FocusScope only hands focus back to it when a dialog opened over
 // it closes). The likely path is the pointer: the browser sends `pointerenter`
 // to a button that appears under a pointer that has not moved, a phone's
-// pointer rests where its last tap was, and Resolve appears in the same slot
-// as the button the player taps to pass priority. A tap on Resolve also
+// browser keeps the mouse it emulates for touch where the last tap was, and
+// Resolve appears in the same slot as the button the player taps to pass
+// priority. A tap on Resolve also
 // focuses it, and that focus outlives the tap. These tests drive both paths
 // through the real Resolve button.
 

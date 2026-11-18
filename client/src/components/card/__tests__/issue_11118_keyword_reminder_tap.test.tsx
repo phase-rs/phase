@@ -68,8 +68,9 @@ function renderFlyingPreview() {
   };
 }
 
-// The events a browser sends for a finger tapping an element, in order: the
-// finger lifting fires `pointerleave`, and the focus and `click` come after it.
+// A subset, in order, of the events a browser sends for a finger tapping an
+// element: the finger lifting fires `pointerleave`, and the focus and `click`
+// come after it.
 function tap(element: HTMLElement) {
   fireEvent.pointerEnter(element, { pointerType: "touch" });
   fireEvent.pointerDown(element, { pointerType: "touch" });
@@ -112,7 +113,7 @@ describe("issue #11118: a tap on a keyword in the card preview shows its reminde
     expect(reminder).toBeVisible();
 
     tap(keyword);
-    expect(keyword).toBeInTheDocument();
+    expect(reminder).toBeInTheDocument();
     expect(reminder).not.toBeVisible();
   });
 
@@ -121,9 +122,11 @@ describe("issue #11118: a tap on a keyword in the card preview shows its reminde
     tap(keyword);
     expect(reminder).toBeVisible();
 
-    tap(elsewhere);
+    // Closed by the tap's `pointerdown`, before focus moves to the other control.
+    fireEvent.pointerDown(elsewhere, { pointerType: "touch" });
 
-    expect(keyword).toBeInTheDocument();
+    expect(keyword).toHaveFocus();
+    expect(reminder).toBeInTheDocument();
     expect(reminder).not.toBeVisible();
   });
 });

@@ -7,6 +7,9 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+/** What a touch tap on a tooltip's trigger does; see `GameplayTooltipProps.touch`. */
+export type TooltipTouch = "ignore" | "toggle";
+
 interface GameplayTooltipProps {
   id?: string;
   children: ReactNode;
@@ -20,8 +23,12 @@ interface GameplayTooltipProps {
    * - `"toggle"` is for a trigger that only explains something, such as a
    *   keyword's reminder text: a tap opens the tooltip, and the next tap, on
    *   the trigger or anywhere else, closes it.
+   *
+   * Only a finger's tap toggles. A pen is treated as a hovering pointer, as in
+   * every other hover check in the client, so a pen that cannot hover shows the
+   * tooltip only while it moves on the trigger.
    */
-  touch?: "ignore" | "toggle";
+  touch?: TooltipTouch;
 }
 
 /**
@@ -47,7 +54,11 @@ export function GameplayTooltip({
   const anchorRef = useRef<HTMLSpanElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<Element | null>(null);
+  // Hover and keyboard focus drive `visible`; a touch tap drives `tapOpen`, so
+  // neither can close or flip what the other opened.
   const [visible, setVisible] = useState(false);
+  const [tapOpen, setTapOpen] = useState(false);
+  const open = visible || tapOpen;
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
   // Open only when the player is pointing at the trigger or tabbing to it.
@@ -62,9 +73,6 @@ export function GameplayTooltip({
   // as it does for keyboard focus and not for the focus a tap or a click gives
   // a button. That focus outlives the gesture, so it would hold the tooltip
   // open after the finger lifts.
-  //
-  // A finger lifting also fires `pointerleave`. That ends a tap rather than
-  // moving off the trigger, so only a hovering pointer's leave closes it.
   useEffect(() => {
     const trigger = anchorRef.current?.closest<HTMLElement>(".group") ?? null;
     triggerRef.current = trigger;
@@ -77,52 +85,68 @@ export function GameplayTooltip({
         setVisible(true);
       }
     };
-    const hideOnLeave = (event: PointerEvent) => {
-      if (event.pointerType !== "touch") setVisible(false);
-    };
     const hide = () => setVisible(false);
     trigger.addEventListener("pointermove", showOnHover);
     trigger.addEventListener("focusin", showOnKeyboardFocus);
-    trigger.addEventListener("pointerleave", hideOnLeave);
+    trigger.addEventListener("pointerleave", hide);
     trigger.addEventListener("focusout", hide);
     return () => {
       trigger.removeEventListener("pointermove", showOnHover);
       trigger.removeEventListener("focusin", showOnKeyboardFocus);
-      trigger.removeEventListener("pointerleave", hideOnLeave);
+      trigger.removeEventListener("pointerleave", hide);
       trigger.removeEventListener("focusout", hide);
     };
   }, []);
 
   // A trigger that opts in with `touch="toggle"` opens on a touch tap and
-  // closes on the next tap, on the trigger or anywhere else.
+  // closes on the next tap on it. Focus leaving it closes it too.
   useEffect(() => {
     if (touch !== "toggle") return;
     const trigger = anchorRef.current?.closest<HTMLElement>(".group") ?? null;
     if (!trigger) return;
     // A tap's own `click` does not report its pointer type reliably across
-    // browsers, so the `pointerdown` that starts the tap records it.
+    // browsers, so the `pointerdown` that starts the tap records it. A touch
+    // that turns into a scroll ends in `pointercancel` with no `click`.
     let tapPointerType: string | null = null;
     const notePointerType = (event: PointerEvent) => {
       tapPointerType = event.pointerType;
     };
-    const toggleOnTap = () => {
-      if (tapPointerType === "touch") setVisible((isVisible) => !isVisible);
+    const forgetPointerType = () => {
       tapPointerType = null;
     };
-    const hideOnOutsidePointer = (event: PointerEvent) => {
-      if (event.target instanceof Node && trigger.contains(event.target)) return;
-      setVisible(false);
+    const toggleOnTap = () => {
+      if (tapPointerType === "touch") setTapOpen((isOpen) => !isOpen);
+      tapPointerType = null;
     };
+    const closeTap = () => setTapOpen(false);
     trigger.addEventListener("pointerdown", notePointerType);
+    trigger.addEventListener("pointercancel", forgetPointerType);
     trigger.addEventListener("click", toggleOnTap);
-    // Capture, so a tap on a control that stops propagation still closes it.
-    document.addEventListener("pointerdown", hideOnOutsidePointer, true);
+    trigger.addEventListener("focusout", closeTap);
     return () => {
       trigger.removeEventListener("pointerdown", notePointerType);
+      trigger.removeEventListener("pointercancel", forgetPointerType);
       trigger.removeEventListener("click", toggleOnTap);
-      document.removeEventListener("pointerdown", hideOnOutsidePointer, true);
+      trigger.removeEventListener("focusout", closeTap);
+      // A trigger that stops opting in (an emblem chip turning activatable)
+      // must not keep a tap's tooltip open.
+      setTapOpen(false);
     };
   }, [touch]);
+
+  // While a tap holds it open, a tap anywhere else closes it. The listener is
+  // on `document` in the capture phase, so a tap on a control that stops
+  // propagation still closes it.
+  useEffect(() => {
+    if (!tapOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const trigger = triggerRef.current;
+      if (event.target instanceof Node && trigger?.contains(event.target)) return;
+      setTapOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+  }, [tapOpen]);
 
   // Once visible, place the tooltip above the trigger with right edges aligned,
   // flipping below when there's no room above and clamping horizontally so it
@@ -130,7 +154,7 @@ export function GameplayTooltip({
   // when the numbers are unchanged so a changing `children` identity can't spin
   // a measure→setState→measure loop.
   useLayoutEffect(() => {
-    if (!visible) return;
+    if (!open) return;
     const trigger = triggerRef.current;
     const tip = tipRef.current;
     if (!trigger || !tip) return;
@@ -146,9 +170,9 @@ export function GameplayTooltip({
     setPos((prev) =>
       prev && prev.left === left && prev.top === top ? prev : { left, top },
     );
-  }, [visible, children]);
+  }, [open, children]);
 
-  const shown = visible && pos !== null;
+  const shown = open && pos !== null;
 
   return (
     <>

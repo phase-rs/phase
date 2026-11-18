@@ -42,8 +42,9 @@ function renderReminderTooltip() {
   };
 }
 
-// The events a browser sends for a finger tapping an element, in order: the
-// finger lifting fires `pointerleave`, and the focus and `click` come after it.
+// A subset, in order, of the events a browser sends for a finger tapping an
+// element: the finger lifting fires `pointerleave`, and the focus and `click`
+// come after it.
 function tap(element: HTMLElement) {
   fireEvent.pointerEnter(element, { pointerType: "touch" });
   fireEvent.pointerDown(element, { pointerType: "touch" });
@@ -188,6 +189,39 @@ describe("GameplayTooltip", () => {
       expect(tooltip).not.toBeVisible();
     });
 
+    it("closes when a tap lands on a control that stops the event from bubbling", () => {
+      const { trigger, elsewhere, tooltip } = renderReminderTooltip();
+      elsewhere.addEventListener("pointerdown", (event) => event.stopPropagation());
+      tap(trigger);
+      expect(tooltip).toBeVisible();
+
+      fireEvent.pointerDown(elsewhere, { pointerType: "touch" });
+
+      expect(tooltip).not.toBeVisible();
+    });
+
+    it("closes when focus leaves its trigger", () => {
+      const { trigger, elsewhere, tooltip } = renderReminderTooltip();
+      tap(trigger);
+      expect(tooltip).toBeVisible();
+
+      act(() => elsewhere.focus());
+
+      expect(tooltip).not.toBeVisible();
+    });
+
+    it("stays open when a mouse-typed leave follows the tap", () => {
+      // A phone's browser emulates a mouse at the last tap, and a layout change
+      // there can send that mouse's `pointerleave`; only hover is closed by it.
+      const { trigger, tooltip } = renderReminderTooltip();
+      tap(trigger);
+      expect(tooltip).toBeVisible();
+
+      fireEvent.pointerLeave(trigger, { pointerType: "mouse" });
+
+      expect(tooltip).toBeVisible();
+    });
+
     it("leaves a mouse click to hover", () => {
       const { trigger, tooltip } = renderReminderTooltip();
       fireEvent.pointerMove(trigger, { pointerType: "mouse" });
@@ -196,7 +230,30 @@ describe("GameplayTooltip", () => {
       fireEvent.pointerDown(trigger, { pointerType: "mouse" });
       fireEvent.pointerUp(trigger, { pointerType: "mouse" });
       fireEvent.click(trigger);
+      fireEvent.pointerLeave(trigger, { pointerType: "mouse" });
 
+      expect(tooltip).not.toBeVisible();
+    });
+
+    it("ignores a click that no touch started", () => {
+      const { trigger, tooltip } = renderReminderTooltip();
+      tap(trigger);
+      expect(tooltip).toBeVisible();
+
+      fireEvent.click(trigger);
+
+      expect(tooltip).toBeVisible();
+    });
+
+    it("ignores a touch that turns into a scroll", () => {
+      const { trigger, tooltip } = renderReminderTooltip();
+
+      fireEvent.pointerDown(trigger, { pointerType: "touch" });
+      fireEvent.pointerCancel(trigger, { pointerType: "touch" });
+      fireEvent.click(trigger);
+      expect(tooltip).not.toBeVisible();
+
+      tap(trigger);
       expect(tooltip).toBeVisible();
     });
   });

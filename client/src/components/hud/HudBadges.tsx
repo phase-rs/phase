@@ -6,7 +6,7 @@ import { HordeRulesPopover } from "./HordeRulesPopover.tsx";
 import { DungeonMapPopover } from "./DungeonMapPopover.tsx";
 import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
-import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
+import { GameplayTooltip, type TooltipTouch } from "../ui/GameplayTooltip.tsx";
 import type {
   DungeonRoomView,
   FamilyCollapseState,
@@ -191,7 +191,7 @@ export function DayNightBadge() {
   if (dayNight == null) return null;
   const isDay = dayNight === "Day";
   return (
-    <BadgeTip text={isDay ? t("badges.dayTooltip") : t("badges.nightTooltip")}>
+    <BadgeTip text={isDay ? t("badges.dayTooltip") : t("badges.nightTooltip")} touch="toggle">
       <span
         role="img"
         aria-label={isDay ? t("badges.day") : t("badges.night")}
@@ -552,12 +552,12 @@ const CONDITION_LABEL_KEY = {
  * escapes the badge's own rounded `overflow-hidden` clip. Newline-separated text
  * becomes stacked rows (native `title` line breaks have no inline-HTML analog).
  */
-function BadgeTip({ text, children }: { text: string; children: ReactNode }) {
+function BadgeTip({ text, touch, children }: { text: string; touch?: TooltipTouch; children: ReactNode }) {
   const lines = text.split("\n");
   return (
     <span className="group relative inline-flex">
       {children}
-      <GameplayTooltip>
+      <GameplayTooltip touch={touch}>
         {lines.length === 1
           ? lines[0]
           : lines.map((line, i) => (
