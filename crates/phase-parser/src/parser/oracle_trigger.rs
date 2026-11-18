@@ -13237,11 +13237,11 @@ fn parse_bare_leg_verb(input: &str) -> OracleResult<'_, SharedComplement> {
 }
 
 /// "while <state>" ending the second leg, in original case.
-fn extract_state_gate<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
+fn extract_state_gate<'a>(pair: TextPair<'a>) -> Option<&'a str> {
     let (gate_lower, _) = take_until::<_, _, OracleError<'_>>(" while ")
-        .parse(lower)
+        .parse(pair.lower)
         .ok()?;
-    Some(original[original.len() - gate_lower.len()..].trim())
+    pair.original_remainder(gate_lower).map(str::trim)
 }
 
 /// "with X" after the second leg's combat verb, in original case.
@@ -13268,7 +13268,9 @@ fn append_shared_complement_if_bare_event(
         .and_then(|(_, kind, _)| match kind {
             SharedComplement::Object => extract_shared_object(after_lower, second_event),
             SharedComplement::CombatAdjunct => extract_combat_adjunct(after_lower, second_event),
-            SharedComplement::StateGate => extract_state_gate(after_lower, second_event),
+            SharedComplement::StateGate => {
+                extract_state_gate(TextPair::new(second_event, after_lower))
+            }
         });
     match shared {
         Some(complement) => format!("{first} {complement}"),

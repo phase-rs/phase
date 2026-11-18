@@ -7,11 +7,14 @@
 //! leg looks back, so the gate reads the power Syr Vondam had on the battlefield
 //! (a lord's bonus and its +1/+1 counters), not its 2/2 card in the graveyard.
 
+use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{TargetRef, TriggerCondition};
+use engine::types::ability::{
+    Comparator, ObjectScope, QuantityExpr, QuantityRef, TargetRef, TriggerCondition,
+};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastingVariant, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -58,12 +61,16 @@ fn board(with_marshal: bool) -> Board {
         })
         .id();
     s.add_basic_land(P0, ManaColor::Green);
-    for _ in 0..5 {
+    // Travel Preparations ({1}{G}), its flashback ({1}{W}) and Wrath of God ({2}{W}{W}).
+    for _ in 0..7 {
         s.add_basic_land(P0, ManaColor::White);
     }
     let sol_ring = s.add_artifact_from_oracle(P1, "Sol Ring", SOL_RING).id();
+    let mut runner = s.build();
+    // CR 613: apply the Marshal's static before the power reach guard reads it.
+    flush_layers(runner.state_mut());
     Board {
-        runner: s.build(),
+        runner,
         syr,
         sol_ring,
         wrath,
@@ -95,11 +102,13 @@ fn wrath(b: &mut Board) -> DestroyTrigger {
                     .expect("order triggers");
             }
             WaitingFor::TriggerTargetSelection {
+                player,
                 description,
                 target_slots,
                 selection,
                 ..
             } => {
+                assert_eq!(player, P0, "Syr Vondam's controller chooses the target");
                 assert!(
                     description
                         .as_deref()
@@ -156,51 +165,69 @@ fn syr_vondam_power_gate_parses_on_both_legs() {
         })
         .collect();
     assert_eq!(gated.len(), 2, "dies leg and exile leg");
+    let power_gate = TriggerCondition::EventTime {
+        condition: Box::new(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        }),
+    };
     for t in gated {
-        assert!(
-            matches!(t.condition, Some(TriggerCondition::EventTime { .. })),
-            "CR 603.2: each leg keeps the power gate: {:?}",
-            t.condition
+        assert_eq!(
+            t.condition.as_ref(),
+            Some(&power_gate),
+            "CR 603.2: each leg keeps the power gate"
         );
     }
 }
 
-/// CR 603.2: a 2/2 Syr Vondam dying is below the gate; the destruction ability
-/// does not trigger and Sol Ring survives.
+/// CR 603.2 + CR 603.10a: the gate is "power is 4 or greater", read as Syr
+/// Vondam last existed on the battlefield. Its power there comes from Benalish
+/// Marshal's +1/+1 (the Marshal is destroyed with it) and Travel Preparations
+/// counters (cast, then flashed back); in the graveyard it is a 2/2 with no
+/// counters. The Marshal's death also triggers Syr Vondam's untargeted first
+/// ability; every targeting prompt is asserted to be the destruction ability's.
 #[test]
-fn syr_vondam_dies_below_four_power_does_not_destroy() {
-    let mut b = board(false);
-    let seen = wrath(&mut b);
-    assert_eq!(seen.prompts, 0, "no destruction trigger at 2 power");
-    assert_eq!(
-        b.runner.state().objects[&b.sol_ring].zone,
-        Zone::Battlefield
-    );
-}
-
-/// CR 603.10a hostile board: Syr Vondam is 4/4 only through Benalish Marshal's
-/// +1/+1 and one +1/+1 counter from Travel Preparations, and Wrath of God
-/// destroys the Marshal with it. In the graveyard it is a 2/2 with no counters;
-/// the look-back reads 4. (The Marshal's death also triggers Syr Vondam's
-/// untargeted first ability; the targeting prompt is asserted to be the
-/// destruction ability's own.)
-#[test]
-fn syr_vondam_dies_at_four_power_through_lord_and_counter_destroys() {
-    let mut b = board(true);
-    let (travel, syr) = (b.travel, b.syr);
-    b.runner.cast(travel).target_object(syr).resolve();
-    assert_eq!(
-        b.runner.state().objects[&syr].power,
-        Some(4),
-        "2 base + Marshal + one counter"
-    );
-
-    let seen = wrath(&mut b);
-    assert_eq!(seen.prompts, 1, "exactly one destruction trigger");
-    assert!(seen.offered_sol_ring, "Sol Ring is a legal target");
-    assert_eq!(
-        b.runner.state().objects[&b.sol_ring].zone,
-        Zone::Graveyard,
-        "the destruction trigger resolved against Sol Ring"
-    );
+fn syr_vondam_destroys_only_at_four_or_more_power() {
+    for (marshal, counters, power, destroys) in [
+        (false, 0, 2, false),
+        (true, 0, 3, false),
+        (true, 1, 4, true),
+        (true, 2, 5, true),
+    ] {
+        let mut b = board(marshal);
+        let (travel, syr) = (b.travel, b.syr);
+        if counters >= 1 {
+            b.runner.cast(travel).target_object(syr).resolve();
+        }
+        if counters == 2 {
+            b.runner
+                .cast(travel)
+                .casting_variant(CastingVariant::Flashback)
+                .target_object(syr)
+                .resolve();
+        }
+        assert_eq!(
+            b.runner.state().objects[&syr].power,
+            Some(power),
+            "reach guard: Syr Vondam's power"
+        );
+        let seen = wrath(&mut b);
+        assert_eq!(seen.prompts, usize::from(destroys), "{power} power");
+        assert_eq!(seen.offered_sol_ring, destroys, "{power} power");
+        let ring = if destroys {
+            Zone::Graveyard
+        } else {
+            Zone::Battlefield
+        };
+        assert_eq!(
+            b.runner.state().objects[&b.sol_ring].zone,
+            ring,
+            "{power} power"
+        );
+    }
 }
