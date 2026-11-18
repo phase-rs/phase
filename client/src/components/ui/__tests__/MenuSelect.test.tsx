@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MenuSelect } from "../MenuSelect";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const items = [
   { value: "Mono Red", label: "Mono Red" },
@@ -132,8 +135,6 @@ describe("MenuSelect", () => {
     expect(listbox.className).not.toContain("rounded-[8px]");
     // The sheet's backdrop is a second button that closes it.
     expect(screen.getAllByRole("button", { name: "All types" })).toHaveLength(2);
-
-    vi.unstubAllGlobals();
   });
 
   it("uses an anchored dropdown when menuLayout is dropdown, even on mobile", () => {
@@ -157,11 +158,9 @@ describe("MenuSelect", () => {
     const listbox = screen.getByRole("listbox");
     expect(listbox).toBeInTheDocument();
     expect(listbox.className).toContain("rounded-[8px]");
-    expect(listbox.className).not.toContain("rounded-t-2xl");
+    expect(listbox.className).not.toContain("inset-x-2");
     expect(screen.queryByRole("button", { name: "All types" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "All types" })).toHaveLength(1);
-
-    vi.unstubAllGlobals();
   });
 
   it("anchors the dropdown to the trigger box when opened", () => {
