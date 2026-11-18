@@ -21,6 +21,38 @@ function renderTooltip() {
   };
 }
 
+// Shaped like CardPreview's keyword reminder: a focusable span described by
+// its tooltip, beside another control a tap can land on.
+function renderReminderTooltip() {
+  render(
+    <div>
+      <span tabIndex={0} className="group relative" aria-describedby="flying-reminder">
+        Flying
+        <GameplayTooltip id="flying-reminder" touch="toggle">
+          This creature can't be blocked except by creatures with flying or reach.
+        </GameplayTooltip>
+      </span>
+      <button type="button">Elsewhere</button>
+    </div>,
+  );
+  return {
+    trigger: screen.getByText("Flying"),
+    elsewhere: screen.getByRole("button", { name: "Elsewhere" }),
+    tooltip: screen.getByRole("tooltip", { hidden: true }),
+  };
+}
+
+// The events a browser sends for a finger tapping an element, in order: the
+// finger lifting fires `pointerleave`, and the focus and `click` come after it.
+function tap(element: HTMLElement) {
+  fireEvent.pointerEnter(element, { pointerType: "touch" });
+  fireEvent.pointerDown(element, { pointerType: "touch" });
+  fireEvent.pointerUp(element, { pointerType: "touch" });
+  fireEvent.pointerLeave(element, { pointerType: "touch" });
+  act(() => element.focus());
+  fireEvent.click(element);
+}
+
 describe("GameplayTooltip", () => {
   beforeEach(() => {
     focusVisible = false;
@@ -130,5 +162,42 @@ describe("GameplayTooltip", () => {
     act(() => trigger.blur());
 
     expect(tooltip).not.toBeVisible();
+  });
+
+  describe('with touch="toggle"', () => {
+    it("opens on a touch tap and closes on the next tap on its trigger", () => {
+      const { trigger, tooltip } = renderReminderTooltip();
+
+      tap(trigger);
+      expect(trigger).toHaveFocus();
+      expect(tooltip).toBeVisible();
+
+      tap(trigger);
+      expect(tooltip).not.toBeVisible();
+    });
+
+    it("closes when a tap lands outside its trigger", () => {
+      const { trigger, elsewhere, tooltip } = renderReminderTooltip();
+      tap(trigger);
+      expect(tooltip).toBeVisible();
+
+      // Closed by the tap's `pointerdown`, before focus moves to the other control.
+      fireEvent.pointerDown(elsewhere, { pointerType: "touch" });
+
+      expect(trigger).toHaveFocus();
+      expect(tooltip).not.toBeVisible();
+    });
+
+    it("leaves a mouse click to hover", () => {
+      const { trigger, tooltip } = renderReminderTooltip();
+      fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+      expect(tooltip).toBeVisible();
+
+      fireEvent.pointerDown(trigger, { pointerType: "mouse" });
+      fireEvent.pointerUp(trigger, { pointerType: "mouse" });
+      fireEvent.click(trigger);
+
+      expect(tooltip).toBeVisible();
+    });
   });
 });

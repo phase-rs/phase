@@ -11,6 +11,17 @@ interface GameplayTooltipProps {
   id?: string;
   children: ReactNode;
   className?: string;
+  /**
+   * What a touch tap on the trigger does. Touch has no hover, and the focus a
+   * tap gives does not open the tooltip, so this is a touch player's only way
+   * to read it.
+   * - `"ignore"` (the default) is for a trigger whose tap acts, such as
+   *   Resolve: the tap does its job and shows nothing.
+   * - `"toggle"` is for a trigger that only explains something, such as a
+   *   keyword's reminder text: a tap opens the tooltip, and the next tap, on
+   *   the trigger or anywhere else, closes it.
+   */
+  touch?: "ignore" | "toggle";
 }
 
 /**
@@ -18,10 +29,11 @@ interface GameplayTooltipProps {
  * transformed / overflow-clipped stacking contexts of its trigger — most
  * importantly a battlefield card's rotating `motion.div`, which otherwise traps
  * the tooltip beneath the `z-[100]` hover card preview no matter how high its
- * own z-index. Visibility follows hover over, and keyboard focus within, the
- * closest `.group` ancestor (the same trigger the previous CSS `group-hover`
- * implementation used, so call sites need no changes), and the fixed position
- * is measured from that trigger and clamped into the viewport with an 8px
+ * own z-index. The trigger is the closest `.group` ancestor (the same trigger
+ * the previous CSS `group-hover` implementation used, so call sites need no
+ * changes). Hover over it and keyboard focus within it open the tooltip, and so
+ * does a touch tap where `touch="toggle"` opts in. The fixed position is
+ * measured from that trigger and clamped into the viewport with an 8px
  * margin. Non-positional `className` overrides (width, padding, text) still
  * apply; positional ones are superseded by the automatic viewport-aware
  * placement.
@@ -30,6 +42,7 @@ export function GameplayTooltip({
   id,
   children,
   className,
+  touch = "ignore",
 }: GameplayTooltipProps) {
   const anchorRef = useRef<HTMLSpanElement>(null);
   const tipRef = useRef<HTMLSpanElement>(null);
@@ -49,6 +62,9 @@ export function GameplayTooltip({
   // as it does for keyboard focus and not for the focus a tap or a click gives
   // a button. That focus outlives the gesture, so it would hold the tooltip
   // open after the finger lifts.
+  //
+  // A finger lifting also fires `pointerleave`. That ends a tap rather than
+  // moving off the trigger, so only a hovering pointer's leave closes it.
   useEffect(() => {
     const trigger = anchorRef.current?.closest<HTMLElement>(".group") ?? null;
     triggerRef.current = trigger;
@@ -61,18 +77,52 @@ export function GameplayTooltip({
         setVisible(true);
       }
     };
+    const hideOnLeave = (event: PointerEvent) => {
+      if (event.pointerType !== "touch") setVisible(false);
+    };
     const hide = () => setVisible(false);
     trigger.addEventListener("pointermove", showOnHover);
     trigger.addEventListener("focusin", showOnKeyboardFocus);
-    trigger.addEventListener("pointerleave", hide);
+    trigger.addEventListener("pointerleave", hideOnLeave);
     trigger.addEventListener("focusout", hide);
     return () => {
       trigger.removeEventListener("pointermove", showOnHover);
       trigger.removeEventListener("focusin", showOnKeyboardFocus);
-      trigger.removeEventListener("pointerleave", hide);
+      trigger.removeEventListener("pointerleave", hideOnLeave);
       trigger.removeEventListener("focusout", hide);
     };
   }, []);
+
+  // A trigger that opts in with `touch="toggle"` opens on a touch tap and
+  // closes on the next tap, on the trigger or anywhere else.
+  useEffect(() => {
+    if (touch !== "toggle") return;
+    const trigger = anchorRef.current?.closest<HTMLElement>(".group") ?? null;
+    if (!trigger) return;
+    // A tap's own `click` does not report its pointer type reliably across
+    // browsers, so the `pointerdown` that starts the tap records it.
+    let tapPointerType: string | null = null;
+    const notePointerType = (event: PointerEvent) => {
+      tapPointerType = event.pointerType;
+    };
+    const toggleOnTap = () => {
+      if (tapPointerType === "touch") setVisible((isVisible) => !isVisible);
+      tapPointerType = null;
+    };
+    const hideOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && trigger.contains(event.target)) return;
+      setVisible(false);
+    };
+    trigger.addEventListener("pointerdown", notePointerType);
+    trigger.addEventListener("click", toggleOnTap);
+    // Capture, so a tap on a control that stops propagation still closes it.
+    document.addEventListener("pointerdown", hideOnOutsidePointer, true);
+    return () => {
+      trigger.removeEventListener("pointerdown", notePointerType);
+      trigger.removeEventListener("click", toggleOnTap);
+      document.removeEventListener("pointerdown", hideOnOutsidePointer, true);
+    };
+  }, [touch]);
 
   // Once visible, place the tooltip above the trigger with right edges aligned,
   // flipping below when there's no room above and clamping horizontally so it

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { buildStackEntry, gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
@@ -49,6 +50,7 @@ describe("issue #11118: the Resolve tooltip opens only for hover or keyboard foc
 
   afterEach(() => {
     cleanup();
+    vi.clearAllMocks();
     vi.restoreAllMocks();
     useGameStore.setState(useGameStore.getInitialState(), true);
     useMultiplayerStore.setState(useMultiplayerStore.getInitialState(), true);
@@ -71,7 +73,7 @@ describe("issue #11118: the Resolve tooltip opens only for hover or keyboard foc
     expect(tooltip).toBeVisible();
   });
 
-  it("stays closed after a tap on Resolve focuses it", () => {
+  it("stays closed after a tap on Resolve passes priority and focuses it", () => {
     showPriority(1);
     render(<ActionButton />);
     const resolve = screen.getByRole("button", { name: "Resolve" });
@@ -82,7 +84,9 @@ describe("issue #11118: the Resolve tooltip opens only for hover or keyboard foc
     fireEvent.pointerUp(resolve, { pointerType: "touch" });
     fireEvent.pointerLeave(resolve, { pointerType: "touch" });
     act(() => resolve.focus());
+    fireEvent.click(resolve);
 
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "PassPriority" });
     expect(resolve).toHaveFocus();
     expect(tooltip).not.toBeVisible();
 

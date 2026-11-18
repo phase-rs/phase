@@ -1780,7 +1780,11 @@ function CardInfoPanel({
                   </span>
                 )}
                 {reminder && (
-                  <GameplayTooltip id={tooltipId} className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl">
+                  <GameplayTooltip
+                    id={tooltipId}
+                    touch="toggle"
+                    className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl"
+                  >
                     <RichLabel text={reminder} size="xs" />
                   </GameplayTooltip>
                 )}
