@@ -14993,7 +14993,6 @@ fn parse_damage_to_self_instead_followup_with_provenance(
     // `DamageDone`, not `DealtDamage`: `dealt_damage_applier` returns the event unchanged,
     // so on that event these lines replaced nothing.
     let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .substitution_shield()
         .execute(followup.value)
         .description(original_text.to_string());
     if recipient_scope.is_none() {
@@ -15051,7 +15050,6 @@ fn parse_damage_to_player_instead_followup(
 
     Some(Lowered {
         value: ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .substitution_shield()
             .damage_target_filter(damage_target_any_player())
             .execute(followup.value)
             .description(original_text.to_string()),
@@ -17997,9 +17995,10 @@ mod tests {
             .expect("damage-substitution replacement must exist (was inert on main)");
         assert_eq!(
             rep.shield_kind,
-            ShieldKind::Substitution,
+            ShieldKind::None,
             "CR 614.1a: the damage is replaced, not prevented"
         );
+        assert!(rep.damage_modification.is_none());
         let execute = rep
             .execute
             .as_ref()
@@ -19539,7 +19538,8 @@ mod tests {
         .expect("damage-to-self counter replacement should parse");
 
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(def.shield_kind, ShieldKind::Substitution);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -19562,7 +19562,8 @@ mod tests {
         .expect("damage-to-controller counter replacement should parse");
 
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(def.shield_kind, ShieldKind::Substitution);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -19585,7 +19586,8 @@ mod tests {
         .expect("damage-to-player exile-top replacement should parse");
 
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(def.shield_kind, ShieldKind::Substitution);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         let execute = def.execute.as_ref().expect("execute present");
         assert!(
@@ -19627,7 +19629,8 @@ mod tests {
         ] {
             let def = parse_replacement_line(text, name).expect("object line should parse");
             assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
-            assert_eq!(def.shield_kind, ShieldKind::Substitution, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
             assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
             assert_eq!(def.damage_target_filter, None, "{name}");
         }
@@ -19647,7 +19650,8 @@ mod tests {
         ] {
             let def = parse_replacement_line(text, name).expect("player line should parse");
             assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
-            assert_eq!(def.shield_kind, ShieldKind::Substitution, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
             assert_eq!(def.valid_card, None, "{name}");
             assert_eq!(
                 def.damage_target_filter,

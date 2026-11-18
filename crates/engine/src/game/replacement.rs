@@ -1010,16 +1010,11 @@ pub enum ReplacementResult {
 pub enum ApplyResult {
     Modified(ProposedEvent),
     Prevented,
-    /// CR 614.6 + CR 615.5 + CR 608.2c: the event was replaced wholesale, as with `Prevented`,
-    /// while an earlier replacement's rider on it was paused on a choice. The replacement's own
-    /// actions are installed behind that rider.
-    PreventedBehindRider(PausedRider),
 }
 
-/// An earlier replacement's rider that paused while a later replacement applied to the same
-/// event (CR 615.5, CR 608.2c). It names only where the later replacement's actions wait; the
-/// amount they read is the one latched on their own drain as their replacement applied
-/// (`replaced_event_amount`).
+/// A paused damage replacement action or rider whose frame later work for the same damage waits
+/// behind (CR 615.5, CR 608.2c). It names only where that work waits; the amount it reads is the
+/// one latched on its own drain as its replacement applied (`replaced_event_amount`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PausedRider {
     /// The frame whose paused resident is the rider's unfinished work.
@@ -1095,6 +1090,48 @@ fn stash_post_replacement_continuation(
     state.install_post_replacement_drain(drain, ResidentDrainPolicy::KeepResident);
 }
 
+/// CR 614.6 + CR 615.5: stash a damage substitution's action. It is the modified event, so it
+/// happens when the damage would have, and a rider resident from an earlier replacement (Test of
+/// Faith: "For each 1 damage prevented this way, put a +1/+1 counter on that creature.") takes
+/// place immediately afterward, each reading the amount latched on its own drain
+/// (`replaced_event_amount`). A rider queued behind another recipient's paused rider keeps its
+/// place in that queue (Command Zone #172).
+fn stash_damage_substitute(
+    state: &mut GameState,
+    substitute: PostReplacementDrain,
+    placement: Option<PausedRider>,
+    events: &mut Vec<GameEvent>,
+) {
+    if state.combat_prevention_tally.is_some() {
+        // strict-failure: CR 615.5 puts the earlier rider after the substitute, but a combat
+        // leg can't park on a rider's prompt yet (Command Zone #267), and running the
+        // substitute here would settle its own prompt inside the batch (Dralnu, Lich Lord's
+        // sacrifice would be cleared). The rider runs first, settled in the batch, and the
+        // substitute's prompts are asked at the leg.
+        if state.has_post_replacement_drain() {
+            drain_combat_damage_rider(state, events);
+        }
+        stash_post_replacement_continuation(state, substitute, placement);
+        return;
+    }
+    let earlier = placement
+        .is_none()
+        .then(|| state.take_ready_post_replacement_drain())
+        .flatten();
+    stash_post_replacement_continuation(state, substitute, placement);
+    let Some(earlier) = earlier else { return };
+    let behind = match drain_damage_rider(state, events) {
+        DamageRiderDrain::Completed => None,
+        DamageRiderDrain::Paused { owner } => Some(PausedRider { owner }),
+    };
+    // CR 104.1: a substitute that ended the game (Nefarious Lich's "If you can't, you lose the
+    // game") ends it; the rider doesn't run.
+    if state.game_end.is_some() {
+        return;
+    }
+    stash_post_replacement_continuation(state, earlier, behind);
+}
+
 /// CR 614.6 + CR 615.5 + CR 616.1: hold a damage replacement's action or rider in the batch
 /// settling its original choices (`DamageBatchLedger::held_riders`), so it runs after the
 /// batch's damage instead of between those choices. Hands the drain back when no batch is
@@ -1110,9 +1147,10 @@ fn hold_damage_rider(
     }
     // CR 614.6: a substitution's action is the modified event; CR 615.5: any other rider is a
     // prevention's additional effect, which follows the event.
-    let timing = match shield_kind_for_rid(state, rid) {
-        Some(ShieldKind::Substitution) => RiderTiming::WithEvent,
-        _ => RiderTiming::AfterEvent,
+    let timing = if damage_execute_substitutes_event_type(state, rid) {
+        RiderTiming::WithEvent
+    } else {
+        RiderTiming::AfterEvent
     };
     // CR 616.1: the affected player, read from the event's recipient as this replacement found
     // it (after any redirect), else the replacing ability's controller.
@@ -1184,17 +1222,14 @@ fn mandatory_post_drain(
     }
 }
 
-/// CR 615.5 + CR 608.2c: where a damage replacement's actions wait. Behind the rider this
-/// event's own substitution waited on (`ApplyResult::PreventedBehindRider`), else behind a rider
-/// of the same noncombat batch that left its prompt standing (Pyroclasm at two Bears, each under
-/// Test of Faith). Placement only: the actions read the amount latched on their drain as their
-/// replacement applied. A substitution on another creature (Dralnu, Lich Lord) also waits here
-/// today, though by CR 614.6 + CR 615.5 it should come first (Command Zone #172).
-fn damage_rider_placement(state: &GameState, behind: Option<PausedRider>) -> Option<PausedRider> {
-    behind.or_else(|| {
-        let owner = state.damage_batch_ledger.as_ref()?.paused_rider?;
-        Some(PausedRider { owner })
-    })
+/// CR 615.5 + CR 608.2c: where a damage replacement's actions wait: behind a rider of the same
+/// noncombat batch that left its prompt standing (Pyroclasm at two Bears, each under Test of
+/// Faith). Placement only: the actions read the amount latched on their drain as their
+/// replacement applied. A substitution queued here behind another recipient's paused rider runs
+/// after it, though by CR 614.6 + CR 615.5 it should come first (Command Zone #172).
+fn damage_rider_placement(state: &GameState) -> Option<PausedRider> {
+    let owner = state.damage_batch_ledger.as_ref()?.paused_rider?;
+    Some(PausedRider { owner })
 }
 
 fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
@@ -3418,42 +3453,6 @@ fn damage_done_applier(
         return ApplyResult::Modified(event);
     }
 
-    // CR 614.1a + CR 614.6: a substitution replaces the event wholesale. Its rider
-    // reads the amount that would have been dealt; nothing is dealt or prevented, so
-    // there is no tally and no `DamagePrevented` (CR 615.13). Force Bubble: "the damage
-    // is neither dealt or prevented."
-    if matches!(
-        shield_kind_for_rid(state, rid),
-        Some(ShieldKind::Substitution)
-    ) {
-        if let ProposedEvent::Damage { amount, .. } = &event {
-            let amount = *amount;
-            // CR 615.5: an earlier effect's rider takes place now, ahead of the stamp below,
-            // because the drain stack keeps one Ready rider and both read `last_effect_count`.
-            // Test of Faith, then Phytohydra: 3 counters for the 3 prevented and 1 for the last
-            // damage.
-            // A batch settling its original choices holds that rider instead
-            // (`hold_damage_rider`), so none is resident here.
-            let earlier = if !damage_batch_holds_riders(state) && state.has_post_replacement_drain()
-            {
-                drain_damage_rider(state, events)
-            } else {
-                DamageRiderDrain::Completed
-            };
-            state.last_effect_count = Some(u32_to_i32_saturating(amount));
-            // CR 608.2c + CR 616.1: a rider that paused (Test of Faith's counters under Hardened
-            // Scales and Doubling Season) still has work to do, and this replacement's actions
-            // (Dralnu, Lich Lord's sacrifice) follow all of it, reading this amount.
-            return match earlier {
-                DamageRiderDrain::Completed => ApplyResult::Prevented,
-                DamageRiderDrain::Paused { owner } => {
-                    ApplyResult::PreventedBehindRider(PausedRider { owner })
-                }
-            };
-        }
-        return ApplyResult::Modified(event);
-    }
-
     // Branch 2: CR 615 — Prevention shield
     // Look up shield from either object replacement_definitions or pending_damage_replacements.
     let shield_kind = if rid.source == ObjectId(0) {
@@ -3733,18 +3732,24 @@ fn damage_done_applier(
         }
     }
 
-    // Branch 3: CR 614.1a + CR 614.6 — cross-event-type substitution. "If a
+    // Branch 3: CR 614.1a + CR 614.6 + CR 615.13 — cross-event-type substitution. "If a
     // source you control would deal noncombat damage to a creature an opponent
     // controls, put that many -1/-1 counters on that creature instead" (Soul-Scar
     // Mage). The damage event is REPLACED, not prevented (CR 615 does not apply):
     // it never happens (CR 614.6), so there is no `DamagePrevented`, no marked
-    // damage, no lifelink and no "deals damage" trigger. The substitute runs as
-    // the post-replacement continuation stashed by `apply_single_replacement`'s
+    // damage, no lifelink and no "deals damage" trigger; Force Bubble: "the damage
+    // is neither dealt or prevented" (CR 615.13). The substitute runs as the
+    // post-replacement continuation stashed by `apply_single_replacement`'s
     // `Prevented` arm, which also latches the replaced event's amount on the
-    // drain for "that many" (`PostReplacementDrain::event_amount`). Mirrors the
-    // LifeGain cross-type substitution (Lich).
+    // drain for "that many" (`PostReplacementDrain::event_amount`) and orders it
+    // against an earlier rider on the same damage (`stash_damage_substitute`).
+    // Mirrors the LifeGain cross-type substitution (Lich).
     if damage_execute_substitutes_event_type(state, rid) {
-        return ApplyResult::Prevented;
+        if let ProposedEvent::Damage { amount, .. } = &event {
+            state.last_effect_count = Some(u32_to_i32_saturating(*amount));
+            return ApplyResult::Prevented;
+        }
+        return ApplyResult::Modified(event);
     }
 
     // No modification and no prevention shield — pass through
@@ -3897,10 +3902,14 @@ fn damage_execute_substitutes_event_type(state: &GameState, rid: ReplacementId) 
 
 /// CR 614.1a + CR 614.6: the definition-level predicate behind
 /// [`damage_execute_substitutes_event_type`] — a `DamageDone` replacement whose
-/// `execute` substitutes a different event for the damage. Shared by the
-/// applier (Branch 3), the stash that latches the replaced amount, and the
-/// CR 616.1 materiality classification, so the three can never disagree.
-fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
+/// `execute` substitutes a different event for the damage. The single authority
+/// for the class: the applier (Branch 3), the stash's amount latch
+/// (`replaced_event_amount`) and its order (`stash_damage_substitute`), the
+/// batch hold's timing (`hold_damage_rider`), the CR 120.8 candidate block, the
+/// CR 615.12 shape (`damage_shape_prevents`), the CR 616.1 materiality
+/// (`candidate_materiality`) and coverage's `damage_substitution_choice_incomplete`
+/// all read it, so they can never disagree.
+pub(crate) fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
     if repl.event != ReplacementEvent::DamageDone
         || !matches!(repl.shield_kind, ShieldKind::None)
         || repl.damage_modification.is_some()
@@ -3931,25 +3940,13 @@ fn event_quantity(event: &ProposedEvent) -> Option<u32> {
 /// [`replaced_event_amount`] reads it.
 #[derive(Debug, Clone, Copy)]
 enum ReplacementOutcome<'a> {
-    /// The event was replaced wholesale (`ApplyResult::Prevented` or `PreventedBehindRider`).
+    /// The event was replaced wholesale (`ApplyResult::Prevented`).
     Replaced,
     /// The applier handed back this modified event (`ApplyResult::Modified`).
     Modified(&'a ProposedEvent),
     /// An optional replacement was accepted, and its branch's action is installed before the
     /// replacement applies (`continue_replacement_impl`).
     AcceptedBeforeApplying,
-}
-
-/// CR 614.1a: whether damage replacement `rid` substitutes a different event for the damage.
-/// The class has two representations today — the tagged `ShieldKind::Substitution` and the
-/// structural predicate [`damage_execute_substitutes_event_type`] — and this helper names both.
-/// Its one caller is [`replaced_event_amount`]; it collapses onto the structural predicate when
-/// the tag is folded into it.
-fn damage_replacement_substitutes(state: &GameState, rid: ReplacementId) -> bool {
-    matches!(
-        shield_kind_for_rid(state, rid),
-        Some(ShieldKind::Substitution)
-    ) || damage_execute_substitutes_event_type(state, rid)
 }
 
 /// CR 615.1a + CR 614.9 + CR 614.1a: the shape verdict on whether a damage replacement is a
@@ -3989,9 +3986,8 @@ fn damage_shape_prevents(repl: &ReplacementDefinition) -> Option<bool> {
         // redirecting it, so "damage can't be prevented" suppresses it as well.
         ShieldKind::PreventionOneShot => Some(true),
         // CR 614.1a + CR 615.1a: "instead" replaces; Phytohydra's ruling: "doesn't prevent damage".
-        ShieldKind::Substitution => Some(false),
-        ShieldKind::None
-        | ShieldKind::Regeneration
+        ShieldKind::None => is_damage_substitution(repl).then_some(false),
+        ShieldKind::Regeneration
         | ShieldKind::DamageReplacementOneShot
         | ShieldKind::Redirection { .. } => None,
     }
@@ -4016,7 +4012,7 @@ fn replaced_event_amount(
     let before = before?;
     match def.event {
         ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage => {
-            if damage_replacement_substitutes(state, rid) {
+            if damage_execute_substitutes_event_type(state, rid) {
                 // CR 614.1a + CR 614.6: a substitution that returned the event modified did not
                 // apply.
                 match outcome {
@@ -7385,10 +7381,9 @@ pub(crate) fn replacement_spends_shared_capacity(state: &GameState, rid: Replace
                 ShieldKind::Redirection {
                     amount, lifetime, ..
                 } => matches!(amount, PreventionAmount::Next(_)) || lifetime.is_one_opportunity(),
-                ShieldKind::None
-                | ShieldKind::Regeneration
-                | ShieldKind::Prevention { .. }
-                | ShieldKind::Substitution => false,
+                ShieldKind::None | ShieldKind::Regeneration | ShieldKind::Prevention { .. } => {
+                    false
+                }
             }
     })
 }
@@ -8965,10 +8960,10 @@ fn object_replacement_candidate_applies_on_entry_board(
     }
     // CR 120.8: a source that would deal 0 damage deals no damage, so a substitution has no
     // event to replace. Urza's Armor applied first leaves a ping at 0, and Nefarious Lich's
-    // "If you can't, you lose the game." must not run. The applier is too late: its
-    // `Modified` result still stashes the rider.
-    if matches!(repl_def.shield_kind, ShieldKind::Substitution)
-        && matches!(event, ProposedEvent::Damage { amount: 0, .. })
+    // "If you can't, you lose the game." must not run; Daunting Defender applied first leaves
+    // nothing for Soul-Scar Mage's -1/-1 counters. The applier is too late: its `Modified`
+    // result still stashes the rider.
+    if is_damage_substitution(repl_def) && matches!(event, ProposedEvent::Damage { amount: 0, .. })
     {
         return false;
     }
@@ -12692,7 +12687,7 @@ fn apply_single_replacement(
                     };
                     if let Some(drain) = drain {
                         let placement = is_damage_event
-                            .then(|| damage_rider_placement(state, None))
+                            .then(|| damage_rider_placement(state))
                             .flatten();
                         stash_post_replacement_continuation(state, drain, placement);
                     }
@@ -12703,11 +12698,7 @@ fn apply_single_replacement(
                 });
                 return Ok(new_event);
             }
-            ApplyResult::Prevented | ApplyResult::PreventedBehindRider(_) => {
-                let behind = match applier_result {
-                    ApplyResult::PreventedBehindRider(rider) => Some(rider),
-                    ApplyResult::Prevented | ApplyResult::Modified(_) => None,
-                };
+            ApplyResult::Prevented => {
                 if consume_on_apply {
                     mark_replacement_consumed(state, rid);
                     if let Some((key, damage_source, _)) = damage_batch_application {
@@ -12728,6 +12719,13 @@ fn apply_single_replacement(
                 // can resolve "the source's controller draws cards" follow-ups
                 // (Swans of Bryn Argoll). Distinct from `post_replacement_source`,
                 // which is the replacement's own source (Swans itself).
+                //
+                // `ReplacementApplied` is logged before the stash: stashing emits no events, and
+                // a substitute run inline (`stash_damage_substitute`) logs after it.
+                events.push(GameEvent::ReplacementApplied {
+                    source_id: rid.source,
+                    event_type,
+                });
                 if let Some(post) = mandatory_post_effect {
                     let drain = mandatory_post_drain(
                         post,
@@ -12758,18 +12756,16 @@ fn apply_single_replacement(
                         Some(drain)
                     };
                     if let Some(drain) = drain {
-                        let placement = if is_damage_event {
-                            damage_rider_placement(state, behind)
+                        let placement = is_damage_event
+                            .then(|| damage_rider_placement(state))
+                            .flatten();
+                        if is_damage_event && damage_execute_substitutes_event_type(state, rid) {
+                            stash_damage_substitute(state, drain, placement, events);
                         } else {
-                            behind
-                        };
-                        stash_post_replacement_continuation(state, drain, placement);
+                            stash_post_replacement_continuation(state, drain, placement);
+                        }
                     }
                 }
-                events.push(GameEvent::ReplacementApplied {
-                    source_id: rid.source,
-                    event_type,
-                });
                 return Err(ApplyResult::Prevented);
             }
         }
@@ -12837,7 +12833,7 @@ fn apply_replacement_to_token_batches(
         match apply_single_replacement(state, view, rid, branch, registry, events) {
             Ok(applied) => survivors.push(applied),
             Err(ApplyResult::Prevented) => {}
-            Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => {
+            Err(ApplyResult::Modified(_)) => {
                 unreachable!("apply_single_replacement reports modification through Ok")
             }
         }
@@ -13380,26 +13376,24 @@ fn candidate_materiality(
     // this it fell through to `Disjoint` and the CR 616.1 order choice was
     // silently skipped. CR 615.3: the one-shot `PreventionOneShot` shield (Awe
     // Strike) writes the same `Damage` field and is equally order-material.
-    // CR 616.1: a substitution reads and consumes the amount, so it doesn't commute with a
-    // doubler either (Phytohydra's ruling). Its `execute` walk below would classify
-    // `PutCounter` as `Disjoint`.
     if matches!(
         repl_def.shield_kind,
-        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot | ShieldKind::Substitution
+        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot
     ) {
         return CandidateMateriality::Writes {
             field: EventField::Damage,
             commute: CommuteClass::NonCommuting,
         };
     }
-    // CR 614.6 + CR 616.1: a damage substitution (Soul-Scar Mage, Szadek)
-    // replaces the damage event with a different event, so once it applies no
-    // other damage replacement applies any more — and applied after them, it
-    // replaces whatever they left. Which applies first decides the outcome, so
-    // the affected player or controller chooses, exactly as for the
-    // found-card replacements below. Without this its `PutCounter` execute
-    // classified as an ETB counter append (`Disjoint`) and the choice was
-    // skipped against a prevention shield.
+    // CR 614.6 + CR 616.1: a damage substitution (Soul-Scar Mage, Szadek,
+    // Phytohydra, Force Bubble) replaces the damage event with a different event,
+    // so once it applies no other damage replacement applies any more — and
+    // applied after them, it replaces whatever they left. Which applies first
+    // decides the outcome, so the affected player or controller chooses, exactly
+    // as for the found-card replacements below (Soul-Scar Mage's, Szadek's and
+    // Phytohydra's rulings on another prevention or replacement effect). Without
+    // this its `PutCounter` execute classified as an ETB counter append
+    // (`Disjoint`) and the choice was skipped against a prevention shield.
     if is_damage_substitution(repl_def) {
         return CandidateMateriality::Unconditional;
     }
@@ -15259,7 +15253,7 @@ fn pipeline_loop(
             ) {
                 Ok(new_event) => proposed = new_event,
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-                Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => {
+                Err(ApplyResult::Modified(_)) => {
                     unreachable!()
                 }
             }
@@ -15330,7 +15324,7 @@ fn pipeline_loop(
             ) {
                 Ok(new_event) => proposed = new_event,
                 Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-                Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => {
+                Err(ApplyResult::Modified(_)) => {
                     unreachable!()
                 }
             }
@@ -15406,7 +15400,7 @@ pub(crate) fn drain_damage_rider(
 }
 
 /// CR 615.5 + CR 510.2: run the resident damage rider at a combat drain that still settles in
-/// the batch: the substitution arm's drain of an earlier rider inside a leg, and Phase D's
+/// the batch: `stash_damage_substitute`'s drain of an earlier rider inside a leg, and Phase D's
 /// aggregate drain, and settle every pause it raises before the batch moves on. The rider's
 /// event is not a portion of the batch (CR 700.1), so it and every answer below run outside
 /// the batch's ledger, as `drain_damage_rider` does. The caller's wait is restored afterwards,
@@ -16700,7 +16694,7 @@ fn continue_replacement_impl(
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
             Ok(new_event) => proposed = new_event,
             Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-            Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => unreachable!(),
+            Err(ApplyResult::Modified(_)) => unreachable!(),
         }
 
         return pipeline_loop(state, proposed, pending.depth + 1, registry, events, None);
@@ -16831,7 +16825,7 @@ fn continue_replacement_impl(
     ) {
         Ok(new_event) => proposed = new_event,
         Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-        Err(ApplyResult::Modified(_) | ApplyResult::PreventedBehindRider(_)) => unreachable!(),
+        Err(ApplyResult::Modified(_)) => unreachable!(),
     }
 
     pipeline_loop(state, proposed, pending.depth + 1, registry, events, None)
@@ -25512,7 +25506,18 @@ mod tests {
                 value: PreventionFormula::fixed(2),
             }),
             // 3: Phytohydra, "put that many +1/+1 counters on it instead".
-            ReplacementDefinition::new(ReplacementEvent::DamageDone).substitution_shield(),
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::EventContextAmount,
+                        },
+                        target: TargetFilter::SelfRef,
+                    },
+                ),
+            ),
             // 4: Furnace of Rath, "it deals double that damage … instead".
             damage_repl(DamageModification::Double),
             // 5: Pariah, "is dealt to enchanted creature instead".
@@ -25608,6 +25613,114 @@ mod tests {
         assert_eq!(latch(rid(8), Some(3), ReplacementOutcome::Replaced), None);
         // An event with no quantity owns no amount.
         assert_eq!(latch(rid(1), None, ReplacementOutcome::Replaced), None);
+    }
+
+    /// CR 614.1a + CR 614.6: one predicate classifies a damage substitution by the definition's
+    /// shape — a `DamageDone` replacement with no shield, no amount modification, and an action
+    /// that is neither damage nor unimplemented — whichever printed line produced it. Each
+    /// negative is one field changed on a positive.
+    #[test]
+    fn is_damage_substitution_reads_the_definitions_shape() {
+        fn damage_replacement(name: &str, text: &str, types: &[&str]) -> ReplacementDefinition {
+            let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+            crate::parser::parse_oracle_text(text, name, &[], &types, &[])
+                .replacements
+                .into_iter()
+                .find(|repl| repl.event == ReplacementEvent::DamageDone)
+                .unwrap_or_else(|| panic!("{name}: a damage replacement parses"))
+        }
+        let phytohydra = damage_replacement(
+            "Phytohydra",
+            "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            &["Creature"],
+        );
+        let szadek = damage_replacement(
+            "Szadek, Lord of Secrets",
+            "If Szadek would deal combat damage to a player, instead put that many +1/+1 counters on Szadek and that player mills that many cards.",
+            &["Creature"],
+        );
+        let lich = damage_replacement(
+            "Nefarious Lich",
+            "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.",
+            &["Enchantment"],
+        );
+        for (name, repl) in [
+            ("Phytohydra", &phytohydra),
+            ("Szadek", &szadek),
+            ("Nefarious Lich", &lich),
+        ] {
+            assert!(is_damage_substitution(repl), "{name}: {repl:?}");
+        }
+        assert!(matches!(
+            phytohydra
+                .execute
+                .as_deref()
+                .map(|execute| &*execute.effect),
+            Some(Effect::PutCounter { .. })
+        ));
+        assert!(szadek
+            .execute
+            .as_deref()
+            .is_some_and(|execute| execute.sub_ability.is_some()));
+
+        let bolt = crate::parser::parse_oracle_text(
+            "Lightning Bolt deals 3 damage to any target.",
+            "Lightning Bolt",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let deal_damage = bolt.abilities[0].effect.clone();
+        assert!(matches!(&*deal_damage, Effect::DealDamage { .. }));
+
+        let with = |change: &dyn Fn(&mut ReplacementDefinition)| {
+            let mut repl = phytohydra.clone();
+            change(&mut repl);
+            repl
+        };
+        let negatives = [
+            (
+                "a prevention shield (Vigor's rider shape)",
+                with(&|repl| {
+                    repl.shield_kind = ShieldKind::Prevention {
+                        amount: PreventionAmount::All,
+                    }
+                }),
+            ),
+            (
+                "an amount modification",
+                with(&|repl| repl.damage_modification = Some(DamageModification::Double)),
+            ),
+            ("no action", with(&|repl| repl.execute = None)),
+            (
+                "an unimplemented action",
+                with(&|repl| {
+                    if let Some(execute) = repl.execute.as_mut() {
+                        execute.effect =
+                            Box::new(Effect::unimplemented("substitute", "an unparsed action"));
+                    }
+                }),
+            ),
+            (
+                "a damage action",
+                with(&|repl| {
+                    if let Some(execute) = repl.execute.as_mut() {
+                        execute.effect = deal_damage.clone();
+                    }
+                }),
+            ),
+            (
+                "a DealtDamage event",
+                with(&|repl| repl.event = ReplacementEvent::DealtDamage),
+            ),
+            (
+                "a GainLife event",
+                with(&|repl| repl.event = ReplacementEvent::GainLife),
+            ),
+        ];
+        for (name, repl) in negatives {
+            assert!(!is_damage_substitution(&repl), "{name}: {repl:?}");
+        }
     }
 
     #[test]

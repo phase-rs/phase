@@ -33,7 +33,7 @@ use crate::types::ability::{
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity, PtStat,
     PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, ShieldKind, SpeedDelta,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
     SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
     StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
@@ -10399,13 +10399,15 @@ enum StructuralFeature {
     /// The card parses, and outside combat the choice is asked, so nothing else in coverage can
     /// see it.
     DamageReplacementChoiceUnaskedInCombat,
-    /// CR 614.1a + CR 616.1: a damage substitution (`ShieldKind::Substitution`: Force Bubble,
-    /// Phytohydra, Nefarious Lich) whose CR 616.1 choice is not offered as the cards give it.
-    /// Protection prevents the damage before the substitution is offered (CR 702.16e), so the
-    /// affected player never chooses it; and simultaneous damage from several sources asks one
-    /// choice per source, where Force Bubble's ruling gives "one choice, not one per source".
-    /// The card parses, and with no protection or competing replacement it works, so nothing
-    /// else in coverage can see it.
+    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement
+    /// `replacement::is_damage_substitution` selects: Phytohydra, Force Bubble, Nefarious Lich,
+    /// Soul-Scar Mage, Szadek, Lord of Secrets, Undead Alchemist) whose CR 616.1 choice is not
+    /// offered against protection. Protection prevents the damage at the pre-replacement gate,
+    /// before the substitution is offered ("Any damage that would be dealt by sources that have the
+    /// stated quality to a permanent or player with protection is prevented."), so the affected
+    /// player never chooses between them (CR 616.1e): Pyroclasm at a Silver Knight under an
+    /// opposing Soul-Scar Mage, or Szadek's combat damage to a player under Teferi's Protection.
+    /// The card parses, and with no protection it works, so nothing else in coverage can see it.
     DamageSubstitutionChoiceIncomplete,
     /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next 1 damage that would be
     /// dealt to this creature this turn is dealt to target creature you control instead." —
@@ -10493,10 +10495,10 @@ impl StructuralFeature {
             // (Battletide Alchemist: the Ogre's 3 combat damage is neither dealt nor prevented).
             DamageReplacementChoiceUnaskedInCombat => FeatureSupport::Unhandled,
             // MEASURED UNHANDLED: `damage_substitution_replacements`
-            // (`protection_prevents_ahead_of_a_substitutions_choice`: Phytohydra with protection
-            // is never asked and gets no counters;
-            // `a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble`: two prompts for one
-            // simultaneous event).
+            // (`protection_prevents_ahead_of_a_substitutions_choice`,
+            // `protection_prevents_ahead_of_soul_scar_mages_choice`,
+            // `protection_prevents_ahead_of_szadeks_choice`: the protected recipient's player is
+            // never asked, and no counters are put).
             DamageSubstitutionChoiceIncomplete => FeatureSupport::Unhandled,
             // MEASURED UNHANDLED: `unpreventable_damage_prevention_effects`
             // (`a_capped_redirects_part_meets_protection_before_a_competing_shield`: the pro-red
@@ -11467,21 +11469,14 @@ fn extract_damage_replacement_choice_feature(
             StructuralFeature::DamageReplacementChoiceUnaskedInCombat,
         );
     }
-    if is_damage_substitution(repl) {
+    // CR 614.1a: the runtime's own substitution predicate, so the fence and the engine select
+    // the same class.
+    if crate::game::replacement::is_damage_substitution(repl) {
         emit_structural(
             features,
             StructuralFeature::DamageSubstitutionChoiceIncomplete,
         );
     }
-}
-
-/// [`StructuralFeature::DamageSubstitutionChoiceIncomplete`]: a replacement that substitutes
-/// for damage (CR 614.1a: "instead") rather than preventing it.
-fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
-    matches!(
-        repl.event,
-        ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage
-    ) && matches!(repl.shield_kind, ShieldKind::Substitution)
 }
 
 fn extract_trigger_features(
@@ -16768,6 +16763,173 @@ mod tests {
                 dropped.then_some(&FeatureSupport::Unhandled),
                 "{name}: the tag must be present exactly when the resolver drops the rider's tail"
             );
+        }
+    }
+
+    /// (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types)
+    type DamageSubstitutionCase = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+
+    const DAMAGE_SUBSTITUTION_TAG: &str = "structural:damage_substitution_choice_incomplete";
+
+    /// CR 614.1a + CR 616.1 + CR 702.16e: the protection fence keys on the runtime's substitution
+    /// predicate (`replacement::is_damage_substitution`), so it covers the class uniformly:
+    /// Soul-Scar Mage, Szadek and Undead Alchemist, whose substitution the fence is the only gap
+    /// of, and the "If damage would be dealt to …, … instead" lines (Phytohydra, Force Bubble,
+    /// Nefarious Lich). A prevention shield (Test of Faith, Phantom Centaur) and an amount
+    /// modification (Furnace of Rath) are not substitutions and are not fenced.
+    #[test]
+    fn a_damage_substitution_is_a_coverage_gap() {
+        let fenced_alone: [DamageSubstitutionCase; 3] = [
+            (
+                "Soul-Scar Mage",
+                "Prowess\nIf a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
+                &["Prowess"],
+                &["Creature"],
+            ),
+            (
+                "Szadek, Lord of Secrets",
+                "Flying\nIf Szadek would deal combat damage to a player, instead put that many +1/+1 counters on Szadek and that player mills that many cards.",
+                &["Flying"],
+                &["Creature"],
+            ),
+            (
+                "Undead Alchemist",
+                "If a Zombie you control would deal combat damage to a player, instead that player mills that many cards.\nWhenever a creature card is put into an opponent's graveyard from their library, exile that card and create a 2/2 black Zombie creature token.",
+                &[],
+                &["Creature"],
+            ),
+        ];
+        for (name, oracle, keywords, types) in fenced_alone {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(DAMAGE_SUBSTITUTION_TAG),
+                Some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+            assert_eq!(
+                card_face_gaps(&face),
+                vec![format!("ResolverFeature:{DAMAGE_SUBSTITUTION_TAG}")],
+                "{name}: the fence is the face's only gap"
+            );
+        }
+
+        let fenced: [DamageSubstitutionCase; 3] = [
+            (
+                "Phytohydra",
+                "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+                &[],
+                &["Creature"],
+            ),
+            (
+                "Force Bubble",
+                "If damage would be dealt to you, put that many depletion counters on this enchantment instead.\nWhen there are four or more depletion counters on this enchantment, sacrifice it.\nAt the beginning of each end step, remove all depletion counters from this enchantment.",
+                &[],
+                &["Enchantment"],
+            ),
+            (
+                "Nefarious Lich",
+                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.",
+                &[],
+                &["Enchantment"],
+            ),
+        ];
+        for (name, oracle, keywords, types) in fenced {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(DAMAGE_SUBSTITUTION_TAG),
+                Some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+        }
+
+        let unfenced: [DamageSubstitutionCase; 3] = [
+            (
+                "Test of Faith",
+                "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+                &[],
+                &["Instant"],
+            ),
+            (
+                "Furnace of Rath",
+                "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+                &[],
+                &["Enchantment"],
+            ),
+            (
+                "Phantom Centaur",
+                "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+                &["Protection"],
+                &["Creature"],
+            ),
+        ];
+        for (name, oracle, keywords, types) in unfenced {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            assert!(
+                !face.abilities.is_empty()
+                    || face
+                        .replacements
+                        .iter()
+                        .any(|repl| repl.event == ReplacementEvent::DamageDone),
+                "{name}: reach guard — the damage line parses"
+            );
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
+        }
+    }
+
+    /// CR 614.1a: Oozeavite and Underdark Beholder are damage substitutions their parse does not
+    /// lower to a replacement, so each stays unsupported through its damage clause, and the
+    /// substitution predicate never selects them (an unparsed line is unimplemented).
+    #[test]
+    fn an_unlowered_damage_substitution_stays_unsupported() {
+        // (name, verbatim Oracle text, the damage clause, its gap's handler)
+        let cases: [(&str, &str, &str, &str); 2] = [
+            (
+                "Oozeavite",
+                "Oozeavite enters with each of a vigilance, reach, trample, and hexproof counter on it. These are also +1/+1 counters.\nIf Oozeavite would be dealt damage, instead create a 0/0 green Ooze creature token and move a counter from Oozeavite onto it. Then if Oozeavite has no counters on it, sacrifice it.\n{3}{G}, {T}: Move any number of counters from other creatures you control onto Oozeavite.",
+                "would be dealt damage, instead create a 0/0 green Ooze creature token",
+                "Effect:static_structure",
+            ),
+            (
+                "Underdark Beholder",
+                "Underdark Beholder enters the battlefield with ten eyestalk counters on it.\nIf Underdark Beholder would be dealt damage, remove that many eyestalk counters from it instead. If you can't, sacrifice it.\nWhenever Underdark Beholder attacks, reveal cards from the top of your library until you reveal an instant, sorcery, or enchantment card with converted mana cost less than the number of eyestalk counters on Underdark Beholder. You may cast it without paying its mana cost. Shuffle your library.",
+                "would be dealt damage, remove that many eyestalk counters from it instead",
+                "Effect:replacement_structure",
+            ),
+        ];
+        for (name, oracle, clause, handler) in cases {
+            let face = counter_rider_face(name, oracle, &[], &["Creature"]);
+            let coverage = card_face_coverage(&face);
+            assert!(
+                coverage.gaps.iter().any(|gap| gap.handler == handler
+                    && gap
+                        .source_text
+                        .as_deref()
+                        .is_some_and(|text| text.contains(clause))),
+                "{name}: the damage clause is a `{handler}` gap: {:?}",
+                coverage.gaps
+            );
+            assert!(
+                !face
+                    .replacements
+                    .iter()
+                    .any(crate::game::replacement::is_damage_substitution),
+                "{name}: no replacement is a damage substitution"
+            );
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
+            assert!(!coverage.is_supported(), "{name}");
         }
     }
 

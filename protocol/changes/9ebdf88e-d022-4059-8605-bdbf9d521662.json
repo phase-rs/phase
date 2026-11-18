@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ShieldKind::Substitution is removed: '…instead' damage substitutions are recognized by their shape (replacement::is_damage_substitution) and serialize with ShieldKind::None, so a GameState or card data written with the Substitution tag no longer decodes."
+}

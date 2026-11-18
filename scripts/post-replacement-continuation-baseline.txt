@@ -47,5 +47,6 @@ crates/engine/src/game/replacement.rs	continue_replacement_impl	template	1
 crates/engine/src/game/replacement.rs	drain_combat_damage_continuation	consumer	1
 crates/engine/src/game/replacement.rs	drain_combat_damage_rider	consumer	1
 crates/engine/src/game/replacement.rs	drain_damage_rider	consumer	1
+crates/engine/src/game/replacement.rs	stash_damage_substitute	stash	3
 crates/engine/src/game/stack.rs	resolve_top	consumer	1
 crates/engine/src/game/zone_pipeline.rs	apply_zone_delivery_tail	consumer	1

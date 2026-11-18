@@ -2,8 +2,10 @@
 //! prevention effect (CR 614.1a, CR 615.1a), and it is order-material against every other
 //! damage replacement (CR 616.1).
 //!
-//! The seven lines are Phytohydra, Lichenthrope, Force Bubble, Delaying Shield, Crumbling
-//! Sanctuary, Dralnu, Lich Lord and Nefarious Lich. Phytohydra's ruling states the class:
+//! The class is every `DamageDone` replacement `replacement::is_damage_substitution` selects:
+//! these seven (Phytohydra, Lichenthrope, Force Bubble, Delaying Shield, Crumbling Sanctuary,
+//! Dralnu, Lich Lord and Nefarious Lich), and Soul-Scar Mage, Szadek, Lord of Secrets and Undead
+//! Alchemist. Phytohydra's ruling states the class:
 //! "Phytohydra's ability doesn't prevent damage. Damage that can't be prevented will still be
 //! replaced by +1/+1 counters being put on Phytohydra."
 //!
@@ -95,6 +97,15 @@ const URZAS_ARMOR: &str = "If a source would deal damage to you, prevent 1 of th
 const PRODIGAL_SORCERER: &str = "{T}: This creature deals 1 damage to any target.";
 const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
 const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
+const SOUL_SCAR_MAGE: &str = "Prowess\nIf a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.";
+const SZADEK_NAME: &str = "Szadek, Lord of Secrets";
+const SZADEK: &str = "Flying\nIf Szadek would deal combat damage to a player, instead put that many +1/+1 counters on Szadek and that player mills that many cards.";
+const UNDEAD_ALCHEMIST: &str = "If a Zombie you control would deal combat damage to a player, instead that player mills that many cards.\nWhenever a creature card is put into an opponent's graveyard from their library, exile that card and create a 2/2 black Zombie creature token.";
+const SILVER_KNIGHT: &str = "First strike, protection from red";
+const TEFERIS_PROTECTION: &str = "Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out. (While they're phased out, they're treated as though they don't exist. They phase in before you untap during your untap step.)\nExile Teferi's Protection.";
+const DAUNTING_DEFENDER: &str =
+    "If a source would deal damage to a Cleric creature you control, prevent 1 of that damage.";
+const VIZIER_OF_REMEDIES: &str = "If one or more -1/-1 counters would be put on a creature you control, that many -1/-1 counters minus one are put on it instead.";
 
 /// The candidate description of a resolution-created prevention shield. Its `source_id` is the
 /// shielded object, so a shield on Phytohydra can't be named by `source_id`.
@@ -171,6 +182,84 @@ fn nefarious_lich(scenario: &mut GameScenario, graveyard_cards: usize) -> Object
     scenario
         .add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH)
         .id()
+}
+
+fn soul_scar_mage(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
+    scenario
+        .add_creature(controller, "Soul-Scar Mage", 1, 2)
+        .with_subtypes(vec!["Human", "Wizard"])
+        .from_oracle_text_with_keywords(&["Prowess"], SOUL_SCAR_MAGE)
+        .id()
+}
+
+fn szadek(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature(P0, SZADEK_NAME, 5, 5)
+        .with_subtypes(vec!["Vampire"])
+        .from_oracle_text_with_keywords(&["Flying"], SZADEK)
+        .id()
+}
+
+fn undead_alchemist(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P0, "Undead Alchemist", 4, 2, UNDEAD_ALCHEMIST)
+        .with_subtypes(vec!["Zombie"])
+        .id()
+}
+
+fn vizier_of_remedies(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(controller, "Vizier of Remedies", 2, 1, VIZIER_OF_REMEDIES)
+        .with_subtypes(vec!["Human", "Cleric"])
+        .id()
+}
+
+/// The counters put on `id`, event by event, in order.
+fn counters_put(events: &[GameEvent], id: ObjectId) -> Vec<(CounterType, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type,
+                count,
+                ..
+            } if *object_id == id => Some((counter_type.clone(), *count)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The total of `kind` counters put on `id` across `events`.
+fn counters_put_total(events: &[GameEvent], id: ObjectId, kind: &CounterType) -> u32 {
+    counters_put(events, id)
+        .iter()
+        .filter(|(found, _)| found == kind)
+        .map(|(_, count)| count)
+        .sum()
+}
+
+/// The library and graveyard sizes of `id`.
+fn library_and_graveyard(runner: &GameRunner, id: PlayerId) -> (usize, usize) {
+    let seat = player(runner, id);
+    (seat.library.len(), seat.graveyard.len())
+}
+
+/// The `ReplacementChoice` that must be up: its chooser and candidate sources.
+#[track_caller]
+fn replacement_prompt(runner: &GameRunner) -> (PlayerId, BTreeSet<ObjectId>) {
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => (
+            *player,
+            candidates
+                .iter()
+                .map(|candidate| candidate.source_id)
+                .collect(),
+        ),
+        other => panic!("expected ReplacementChoice, got {other:?}"),
+    }
 }
 
 fn furnace(scenario: &mut GameScenario) -> ObjectId {
@@ -2464,9 +2553,67 @@ fn a_substitution_has_no_zero_damage_event_to_replace() {
     }
 }
 
+/// CR 120.8: "If a source would deal 0 damage, it does not deal damage at all." Prodigal
+/// Sorcerer pings P1's Daunting Defender ("If a source would deal damage to a Cleric creature you
+/// control, prevent 1 of that damage.") under P0's Soul-Scar Mage, and P1 orders the two
+/// (CR 616.1). Defender first leaves the ping at 0, so Soul-Scar Mage has no event to replace:
+/// no -1/-1 counter. Soul-Scar Mage first replaces the 1 with one -1/-1 counter.
+#[test]
+fn a_soul_scar_substitution_has_no_zero_damage_event_to_replace() {
+    for defender_first in [true, false] {
+        let mut scenario = scenario();
+        let mage = soul_scar_mage(&mut scenario, P0);
+        let defender = scenario
+            .add_creature_from_oracle(P1, "Daunting Defender", 3, 3, DAUNTING_DEFENDER)
+            .with_subtypes(vec!["Human", "Cleric"])
+            .id();
+        let sorcerer = scenario
+            .add_creature_from_oracle(P0, "Prodigal Sorcerer", 1, 1, PRODIGAL_SORCERER)
+            .id();
+        let mut runner = scenario.build();
+        let mut events = runner
+            .act(GameAction::ActivateAbility {
+                source_id: sorcerer,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("activate")
+            .events;
+        settle(&mut runner, &mut vec![object_target(defender)], &mut events);
+        // Reach: the Defender's own "Cleric creature you control" makes it a candidate.
+        assert_eq!(
+            replacement_prompt(&runner),
+            (P1, BTreeSet::from([mage, defender]))
+        );
+        choose_source(
+            &mut runner,
+            &mut events,
+            if defender_first { defender } else { mage },
+        );
+
+        let mage_applied = events.iter().any(|event| {
+            matches!(event, GameEvent::ReplacementApplied { source_id, .. } if *source_id == mage)
+        });
+        if defender_first {
+            assert!(!mage_applied, "no 0-damage event to replace");
+            assert_eq!(counters(&runner, defender, &CounterType::Minus1Minus1), 0);
+        } else {
+            assert!(mage_applied);
+            assert_eq!(counters(&runner, defender, &CounterType::Minus1Minus1), 1);
+        }
+        assert_eq!(damage(&runner, defender), 0);
+        assert_at_rest(&runner);
+    }
+}
+
 /// Test of Faith's ruling: "If a 1/1 creature would be dealt 6 damage, 3 damage is prevented and
 /// three +1/+1 counters are put on the creature." The last damage is then replaced, and each
 /// effect's "that many" reads its own amount (CR 614.6, CR 615.5).
+///
+/// Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many permanents
+/// instead." The sacrifice is the modified event (CR 614.6), so its prompt comes before Test of
+/// Faith's counters exist, and the counters follow the answer immediately afterward (CR 615.5):
+/// 0 at the prompt, 3 after it. (This row used to expect the counters before the prompt.)
 #[test]
 fn an_earlier_rider_is_not_lost_to_a_substitution_and_reads_its_own_amount() {
     for shield_first in [true, false] {
@@ -2511,11 +2658,12 @@ fn an_earlier_rider_is_not_lost_to_a_substitution_and_reads_its_own_amount() {
         }
     }
 
-    // Dralnu: the shield's rider runs ahead of the sacrifice prompt.
+    // Dralnu: the sacrifice prompt comes first, and the shield's rider follows its answer
+    // (CR 614.6 + CR 615.5).
     for shield_first in [true, false] {
         let mut scenario = self::scenario();
         let id = dralnu(&mut scenario, P0);
-        lands(&mut scenario, P0, 4);
+        let land = lands(&mut scenario, P0, 4);
         let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
         let slash = sorcery(&mut scenario, "Flame Slash", FLAME_SLASH);
         let mut runner = scenario.build();
@@ -2523,14 +2671,25 @@ fn an_earlier_rider_is_not_lost_to_a_substitution_and_reads_its_own_amount() {
         let mut events = cast(&mut runner, slash, vec![object_target(id)]);
         if shield_first {
             choose_shield(&mut runner, &mut events);
-            assert_eq!(plus_counters(&runner, id), 3);
             assert_eq!(zone_prompt(&runner), (1, 5));
+            assert_eq!(plus_counters(&runner, id), 0);
+            answer(
+                &mut runner,
+                GameAction::SelectCards {
+                    cards: vec![land[0]],
+                },
+                &mut events,
+            );
+            assert_eq!(plus_counters(&runner, id), 3);
+            assert_eq!(zone(&runner, land[0]), Zone::Graveyard);
+            assert_eq!(zone(&runner, id), Zone::Battlefield);
+            assert_eq!(damage(&runner, id), 0);
         } else {
             choose_not_shield(&mut runner, &mut events);
             assert_eq!(plus_counters(&runner, id), 0);
             assert_eq!(zone_prompt(&runner), (4, 5));
+            take_offered(&mut runner, &mut events);
         }
-        take_offered(&mut runner, &mut events);
         assert_at_rest(&runner);
     }
 
@@ -2573,18 +2732,219 @@ fn answer_counter_orders(
     seen
 }
 
-/// Test of Faith: "For each 1 damage prevented this way, put a +1/+1 counter on that
-/// creature." Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many
-/// permanents instead." With Hardened Scales and Doubling Season, every counter event is
-/// ordered (CR 616.1), and the sacrifice follows all of them (CR 608.2c, CR 615.5): sacrificing
-/// Hardened Scales cannot change a counter event that already happened.
+/// Soul-Scar Mage: "If a source you control would deal noncombat damage to a creature an opponent
+/// controls, put that many -1/-1 counters on that creature instead." Test of Faith: "Prevent the
+/// next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented
+/// this way, put a +1/+1 counter on that creature." Flame Slash's 4 at P1's 5/5 under both, in
+/// P1's order (CR 616.1).
+///
+/// Test of Faith first prevents 3, and Soul-Scar Mage replaces the last 1. The -1/-1 counter is
+/// the modified event, which happens when the damage would have (CR 614.6), and Test of Faith's
+/// counters are the rest of its effect, immediately afterward (CR 615.5; Acolyte's Reward:
+/// "Then Acolyte's Reward deals its damage."). Each reads its own amount: 1 and 3. After
+/// CR 704.5q the 5/5 has two +1/+1 counters. Soul-Scar Mage first replaces all 4, and Test of
+/// Faith has nothing left to prevent (CR 616.1f) and isn't used up (CR 609.7b).
+///
+/// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174), so
+/// its three counters are three events of 1; the card puts one event of 3. The order and the
+/// totals hold under both.
+#[test]
+fn an_earlier_rider_follows_a_soul_scar_substitution() {
+    for faith_first in [true, false] {
+        let mut scenario = scenario();
+        let mage = soul_scar_mage(&mut scenario, P0);
+        let creature = scenario.add_creature(P1, "Vanilla 5/5", 5, 5).id();
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let slash = sorcery(&mut scenario, "Flame Slash", FLAME_SLASH);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(creature)]);
+        let mut events = cast(&mut runner, slash, vec![object_target(creature)]);
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("expected P1's order, got {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*player, P1);
+        assert!(candidates.iter().any(|c| c.source_id == mage));
+        assert!(candidates.iter().any(|c| c.description == SHIELD));
+        if faith_first {
+            choose_shield(&mut runner, &mut events);
+        } else {
+            choose_source(&mut runner, &mut events, mage);
+        }
+
+        let put = counters_put(&events, creature);
+        if faith_first {
+            assert_eq!(
+                put.first(),
+                Some(&(CounterType::Minus1Minus1, 1)),
+                "{put:?}"
+            );
+            assert!(
+                put[1..]
+                    .iter()
+                    .all(|(kind, _)| *kind == CounterType::Plus1Plus1),
+                "Test of Faith's counters follow the substitute: {put:?}"
+            );
+            assert_eq!(
+                counters_put_total(&events, creature, &CounterType::Plus1Plus1),
+                3
+            );
+            assert_eq!(prevented(&events), 1);
+            assert_eq!(plus_counters(&runner, creature), 2);
+            assert_eq!(counters(&runner, creature, &CounterType::Minus1Minus1), 0);
+        } else {
+            assert_eq!(put, vec![(CounterType::Minus1Minus1, 4)]);
+            assert_eq!(prevented(&events), 0);
+            assert_eq!(plus_counters(&runner, creature), 0);
+            assert_eq!(counters(&runner, creature, &CounterType::Minus1Minus1), 4);
+        }
+        assert_eq!(damage(&runner, creature), 0);
+        assert_at_rest(&runner);
+    }
+}
+
+/// The board of `an_earlier_rider_follows_a_soul_scar_substitution`, Test of Faith first, with
+/// P1's Hardened Scales and Doubling Season. The substitute's -1/-1 counter comes first
+/// (CR 614.6), and Doubling Season alone applies to it, so no order is asked: 2. Test of Faith's
+/// counters follow it (CR 615.5) and meet both, in P1's order (CR 616.1). So at P1's first
+/// counter order the 5/5 already has its two -1/-1 counters and no +1/+1 counter.
 ///
 /// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174),
-/// so the engine asks three orders and puts 12 (Scales first) or 9 (Season first). The card puts
-/// three counters in one event: 8 or 7, with one order.
+/// so the engine asks three orders and puts 12 (Scales first) or 9 (Season first), 10 or 7 after
+/// CR 704.5q. The card puts three counters in one event: 8 or 7, with one order (6 or 5 after
+/// CR 704.5q).
 #[test]
-fn an_earlier_riders_paused_counters_finish_before_the_substitution() {
-    for (scales_first, each, total) in [(true, 4, 12), (false, 3, 9)] {
+fn an_earlier_riders_prompt_follows_a_soul_scar_substitution() {
+    for (scales_first, each, total, after_sba) in [(true, 4, 12, 10), (false, 3, 9, 7)] {
+        let mut scenario = scenario();
+        soul_scar_mage(&mut scenario, P0);
+        let creature = scenario.add_creature(P1, "Vanilla 5/5", 5, 5).id();
+        let scales = scenario
+            .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+            .id();
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let slash = sorcery(&mut scenario, "Flame Slash", FLAME_SLASH);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(creature)]);
+        let mut events = cast(&mut runner, slash, vec![object_target(creature)]);
+        choose_shield(&mut runner, &mut events);
+
+        assert_eq!(
+            replacement_prompt(&runner),
+            (P1, BTreeSet::from([scales, season]))
+        );
+        assert_eq!(counters(&runner, creature, &CounterType::Minus1Minus1), 2);
+        assert_eq!(plus_counters(&runner, creature), 0);
+        let first = if scales_first { scales } else { season };
+        let mut seen = Vec::new();
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            assert_eq!(
+                replacement_prompt(&runner),
+                (P1, BTreeSet::from([scales, season]))
+            );
+            seen.push(plus_counters(&runner, creature));
+            choose_source(&mut runner, &mut events, first);
+        }
+
+        assert_eq!(seen, vec![0, each, 2 * each]);
+        assert_eq!(
+            counters_put_total(&events, creature, &CounterType::Plus1Plus1),
+            total
+        );
+        assert_eq!(plus_counters(&runner, creature), after_sba);
+        assert_eq!(counters(&runner, creature, &CounterType::Minus1Minus1), 0);
+        assert_eq!(damage(&runner, creature), 0);
+        assert_at_rest(&runner);
+    }
+}
+
+/// The board of `an_earlier_rider_follows_a_soul_scar_substitution`, Test of Faith first, with
+/// P1's Vizier of Remedies ("If one or more -1/-1 counters would be put on a creature you
+/// control, that many -1/-1 counters minus one are put on it instead.") and Doubling Season. The
+/// substitute's one -1/-1 counter meets both, and P1 orders them (CR 616.1): Vizier first
+/// (1 − 1) × 2 = 0, Season first 1 × 2 − 1 = 1. Test of Faith's counters wait behind that prompt
+/// (CR 615.5 + CR 608.2c), so no +1/+1 counter is there while it stands. Then its 3 counters meet
+/// Doubling Season alone: 6. After CR 704.5q: 6 or 5 +1/+1 counters and no -1/-1 counter.
+#[test]
+fn an_earlier_rider_waits_behind_a_soul_scar_substitutions_prompt() {
+    for (vizier_first, minus, after_sba) in [(true, 0, 6), (false, 1, 5)] {
+        let mut scenario = scenario();
+        soul_scar_mage(&mut scenario, P0);
+        let creature = scenario.add_creature(P1, "Vanilla 5/5", 5, 5).id();
+        let vizier = vizier_of_remedies(&mut scenario, P1);
+        let season = scenario
+            .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+            .id();
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let slash = sorcery(&mut scenario, "Flame Slash", FLAME_SLASH);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(creature)]);
+        let mut events = cast(&mut runner, slash, vec![object_target(creature)]);
+        choose_shield(&mut runner, &mut events);
+
+        let first = if vizier_first { vizier } else { season };
+        let mut prompts = 0;
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            assert_eq!(
+                replacement_prompt(&runner),
+                (P1, BTreeSet::from([vizier, season]))
+            );
+            assert_eq!(
+                plus_counters(&runner, creature),
+                0,
+                "Test of Faith's counters wait behind the substitute's prompt"
+            );
+            prompts += 1;
+            choose_source(&mut runner, &mut events, first);
+        }
+
+        assert!(
+            prompts >= 1,
+            "reach: the substitute's counter asks an order"
+        );
+        assert_eq!(
+            counters_put_total(&events, creature, &CounterType::Minus1Minus1),
+            minus
+        );
+        assert_eq!(
+            counters_put_total(&events, creature, &CounterType::Plus1Plus1),
+            6
+        );
+        assert_eq!(plus_counters(&runner, creature), after_sba);
+        assert_eq!(counters(&runner, creature, &CounterType::Minus1Minus1), 0);
+        assert_eq!(damage(&runner, creature), 0);
+        assert_at_rest(&runner);
+    }
+}
+
+/// Test of Faith: "For each 1 damage prevented this way, put a +1/+1 counter on that
+/// creature." Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many
+/// permanents instead." The sacrifice is the modified event (CR 614.6), so it is asked first,
+/// before any counter, and Test of Faith's counters follow it immediately afterward (CR 615.5),
+/// under the Hardened Scales and Doubling Season the sacrifice left. Sacrificing Hardened Scales
+/// leaves Doubling Season alone, one applicable replacement per counter event, and Dralnu ends
+/// at 3 × 2 = 6 with no order asked. Sacrificing a land leaves both, so every counter event is
+/// ordered (CR 616.1). (This row used to expect the counters, ordered, before the sacrifice
+/// prompt, and 12 or 9 with Hardened Scales sacrificed.)
+///
+/// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174),
+/// so with a land sacrificed the engine asks three orders and puts 12 (Scales first) or 9
+/// (Season first). The card puts three counters in one event: 8 or 7, with one order.
+#[test]
+fn an_earlier_riders_counters_follow_the_substitutions_sacrifice() {
+    // `None`: sacrifice Hardened Scales. `Some((scales_first, each, total))`: sacrifice a land.
+    for land_order in [None, Some((true, 4, 12)), Some((false, 3, 9))] {
         let mut scenario = self::scenario();
         let id = dralnu(&mut scenario, P0);
         let scales = scenario
@@ -2593,7 +2953,7 @@ fn an_earlier_riders_paused_counters_finish_before_the_substitution() {
         let season = scenario
             .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON)
             .id();
-        lands(&mut scenario, P0, 2);
+        let land = lands(&mut scenario, P0, 2);
         let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
         let slash = sorcery(&mut scenario, "Flame Slash", FLAME_SLASH);
         let mut runner = scenario.build();
@@ -2601,30 +2961,53 @@ fn an_earlier_riders_paused_counters_finish_before_the_substitution() {
         let mut events = cast(&mut runner, slash, vec![object_target(id)]);
         choose_shield(&mut runner, &mut events);
 
-        let first = if scales_first { scales } else { season };
-        let seen = answer_counter_orders(&mut runner, &mut events, id, first);
-        assert_eq!(seen, vec![0, each, 2 * each]);
-        assert_eq!(plus_counters(&runner, id), total);
+        // The sacrifice prompt comes first: no counter order was asked and no counter is put.
         assert_eq!(zone_prompt(&runner), (1, 5));
+        assert_eq!(plus_counters(&runner, id), 0);
+        let sacrificed = if land_order.is_some() {
+            land[0]
+        } else {
+            scales
+        };
         answer(
             &mut runner,
             GameAction::SelectCards {
-                cards: vec![scales],
+                cards: vec![sacrificed],
             },
             &mut events,
         );
+        assert_eq!(zone(&runner, sacrificed), Zone::Graveyard);
 
-        assert_eq!(zone(&runner, scales), Zone::Graveyard);
+        match land_order {
+            None => {
+                assert!(
+                    !matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ),
+                    "Doubling Season alone asks no order"
+                );
+                assert_eq!(plus_counters(&runner, id), 6);
+            }
+            Some((scales_first, each, total)) => {
+                let first = if scales_first { scales } else { season };
+                let seen = answer_counter_orders(&mut runner, &mut events, id, first);
+                assert_eq!(seen, vec![0, each, 2 * each]);
+                assert_eq!(plus_counters(&runner, id), total);
+            }
+        }
         assert_eq!(zone(&runner, id), Zone::Battlefield);
-        assert_eq!(plus_counters(&runner, id), total);
         assert_eq!(damage(&runner, id), 0);
         assert_at_rest(&runner);
     }
 
-    // Phytohydra: "put that many +1/+1 counters on it instead" is one more ordered counter
-    // event, of 1, after Test of Faith's counters. strict-failure: Test of Faith's three counters
-    // are three ordered events (Command Zone #174), so 12 + 4; the card puts them in one event,
-    // (3+1)×2 = 8, then 4: 12, with two orders.
+    // Phytohydra: "put that many +1/+1 counters on it instead" is the modified event
+    // (CR 614.6), one ordered counter event of 1, and Test of Faith's counters follow it
+    // (CR 615.5). Under Hardened Scales first every 1-counter event gives (1+1)×2 = 4, so these
+    // totals don't show the order (`an_earlier_riders_prompt_follows_a_soul_scar_substitution`
+    // does). strict-failure: Test of Faith's three counters are three ordered events (Command
+    // Zone #174), so 4 + 12; the card puts them in one event: 4, then (3+1)×2 = 8: 12, with two
+    // orders.
     let mut scenario = self::scenario();
     let hydra = phytohydra(&mut scenario, P0);
     let scales = scenario
@@ -2643,7 +3026,10 @@ fn an_earlier_riders_paused_counters_finish_before_the_substitution() {
     assert_at_rest(&runner);
 
     // Kicked Hurloon Battle Hymn: "If this spell was kicked, you gain 4 life." is the spell's
-    // next instruction, after the counters and the queued sacrifice (CR 608.2c).
+    // next instruction. Dralnu's sacrifice comes first (CR 614.6), Test of Faith's counters
+    // follow it as part of that prevention effect (CR 615.5), and only then does the spell resume
+    // (CR 608.2c). With Hardened Scales sacrificed no counter order is asked, so the order is
+    // read from the answering action's events: every +1/+1 counter on Dralnu before the gain.
     let mut scenario = self::scenario();
     let id = dralnu(&mut scenario, P0);
     let scales = scenario
@@ -2671,27 +3057,51 @@ fn an_earlier_riders_paused_counters_finish_before_the_substitution() {
     let mut events = Vec::new();
     settle(&mut runner, &mut Vec::new(), &mut events);
     choose_shield(&mut runner, &mut events);
-    let mut lives = Vec::new();
-    while matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ) {
-        lives.push((plus_counters(&runner, id), life(&runner, P0)));
-        choose_source(&mut runner, &mut events, scales);
-    }
-    // strict-failure: three counter events (Command Zone #174); the card puts one, for 8.
-    assert_eq!(lives, vec![(0, 20), (4, 20), (8, 20)]);
     assert_eq!(zone_prompt(&runner), (1, 7));
+    assert_eq!(plus_counters(&runner, id), 0);
     assert_eq!(life(&runner, P0), 20);
-    answer(
-        &mut runner,
-        GameAction::SelectCards {
+    let sacrifice = runner
+        .act(GameAction::SelectCards {
             cards: vec![scales],
-        },
-        &mut events,
+        })
+        .expect("sacrifice")
+        .events;
+    let last_counter = sacrifice.iter().rposition(|event| {
+        matches!(
+            event,
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                ..
+            } if *object_id == id
+        )
+    });
+    let gains: Vec<usize> = sacrifice
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            matches!(
+                event,
+                GameEvent::LifeChanged { player_id, amount: 4, .. } if *player_id == P0
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let last_counter =
+        last_counter.expect("reach: Test of Faith's counters are put in the answering action");
+    assert_eq!(
+        gains.len(),
+        1,
+        "the kicked gain happens once: {sacrifice:?}"
     );
+    assert!(
+        last_counter < gains[0],
+        "every counter before the spell resumes: {sacrifice:?}"
+    );
+    events.extend(sacrifice);
+    settle(&mut runner, &mut Vec::new(), &mut events);
     assert_eq!(life(&runner, P0), 24);
-    assert_eq!(plus_counters(&runner, id), 12);
+    assert_eq!(plus_counters(&runner, id), 6);
     assert_eq!(zone(&runner, scales), Zone::Graveyard);
     assert_eq!(zone(&runner, id), Zone::Battlefield);
     assert_at_rest(&runner);
@@ -3442,6 +3852,8 @@ fn cast_temper_at_one(runner: &mut GameRunner, temper: ObjectId, target: ObjectI
 /// are ordered by P1 (CR 616.1). Test of Faith first prevents 3 and puts 3 counters, and
 /// Phytohydra replaces the last 1 with 1 more: 4. Phytohydra first replaces all 4 with 4
 /// counters and leaves the shield unused. Phytohydra is dealt no damage, and no rider is left.
+/// In combat Test of Faith's counters are put before Phytohydra's; by CR 614.6 + CR 615.5
+/// Phytohydra's come first (strict-failure, Command Zone #267).
 #[test]
 fn a_resident_rider_from_another_recipient_is_not_lost() {
     let mut scenario = scenario();
@@ -3695,6 +4107,51 @@ fn a_substitution_is_ordered_against_a_prevention_shield() {
     }
 }
 
+/// Force Bubble ("If damage would be dealt to you, put that many depletion counters on this
+/// enchantment instead.") and Pariah ("All damage that would be dealt to you is dealt to
+/// enchanted creature instead.") both apply to Lightning Bolt's 3 at P1, who orders them
+/// (CR 616.1, CR 616.1e). Force Bubble first replaces the damage with 3 depletion counters, and
+/// Pariah has no event left. Pariah first sends it to the enchanted creature, which "dealt to
+/// you" no longer matches (CR 616.1f).
+#[test]
+fn a_substitution_and_a_redirect_ask_their_order() {
+    for bubble_first in [true, false] {
+        let mut scenario = scenario();
+        let bubble = force_bubble(&mut scenario, P1);
+        let creature = scenario.add_creature(P1, "Wall", 0, 8).id();
+        let pariah = scenario
+            .add_enchantment_from_oracle(P1, "Pariah", PARIAH)
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+            .id();
+        let spell = bolt(&mut scenario);
+        let mut runner = scenario.build();
+        attach_to(runner.state_mut(), pariah, creature);
+        let mut events = cast(&mut runner, spell, vec![player_target(P1)]);
+        let (chooser, sources) = replacement_prompt(&runner);
+        assert_eq!(chooser, P1);
+        assert!(
+            sources.contains(&bubble) && sources.contains(&pariah),
+            "{sources:?}"
+        );
+        choose_source(
+            &mut runner,
+            &mut events,
+            if bubble_first { bubble } else { pariah },
+        );
+
+        if bubble_first {
+            assert_eq!(counters(&runner, bubble, &depletion()), 3);
+            assert_eq!(damage(&runner, creature), 0);
+        } else {
+            assert_eq!(counters(&runner, bubble, &depletion()), 0);
+            assert_eq!(damage(&runner, creature), 3);
+        }
+        assert_eq!(life(&runner, P1), 20);
+        assert_at_rest(&runner);
+    }
+}
+
 /// Pyroclasm at a Phytohydra with protection from everything. Protection's prevention
 /// (CR 702.16e: "Any damage that would be dealt by sources that have the stated quality to a
 /// permanent or player with protection is prevented.") and Phytohydra's substitution both apply,
@@ -3721,6 +4178,108 @@ fn protection_prevents_ahead_of_a_substitutions_choice() {
     assert_eq!(plus_counters(&runner, hydra), 0);
     assert_eq!(damage(&runner, hydra), 0);
     assert_at_rest(&runner);
+}
+
+/// Pyroclasm (red, CR 202.2) at P1's Silver Knight ("First strike, protection from red") under
+/// P0's Soul-Scar Mage. Protection's prevention (CR 702.16e) and Soul-Scar Mage's substitution
+/// both apply, so P1 chooses one (CR 616.1, CR 616.1e): Soul-Scar Mage first puts two -1/-1
+/// counters on the Knight, protection first none. P1's Hill Giant, with no protection, is the
+/// reach guard: Soul-Scar Mage applies in the same cast, and it survives as a 1/1.
+///
+/// strict-failure: protection prevents the damage at the pre-replacement gate, before the
+/// substitution is offered, so P1 is never asked and the Knight gets no counters. Soul-Scar Mage
+/// reports unsupported for it
+/// (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
+#[test]
+fn protection_prevents_ahead_of_soul_scar_mages_choice() {
+    let mut scenario = scenario();
+    let mage = soul_scar_mage(&mut scenario, P0);
+    let knight = scenario
+        .add_creature(P1, "Silver Knight", 2, 2)
+        .with_subtypes(vec!["Human", "Knight"])
+        .from_oracle_text_with_keywords(&["First strike", "Protection"], SILVER_KNIGHT)
+        .id();
+    let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pyroclasm", false, PYROCLASM)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let mut runner = scenario.build();
+    assert!(runner.state().objects[&knight]
+        .keywords
+        .contains(&Keyword::Protection(ProtectionTarget::Color(
+            ManaColor::Red
+        ))));
+    let events = cast(&mut runner, spell, vec![]);
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::ReplacementApplied { source_id, .. } if *source_id == mage
+    )));
+    assert_eq!(counters(&runner, giant, &CounterType::Minus1Minus1), 2);
+    assert_eq!(zone(&runner, giant), Zone::Battlefield);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::DamagePrevented { target: TargetRef::Object(id), .. } if *id == knight
+    )));
+    assert_eq!(counters(&runner, knight, &CounterType::Minus1Minus1), 0);
+    assert_eq!(damage(&runner, knight), 0);
+    assert_at_rest(&runner);
+}
+
+/// Szadek, Lord of Secrets attacks P1, who cast Teferi's Protection ("you gain protection from
+/// everything"). Protection's prevention (CR 702.16e) and Szadek's substitution both apply to the
+/// combat damage to P1, who chooses one (CR 616.1, CR 616.1e): Szadek first puts five +1/+1
+/// counters on Szadek and mills five, protection first does neither.
+///
+/// strict-failure: protection prevents the damage at the pre-replacement gate, before the
+/// substitution is offered, so P1 is never asked: no counter and no mill. Szadek reports
+/// unsupported for it (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
+#[test]
+fn protection_prevents_ahead_of_szadeks_choice() {
+    let mut scenario = scenario();
+    let szadek = szadek(&mut scenario);
+    scenario.with_library_top(P1, &["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
+    let protection = scenario
+        .add_spell_to_hand_from_oracle(P1, "Teferi's Protection", true, TEFERIS_PROTECTION)
+        .id();
+    let mut runner = scenario.build();
+    // P0 passes in precombat main, and P1 casts Teferi's Protection with priority.
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    cast(&mut runner, protection, vec![]);
+    assert_eq!(runner.state().active_player, P0);
+
+    let events = combat_events(&mut runner, vec![szadek], vec![]);
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "P1 is never asked"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::DamagePrevented { source_id, target: TargetRef::Player(player), .. }
+            if *source_id == szadek && *player == P1
+    )));
+    assert_eq!(plus_counters(&runner, szadek), 0);
+    assert_eq!(library_and_graveyard(&runner, P1), (7, 0));
+    assert_eq!(life(&runner, P1), 20);
 }
 
 /// "dealt to you" and "dealt to this creature" name only their recipient (CR 614.1a).
@@ -4154,8 +4713,11 @@ fn combat_order_answer_drains_in_its_own_portion() {
 ///
 /// strict-failure: the ruling says "damage from multiple sources that happens at one time (such
 /// as combat damage) gives one choice, not one per source", and the engine asks three times
-/// where the card gives one. Force Bubble reports unsupported for it
-/// (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
+/// where the card gives one.
+/// This gap is Force Bubble's own ruling. CR 700.1 ("The text of triggered abilities and
+/// replacement effects defines the event they're looking for") keeps it from carrying over to a
+/// source-qualified substitution, so `damage_substitution_choice_incomplete` does not claim it
+/// for the class. Force Bubble reports unsupported through that fence's protection gap.
 #[test]
 fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
     let mut scenario = scenario();
@@ -4190,8 +4752,11 @@ fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
 ///
 /// strict-failure: the ruling says "damage from multiple sources that happens at one time (such
 /// as combat damage) gives one choice, not one per source", and the engine asks once per Dragon:
-/// two prompts where the card gives one. Force Bubble reports unsupported for it
-/// (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
+/// two prompts where the card gives one.
+/// This gap is Force Bubble's own ruling. CR 700.1 ("The text of triggered abilities and
+/// replacement effects defines the event they're looking for") keeps it from carrying over to a
+/// source-qualified substitution, so `damage_substitution_choice_incomplete` does not claim it
+/// for the class. Force Bubble reports unsupported through that fence's protection gap.
 #[test]
 fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
     let mut scenario = scenario();
@@ -4235,6 +4800,115 @@ fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
     assert_eq!(counters(&runner, second, &depletion()), 0);
     assert_eq!(life(&runner, P1), 20);
     assert_at_rest(&runner);
+}
+
+/// CR 615.7: "Each 1 damage that would be dealt to the "shielded" permanent or player is
+/// prevented. Preventing 1 damage reduces the remaining shield by 1." Szadek, Lord of Secrets and
+/// a 4/4 attack P1, who is under P0's Mending Hands ("Prevent the next 4 damage that would be
+/// dealt to any target this turn."). Szadek's 5 meets both, in P1's order (CR 616.1). Szadek
+/// first replaces all 5 (five +1/+1 counters, five milled) and prevents nothing, so the shield
+/// isn't used up (CR 609.7b) and prevents the 4/4's 4. Mending Hands first is Szadek's ruling: "the
+/// player can choose to first have Mending Hands prevent 4 of the damage and then apply Szadek's
+/// ability so that it gets only one counter", and the 4/4's 4 is then dealt.
+#[test]
+fn szadeks_substitution_leaves_a_shared_shield_for_the_other_attacker() {
+    for szadek_first in [true, false] {
+        let mut scenario = scenario();
+        let szadek = szadek(&mut scenario);
+        let ogre = scenario.add_creature(P0, "Ogre", 4, 4).id();
+        scenario.with_library_top(P1, &["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
+        let hands = instant(&mut scenario, "Mending Hands", MENDING_HANDS);
+        let mut runner = scenario.build();
+        cast(&mut runner, hands, vec![player_target(P1)]);
+        let mut events = combat_events(&mut runner, vec![szadek, ogre], vec![]);
+
+        // Reach: Szadek's damage meets the shield with all 4 left.
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("expected P1's order, got {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*player, P1);
+        assert!(candidates.iter().any(|c| c.source_id == szadek));
+        assert!(candidates.iter().any(|c| c.description == SHIELD));
+        if szadek_first {
+            choose_source(&mut runner, &mut events, szadek);
+        } else {
+            choose_shield(&mut runner, &mut events);
+        }
+
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "one order prompt"
+        );
+        let prevented_from: Vec<(ObjectId, u32)> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamagePrevented {
+                    source_id,
+                    target: TargetRef::Player(player),
+                    amount,
+                } if *player == P1 => Some((*source_id, *amount)),
+                _ => None,
+            })
+            .collect();
+        if szadek_first {
+            assert_eq!(plus_counters(&runner, szadek), 5);
+            assert_eq!(library_and_graveyard(&runner, P1), (2, 5));
+            assert_eq!(prevented_from, vec![(ogre, 4)]);
+            assert_eq!(life(&runner, P1), 20);
+        } else {
+            assert_eq!(plus_counters(&runner, szadek), 1);
+            assert_eq!(library_and_graveyard(&runner, P1), (6, 1));
+            assert_eq!(prevented_from, vec![(szadek, 4)]);
+            assert_eq!(life(&runner, P1), 16);
+        }
+    }
+}
+
+/// Undead Alchemist: "If you control multiple Undead Alchemists, the multiple replacement
+/// abilities will have no added effect. Combat damage dealt to a player by a Zombie you control
+/// will be replaced only once with cards being put into that player's graveyard." Alchemist A
+/// attacks P1 alone; both Alchemists apply to its 4, so P1 chooses one (CR 616.1). After it
+/// applies the event is a mill (CR 614.6), which the other's "would deal combat damage" no longer
+/// matches (CR 614.5, CR 616.1f): P1 mills 4, once. The milled cards are not creature cards, so
+/// neither Alchemist's trigger creates a token.
+#[test]
+fn two_undead_alchemists_replace_a_zombies_damage_once() {
+    for a_first in [true, false] {
+        let mut scenario = scenario();
+        let a = undead_alchemist(&mut scenario);
+        let b = undead_alchemist(&mut scenario);
+        scenario.with_library_top(P1, &["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
+        let mut runner = scenario.build();
+        let first = if a_first { a } else { b };
+        let (events, prompts) = combat_answering(&mut runner, vec![a], vec![], &[first]);
+
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].0, P1);
+        assert_eq!(source_set(&prompts[0].1), BTreeSet::from([a, b]));
+        let applied: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ReplacementApplied { source_id, .. }
+                    if *source_id == a || *source_id == b =>
+                {
+                    Some(*source_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(applied, vec![first]);
+        assert_eq!(library_and_graveyard(&runner, P1), (3, 4));
+        assert_eq!(life(&runner, P1), 20);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+    }
 }
 
 /// Battletide Alchemist: "If a source would deal damage to a player, you may prevent X of that
@@ -4617,6 +5291,128 @@ fn a_fight_parked_on_a_held_rider_ends_with_the_game() {
         0,
         "no damage batch is left to resume"
     );
+}
+
+/// Soul-Scar Mage's ruling: "If an effect causes a creature you control to fight a creature an
+/// opponent controls, the damage is dealt simultaneously. For instance, if your 2/2 creature
+/// fights an opponent's 4/4 creature, your creature will be dealt 4 damage and your opponent's
+/// creature will have two -1/-1 counters put on it." (CR 701.14a.) The same fight without
+/// Soul-Scar Mage is the reach guard: the 4/4 is dealt 2.
+#[test]
+fn soul_scar_mage_fight_replaces_one_direction() {
+    for with_mage in [true, false] {
+        let mut scenario = scenario();
+        if with_mage {
+            soul_scar_mage(&mut scenario, P0);
+        }
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let theirs = scenario.add_creature(P1, "Vanilla 4/4", 4, 4).id();
+        let pit_fight = instant(&mut scenario, "Pit Fight", PIT_FIGHT);
+        let mut runner = scenario.build();
+        let events = cast(
+            &mut runner,
+            pit_fight,
+            vec![object_target(bears), object_target(theirs)],
+        );
+
+        assert_completes_once_after_its_damage(&events, EffectKind::Fight, pit_fight);
+        assert_eq!(
+            zone(&runner, bears),
+            Zone::Graveyard,
+            "the Bears are dealt 4"
+        );
+        if with_mage {
+            assert_eq!(counters(&runner, theirs, &CounterType::Minus1Minus1), 2);
+            assert_eq!(damage(&runner, theirs), 0);
+        } else {
+            assert_eq!(counters(&runner, theirs, &CounterType::Minus1Minus1), 0);
+            assert_eq!(damage(&runner, theirs), 2);
+        }
+        assert_at_rest(&runner);
+    }
+}
+
+/// Pit Fight deals both directions at once (CR 701.14a). P0's Bears, under P0's Test of Faith,
+/// fight P1's 4/4 under P0's Soul-Scar Mage. The Bears' 2 becomes "that many -1/-1 counters" on
+/// the 4/4 (CR 614.6), the modified event; the 4/4's 4 meets Test of Faith, which prevents 3, and
+/// its "put a +1/+1 counter" is the rest of its effect, immediately afterward (CR 615.5). So the
+/// substitute's work comes before the rider's, though P0 is active: Phase D's APNAP rank
+/// (CR 101.4) orders held work only within one timing.
+///
+/// P1's Doubling Season and Vizier of Remedies both apply to the 2 counters on P1's creature, in
+/// P1's order (CR 616.1): Season first 2 × 2 − 1 = 3, Vizier first (2 − 1) × 2 = 2. P0's Hardened
+/// Scales and Doubling Season apply to Test of Faith's counters on P0's Bears, in P0's order. Each
+/// player's Doubling Season reads "a permanent you control", so neither appears in the other's
+/// prompt.
+///
+/// strict-failure: Test of Faith's counters parse as one counter at a time (Command Zone #174), so
+/// P0 is asked three times, (1+1) × 2 = 4 or 1 × 2 + 1 = 3 each: 12 or 9, and the prompts are P1,
+/// P0, P0, P0. The card puts its three counters in one event: (3+1) × 2 = 8 or 3 × 2 + 1 = 7, and
+/// the prompts are P1, P0.
+#[test]
+fn a_soul_scar_fight_substitution_comes_with_the_event() {
+    for (p1_season_first, p0_scales_first, minus, each, total) in
+        [(true, true, 3, 4, 12), (false, false, 2, 3, 9)]
+    {
+        let mut scenario = scenario();
+        soul_scar_mage(&mut scenario, P0);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+            .id();
+        let season_p0 = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON)
+            .id();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let theirs = scenario.add_creature(P1, "Vanilla 4/4", 4, 4).id();
+        let season_p1 = scenario
+            .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+            .id();
+        let vizier = vizier_of_remedies(&mut scenario, P1);
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let pit_fight = instant(&mut scenario, "Pit Fight", PIT_FIGHT);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(bears)]);
+        let mut events = cast(
+            &mut runner,
+            pit_fight,
+            vec![object_target(bears), object_target(theirs)],
+        );
+
+        let mut prompts = Vec::new();
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            let (chooser, sources) = replacement_prompt(&runner);
+            prompts.push((chooser, sources, plus_counters(&runner, bears)));
+            let pick = match (chooser == P1, p1_season_first, p0_scales_first) {
+                (true, true, _) => season_p1,
+                (true, false, _) => vizier,
+                (false, _, true) => scales,
+                (false, _, false) => season_p0,
+            };
+            choose_source(&mut runner, &mut events, pick);
+        }
+
+        assert_eq!(prompts.len(), 4, "{prompts:?}");
+        let choosers: Vec<PlayerId> = prompts.iter().map(|(chooser, _, _)| *chooser).collect();
+        assert_eq!(choosers, vec![P1, P0, P0, P0], "{prompts:?}");
+        assert_eq!(prompts[0].1, BTreeSet::from([season_p1, vizier]));
+        assert!(
+            prompts[1..]
+                .iter()
+                .all(|(_, sources, _)| *sources == BTreeSet::from([scales, season_p0])),
+            "{prompts:?}"
+        );
+        let seen: Vec<u32> = prompts.iter().map(|(_, _, plus)| *plus).collect();
+        assert_eq!(seen, vec![0, 0, each, 2 * each], "{prompts:?}");
+        assert_eq!(counters(&runner, theirs, &CounterType::Minus1Minus1), minus);
+        assert_eq!(damage(&runner, theirs), 0);
+        assert_eq!(plus_counters(&runner, bears), total);
+        assert_eq!(damage(&runner, bears), 1);
+        assert_completes_once_after_its_damage(&events, EffectKind::Fight, pit_fight);
+        assert_at_rest(&runner);
+    }
 }
 
 const AWE_STRIKE: &str = "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.";
