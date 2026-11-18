@@ -311,7 +311,7 @@ fn forge_anew_zero_equip_is_not_offered_during_the_opponents_turn() {
         ),
         "Forge Anew's {{0}} applies only during your own turn"
     );
-    runner.advance_until_stack_empty();
+    resolve_stack_by_passing(&mut runner);
     assert!(
         runner.state().objects[&shikari]
             .attachments
@@ -348,4 +348,113 @@ fn forge_anew_zero_equip_is_offered_during_your_own_turn() {
             .contains(&equipment),
         "the Equipment attaches after paying {{0}}"
     );
+}
+
+const BRUENOR: &str = "Each creature you control gets +2/+0 for each Equipment attached to it.\nYou may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.";
+
+/// CR 109.5 + CR 118.9 + CR 702.6a: Bruenor Battlehammer's "the first equip
+/// ability you activate each turn" counts only its controller's own activations.
+/// P1 equips first (Leonin Shikari, at instant speed, during P0's turn); P0's
+/// first equip is still offered {0}.
+#[test]
+fn opponents_earlier_equip_does_not_consume_bruenors_zero_equip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Bruenor Battlehammer", 5, 3, BRUENOR)
+        .as_legendary()
+        .with_subtypes(vec!["Dwarf", "Warrior"]);
+    let p0_equipment = scenario
+        .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let shikari = scenario
+        .add_creature_from_oracle(P1, "Leonin Shikari", 1, 1, LEONIN_SHIKARI)
+        .with_subtypes(vec!["Cat", "Soldier"])
+        .id();
+    let p1_equipment = scenario
+        .add_artifact_from_oracle(P1, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+
+    // CR 117.3d: P0 passes with an empty stack, so P1 receives priority during
+    // P0's turn and can equip at instant speed (Leonin Shikari).
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 may pass priority");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 },
+        "reach guard: P1 received priority"
+    );
+    for _ in 0..2 {
+        runner.state_mut().players[1].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    let p1_result = runner
+        .act(GameAction::ActivateAbility {
+            source_id: p1_equipment,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1's instant-speed equip is legal");
+    assert!(
+        !matches!(
+            p1_result.waiting_for,
+            WaitingFor::ActivationCostOneOfChoice { .. }
+        ),
+        "Bruenor belongs to P0, so P1 is offered no {{0}} branch"
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().objects[&shikari]
+            .attachments
+            .contains(&p1_equipment),
+        "reach guard: P1's equip activated and resolved first this turn"
+    );
+    // CR 117.3b: P0, the active player, receives priority after the ability resolves.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "P0 naturally regains priority"
+    );
+
+    // P0 has no mana, so only the {0} alternative is payable.
+    let result = activate_equip(&mut runner, p0_equipment);
+    let zero_branch = match result.waiting_for {
+        WaitingFor::ActivationCostOneOfChoice { ref costs, .. } => costs
+            .iter()
+            .position(
+                |cost| matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)),
+            )
+            .expect("the {0} equip branch should still be offered to P0"),
+        other => panic!("expected the alternative cost choice, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseActivationCostBranch { index: zero_branch })
+        .expect("choosing the {0} branch should be accepted");
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().objects[&p0_equipment].attached_to.is_some(),
+        "P0's Equipment attaches after paying {{0}}"
+    );
+}
+
+/// CR 117.4 + CR 608.1: with an ability on the stack, both players pass in
+/// turn until it resolves.
+fn resolve_stack_by_passing(runner: &mut engine::game::scenario::GameRunner) {
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority resolves the stack");
+    }
+    panic!("stack did not resolve: {:?}", runner.state().stack);
 }

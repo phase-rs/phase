@@ -3,7 +3,7 @@
 //! lets its controller pay {0} rather than the cycling cost of the first card they cycle
 //! each turn; the card must still be discarded.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::AbilityCost;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -217,4 +217,97 @@ fn new_perspectives_offers_nothing_below_seven_cards() {
         0,
         "the ordinary {{R}} cycling cost was paid"
     );
+}
+
+const CENSOR: &str = "Counter target spell unless its controller pays {1}.\nCycling {U} ({U}, Discard this card: Draw a card.)";
+
+/// CR 109.5 + CR 118.9 + CR 702.29a: Gavi's "the first card you cycle each turn"
+/// counts only its controller's own cycling. An opponent who cycles first during
+/// the controller's turn (cycling is instant speed) does not consume P0's {0}.
+#[test]
+fn opponents_earlier_cycle_does_not_consume_gavis_zero_cycling() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Gavi, Nest Warden", 2, 5, GAVI)
+        .as_legendary();
+    let p0_cave = scenario
+        .add_land_to_hand(P0, "Forgotten Cave")
+        .from_oracle_text(FORGOTTEN_CAVE)
+        .id();
+    let censor = scenario
+        .add_spell_to_hand_from_oracle(P1, "Censor", true, CENSOR)
+        .id();
+    scenario.with_library_top(P0, &["P0 Draw"]);
+    scenario.with_library_top(P1, &["P1 Draw"]);
+    let mut runner = scenario.build();
+
+    // CR 117.3d: P0 passes with an empty stack, so P1 receives priority during
+    // P0's turn and cycles Censor for {U}.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 may pass priority");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 },
+        "reach guard: P1 received priority"
+    );
+    runner.state_mut().players[1].mana_pool.add(ManaUnit::new(
+        ManaType::Blue,
+        ObjectId(0),
+        false,
+        vec![],
+    ));
+    let p1_cycle = activate_cycling(&mut runner, censor).expect("P1's cycling is legal");
+    assert!(
+        !matches!(
+            p1_cycle.waiting_for,
+            WaitingFor::ActivationCostOneOfChoice { .. }
+        ),
+        "Gavi belongs to P0, so P1 is offered no {{0}} branch"
+    );
+    resolve_stack_by_passing(&mut runner);
+    assert_eq!(
+        runner.state().objects[&censor].zone,
+        Zone::Graveyard,
+        "reach guard: P1's Censor was cycled first this turn"
+    );
+    // CR 117.3b: P0, the active player, receives priority after the ability resolves.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "P0 naturally regains priority"
+    );
+
+    // P0 has no mana, so the only affordable branch is the {0} alternative.
+    let result = activate_cycling(&mut runner, p0_cave)
+        .expect("P0's first cycle is payable through Gavi's {0}");
+    let zero_branch = match result.waiting_for {
+        WaitingFor::ActivationCostOneOfChoice { ref costs, .. } => costs
+            .iter()
+            .position(
+                |cost| matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)),
+            )
+            .expect("the {0} cycling branch should still be offered to P0"),
+        other => panic!("expected the alternative cost choice, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseActivationCostBranch { index: zero_branch })
+        .expect("choosing the {0} branch should be accepted");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&p0_cave].zone, Zone::Graveyard);
+}
+
+/// CR 117.4 + CR 608.1: with an ability on the stack, both players pass in
+/// turn until it resolves.
+fn resolve_stack_by_passing(runner: &mut engine::game::scenario::GameRunner) {
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority resolves the stack");
+    }
+    panic!("stack did not resolve: {:?}", runner.state().stack);
 }

@@ -27680,7 +27680,9 @@ fn activation_cost_with_alternative_keyword_costs(
                 state,
                 ability_tag.keyword_str(),
                 ActivationExemption::None,
-                None,
+                // CR 109.5: "you activate" — only the static controller's own
+                // earlier activations consume the once-per-turn option.
+                Some(&PlayerFilter::Controller),
                 definition.affected.as_ref(),
                 None,
                 static_source.id,
@@ -36252,9 +36254,10 @@ pub(crate) fn cost_observable_activation_journal(
                 activator.as_ref(),
                 targets.as_ref(),
             ),
-            // CR 118.9 + CR 611.3a: "the first <keyword> ability you activate
-            // each turn" (Bruenor Battlehammer, Gavi, Kíli): the activator is
-            // the static's controller and no target gate applies.
+            // CR 118.9 + CR 611.3a + CR 109.5: "the first <keyword> ability you
+            // activate each turn" (Bruenor Battlehammer, Gavi, Kíli): only the
+            // static controller's own activations count (`Controller` gate,
+            // matching the pricing path) and no target gate applies.
             StaticMode::AlternativeKeywordCost {
                 keyword,
                 frequency: Some(CastFrequency::OncePerTurn),
@@ -36266,7 +36269,12 @@ pub(crate) fn cost_observable_activation_journal(
                 else {
                     return;
                 };
-                (tag.keyword_str(), ActivationExemption::None, None, None)
+                (
+                    tag.keyword_str(),
+                    ActivationExemption::None,
+                    Some(&PlayerFilter::Controller),
+                    None,
+                )
             }
             _ => return,
         };
@@ -39669,110 +39677,157 @@ mod selected_impulse_authority_tests {
 
 #[cfg(test)]
 mod alternative_keyword_cost_journal_tests {
-    use super::{cost_observable_activation_journal, is_first_activation_modifier};
-    use crate::game::scenario::{GameScenario, P0};
-    use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, Effect, QuantityExpr, TargetFilter,
-    };
-    use crate::types::statics::StaticMode;
-    use crate::types::zones::Zone;
+    use super::cost_observable_activation_journal;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::AbilityTag;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{CastPaymentMode, WaitingFor};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaType, ManaUnit};
+    use crate::types::phase::Phase;
 
-    /// An equip-tagged activated ability, the shape the journal records.
-    fn equip_ability() -> AbilityDefinition {
-        let mut def = AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-        )
-        .cost(AbilityCost::Mana {
-            cost: crate::types::mana::ManaCost::Cost {
-                shards: Vec::new(),
-                generic: 1,
-            },
-        });
-        def.ability_tag = Some(AbilityTag::Equip);
-        def
+    const BRUENOR: &str = "Each creature you control gets +2/+0 for each Equipment attached to it.\nYou may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.";
+    const LEONIN_SHIKARI: &str =
+        "You may activate equip abilities any time you could cast an instant.";
+    const VULSHOK_MORNINGSTAR: &str = "Equipped creature gets +2/+2.\nEquip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)";
+
+    /// P0 (the active player) with Bruenor Battlehammer (when `with_bruenor`)
+    /// and a Vulshok Morningstar; P1 with Leonin Shikari (instant-speed equip)
+    /// and its own Vulshok Morningstar.
+    fn build(with_bruenor: bool) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if with_bruenor {
+            scenario
+                .add_creature_from_oracle(P0, "Bruenor Battlehammer", 5, 3, BRUENOR)
+                .as_legendary()
+                .with_subtypes(vec!["Dwarf", "Warrior"]);
+        } else {
+            scenario.add_vanilla(P0, 5, 3);
+        }
+        let p0_equipment = scenario
+            .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        scenario
+            .add_creature_from_oracle(P1, "Leonin Shikari", 1, 1, LEONIN_SHIKARI)
+            .with_subtypes(vec!["Cat", "Soldier"]);
+        let p1_equipment = scenario
+            .add_artifact_from_oracle(P1, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        if !with_bruenor {
+            // No {0} alternative: P0 pays the ordinary {2}.
+            for _ in 0..2 {
+                runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+            }
+        }
+        (runner, p0_equipment, p1_equipment)
     }
 
-    /// CR 118.9 + CR 611.3a + CR 732.2a: Bruenor Battlehammer's "You may pay {0}
-    /// rather than pay the equip cost of the first equip ability you activate
-    /// each turn." reads the turn's activation journal, so loop detection keeps
-    /// the first equip row while a board with no such static strips it.
+    fn activate_equip(runner: &mut GameRunner, equipment: ObjectId) {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: equipment,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("equip activation is legal");
+    }
+
+    /// Runs both players' equip activations on P0's turn through the production
+    /// `ActivateAbility` path: P0's first (paying {0} when Bruenor offers it),
+    /// then P1's at instant speed (Leonin Shikari) paying the ordinary {2}.
+    fn both_players_equip(runner: &mut GameRunner, p0_equipment: ObjectId, p1_equipment: ObjectId) {
+        let result = runner
+            .act(GameAction::ActivateAbility {
+                source_id: p0_equipment,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("P0's equip activation is legal");
+        if let WaitingFor::ActivationCostOneOfChoice { .. } = result.waiting_for {
+            runner
+                .act(GameAction::ChooseActivationCostBranch { index: 0 })
+                .expect("the {0} branch is accepted");
+        }
+        runner.advance_until_stack_empty();
+
+        // CR 117.3d: P0 passes with an empty stack, so P1 receives priority and
+        // can equip at instant speed (Leonin Shikari).
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 may pass priority");
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 },
+            "reach guard: P1 received priority"
+        );
+        for _ in 0..2 {
+            runner.state_mut().players[1].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        activate_equip(runner, p1_equipment);
+        let journal = &runner.state().abilities_activated_this_turn_by_player;
+        assert_eq!(
+            journal.get(&P0).map(|rows| rows.len()),
+            Some(1),
+            "reach guard: P0's equip activation is journaled"
+        );
+        assert_eq!(
+            journal.get(&P1).map(|rows| rows.len()),
+            Some(1),
+            "reach guard: P1's equip activation is journaled"
+        );
+        assert_eq!(
+            journal[&P1][0].ability_tag,
+            Some(AbilityTag::Equip),
+            "the row comes from a real Equip ability"
+        );
+    }
+
+    /// CR 118.9 + CR 611.3a + CR 109.5 + CR 732.2a: Bruenor Battlehammer's "You
+    /// may pay {0} rather than pay the equip cost of the first equip ability you
+    /// activate each turn." reads the turn's activation journal, so loop
+    /// detection keeps each player's first equip row (judged per hypothetical
+    /// controller, CR 109.5) while a board with no such static strips them.
     ///
     /// Reverting the `AlternativeKeywordCost` arm of `is_first_activation_modifier`
-    /// / `cost_observable_activation_journal` empties the kept journal in the
-    /// first assertion.
+    /// / `cost_observable_activation_journal` empties the kept journal; dropping
+    /// the `Controller` activator gate lets P0's earlier row shadow P1's, so
+    /// P1's row is not kept for P1 as a hypothetical controller.
     #[test]
-    fn once_per_turn_alternative_keyword_cost_keeps_the_first_equip_row() {
-        let parsed = crate::parser::oracle::parse_oracle_text(
-            "Each creature you control gets +2/+0 for each Equipment attached to it.
-You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.",
-            "Bruenor Battlehammer",
-            &[],
-            &[
-                String::from("Creature"),
-                String::from("Dwarf"),
-                String::from("Warrior"),
-            ],
-            &[],
+    fn once_per_turn_alternative_keyword_cost_keeps_each_controllers_first_equip_row() {
+        let (mut runner, p0_equipment, p1_equipment) = build(true);
+        both_players_equip(&mut runner, p0_equipment, p1_equipment);
+        let journal = cost_observable_activation_journal(runner.state());
+        assert_eq!(
+            journal.get(&P0).map(|rows| rows.len()),
+            Some(1),
+            "P0's first equip row is kept"
         );
-        let definition = parsed
-            .statics
-            .into_iter()
-            .find(|s| matches!(s.mode, StaticMode::AlternativeKeywordCost { .. }))
-            .expect("Bruenor's equip line parses to an alternative keyword cost");
-        // Reach guard: the parsed line is the once-per-turn alternative shape.
+        assert_eq!(
+            journal.get(&P1).map(|rows| rows.len()),
+            Some(1),
+            "P1's first equip row is kept for P1 as a hypothetical controller"
+        );
+
+        // Control: no first-activation modifier on the board, nothing is kept.
+        let (mut runner, p0_equipment, p1_equipment) = build(false);
+        both_players_equip(&mut runner, p0_equipment, p1_equipment);
         assert!(
-            matches!(
-                definition.mode,
-                StaticMode::AlternativeKeywordCost {
-                    frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
-                    ..
-                }
-            ),
-            "{:?}",
-            definition.mode
+            cost_observable_activation_journal(runner.state()).is_empty(),
+            "with no first-activation modifier on the board the rows are stripped"
         );
-        assert!(is_first_activation_modifier(&definition.mode));
-
-        let mut scenario = GameScenario::new();
-        let source = scenario.add_creature(P0, "Equipment Source", 1, 1).id();
-        let mut runner = scenario.build();
-        let mut state = runner.state_mut();
-        let bruenor = crate::game::zones::create_object(
-            &mut state,
-            crate::types::identifiers::CardId(900),
-            P0,
-            "Bruenor Battlehammer".to_string(),
-            Zone::Battlefield,
-        );
-        let row =
-            super::capture_activation_record_from(&state, P0, source, Some(&equip_ability()), &[])
-                .expect("a live source yields a record");
-        assert_eq!(row.ability_tag, Some(AbilityTag::Equip));
-        state
-            .abilities_activated_this_turn_by_player
-            .entry(P0)
-            .or_default()
-            .push_back(row);
-
-        // No modifier reads the journal: the row is projected out.
-        assert!(
-            cost_observable_activation_journal(&state).is_empty(),
-            "with no first-activation modifier on the board the row is stripped"
-        );
-
-        state
-            .objects
-            .get_mut(&bruenor)
-            .expect("Bruenor exists")
-            .static_definitions
-            .push(definition);
-        let journal = cost_observable_activation_journal(&state);
-        let kept = journal.get(&P0).expect("the first equip row is kept");
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].ability_tag, Some(AbilityTag::Equip));
     }
 }
