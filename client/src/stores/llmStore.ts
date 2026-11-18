@@ -27,6 +27,7 @@ const STORED_PROFILE_KEYS = [
   "maxOutputTokens",
   "temperature",
   "enabled",
+  "rememberApiKey",
 ] as const satisfies readonly (keyof StoredProfile)[];
 
 function withoutCredential(profile: LlmProfile): StoredProfile {
@@ -174,6 +175,8 @@ function readPersistedProfiles(value: unknown): LlmProfile[] {
         // A profile whose model did not survive cannot be usable, so it must
         // not present itself as enabled.
         enabled: record.enabled === true && normalizeString(record.model).trim() !== "",
+        // Opt-in preference; off by default. Only the boolean value survives.
+        rememberApiKey: record.rememberApiKey === true,
       },
     ];
   });
@@ -311,6 +314,8 @@ export const useLlmStore = create<LlmState>()(
           // never reachable -- `isProfileUsable` also requires a model and, for
           // a provider that needs one, a key.
           enabled: true,
+          // Opt-in only: off by default.
+          rememberApiKey: false,
           ...partial,
         };
         set((state) => ({ profiles: [...state.profiles, profile] }));
@@ -419,8 +424,25 @@ export const useLlmStore = create<LlmState>()(
         // blanked the credential in memory, so this write only rewrites the
         // stored record through `partialize` to remove it from disk.
         queueMicrotask(() => {
-          useLlmStore.setState({
-            profiles: readPersistedProfiles(state.profiles).map((profile) => ({ ...profile })),
+          useLlmStore.setState(() => {
+            // First, scrub any pre-v1 credentials from the hydrated profiles.
+            const scrubbed = readPersistedProfiles(state.profiles).map((profile) => ({ ...profile }));
+            // Then, hydrate opt-in sessionStorage API keys for profiles with
+            // `rememberApiKey: true`. This must happen after the scrub so the
+            // sessionStorage keys are not overwritten.
+            const hydrated = readSessionApiKeys();
+            if (Object.keys(hydrated).length > 0) {
+              return {
+                profiles: scrubbed.map((profile) => {
+                  const key = hydrated[profile.id];
+                  if (key !== undefined && profile.rememberApiKey) {
+                    return { ...profile, apiKey: key };
+                  }
+                  return profile;
+                }),
+              };
+            }
+            return { profiles: scrubbed };
           });
         });
       },
@@ -502,3 +524,116 @@ function dropRelayKeysOnOriginChange(): void {
 }
 
 dropRelayKeysOnOriginChange();
+
+// ── Session-persisted API keys: sessionStorage, not localStorage ───────────────
+//
+// When a player opts in via `rememberApiKey`, the API key for that profile is
+// copied to sessionStorage. This survives a tab reload but is cleared when the
+// tab closes. It is never written to localStorage, never included in backup
+// export or cloud sync, and is excluded from the store's `partialize` output.
+// The store's `merge` never hydrates keys from localStorage; sessionStorage is
+// the sole persistence for these opt-in copies.
+//
+// Every existing clear rule applies to the stored copy too:
+// - Changing provider or endpoint clears it (handled in `updateProfile`)
+// - Changing the Jev relay origin clears it (handled in `dropRelayKeysOnOriginChange`)
+// - Turning the option off deletes it (handled in the subscription below)
+
+const LLM_API_KEYS_SESSION_KEY = "phase-llm-api-keys";
+
+/** Map of profile id -> API key, stored in sessionStorage. */
+type SessionApiKeyMap = Record<string, string>;
+
+/** Reads and validates the API key map from sessionStorage. Any failure
+ *  (absent, quota, disabled, malformed) yields an empty map — keys then
+ *  simply do not survive, exactly as a fresh tab. */
+function readSessionApiKeys(): SessionApiKeyMap {
+  try {
+    const raw = sessionStorage.getItem(LLM_API_KEYS_SESSION_KEY);
+    if (raw === null) return {};
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    // Coerce all values to strings, drop non-string entries.
+    const result: SessionApiKeyMap = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof key === "string" && typeof value === "string") {
+        result[key] = value;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Writes the API key map to sessionStorage, removing the key entirely when
+ *  the map is empty so a cleared session leaves nothing behind. */
+function writeSessionApiKeys(keys: SessionApiKeyMap): void {
+  try {
+    if (Object.keys(keys).length === 0) {
+      sessionStorage.removeItem(LLM_API_KEYS_SESSION_KEY);
+      return;
+    }
+    sessionStorage.setItem(LLM_API_KEYS_SESSION_KEY, JSON.stringify(keys));
+  } catch {
+    // Non-fatal: with no sessionStorage the keys just do not survive a
+    // refresh, which is a strictly safer failure than persisting them anyway.
+  }
+}
+
+/**
+ * Loads sessionStorage-persisted API keys into the store. Runs once at
+ * module load, after `create` has finished localStorage hydration, so it is
+ * the final word on the initial `apiKey` values for profiles with
+ * `rememberApiKey: true`. Idempotent and exported so a test can drive it
+ * against a seeded sessionStorage.
+ */
+export function hydrateSessionApiKeys(): void {
+  const hydrated = readSessionApiKeys();
+  if (Object.keys(hydrated).length === 0) return;
+  useLlmStore.setState((current) => ({
+    profiles: current.profiles.map((profile) => {
+      const key = hydrated[profile.id];
+      if (key !== undefined && profile.rememberApiKey) {
+        return { ...profile, apiKey: key };
+      }
+      return profile;
+    }),
+  }));
+}
+
+// hydrateSessionApiKeys is now called from onRehydrateStorage to ensure
+// it runs after the pre-v1 credential scrub. Kept exported for tests.
+
+// Mirror every later change to the API key map back to sessionStorage. Keyed
+// on identity: `updateProfile` and the subscription both return a new object
+// only when the map actually changed, so unrelated store updates do not
+// touch storage.
+useLlmStore.subscribe((state, prev) => {
+  // Build the map of keys for profiles that have rememberApiKey enabled.
+  const nextKeys: SessionApiKeyMap = {};
+  let changed = false;
+  for (const profile of state.profiles) {
+    if (profile.rememberApiKey && profile.apiKey) {
+      nextKeys[profile.id] = profile.apiKey;
+    }
+  }
+  // Compare with previous map to avoid unnecessary writes.
+  const prevKeys: SessionApiKeyMap = {};
+  for (const profile of prev.profiles) {
+    if (profile.rememberApiKey && profile.apiKey) {
+      prevKeys[profile.id] = profile.apiKey;
+    }
+  }
+  // Check if the map changed (added, removed, or modified keys).
+  const allIds = new Set([...Object.keys(nextKeys), ...Object.keys(prevKeys)]);
+  for (const id of allIds) {
+    if (nextKeys[id] !== prevKeys[id]) {
+      changed = true;
+      break;
+    }
+  }
+  if (changed) {
+    writeSessionApiKeys(nextKeys);
+  }
+});

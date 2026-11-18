@@ -20,6 +20,7 @@ function profile(patch: Partial<LlmProfile>): LlmProfile {
     maxOutputTokens: null,
     temperature: null,
     enabled: true,
+    rememberApiKey: false,
     ...patch,
   };
 }

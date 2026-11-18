@@ -25,6 +25,7 @@ function profile(overrides: Partial<LlmProfile> = {}): LlmProfile {
     maxOutputTokens: null,
     temperature: null,
     enabled: true,
+    rememberApiKey: false,
     ...overrides,
   };
 }

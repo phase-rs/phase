@@ -24,6 +24,7 @@ async function freshStore() {
 beforeEach(() => {
   vi.resetModules();
   localStorage.clear();
+  sessionStorage.clear();
 });
 
 describe("persisted store hydration", () => {
@@ -275,6 +276,7 @@ describe("persisted store hydration", () => {
       maxOutputTokens: null,
       temperature: null,
       enabled: false,
+      rememberApiKey: false,
     });
   });
 
@@ -353,6 +355,7 @@ describe("persisted store hydration", () => {
       maxOutputTokens: 2048,
       temperature: 0.2,
       enabled: true,
+      rememberApiKey: false,
     });
   });
 
@@ -458,5 +461,161 @@ describe("persisted store hydration", () => {
     expect(state.seatBindings).toEqual({});
     expect(state.draftEnabled).toBe(false);
     expect(state.draftProfileId).toBeNull();
+  });
+
+  // ── SessionStorage API key hydration ────────────────────────────────────────
+
+  it("rehydrates API key from sessionStorage when rememberApiKey is true", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+          rememberApiKey: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-api-keys", JSON.stringify({ p1: "sk-session-restored" }));
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("sk-session-restored");
+    expect(profile?.rememberApiKey).toBe(true);
+  });
+
+  it("does not rehydrate API key from sessionStorage when rememberApiKey is false", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+          rememberApiKey: false,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-api-keys", JSON.stringify({ p1: "sk-should-not-restore" }));
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(false);
+  });
+
+  it("does not rehydrate API key from sessionStorage when key is absent", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+          rememberApiKey: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    // No sessionStorage key
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(true);
+  });
+
+  it("survives malformed sessionStorage data", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+          rememberApiKey: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-api-keys", "not valid json");
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(true);
+  });
+
+  it("survives sessionStorage quota errors", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+          rememberApiKey: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    // Simulate quota exceeded by making setItem throw
+    const originalSetItem = sessionStorage.setItem;
+    sessionStorage.setItem = vi.fn(() => { throw new DOMException("Quota exceeded", "QuotaExceededError"); });
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(true);
+
+    sessionStorage.setItem = originalSetItem;
   });
 });

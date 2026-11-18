@@ -44,6 +44,7 @@ const PROFILE: LlmProfile = {
   maxOutputTokens: null,
   temperature: null,
   enabled: true,
+  rememberApiKey: false,
 };
 
 const REQUEST = {
