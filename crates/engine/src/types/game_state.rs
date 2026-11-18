@@ -10589,6 +10589,14 @@ pub struct PendingCast {
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
+    /// CR 113.2c + CR 601.2b + CR 601.2f: the keyword instance whose
+    /// alternative cost this cast announced, when the card has more than one
+    /// distinct instance of `casting_variant`'s keyword. Bound once, at
+    /// preparation; every later read of the alternative cost resolves this
+    /// payload instead of re-electing one. `None` for every cast whose variant
+    /// elects no instance, and for a cast whose card has a single instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative_cost_keyword: Option<Keyword>,
     /// CR 601.2a: Object-attached permission elected for this cast. Keeping the
     /// exact index prevents payment concessions from leaking between competing
     /// `PlayFromExile` / `ExileWithAltCost` grants on the same object.
@@ -11736,6 +11744,7 @@ impl PendingCast {
             target_constraints: Vec::new(),
             crime_candidate: false,
             casting_variant: CastingVariant::Normal,
+            alternative_cost_keyword: None,
             casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
@@ -14585,6 +14594,14 @@ pub struct CastingVariantChoiceOption {
     /// Blitz, Bestow); `None` for every other option.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<CastAuthorityChoice>,
+    /// CR 113.2c + CR 601.2b + CR 118.9a: the keyword instance whose
+    /// alternative cost this option pays, for a card with more than one
+    /// distinct instance of the same graveyard-cast keyword (Deep Analysis'
+    /// printed flashback and Lier's granted one). `Some` exactly when
+    /// `keywords::instance_elected_kind(variant)` names the instance's kind;
+    /// `None` for every other option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative_cost_keyword: Option<Keyword>,
 }
 
 /// CR 601.2a: which graveyard-cast permission grant authorizes a cast: the
@@ -63489,6 +63506,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
     fn waiting_for_variants_exist() {
         fn dummy_pending() -> Box<PendingCast> {
             Box::new(PendingCast {
+                alternative_cost_keyword: None,
                 object_id: ObjectId(1),
                 card_id: CardId(1),
                 ability: Box::new(ResolvedAbility::new(
@@ -64130,6 +64148,56 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert_eq!(back, prompt);
     }
 
+    /// CR 113.2c + CR 601.2b: the elected keyword instance round-trips on a
+    /// casting option and on a pending cast; payloads without it load `None`.
+    #[test]
+    fn alternative_cost_keyword_round_trips_and_defaults_to_none() {
+        use crate::types::keywords::FlashbackCost;
+        let keyword = Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost));
+        let option = CastingVariantChoiceOption {
+            variant: CastingVariant::Flashback,
+            face: CastingVariantFace::Current,
+            mana_cost: ManaCost::SelfManaCost,
+            additional_cost: None,
+            authority: None,
+            alternative_cost_keyword: Some(keyword.clone()),
+        };
+        let mut json = serde_json::to_value(&option).expect("serialize option");
+        let back: CastingVariantChoiceOption =
+            serde_json::from_value(json.clone()).expect("deserialize option");
+        assert_eq!(back, option);
+        json.as_object_mut()
+            .expect("an object")
+            .remove("alternative_cost_keyword");
+        let legacy: CastingVariantChoiceOption =
+            serde_json::from_value(json).expect("deserialize legacy option");
+        assert_eq!(legacy.alternative_cost_keyword, None);
+
+        let mut pending = PendingCast::new(
+            ObjectId(1),
+            CardId(1),
+            ResolvedAbility::new(
+                crate::types::ability::Effect::Unimplemented {
+                    name: "Dummy".to_string(),
+                    description: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            ),
+            ManaCost::NoCost,
+        );
+        pending.alternative_cost_keyword = Some(keyword.clone());
+        let mut json = serde_json::to_value(&pending).expect("serialize pending");
+        let back: PendingCast = serde_json::from_value(json.clone()).expect("deserialize pending");
+        assert_eq!(back.alternative_cost_keyword, Some(keyword));
+        json.as_object_mut()
+            .expect("an object")
+            .remove("alternative_cost_keyword");
+        let legacy: PendingCast = serde_json::from_value(json).expect("deserialize legacy pending");
+        assert_eq!(legacy.alternative_cost_keyword, None);
+    }
+
     #[test]
     fn pending_cast_ref_is_single_source_of_truth_for_inline_variants() {
         // CR 601.2f: Every WaitingFor variant that carries `pending_cast: Box<PendingCast>`
@@ -64140,6 +64208,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         // inline variants share the same match arm; the destructuring pattern
         // makes coverage compiler-visible.
         let pending = Box::new(PendingCast {
+            alternative_cost_keyword: None,
             object_id: ObjectId(1),
             card_id: CardId(1),
             ability: Box::new(ResolvedAbility::new(
