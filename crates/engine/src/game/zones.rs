@@ -210,8 +210,8 @@ pub(super) fn capture_exit_lki(
         // CR 208.4b + CR 613.4b: keep both current and layer-7b base values.
         base_power: obj.layer_base_power.or(obj.base_power),
         base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
-        // CR 202.3d + CR 709.4: off-stack split cards use their combined
-        // mana value and colors; on-stack spells use the cast face.
+        // CR 202.3d + CR 709.4d + CR 709.5: reuse the zone-aware
+        // characteristic readers, including fused spells and unlocked Rooms.
         mana_value: obj.effective_mana_value(),
         controller: obj.controller,
         owner: obj.owner,
@@ -226,7 +226,7 @@ pub(super) fn capture_exit_lki(
         tapped: obj.tapped,
         // CR 701.60b: suspected status is read at exit.
         is_suspected: obj.is_suspected,
-        // CR 722.3a: the move clears the prepared designation.
+        // CR 722.3a + CR 400.7: keep the old object's prepared designation.
         was_prepared: obj.prepared.is_some(),
         intensity: obj.intensity,
         // CR 701.3d: the caller captures these before any attachment sever.

@@ -3305,8 +3305,8 @@ fn parse_referent_predicate(
             ))
         }
         ReferentSurface::NonbasicLand => {
-            // CR 400.7 + CR 205.4: the land is gone when the rider resolves (Molten Rain
-            // destroys it first), so "was nonbasic" reads last known information.
+            // CR 205.4 + CR 608.2h: Molten Rain's "was nonbasic" sets the LKI
+            // hint. If the land survives destruction, its current pin reads live.
             let (rest, _) = tag("that land was nonbasic").parse(input)?;
             Ok((
                 rest,
@@ -4594,9 +4594,9 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
-    // Leading position: "If its mana value was N or less/greater, [effect]." (past tense,
-    // CR 400.7: last known information) and "If it has mana value N or less/greater,
-    // [effect]." (present tense: current state — Cosmic Rebirth).
+    // Leading "If its mana value was N or less/greater, [effect]" (LKI hint)
+    // and "If it has mana value N or less/greater, [effect]" (no hint).
+    // CR 608.2h: either tense can read a pinned exit snapshot if the object left.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower.as_str()) {
         if let Ok((rest, clause)) = parse_referent_predicate(rest, ReferentSurface::ManaValueFixed)
         {
@@ -18118,7 +18118,7 @@ mod referent_owner_tests {
             ReferentSurface::ManaValueFixed,
         ),
         (
-            "Anoint with Affliction",
+            "Extinguish the Light",
             "its mana value was 3 or less",
             ReferentSurface::ManaValueFixed,
         ),
