@@ -154,30 +154,6 @@ fn norin_moved_out_of_exile_is_not_returned() {
     assert_eq!(zone(&runner, norin), Zone::Graveyard);
 }
 
-fn resolve_stack_and_triggers(runner: &mut GameRunner) {
-    let mut guard = 0;
-    while !runner.state().stack.is_empty()
-        || matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-    {
-        guard += 1;
-        assert!(
-            guard < 128,
-            "stalled resolving Norin trigger; waiting_for = {:?}, stack = {}",
-            runner.state().waiting_for,
-            runner.state().stack.len()
-        );
-        match &runner.state().waiting_for {
-            WaitingFor::DeclareAttackers { .. } => break,
-            WaitingFor::DeclareBlockers { .. } => break,
-            _ => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("priority pass while resolving Norin exile trigger");
-            }
-        }
-    }
-}
-
 #[test]
 fn norin_parses_spell_cast_and_creature_attacks_triggers() {
     let parsed = parse_oracle_text(
@@ -200,6 +176,8 @@ fn norin_parses_spell_cast_and_creature_attacks_triggers() {
 fn norin_exiles_on_creature_attack() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest"; 10]);
+    scenario.with_library_top(P1, &["Forest"; 10]);
 
     let norin = scenario
         .add_creature_from_oracle(P0, "Norin the Wary", 2, 1, NORIN_ORACLE)
@@ -207,39 +185,34 @@ fn norin_exiles_on_creature_attack() {
     let attacker = scenario.add_creature(P1, "Hostile Bear", 2, 2).id();
 
     let mut runner = scenario.build();
-    assert_eq!(runner.state().objects[&norin].zone, Zone::Battlefield);
 
-    runner.state_mut().active_player = P1;
-    runner.pass_both_players();
+    // Play out P0's turn without attacking, up to P1's declare-attackers step.
+    pass_until(&mut runner, |r| {
+        r.state().active_player == P1
+            && matches!(r.state().waiting_for, WaitingFor::DeclareAttackers { .. })
+    });
+    // Reach guard: no trigger has fired yet, so Norin is still on the battlefield.
+    assert_eq!(zone(&runner, norin), Zone::Battlefield);
+    assert!(runner.state().delayed_triggers.is_empty());
+
+    // An opponent's creature attacks: "a creature attacks" is not limited to
+    // Norin's controller's creatures.
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P0))],
             bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
-
-    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-        runner.pass_both_players();
-    }
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::DeclareBlockers { .. }
-    ) {
-        runner
-            .act(GameAction::DeclareBlockers {
-                assignments: vec![],
-            })
-            .expect("DeclareBlockers should succeed");
-        runner.pass_both_players();
-    }
-
-    resolve_stack_and_triggers(&mut runner);
+    drain_stack(&mut runner);
 
     assert_eq!(
-        runner.state().objects[&norin].zone,
+        zone(&runner, norin),
         Zone::Exile,
         "Norin must exile itself when a creature attacks (issue #2357)"
     );
+    // The attack trigger resolved during P1's turn, before its end step.
+    assert_eq!(runner.state().active_player, P1);
+    assert_ne!(runner.state().phase, Phase::End);
 
     // CR 603.7e: the attack half's delayed return brings Norin back too.
     resolve_the_end_step_return(&mut runner);
