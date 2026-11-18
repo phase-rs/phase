@@ -504,7 +504,7 @@ fn altar_bearing_boards_offer_and_publish_one_library_delta_per_victim() {
 /// The paired positive for the row above, on the SAME instrument: with the mill's only source
 /// gone the same boards still offer, and the certificate publishes NO `LibraryDelta`.
 ///
-/// DISCRIMINATING: drop `certify_instructed_opponent_library_departure`'s C1c empty-set guard
+/// DISCRIMINATING: drop `certify_instructed_library_departure`'s C1c empty-set guard
 /// so a period with no departure still yields a certificate ⇒ these arms publish a mill axis
 /// for a board that mills nobody ⇒ **FAILS**.
 #[test]

@@ -1256,6 +1256,10 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     // earlier batches' tokens once a paused batch resumed (CR 608.2c), so it publishes nothing
     // the ledger's own guard withheld.
     //
+    // The as-enters dice continuation reuses these bulk handoffs. Parked rolls
+    // and parked entry occurrences carry events, not token-id publishes, so they
+    // add no production classification to either anaphora container.
+    //
     // #10762's substituted-batch custody added one more, in `token_copy.rs`: the resumed
     // owner's adoption of a substituted batch, `drain_copy_token_resolution`'s first
     // `.extend(state.last_created_token_ids.clone())`. A bulk argument (a clone of ledger 3):

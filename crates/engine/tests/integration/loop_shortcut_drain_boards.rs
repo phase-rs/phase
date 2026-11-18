@@ -3,15 +3,12 @@
 //!
 //! `lethal_lifegain_loss_4p.json.gz` is derived from `LethalLifeGainLossLoop.zip` and
 //! `weird_drain_4p.json.gz` from `weird-drain-behavior.zip`, both through
-//! `scripts/migrate-dump-fixture.sh --effect-kind LoseLife --deck-size Exactly:100`. The
-//! committed artifact IS the gzip stream, and that script's `--control` mode holds a
-//! fresh run of the whole recipe against those exact bytes — so a regeneration must
-//! re-gzip (`gzip -9 -n`), never commit a bare `.json`.
+//! `scripts/migrate-dump-fixture.sh --effect-kind LoseLife --deck-size Exactly:100`, then
+//! driven forward to the recorded offer. The committed artifact IS the gzip stream, so a
+//! regeneration must re-gzip (`gzip -9 -n`), never commit a bare `.json`.
 //!
-//! The pair is its own positive-and-negative control: the weird-drain board's RESTORED
-//! offer is directly declarable, and the lethal board's is not — its only legal answer is
-//! to decline. A live declarable offer is reached on either board only by declining and
-//! driving forward, which is why nothing here asserts against a restored offer.
+//! Both boards' RESTORED offers are directly declarable; a live offer is reached by declining
+//! and driving forward.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -19,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use engine::analysis::decision_template::{
     AnnouncementSubject, ChoicePoint, DecisionPoint, DecisionPointKind, DecisionSlot,
-    IterationCount, PinnedDecision, TargetPin, TargetSchedule,
+    IterationCount, PinnedDecision, RepetitionBound, TargetPin, TargetSchedule,
 };
 use engine::game::engine::apply;
 use engine::types::ability::TargetRef;
@@ -67,6 +64,25 @@ pub(crate) fn lethal_lifegain_loss_board() -> GameState {
 
 pub(crate) fn weird_drain_board() -> GameState {
     restore(include_bytes!("../fixtures/weird_drain_4p.json.gz"))
+}
+
+/// CR 732.2a: a committed save whose offer carries a numeric `measured_repetition_bound` restores
+/// bounded, and the views publish its capacity.
+#[test]
+fn a_committed_legacy_bound_restores_measured_through_the_production_seam() {
+    let state = weird_drain_board();
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!(
+            "reach: the save restores at its offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(schema.repetition_bound, RepetitionBound::Measured);
+    assert!(schema.is_bounded());
+    assert_eq!(
+        engine::game::derived_views::derive_views(&state, None).bounded_loop_max_repetitions,
+        Some(schema.deliverable_capacity)
+    );
 }
 
 fn submit(state: &mut GameState, who: PlayerId, action: GameAction) {
@@ -159,9 +175,8 @@ fn legal_actions_at_offer(state: &GameState, proposer: PlayerId) -> Vec<GameActi
 /// Decline the restored offer and drive to the next CR 732.2a offer that is actually
 /// DECLARABLE, returning the proposer and the seat the drive latched.
 ///
-/// The declarability assertion before returning is this helper's liveness control: on the
-/// lethal board the restored offer's only legal answer is to decline, so a caller handed
-/// that offer would be reading a dead board rather than a negative.
+/// The declarability assertion before returning is this helper's liveness control: a caller
+/// handed an undeclarable offer would be reading a dead board rather than a negative.
 pub(crate) fn drive_to_live_declarable_offer(state: &mut GameState) -> LiveOffer {
     let WaitingFor::LoopShortcut { proposer, .. } = state.waiting_for else {
         panic!(
@@ -196,7 +211,7 @@ pub(crate) fn drive_to_live_declarable_offer(state: &mut GameState) -> LiveOffer
     );
 }
 
-/// CR 704.5a: re-derive a live offer's `measured_repetition_bound` from PUBLISHED data alone — the
+/// CR 704.5a: re-derive a live offer's repetition bound from PUBLISHED data alone — the
 /// certificate's `per_cycle` delta, its `victim_slot` magnitudes and its `declarable_victims`,
 /// plus the live board's lives and libraries — and the seat the caller's own drive aimed at.
 ///
@@ -413,12 +428,9 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
     assert_eq!(*proposer, offer.proposer);
 
     // Row 6 — the certificate the drive reached reserved elimination headroom for someone.
-    // A RESTORED offer's set deserializes empty (`#[serde(default)]` on a field older
-    // saves lack), which is why no row may read one.
     assert!(
         !per_cycle.declarable_victims.is_empty(),
-        "a live offer publishes the seats CR 704.5a headroom was reserved for; empty is the \
-         restored-offer shape"
+        "a live offer publishes the seats CR 704.5a headroom was reserved for"
     );
 
     // Row 7 — the proposer gains per cycle, the seat the drive latched loses, and the
@@ -481,14 +493,13 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
         "the published declaration pins the seat the drive aimed at"
     );
 
-    // Row 9 — the three published quantifiers, and the ORDER they stand in. The SUGGESTION is
-    // the count this offer's own declaration drives: the cascade it implies, cut where that
-    // declaration stops charging the seat it pinned. The CEILING is CR 732.2a's existential —
-    // the widest count SOME legal declaration may specify — so it never falls below the
-    // suggestion. And the DIVISOR (`rederive_live_offer_bound`) answers a third question, the
-    // FIRST crossing under any declaration, which is why it is no longer either published field.
+    // Row 9 — the three published quantifiers, and the ORDER they stand in. The declaration's own
+    // count is the cascade it implies, cut where it stops charging the seat it pinned. The CEILING
+    // is CR 732.2a's existential — the widest count SOME legal declaration may specify. And the
+    // DIVISOR (`rederive_live_offer_bound`) answers a third question, the FIRST crossing under any
+    // declaration, which is why it is neither published field.
     let bound = schema.deliverable_capacity;
-    assert_eq!(schema.measured_repetition_bound, Some(bound));
+    assert_eq!(schema.repetition_bound, RepetitionBound::Measured);
 
     let entries = crate::loop_shortcut::cascade_from(
         state,
@@ -498,19 +509,27 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
         &schema.points,
     );
     let pinned = pinned_seats(&declaration.decisions);
-    assert!(
-        !pinned.is_empty(),
-        "reach-guard: the published declaration pins a seat (row 8), so the cut below is a real \
-         truncation rather than the untargeted identity"
-    );
-    // CR 732.2a: inclusive at the entry the pinned seat departs on — that entry the declaration
-    // still drives; the ones after it charge a seat this declaration no longer names.
-    let own = entries
+    let (cut, cut_seats) = entries
         .iter()
         .find(|(_, seats)| seats.iter().any(|seat| pinned.contains(seat)))
         .or_else(|| entries.last())
-        .map(|(repetition, _)| *repetition)
         .expect("a bounded offer's cascade carries at least one entry");
+    // CR 104.2a: the offer's count eliminates every opponent, each taking ceil(life / loss)
+    // repetitions, the trigger already on the stack (CR 603.3d) being one of its seat's.
+    let winning: u32 = state
+        .players
+        .iter()
+        .filter(|player| player.id != *proposer && !player.is_eliminated)
+        .map(|player| (player.life as u32).div_ceil(loss as u32))
+        .sum();
+    // CR 603.3d + CR 601.2c: a cut that leaves one opponent leaves the trigger one legal target,
+    // announced unasked, so the declaration drives on to the count that ends the game.
+    let remaining = state
+        .players
+        .iter()
+        .filter(|p| p.id != *proposer && !p.is_eliminated && !cut_seats.contains(&p.id))
+        .count();
+    let own = if remaining == 1 { winning } else { *cut };
     assert_eq!(
         declaration.replay,
         engine::analysis::decision_template::ReplayMode::Scheduled {
@@ -519,31 +538,23 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
         "CR 732.2a: the published declaration is stamped at the count it drives; cascade \
          {entries:?} cut at the seats it pins {pinned:?}"
     );
-    // CR 104.2a: the suggestion eliminates every opponent, each taking ceil(life / loss)
-    // repetitions, the trigger already on the stack (CR 603.3d) being one of its seat's.
-    let winning: u32 = state
-        .players
-        .iter()
-        .filter(|player| player.id != *proposer && !player.is_eliminated)
-        .map(|player| (player.life as u32).div_ceil(loss as u32))
-        .sum();
     assert_eq!(schema.iteration_count, IterationCount::Fixed(winning));
     assert_eq!(
         schema
             .suggested_declaration
             .as_ref()
             .map(|suggestion| suggestion.replay.clone()),
-        Some(engine::analysis::decision_template::ReplayMode::Scheduled {
+        (own < winning).then_some(engine::analysis::decision_template::ReplayMode::Scheduled {
             count: IterationCount::Fixed(winning)
         }),
-        "the suggestion is stamped at the count the offer suggests"
+        "a suggestion is published only where the declaration's own count falls short of it"
     );
 
     let divisor = rederive_live_offer_bound(state, offer.aimed_at);
     assert!(
-        own < winning && winning <= bound,
-        "the suggestion drives past the declaration's own count and within the ceiling; \
-         own {own}, suggestion {winning}, ceiling {bound}"
+        own <= winning && winning <= bound,
+        "the offer's count reaches the declaration's own and stays within the ceiling; \
+         own {own}, offered {winning}, ceiling {bound}"
     );
     assert!(
         divisor <= own && own <= bound,
@@ -559,64 +570,36 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
     );
 }
 
-/// Row 5 — the control pair. Each board is the other's control, and the difference is
-/// exactly the property every later row depends on.
+/// Row 5 — each board's restored offer is directly declarable and publishes its declaration.
 #[test]
-fn the_two_restored_offers_disagree_on_declarability() {
-    let weird = weird_drain_board();
-    let WaitingFor::LoopShortcut {
-        proposer: weird_proposer,
-        declaration: weird_declaration,
-        ..
-    } = &weird.waiting_for
-    else {
-        panic!(
-            "the weird-drain fixture restores at its offer: {:?}",
-            weird.waiting_for
+fn both_restored_offers_are_declarable() {
+    for (label, state) in [
+        ("weird-drain", weird_drain_board()),
+        ("lethal", lethal_lifegain_loss_board()),
+    ] {
+        let WaitingFor::LoopShortcut {
+            proposer,
+            declaration,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "the {label} fixture restores at its offer: {:?}",
+                state.waiting_for
+            );
+        };
+        let actions = legal_actions_at_offer(&state, *proposer);
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, GameAction::DeclareShortcut { .. })),
+            "the {label} board's restored offer is directly declarable: {actions:?}"
         );
-    };
-    let weird_actions = legal_actions_at_offer(&weird, *weird_proposer);
-    assert!(
-        weird_actions
-            .iter()
-            .any(|action| matches!(action, GameAction::DeclareShortcut { .. })),
-        "the weird-drain board's restored offer is directly declarable: {weird_actions:?}"
-    );
-    assert!(
-        weird_declaration.is_some(),
-        "and it publishes the declaration the engine can already specify"
-    );
-
-    let lethal = lethal_lifegain_loss_board();
-    let WaitingFor::LoopShortcut {
-        proposer: lethal_proposer,
-        declaration: lethal_declaration,
-        ..
-    } = &lethal.waiting_for
-    else {
-        panic!(
-            "the lethal fixture restores at its offer: {:?}",
-            lethal.waiting_for
+        assert!(
+            declaration.is_some(),
+            "and it publishes the declaration the engine can already specify"
         );
-    };
-    let lethal_actions = legal_actions_at_offer(&lethal, *lethal_proposer);
-    assert!(
-        lethal_actions
-            .iter()
-            .any(|action| matches!(action, GameAction::DeclineShortcut)),
-        "reach-guard: the lethal board's restored offer IS an offer with a legal answer, so the \
-         refusal below is a negative and not a dead read: {lethal_actions:?}"
-    );
-    assert!(
-        !lethal_actions
-            .iter()
-            .any(|action| matches!(action, GameAction::DeclareShortcut { .. })),
-        "the lethal board's restored offer can only be declined: {lethal_actions:?}"
-    );
-    assert!(
-        lethal_declaration.is_none(),
-        "and it publishes no declaration"
-    );
+    }
 }
 
 #[test]
@@ -633,11 +616,10 @@ fn weird_drain_board_live_offer_is_self_consistent() {
     assert_live_offer_is_self_consistent(&state, offer);
 }
 
-/// The restored/live pair on the SAME board, which is what licenses the rule that no row
-/// asserts against a restored offer: `declarable_victims` is snapshotted at the mint and
-/// lossy across the wire for a save written before the field existed.
+/// The restored/live pair on the SAME board: `declarable_victims` is snapshotted at the mint and
+/// survives the wire.
 #[test]
-fn declarable_victims_are_empty_when_restored_and_populated_when_live() {
+fn declarable_victims_are_populated_when_restored_and_when_live() {
     for mut state in [lethal_lifegain_loss_board(), weird_drain_board()] {
         let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
             panic!("restores at its offer: {:?}", state.waiting_for);
@@ -650,8 +632,8 @@ fn declarable_victims_are_empty_when_restored_and_populated_when_live() {
             .declarable_victims
             .clone();
         assert!(
-            restored.is_empty(),
-            "a restored certificate's declarable_victims deserialize empty: {restored:?}"
+            !restored.is_empty(),
+            "a restored certificate carries its declarable_victims"
         );
 
         drive_to_live_declarable_offer(&mut state);
@@ -727,34 +709,21 @@ fn only_a_published_targets_slot_off_the_charged_set_is_unbacked() {
     .is_empty());
 }
 
-/// **The suggestion-count ingress route reaches the same refusal.**
-/// [`InteractionShortcutDecision`] is closed at three variants and this row accounts for all
-/// three: `Decline` returns `GameAction::DeclineShortcut` above the pin loop and reaches no
-/// conjunct at all, while `AcceptSuggested` and `Fixed` fall through the SAME pin loop into the
-/// same `declaration_conforms` call. `AcceptSuggested`'s count is the offer's own published
-/// SUGGESTION while its pins are CLIENT-submitted, so "the offer cannot refuse its own published
-/// declaration" does not reach it — the suggestion's own segments in reverse order aim the
-/// seat that crosses first for a segment longer than its crossing.
-///
-/// # What attributes the refusal
-///
-/// `ConstraintUnsatisfied` is not by itself proof this conjunct fired — the ingress returns it
-/// from several places — so the two halves differ in NOTHING but the order of the same
-/// segments, at the same count, on the same board, in the same invocation.
-///
-/// REVERT-PROBE: delete `declaration_conforms`' aim conjunct ⇒ the first half is accepted and
-/// this row fails on its refusal assertion.
+/// CR 603.3d + CR 601.2c: once a seat leaves, the trigger whose segment outlives it has one legal
+/// target, announced as a spell's targets are, so a pin naming the departed seat contradicts no
+/// game choice. The suggested allocation's segments in either order mint a declaration at the
+/// published count, through `AcceptSuggested` and `Fixed` alike.
 #[test]
-fn an_accept_suggested_pin_whose_segment_outlives_its_seat_is_refused() {
+fn an_accept_suggested_pin_outliving_its_seat_names_no_choice_and_is_accepted() {
     use engine::game::interaction::{
         bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
     };
     use engine::game::visibility::filter_state_for_viewer;
     use engine::types::interaction::{
-        AmountAssignment, InteractionOpportunityResponse, InteractionReasonCode,
-        InteractionResponse, InteractionResponseSpec, InteractionSessionId,
-        InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
-        InteractionShortcutPointKind, InteractionSubmission,
+        AmountAssignment, InteractionOpportunityResponse, InteractionResponse,
+        InteractionResponseSpec, InteractionSessionId, InteractionShortcutCountSpec,
+        InteractionShortcutDecision, InteractionShortcutPin, InteractionShortcutPointKind,
+        InteractionSubmission,
     };
 
     let mut state = weird_drain_board();
@@ -917,49 +886,36 @@ fn an_accept_suggested_pin_whose_segment_outlives_its_seat_is_refused() {
         )
     };
 
-    // ── The paired positive: the SAME variant, the SAME count, the suggestion's own segments.
-    let accepted = submit_decision(InteractionShortcutDecision::AcceptSuggested, &suggestion)
-        .expect("CR 732.2a: every aim survives, so this submission mints its declaration");
-    match &accepted {
-        GameAction::DeclareShortcut { count, template } => {
-            assert_eq!(
-                *count,
-                IterationCount::Fixed(suggested),
-                "`AcceptSuggested` declares the count the OFFER published"
-            );
-            assert!(
-                template.is_some(),
-                "and it mints the client's own pins as the declaration"
-            );
-        }
-        other => panic!("the ingress mints a DeclareShortcut, got {other:?}"),
-    }
-
-    // ── The refusal: the same variant, the same count, the same segments in reverse order, so
-    //    the seat that crosses first is aimed at first and its segment outlives it.
-    assert_eq!(
-        submit_decision(InteractionShortcutDecision::AcceptSuggested, &reversed)
-            .map_err(|error| error.code),
-        Err(InteractionReasonCode::ConstraintUnsatisfied),
-        "CR 732.2a + CR 608.2b: an aim lands after its own seat's crossing, so the ingress \
-         refuses the declaration and mints NO action. The two halves differ in nothing but which \
-         published victim each segment names"
-    );
-
-    // ── The adjacent enum variant, which shows the refusal belongs to the shared authority
-    //    rather than to the `AcceptSuggested` arm.
-    assert_eq!(
-        submit_decision(
+    for (label, decision, allocation) in [
+        (
+            "suggested order",
+            InteractionShortcutDecision::AcceptSuggested,
+            &suggestion,
+        ),
+        (
+            "reversed",
+            InteractionShortcutDecision::AcceptSuggested,
+            &reversed,
+        ),
+        (
+            "reversed, Fixed",
             InteractionShortcutDecision::Fixed {
-                iterations: suggested
+                iterations: suggested,
             },
-            &reversed
-        )
-        .map_err(|error| error.code),
-        Err(InteractionReasonCode::ConstraintUnsatisfied),
-        "`Fixed` at that same published count with those same pins is refused too — both \
-         variants fall through one pin loop into one `declaration_conforms` call"
-    );
+            &reversed,
+        ),
+    ] {
+        let action = submit_decision(decision, allocation)
+            .unwrap_or_else(|error| panic!("{label}: CR 732.2a: refused with {:?}", error.code));
+        let GameAction::DeclareShortcut { count, template } = &action else {
+            panic!("{label}: the ingress mints a DeclareShortcut, got {action:?}");
+        };
+        assert_eq!(*count, IterationCount::Fixed(suggested), "{label}");
+        assert!(
+            template.is_some(),
+            "{label}: the client's pins are the declaration"
+        );
+    }
 }
 
 /// The seats an offer publishes as aimable — the player targets its `Targets` points admit.
@@ -984,10 +940,8 @@ fn published_aimable_seats(points: &[DecisionPoint]) -> Vec<PlayerId> {
 /// these offers publish as aimable is charged nothing a declaration's aim cannot move, so a count
 /// partitioned across their seats crosses where the partition says and not where the order does.
 ///
-/// The engine's own rule, read on the two boards this file already drives, through the live offer
-/// `drive_to_live_declarable_offer` returns — the restored offers are not readable for this
-/// (`declarable_victims` deserialize empty), which is the same reason every other row here drives
-/// first. The ceiling control, the bounded assertion and the two-seat floor all live in
+/// The engine's own rule, read on the boards this file already drives, through the live offer
+/// `drive_to_live_declarable_offer` returns. The ceiling control, the bounded assertion and the two-seat floor all live in
 /// [`crate::fantastic_four_bounded_loop::assert_no_aim_independent_charge`] and its caller here,
 /// so a board demoted out of this shape reds rather than passing vacuously.
 #[test]
@@ -1061,7 +1015,8 @@ pub(crate) fn collect_gz(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Whether a committed dump's own JSON says it restores AT a CR 732.2a offer carrying a certified
-/// period — decided by reading the persisted document, with no restore and no drive.
+/// period and a published decision point — decided by reading the persisted document, with no
+/// restore and no drive; a choice-free offer has no aimable seat for the row above to read.
 ///
 /// Both envelope shapes are tried, because committed dumps use each and an envelope-only read
 /// would drop a real board by name.
@@ -1075,11 +1030,15 @@ fn restores_at_a_certified_offer(path: &Path) -> bool {
         && waiting
             .pointer("/data/certificate/per_cycle")
             .is_some_and(|per_cycle| !per_cycle.is_null())
+        && waiting
+            .pointer("/data/schema/points")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|points| !points.is_empty())
 }
 
-/// **Which committed dumps the row above is the whole population of.** The two boards it drives
-/// are exactly the committed dumps whose own persisted JSON restores at a CR 732.2a offer carrying
-/// a certified period; a newcomer reds here and prints its own name, so it is added to that row
+/// **Which committed dumps the row above is the whole population of.** The boards it drives are
+/// exactly the committed dumps whose own persisted JSON restores at a CR 732.2a offer carrying a
+/// certified period and a decision point; a newcomer reds here and prints its own name, so it is added to that row
 /// rather than found in playtesting.
 ///
 /// # What kind of claim this is, which is NOT the kind the row above makes
@@ -1135,22 +1094,13 @@ fn the_committed_dumps_that_restore_at_a_certified_offer_are_the_aim_independent
 
 /// CR 800.4a: P1 stole a creature P0 owns, with a +1/+1 counter on it. P1's departure ends that
 /// control effect and the creature stays under P0, so the repetition P1 leaves on conforms and
-/// accepting the weird-drain board's suggestion still eliminates every opponent.
+/// accepting the weird-drain board's published declaration still eliminates every opponent.
 #[test]
-fn a_creature_the_departing_seat_stole_returns_and_the_suggested_take_still_wins() {
-    use engine::game::interaction::{
-        bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
-    };
-    use engine::game::visibility::filter_state_for_viewer;
+fn a_creature_the_departing_seat_stole_returns_and_the_published_take_still_wins() {
     use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::identifiers::CardId;
-    use engine::types::interaction::{
-        InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
-        InteractionSessionId, InteractionShortcutDecision, InteractionShortcutPin,
-        InteractionSubmission,
-    };
     use engine::types::zones::Zone;
 
     for stolen in [false, true] {
@@ -1183,64 +1133,24 @@ fn a_creature_the_departing_seat_stole_returns_and_the_suggested_take_still_wins
             if stolen { PlayerId(1) } else { live.proposer }
         );
 
-        bind_interaction_authority(&mut state, InteractionSessionId("stolen".into()))
-            .expect("valid interaction authority binding");
-        let filtered = filter_state_for_viewer(&state, live.proposer);
-        let view = derive_viewer_interaction(&state, &filtered, live.proposer);
-        let opportunity = view
-            .opportunities
-            .iter()
-            .find(|o| {
-                matches!(
-                    &o.response,
-                    InteractionOpportunityResponse::Schema {
-                        spec: InteractionResponseSpec::Shortcut { .. },
-                        ..
-                    }
-                )
-            })
-            .expect("the offer is published as a shortcut schema");
-        let InteractionOpportunityResponse::Schema {
-            spec: InteractionResponseSpec::Shortcut { points, .. },
-            ..
-        } = &opportunity.response
-        else {
-            unreachable!();
+        let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+            panic!("the board stands at its offer: {:?}", state.waiting_for);
         };
-        let pins = points
-            .iter()
-            .filter(|point| !point.read_only)
-            .map(|point| InteractionShortcutPin {
-                group: point.group,
-                choice_ids: if matches!(
-                    point.kind,
-                    engine::types::interaction::InteractionShortcutPointKind::Targets
-                ) {
-                    Vec::new()
-                } else {
-                    point
-                        .candidate_ids
-                        .iter()
-                        .take(point.min as usize)
-                        .cloned()
-                        .collect()
-                },
-                amounts: Vec::new(),
-            })
-            .collect();
-        let action = resolve_interaction_response(
-            &state,
+        assert!(
+            schema.suggested_declaration.is_none(),
+            "stolen={stolen}: the published declaration already reaches the count, so no \
+             suggestion is published"
+        );
+        let count = schema.iteration_count.clone();
+        apply(
+            &mut state,
             live.proposer,
-            &InteractionSubmission {
-                interaction_id: opportunity.interaction_id.clone(),
-                response: InteractionResponse::Shortcut {
-                    decision: InteractionShortcutDecision::AcceptSuggested,
-                    pins,
-                },
+            GameAction::DeclareShortcut {
+                count,
+                template: None,
             },
         )
-        .expect("AcceptSuggested with an empty pin is admitted");
-        apply(&mut state, live.proposer, action).expect("the declaration is dispatched");
+        .expect("the declaration is dispatched");
         while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
             apply(
                 &mut state,

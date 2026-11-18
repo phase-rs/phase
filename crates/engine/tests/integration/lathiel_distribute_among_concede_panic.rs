@@ -154,7 +154,12 @@ fn lathiel_distribute_among_concede_does_not_panic() {
     // P0 concedes. The engine removes P0's stack entries via `retain` in
     // `do_eliminate`, but (before the fix) does NOT clear `pending_trigger_entry`.
     let mut events = Vec::new();
-    eliminate_player(runner.state_mut(), P0, &mut events);
+    eliminate_player(
+        runner.state_mut(),
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     // After the fix: pending_trigger_entry must be cleared if the entry is gone.
     // After the fix: pending_trigger must also be cleared.

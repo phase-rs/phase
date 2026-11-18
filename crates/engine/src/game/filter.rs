@@ -7086,6 +7086,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         block_pairs: Vec::new(),
         co_departed: Vec::new(),
         co_entered: Vec::new(),
+        instruction_lead: None,
         attached_to: None,
         entered_incarnation,
         turn_zone_change_index: 0,
@@ -7468,9 +7469,8 @@ fn filter_inner_for_object(
         TargetFilter::SelfRef => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime, so this arm is defense-in-depth and
-        // mirrors SelfRef's source-identity semantics.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
@@ -8334,8 +8334,8 @@ fn zone_change_filter_inner(
                     record_source.identity.reference == source.identity.reference
                 })
         }),
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime — mirrors SelfRef's source identity.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             trigger_source.map_or(record.object_id == source_id, |source| {
                 record
@@ -10189,6 +10189,12 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// copy's copied name reverts once it leaves the battlefield, so the live read
 /// would report the printed name instead.
 ///
+/// CR 400.7 + CR 608.2h: an intervening instruction that yields a single referent
+/// overwrites that snapshot (Legion's End's mass exile or reveal), and the target
+/// has still left as the object it was. When the target occurrence's pinned
+/// incarnation is no longer current, its exit last-known information answers. An
+/// unpinned target or one with no exit record falls through to the live read.
+///
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
@@ -10201,6 +10207,16 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
         .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
     {
         return Some(snapshot.lki.name.clone());
+    }
+    if let Some(lki) = ability
+        .targets
+        .iter()
+        .position(|target| *target == TargetRef::Object(id))
+        .and_then(|index| ability.target_pin_at(index))
+        .filter(|pin| !pin.is_current(state))
+        .and_then(|pin| exit_lki_for_incarnation(state, id, pin.incarnation))
+    {
+        return Some(lki.name.clone());
     }
     if let Some(obj) = state.objects.get(&id) {
         return Some(obj.name.clone());
@@ -26567,6 +26583,7 @@ mod tests {
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
             co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -29822,7 +29839,6 @@ mod entry_projection_tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: Default::default(),

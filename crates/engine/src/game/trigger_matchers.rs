@@ -1053,11 +1053,75 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ExiledBySource
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
-        | TargetFilter::Named { .. } => super::filter::matches_target_filter(
-            state,
-            object_id,
-            filter,
-            &super::filter::FilterContext::from_trigger_source(source_context),
+        | TargetFilter::Named { .. } => match departed_subject_record(state, object_id, source_context)
+        {
+            // CR 603.10 + CR 400.7: the event happened while this source was
+            // still on the battlefield and a later instruction of the same
+            // resolution moved it (CR 608.2c). The post-move object is a new
+            // object, so the subject is read as it last existed on the
+            // battlefield: its own departure record.
+            Some(record) => super::filter::matches_target_filter_on_zone_change_record(
+                state,
+                record,
+                filter,
+                &super::filter::FilterContext::from_trigger_source(source_context),
+            ),
+            None => super::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &super::filter::FilterContext::from_trigger_source(source_context),
+            ),
+        },
+    }
+}
+
+/// CR 603.10 + CR 400.7 + CR 608.2h: the battlefield-departure record that
+/// answers a subject question about `object_id` for a source matched in its
+/// departure window, or `None` for every ordinary (live) match.
+///
+/// `Some` only when all three hold: the collector marked this match
+/// `DepartureWindow`, the subject is the source itself, and the ledger holds
+/// the departure row of exactly the source's incarnation. Anything else fails
+/// closed to the live read, which for a departed source matches nothing.
+pub(super) fn departed_subject_record<'a>(
+    state: &'a GameState,
+    object_id: ObjectId,
+    source_context: &TriggerSourceContext,
+) -> Option<&'a crate::types::game_state::ZoneChangeRecord> {
+    if source_context.subject_scope
+        != crate::types::game_state::SubjectIncarnationScope::DepartureWindow
+        || object_id != source_context.identity.reference.object_id
+    {
+        return None;
+    }
+    crate::types::game_state::exact_battlefield_departure_row(
+        state,
+        source_context.identity.reference,
+    )
+}
+
+/// CR 122.1 + CR 603.10: how many `counter_type` counters the subject of a
+/// counter event has at the event's boundary. A source matched in its
+/// departure window reads its departure record's last-known counters (the
+/// latest battlefield view of that incarnation); every other match reads the
+/// live object. A departure record without its source context fails closed.
+fn subject_counters_at_event_boundary(
+    state: &GameState,
+    object_id: ObjectId,
+    counter_type: &crate::types::counter::CounterType,
+    source_context: &TriggerSourceContext,
+) -> Option<u32> {
+    match departed_subject_record(state, object_id, source_context) {
+        Some(record) => record
+            .trigger_source_context()
+            .map(|context| context.lki.counters.get(counter_type).copied().unwrap_or(0)),
+        None => Some(
+            state
+                .objects
+                .get(&object_id)
+                .and_then(|obj| obj.counters.get(counter_type).copied())
+                .unwrap_or(0),
         ),
     }
 }
@@ -1176,10 +1240,25 @@ fn count_matching_trigger_event_subjects(
                 0
             }
         }
+        // CR 603.2c + CR 122.1: the removal mirror of `CounterAdded` above. A
+        // batched "one or more counters are removed from <FILTER>" trigger whose
+        // effect reads "that much" (`EventContextAmount`) reads the NUMBER OF
+        // COUNTERS removed from matching objects, not a subject headcount —
+        // a headcount here would outrank the event's own magnitude in the
+        // `EventContextAmount` cascade.
+        GameEvent::CounterRemoved {
+            object_id, count, ..
+        } => {
+            if matches(*object_id) {
+                *count
+            } else {
+                0
+            }
+        }
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::XValueChosen { .. }
@@ -1210,7 +1289,6 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::ObjectIntensified { .. }
-        | GameEvent::CounterRemoved { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::CardCopyCreated { .. }
@@ -2967,11 +3045,16 @@ pub(super) fn match_counter_removed(
                 return false;
             }
             if let Some(threshold) = filter.threshold {
-                let current = state
-                    .objects
-                    .get(object_id)
-                    .and_then(|obj| obj.counters.get(&filter.counter_type).copied())
-                    .unwrap_or(0);
+                // CR 603.10: a source matched in its departure window reads the
+                // count it had when it last existed on the battlefield.
+                let Some(current) = subject_counters_at_event_boundary(
+                    state,
+                    *object_id,
+                    &filter.counter_type,
+                    source_context,
+                ) else {
+                    return false;
+                };
                 if threshold == 0 {
                     // "Last counter removed" — fire only when post-removal count is 0.
                     if current != 0 {
@@ -3340,20 +3423,36 @@ pub(super) fn match_phase(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    // CR 805.4d: a fanned occurrence admits exactly like the production event
-    // (active-player-based); its bound player is binding context, not an
-    // admission criterion.
-    let phase = match event {
-        GameEvent::PhaseChanged { phase } => phase,
-        GameEvent::PhaseChangedForPlayer { phase, .. } => phase,
-        _ => return false,
-    };
-    let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
-        phase == trigger_phase
+    if let GameEvent::PhaseChanged { phase } = event {
+        let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
+            phase == trigger_phase
+        } else {
+            true
+        };
+        // CR 102.1 + CR 800.4j: a step scoped to a player's turn belongs to no player while the
+        // turn continues without an active player; an unscoped step ("each end step") still begins.
+        phase_matches
+            && phase_trigger_players(trigger, state, source_context)
+                .is_none_or(|players| !players.is_empty())
     } else {
-        true
-    };
-    phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
+        false
+    }
+}
+
+/// CR 603.2b + CR 805.4d: the turn players whose step a phase trigger with a per-player scope
+/// (its `valid_target`) observes; `None` for one without, such as "your opponents' end step".
+pub(crate) fn phase_trigger_players(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    source_context: &TriggerSourceContext,
+) -> Option<Vec<PlayerId>> {
+    trigger.valid_target.as_ref()?;
+    Some(
+        crate::game::players::turn_players(state)
+            .into_iter()
+            .filter(|&player| valid_player_matches(trigger, state, player, source_context))
+            .collect(),
+    )
 }
 
 // CR 603.4: Match when the trigger's source becomes the target of a spell or ability.
@@ -3994,15 +4093,18 @@ pub(super) fn match_taps_for_mana(
 /// targeted `GainControl`, `GainControlAll`, `GiveControl`,
 /// `apply_permanent_control_change`, `exchange_control::resolve` (CR 701.12a,
 /// success path only) and the until-end-of-turn reversion in
-/// `turns::execute_cleanup` (CR 514.2).
+/// `turns::execute_cleanup` (CR 514.2). Control a full layer evaluation derives
+/// without an instruction (a static ability's layer-2 effect such as Control
+/// Magic or Confiscate entering or leaving, a lapsed `ForAsLongAs` duration) is
+/// published from that pass's controller diff
+/// (`layers::queue_derived_control_changes`, drained by
+/// `layers::publish_layer_control_changes`), deduplicated against the
+/// instruction publishers.
 ///
-/// Control the layer pass assigns or retires publishes nothing: a static
-/// ability's layer-2 effect (Confiscate, Control Magic) is applied as
-/// `ContinuousModification::ChangeController`, a lapsed `ForAsLongAs` duration
-/// (Callous Oppressor) is retired by `layers::retire_ended_effects`, and
-/// `layers::finish_layer_evaluation` only diffs the settled controllers
-/// (phase-rs/phase#9903). Coverage keeps the `Gains` side unsupported for that
-/// reason (`coverage::trigger_mode_has_unpublished_event_source`).
+/// This publishes every control change actually derived by a full layer
+/// evaluation, without duplicating existing instruction publication. It does
+/// not guarantee that every rules-required control transition is derived;
+/// phase-rs/phase#10947 remains.
 ///
 /// The producers are the CR 603.10d look-back abilities: "When you lose control
 /// of ~" (Khârn the Betrayer, Duplicity, Gustha's Scepter), the Stolen Uniform
@@ -4010,11 +4112,15 @@ pub(super) fn match_taps_for_mana(
 /// from you" (Zidane, Tantalus Thief; `valid_target` names the gaining player).
 ///
 /// The gain side, "When you gain control of ~ [from another player]" (Risky
-/// Move), is an ordinary trigger (CR 603.10): it's collected from the board
-/// after the event and matched on it. The changing object is "~" itself
-/// (`valid_card`), and "you" is the gainer, whom
+/// Move), triggers on the board immediately after the event (CR 603.10). The
+/// changing object is "~" itself (`valid_card`), and "you" is the gainer, whom
 /// `collect_matching_triggers_inner` makes the trigger's controller (CR
-/// 603.3a). A non-self source fires when its controller is the gainer.
+/// 603.3a). A non-self source fires when its controller is the gainer. An
+/// instruction-published change is collected from the board and matched on it.
+/// A layer-derived change is published at a later drain, so the pass that
+/// derived it latches the gain-side watchers then; they are collected from that
+/// latch, and the subject is judged on the observation, as for the lose side
+/// (CR 113.7a: the trigger outlives a source destroyed before publication).
 ///
 /// The lose side looks back in time (CR 603.10d) and is judged entirely on the
 /// event's evidence, which the instruction captured immediately before its
@@ -4061,6 +4167,23 @@ pub(super) fn match_changes_controller(
     }
     match side {
         ControlChangeSide::Gains => {
+            // CR 603.10 + CR 113.7a: a layer-derived change's gain side is
+            // collected only from the watchers latched immediately after it
+            // (`triggers::latched_control_change_side`). Its source may have
+            // left by publication, so the subject is judged on the event's
+            // observation and "you" is the latched controller.
+            if let Some(observation) = state
+                .control_change_observation(*evidence)
+                .filter(|observation| observation.gain_watchers.is_some())
+            {
+                return observed_subject_matches(
+                    state,
+                    trigger,
+                    &observation.subject,
+                    source_context,
+                ) && (source_event_subject_id(source_context) == *object_id
+                    || source_context.lki.controller == *new_controller);
+            }
             if !valid_card_matches(trigger, state, *object_id, source_context) {
                 return false;
             }
@@ -4071,29 +4194,10 @@ pub(super) fn match_changes_controller(
             let Some(observation) = state.control_change_observation(*evidence) else {
                 return false;
             };
-            let subject = &observation.subject;
-            if subject.zone != Zone::Battlefield {
-                return false;
-            }
-            let subject_matches = match &trigger.valid_card {
-                None => true,
-                Some(TargetFilter::SelfRef) => {
-                    subject.identity == source_context.identity.reference
-                }
-                Some(TargetFilter::SpecificObject { id }) => subject.identity.object_id == *id,
-                Some(filter) => {
-                    crate::types::events::EventObjectSnapshot::classify_filter_shape(filter)
-                        == crate::types::events::EventObjectFilterSupport::Supported
-                        && super::filter::matches_target_filter_on_event_snapshot(
-                            state,
-                            subject,
-                            filter,
-                            &super::filter::FilterContext::from_trigger_source(source_context),
-                        )
-                }
-            };
             let you = source_context.lki.controller;
-            if !subject_matches || *old_controller != you {
+            if !observed_subject_matches(state, trigger, &observation.subject, source_context)
+                || *old_controller != you
+            {
                 return false;
             }
             // `Controller` here is the legacy lose-control payload: before
@@ -4108,6 +4212,37 @@ pub(super) fn match_changes_controller(
                     player_matches_filter_as(filter, state, *new_controller, you, source_context)
                 }
             }
+        }
+    }
+}
+
+/// CR 110.1 + CR 400.7: a control-change trigger's `valid_card` judged on the
+/// event's observed subject rather than the board: the subject was a permanent
+/// (its observed zone; a spell changing control on the stack, CR 109.4, never
+/// matches), `SelfRef` by exact incarnation, `SpecificObject` by id, and any
+/// other filter only when an event snapshot can answer it exactly.
+fn observed_subject_matches(
+    state: &GameState,
+    trigger: &TriggerDefinition,
+    subject: &crate::types::events::EventObjectSnapshot,
+    source_context: &TriggerSourceContext,
+) -> bool {
+    if subject.zone != Zone::Battlefield {
+        return false;
+    }
+    match &trigger.valid_card {
+        None => true,
+        Some(TargetFilter::SelfRef) => subject.identity == source_context.identity.reference,
+        Some(TargetFilter::SpecificObject { id }) => subject.identity.object_id == *id,
+        Some(filter) => {
+            crate::types::events::EventObjectSnapshot::classify_filter_shape(filter)
+                == crate::types::events::EventObjectFilterSupport::Supported
+                && super::filter::matches_target_filter_on_event_snapshot(
+                    state,
+                    subject,
+                    filter,
+                    &super::filter::FilterContext::from_trigger_source(source_context),
+                )
         }
     }
 }
@@ -5321,6 +5456,7 @@ pub(super) fn match_rolled_die(
         player_id,
         sides,
         result,
+        ..
     } = event
     {
         if trigger.die_sides.is_some_and(|required| required != *sides) {
@@ -5630,7 +5766,7 @@ pub(super) fn match_loses_game(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::PlayerLost { player_id } = event {
+    if let GameEvent::PlayerLost { player_id, .. } = event {
         valid_player_matches(trigger, state, *player_id, source_context)
     } else {
         false
@@ -7353,6 +7489,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: Some(13),
+                pre_entry_source: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7363,6 +7500,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 6,
                 result: Some(4),
+                pre_entry_source: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7373,6 +7511,7 @@ mod tests {
                 player_id: PlayerId(1),
                 sides: 20,
                 result: Some(13),
+                pre_entry_source: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -7394,6 +7533,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result,
+            pre_entry_source: None,
         };
 
         // CR 706.2: Exact([1]) — fires on Some(1), not Some(2).
@@ -18517,6 +18657,7 @@ mod tests {
 
         let other = GameEvent::PlayerLost {
             player_id: PlayerId(0),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             !match_vote_resolved(
@@ -18665,6 +18806,7 @@ mod tests {
 
         let opp_lost = GameEvent::PlayerLost {
             player_id: PlayerId(1),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             match_loses_game(
@@ -18678,6 +18820,7 @@ mod tests {
 
         let my_lost = GameEvent::PlayerLost {
             player_id: PlayerId(0),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             match_loses_game(

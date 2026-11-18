@@ -1185,14 +1185,12 @@ fn apply_pending_counter_post_action(
             owner,
             copy,
             enter_tapped,
-            enter_with_counters,
             remaining_count,
         } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
             state,
             owner,
             copy,
             enter_tapped,
-            enter_with_counters,
             remaining_count,
             events,
         ),
@@ -1325,6 +1323,7 @@ fn apply_pending_counter_post_action(
                     if to == Zone::Battlefield {
                         crate::game::engine_replacement::flush_deferred_entry_events_into_priority_scan(
                             state,
+                            object_id,
                             events,
                         );
                     }
@@ -1657,10 +1656,14 @@ pub(crate) fn apply_counter_removal(
         .record_object_counter(command)
         .expect("resolved counter removal must have a live journal cause");
 
+    // CR 608.2c: stamp the open instruction so removals of different
+    // instructions of one resolution stay separate events.
+    let instruction_lead = crate::game::zones::open_instruction_lead(state, events.len());
     events.push(GameEvent::CounterRemoved {
         object_id,
         counter_type,
         count: removed,
+        instruction_lead,
     });
     removed
 }
@@ -7123,7 +7126,7 @@ mod tests {
             GameEvent::CounterRemoved {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
-                count: 1,
+                count: 1, ..
             } if *object_id == source_id
         )));
     }
@@ -7196,7 +7199,7 @@ mod tests {
             GameEvent::CounterRemoved {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
-                count: 1,
+                count: 1, ..
             } if *object_id == source_id
         )));
         assert!(events.iter().any(|event| matches!(

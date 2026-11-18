@@ -27,10 +27,11 @@ use super::lower::{
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
 use super::{
-    attach_controller_if_absent, is_bare_object_pronoun, is_bare_plural_object_pronoun,
-    resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
+    attach_controller_if_absent, hand_reveal_target_to_controller_ref, is_bare_object_pronoun,
+    is_bare_plural_object_pronoun, resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::bind_controller_phrase;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::ChosenReturnSpec;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -44,7 +45,10 @@ use crate::parser::oracle_nom::prevention::{
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
-use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
+use crate::parser::oracle_nom::target::{
+    controller_phrase_among, ControllerForm, ControllerPhrase, ControllerSubject, ControllerTense,
+    PlayerAnaphor,
+};
 use crate::parser::oracle_static::{parse_activated_ability_cost_head, ActivatedAbilityCostHead};
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
@@ -633,17 +637,6 @@ fn parse_direct_manifest_clause<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> OracleResult<'a, (TargetFilter, QuantityExpr, Option<ControllerRef>)> {
-    let attach_to_it_continuation = value(
-        (),
-        preceded(
-            space1::<_, OracleError<'_>>,
-            (
-                tag::<_, _, OracleError<'_>>("and attach "),
-                take_until::<_, _, OracleError<'_>>(" to it"),
-                tag(" to it"),
-            ),
-        ),
-    );
     all_consuming((
         tag::<_, _, OracleError<'_>>("manifest the top "),
         parse_manifest_count_card_words,
@@ -659,11 +652,10 @@ fn parse_direct_manifest_clause<'a>(
             space1::<_, OracleError<'_>>,
             tag("under your control"),
         )),
-        opt(attach_to_it_continuation),
         opt(tag(".")),
     ))
     .parse(input)
-    .map(|(rest, (_, count, _, target, _, _, _))| (rest, (target, count, Some(ControllerRef::You))))
+    .map(|(rest, (_, count, _, target, _, _))| (rest, (target, count, Some(ControllerRef::You))))
 }
 
 fn parse_put_sticker_target_tail(
@@ -3190,23 +3182,7 @@ pub(super) fn try_parse_multi_zone_same_name_exile(
     ) -> Result<(&str, (ControllerRef, MultiZoneExileQuantifier)), nom::Err<OracleError<'_>>> {
         // search <possessive> graveyard, hand, and library
         let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
-        let (input, owner) = alt((
-            value(
-                ControllerRef::ParentTargetOwner,
-                tag::<_, _, OracleError<'_>>("its owner's "),
-            ),
-            value(
-                ControllerRef::ParentTargetController,
-                tag("its controller's "),
-            ),
-            value(ControllerRef::TargetPlayer, tag("their ")),
-            value(ControllerRef::TargetPlayer, tag("that player's ")),
-            value(ControllerRef::TargetPlayer, tag("target player's ")),
-            value(ControllerRef::Opponent, tag("target opponent's ")),
-            value(ControllerRef::Opponent, tag("an opponent's ")),
-            value(ControllerRef::You, tag("your ")),
-        ))
-        .parse(input)?;
+        let (input, owner) = parse_zone_owner_possessive(input)?;
         let (input, _) = alt((
             tag::<_, _, OracleError<'_>>("graveyard, hand, and library"),
             tag("graveyard, hand and library"),
@@ -3250,40 +3226,102 @@ pub(super) fn try_parse_multi_zone_same_name_exile(
                 )))
             }
         }
-        // Match the trailing same-name suffix. The name source is either a
-        // previously-named card ("with that name", Lost Legacy / Deadly Cover-Up)
-        // or the spell's exiled/countered target referenced by its card type
-        // ("with the same name as that card/creature/land/spell/…", Surgical
-        // Extraction / Eradicate / Crumble to Dust / Counterbore / Deicide). The
-        // card-type is composed as one `alt` axis rather than enumerated as full
-        // strings; all forms lower to the same `SameNameAsParentTarget` effect.
-        let (input, _) = alt((
-            value(
-                (),
-                tag::<_, _, OracleError<'_>>(" with that name and exile them"),
-            ),
-            value(
-                (),
-                (
-                    tag::<_, _, OracleError<'_>>(" with the same name as that "),
-                    alt((
-                        tag("creature"),
-                        tag("permanent"),
-                        tag("planeswalker"),
-                        tag("artifact"),
-                        tag("enchantment"),
-                        tag("land"),
-                        tag("spell"),
-                        tag("card"),
-                    )),
-                    tag(" and exile them"),
-                ),
-            ),
-        ))
-        .parse(input)?;
+        // Match the trailing same-name suffix; all forms lower to the same
+        // `SameNameAsParentTarget` effect.
+        let (input, _) = (
+            tag::<_, _, OracleError<'_>>(" "),
+            parse_same_name_reference,
+            tag(" and exile them"),
+        )
+            .parse(input)?;
         Ok((input, (owner, quantifier)))
     }
     run(lower).ok().map(|(_, result)| result)
+}
+
+/// CR 201.2a: the same-name reference that closes a same-name card population.
+/// The name source is either a previously named card ("with that name", Lost
+/// Legacy / Deadly Cover-Up / Legion's End) or the spell's exiled/countered target
+/// referenced by its card type ("with the same name as that
+/// card/creature/land/spell/…", Surgical Extraction / Eradicate / Crumble to Dust /
+/// Counterbore / Deicide / Hour of Glory). The card type is composed as one `alt`
+/// axis rather than enumerated as full strings.
+pub(super) fn parse_same_name_reference(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("with the same name as that "),
+                alt((
+                    tag("creature"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                    tag("artifact"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("spell"),
+                    tag("card"),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 400.1 + CR 108.3: the possessive naming whose zones a mass exile reaches,
+/// as the owner axis its filter carries. Shared by the multi-zone recognizers.
+fn parse_zone_owner_possessive(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(
+            ControllerRef::ParentTargetOwner,
+            tag::<_, _, OracleError<'_>>("its owner's "),
+        ),
+        value(
+            ControllerRef::ParentTargetController,
+            tag("its controller's "),
+        ),
+        value(ControllerRef::TargetPlayer, tag("their ")),
+        value(ControllerRef::TargetPlayer, tag("that player's ")),
+        value(ControllerRef::TargetPlayer, tag("target player's ")),
+        value(ControllerRef::Opponent, tag("target opponent's ")),
+        value(ControllerRef::Opponent, tag("an opponent's ")),
+        value(ControllerRef::You, tag("your ")),
+    ))
+    .parse(input)
+}
+
+/// CR 400.1 + CR 402.1 + CR 404.1: "<possessive> <zone>[ and <zone>…]" — one
+/// player's zones, deduped, in written order. Additional zones join by " and " /
+/// ", and " / ", " (oxford comma). The caller decides how many zones it accepts
+/// and what may follow.
+fn parse_possessive_zone_union(input: &str) -> OracleResult<'_, (ControllerRef, Vec<Zone>)> {
+    let (input, owner) = parse_zone_owner_possessive(input)?;
+    let (input, zones) = parse_zone_word_union(input)?;
+    Ok((input, (owner, zones)))
+}
+
+fn parse_zone_word_union(input: &str) -> OracleResult<'_, Vec<Zone>> {
+    let (mut input, first) = parse_zone_word(input)?;
+    let mut zones = vec![first];
+    loop {
+        let Ok((after_sep, _)) = alt((
+            tag::<_, _, OracleError<'_>>(" and "),
+            tag(", and "),
+            tag(", "),
+        ))
+        .parse(input) else {
+            break;
+        };
+        let Ok((after_zone, zone)) = parse_zone_word(after_sep) else {
+            break;
+        };
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+        input = after_zone;
+    }
+    Ok((input, zones))
 }
 
 /// CR 400.1 + CR 401.1 + CR 402.1 + CR 404.1 + CR 406.2: map a single zone word to
@@ -3422,43 +3460,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
             let (input, _) = tag::<_, _, OracleError<'_>>(" from ").parse(after_head)?;
             (input, tf.type_filters)
         };
-        let (input, owner) = alt((
-            value(
-                ControllerRef::ParentTargetOwner,
-                tag::<_, _, OracleError<'_>>("its owner's "),
-            ),
-            value(
-                ControllerRef::ParentTargetController,
-                tag("its controller's "),
-            ),
-            value(ControllerRef::TargetPlayer, tag("their ")),
-            value(ControllerRef::TargetPlayer, tag("that player's ")),
-            value(ControllerRef::TargetPlayer, tag("target player's ")),
-            value(ControllerRef::Opponent, tag("target opponent's ")),
-            value(ControllerRef::Opponent, tag("an opponent's ")),
-            value(ControllerRef::You, tag("your ")),
-        ))
-        .parse(input)?;
-        let (mut input, first) = parse_zone_word(input)?;
-        let mut zones = vec![first];
-        // Additional zones joined by " and " / ", and " / ", " (oxford comma).
-        loop {
-            let Ok((after_sep, _)) = alt((
-                tag::<_, _, OracleError<'_>>(" and "),
-                tag(", and "),
-                tag(", "),
-            ))
-            .parse(input) else {
-                break;
-            };
-            let Ok((after_zone, zone)) = parse_zone_word(after_sep) else {
-                break;
-            };
-            if !zones.contains(&zone) {
-                zones.push(zone);
-            }
-            input = after_zone;
-        }
+        let (input, (owner, zones)) = parse_possessive_zone_union(input)?;
         Ok((input, (type_filters, owner, zones)))
     }
     let (rem, (type_filters, owner, zones)) = run(rest_lower).ok()?;
@@ -3472,6 +3474,152 @@ pub(super) fn try_parse_multi_zone_player_exile(
         return None;
     }
     Some((type_filters, owner, zones))
+}
+
+/// CR 201.2a + CR 400.1 + CR 701.13a + CR 608.2c: "exile all cards `<same-name
+/// reference>` from `<zone source>`", in either word order — the cards a player
+/// owns in the named zones that share a name with the instruction's target. Legion's
+/// End writes "cards with that name from their hand and graveyard"; Hour of Glory
+/// writes "cards from it with the same name as that creature".
+///
+/// A bare "it" names the hand revealed earlier in the same chain (CR 608.2c), so it
+/// declines without that antecedent. Unlike [`try_parse_multi_zone_player_exile`]
+/// this accepts a single zone, because the same-name axis (not a zone union)
+/// distinguishes it from the generic single-origin path.
+///
+/// The outer `None` means "not this shape". Once a head is recognized — "cards
+/// `<same-name reference>` from " (order A), or "cards from " followed somewhere by
+/// the same-name reference (order B) — the shape is claimed: every later failure
+/// (an unrepresentable owner, an unknown zone word, a trailing fragment, or a
+/// same-name antecedent that is not the parent target) is the inner `None`, an
+/// honest decline the caller must not let fall through to the generic mass path.
+pub(super) fn try_parse_same_name_zone_exile(
+    rest_lower: &str,
+    ctx: &ParseContext,
+) -> Option<Option<(ControllerRef, Vec<Zone>)>> {
+    // Order A: "cards <same-name reference> from <source><tail>".
+    if let Ok((source_input, _)) = (
+        tag::<_, _, OracleError<'_>>("cards "),
+        parse_same_name_reference,
+        tag(" from "),
+    )
+        .parse(rest_lower)
+    {
+        let claimed = parse_same_name_exile_source(source_input, ctx)
+            .ok()
+            .filter(|(tail, _)| same_name_tail_is_terminal(tail))
+            .and_then(|(_, owner_zones)| same_name_owner_zones(owner_zones, ctx));
+        return Some(claimed);
+    }
+    // Order B: "cards from <source> <same-name reference><tail>".
+    let (after_from, _) = tag::<_, _, OracleError<'_>>("cards from ")
+        .parse(rest_lower)
+        .ok()?;
+    let (source_text, (), tail) =
+        nom_primitives::scan_preceded(after_from, parse_same_name_reference)?;
+    let claimed = all_consuming(terminated(
+        |input| parse_same_name_exile_source(input, ctx),
+        tag::<_, _, OracleError<'_>>(" "),
+    ))
+    .parse(source_text)
+    .ok()
+    .filter(|_| same_name_tail_is_terminal(tail))
+    .and_then(|(_, owner_zones)| same_name_owner_zones(owner_zones, ctx));
+    Some(claimed)
+}
+
+/// The clause must be fully consumed: only sentence punctuation may follow, so no
+/// trailing fragment is silently dropped.
+fn same_name_tail_is_terminal(tail: &str) -> bool {
+    all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(tail.trim())
+        .is_ok()
+}
+
+/// CR 608.2c + CR 608.2k: `SameNameAsParentTarget` reads the instruction's parent
+/// target, so the same-name antecedent ("that creature", "that name") must be it.
+/// Under a typed trigger subject it is the trigger's object instead, which the
+/// shared binder reports by resolving "its controller" to `TriggeringPlayer`; the
+/// shape then declines, as "with the same controller" does in `oracle_target`.
+/// An owner the recognizer read but cannot represent also declines.
+fn same_name_owner_zones(
+    (owner, zones): (Option<ControllerRef>, Vec<Zone>),
+    ctx: &ParseContext,
+) -> Option<(ControllerRef, Vec<Zone>)> {
+    let names_parent_target = bind_controller_phrase(
+        &ControllerPhrase {
+            subject: ControllerSubject::Anaphoric(PlayerAnaphor::ItsController),
+            form: ControllerForm::Singular,
+            tense: ControllerTense::Present,
+        },
+        &ctx.player_antecedents(),
+    ) == Some(ControllerRef::ParentTargetController);
+    if !names_parent_target {
+        return None;
+    }
+    owner.map(|owner| (owner, zones))
+}
+
+/// The owner axis of a same-name zone exile. `Some` is a representable owner;
+/// `None` is a possessive this shape recognizes only to decline it.
+///
+/// - "their" → `ScopedPlayer` (CR 608.2c): the clause's subject, bound later by
+///   `inject_subject_target`, or with no subject by the chain's player antecedent.
+/// - "its owner's" → `ParentTargetOwner` (CR 108.3) and "its controller's" →
+///   `ParentTargetController` (CR 109.4): object anaphors bound to the parent
+///   target, the antecedent `SameNameAsParentTarget` assumes (CR 608.2c).
+/// - "target player's" → `TargetPlayer` (CR 115.1a): an announced player target.
+/// - "your" → `You` (CR 109.5): the caster.
+/// - "that player's" declines: it names whichever player the chain last named
+///   (CR 608.2c), and no printed card in this class uses it.
+/// - "target opponent's" declines: no printed card in this class uses it (it would
+///   be `TargetOpponent`). "an opponent's" declines: one unspecified opponent is
+///   not the population `Opponent`.
+///
+/// Unlike [`parse_zone_owner_possessive`], explicit and subject-relative owners
+/// stay distinct here, so neither late binder can overwrite an explicit owner.
+fn parse_same_name_zone_owner(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(
+            Some(ControllerRef::ParentTargetOwner),
+            tag::<_, _, OracleError<'_>>("its owner's "),
+        ),
+        value(
+            Some(ControllerRef::ParentTargetController),
+            tag("its controller's "),
+        ),
+        value(Some(ControllerRef::ScopedPlayer), tag("their ")),
+        value(Some(ControllerRef::TargetPlayer), tag("target player's ")),
+        value(Some(ControllerRef::You), tag("your ")),
+        value(None, tag("that player's ")),
+        value(None, tag("target opponent's ")),
+        value(None, tag("an opponent's ")),
+    ))
+    .parse(input)
+}
+
+/// The zones a same-name mass exile reaches: an owner possessive and a zone
+/// union, or "it" for the hand an earlier clause of this chain revealed. "it"
+/// resolves through the recorded reveal (CR 608.2c), as the "from among them"
+/// hand branch does; no reveal, an unmapped one, or the population `Opponent`
+/// (not one revealed player) gives no owner. The union is tried first so "its
+/// owner's hand" never stops at "it".
+fn parse_same_name_exile_source<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (Option<ControllerRef>, Vec<Zone>)> {
+    alt((
+        (parse_same_name_zone_owner, parse_zone_word_union),
+        map(tag("it"), |_| {
+            let owner = ctx
+                .chain_prior_hand_reveal_target
+                .as_ref()
+                .and_then(hand_reveal_target_to_controller_ref)
+                .filter(|owner| *owner != ControllerRef::Opponent);
+            (owner, vec![Zone::Hand])
+        }),
+    ))
+    .parse(input)
 }
 
 /// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<permanent types>` and
@@ -4506,7 +4654,7 @@ fn parse_counted_hand_reveal(
 /// with no subject of its own that is the acting player (Controller), which a
 /// per-player scope rebinds to the iterating player and `inject_subject_target`
 /// rebinds to a declared subject.
-fn parse_subject_hand_owner(input: &str) -> OracleResult<'_, TargetFilter> {
+pub(super) fn parse_subject_hand_owner(input: &str) -> OracleResult<'_, TargetFilter> {
     value(
         TargetFilter::Controller,
         alt((tag("their hand"), tag("his or her hand"))),
@@ -7904,7 +8052,7 @@ pub(super) fn parse_utility_imperative_ast(
             {
                 (TargetFilter::ParentTarget, "")
             } else {
-                parse_attach_recipient(recipient_text, ctx, None)
+                parse_attach_recipient(recipient_text, ctx)
             }
         };
         #[cfg(debug_assertions)]
@@ -7995,8 +8143,16 @@ pub(super) fn parse_utility_imperative_ast(
                 AttachSelection::AtResolution { count: cardinality }
             };
             let (attachment, _attachment_rem) = parse_attachment_anaphor(&attachment_text, ctx);
-            let (target, _target_rem) =
-                parse_attach_recipient(&target_text, ctx, Some(&attachment));
+            let (target, _target_rem) = parse_attach_recipient(&target_text, ctx);
+            // CR 400.7j + CR 701.3a: after a battlefield move, "attach ~ to it" makes the moved card the host; `OriginalSource` keeps the source as the attachment through the forward_result rebind.
+            let attachment = match (attachment, &target) {
+                (TargetFilter::SelfRef, TargetFilter::ParentTarget)
+                    if ctx.prior_clause_moves_to_battlefield =>
+                {
+                    TargetFilter::OriginalSource
+                }
+                (attachment, _) => attachment,
+            };
             // CR 115.6 + CR 601.2c: the HOST operand's zero-target authority is
             // its own printed quantifier, independent of whether the ATTACHMENT
             // operand claimed an announced slot. "attach target Equipment you
@@ -8210,16 +8366,20 @@ fn parse_attach_target_quantifier(
     }
 }
 
-fn parse_attach_recipient<'a>(
-    text: &'a str,
-    ctx: &mut ParseContext,
-    attachment: Option<&TargetFilter>,
-) -> (TargetFilter, &'a str) {
+fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     // CR 608.2k: thread `ctx` so "attach this Equipment to it" in trigger
     // bodies binds "it" to the triggering subject (Ancestral Katana —
     // "Whenever a Samurai or Warrior you control attacks alone … attach this
     // Equipment to it"). Pre-existing "her" / "him" → SelfRef carve-out is
     // preserved for legacy attach-to-self phrasings (e.g. "attach to her").
+    // CR 400.7j: after a battlefield move, a bare "it" host is the card that move
+    // put there (the forwarded `ParentTarget`), not the trigger subject.
+    if ctx.prior_clause_moves_to_battlefield {
+        let trimmed = text.trim_start();
+        if parse_neuter_attach_self_recipient(trimmed.to_ascii_lowercase().trim()).is_ok() {
+            return (TargetFilter::ParentTarget, &trimmed[trimmed.len()..]);
+        }
+    }
     let (target, rest) = parse_target_with_ctx(text, ctx);
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();
@@ -8227,17 +8387,9 @@ fn parse_attach_recipient<'a>(
         if parse_gendered_attach_self_recipient(lower.trim()).is_ok() {
             return (TargetFilter::SelfRef, &trimmed[lower.len()..]);
         }
-        // CR 608.2c: a selected attachment and a newly created permanent are
-        // distinct referents in "attach that Equipment to it." Bind the bare
-        // recipient only after parsing the attachment role, so source-owned
-        // Equipment and face-down card attachment semantics remain unchanged.
-        if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
-            && ctx.token_created_in_chain
-            && matches!(
-                attachment,
-                Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. })
-            )
-        {
+        // CR 608.2c: a bare "it" host names what the chain's most recent
+        // producer made, whatever the attachment operand is.
+        if parse_neuter_attach_self_recipient(lower.trim()).is_ok() && ctx.token_created_in_chain {
             return (TargetFilter::LastCreated, &trimmed[lower.len()..]);
         }
         if parse_neuter_attach_self_recipient(lower.trim()).is_ok()
@@ -8253,8 +8405,8 @@ fn parse_attach_recipient<'a>(
         // two consumers cannot disagree about what "that creature" means.
         //
         // The DEMONSTRATIVE-only entry point is deliberate: bare "it" is already
-        // resolved by the branch above through
-        // `attach_neuter_recipient_resolves_via_subject`, a wider gate, and
+        // resolved by the two branches above (the chain-created referent, then
+        // `attach_neuter_recipient_resolves_via_subject`, a wider gate), and
         // letting it fall through to here would change bare-pronoun attachment
         // for chains that have nothing to do with a chain-created referent.
         if let Some(bound) = super::counter::chain_created_demonstrative_binding(lower.trim(), ctx)
@@ -12430,6 +12582,31 @@ pub(super) fn parse_exile_ast(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
+        // CR 201.2a + CR 400.1 + CR 701.13a + CR 608.2c: "exile all cards with that
+        // name from <possessive> <zone>[ and <zone>]" (Legion's End) or "exile all
+        // cards from it with the same name as that creature" (Hour of Glory). Lowers
+        // like the `MultiZoneSameNameExile` mass arm: the zones ride on the filter via
+        // `InAnyZone` and `origin: None` defers to it.
+        if let Some(same_name) = try_parse_same_name_zone_exile(rest_lower, ctx) {
+            // A recognized same-name exile whose owner cannot be represented declines
+            // here rather than reaching the generic mass path below, which would drop
+            // both the owner and the name (CR 201.2a).
+            let (owner, zones) = same_name?;
+            return Some(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(owner),
+                    properties: vec![
+                        FilterProp::InAnyZone { zones },
+                        FilterProp::SameNameAsParentTarget,
+                    ],
+                }),
+                all: true,
+                enter_with_counters: vec![],
+                multi_target: None,
+            });
+        }
         // CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from <possessive> <zone>
         // and <zone>" (Identity Crisis) — a *union* of origin zones. Recognized
         // before the generic single-origin path below, whose `infer_origin_zone`
@@ -12518,6 +12695,29 @@ pub(super) fn parse_exile_ast(
 
     let (_, rest_text) = nom_on_lower(text, lower, |input| value((), tag("exile ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest_text.len()..];
+
+    // CR 608.2c + CR 701.13a: "exile the rest" names every card of the chain's
+    // revealed/looked-at set that is still in the library once the earlier
+    // instructions have moved their share (Sword-Point Diplomacy, Eye of
+    // Yawgmoth). It is a mass move over that set — never a one-card choice — and
+    // cards already routed elsewhere (to hand) are not "the rest".
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("the rest"),
+        opt(one_of(".;")),
+    ))
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return Some(ZoneCounterImperativeAst::Exile {
+            origin: Some(Zone::Library),
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+            all: true,
+            enter_with_counters: vec![],
+            multi_target: None,
+        });
+    }
 
     if let Some(target) = try_parse_heterogeneous_chosen_exile(rest_lower, ctx) {
         return Some(ZoneCounterImperativeAst::Exile {
@@ -21871,6 +22071,91 @@ mod tests {
     }
 
     #[test]
+    fn parse_attach_source_to_bare_it_binds_created_referent_only_after_a_producer() {
+        let input = "attach ~ to it";
+        let lower = input.to_lowercase();
+        for (created, expected_target) in [
+            (true, TargetFilter::LastCreated),
+            (false, TargetFilter::SelfRef),
+        ] {
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::SelfRef),
+                token_created_in_chain: created,
+                ..Default::default()
+            };
+            let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+            let Some(UtilityImperativeAst::Attach {
+                attachment, target, ..
+            }) = result
+            else {
+                panic!("{input}: expected Attach, got {result:?}");
+            };
+            assert_eq!(attachment, TargetFilter::SelfRef);
+            assert_eq!(target, expected_target, "token_created_in_chain: {created}");
+        }
+    }
+
+    #[test]
+    fn cryptic_coat_attaches_itself_to_the_cloaked_card() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When this Equipment enters, cloak the top card of your library, then attach this Equipment to it. (To cloak a card, put it onto the battlefield face down as a 2/2 creature with ward {2}. Turn it face up any time for its mana cost if it's a creature card.)\nEquipped creature gets +1/+0 and can't be blocked.\n{1}{U}: Return this Equipment to its owner's hand.",
+            "Cryptic Coat",
+            &[],
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Cryptic Coat ETB execute");
+        assert!(
+            matches!(&*execute.effect, Effect::Cloak { .. }),
+            "got {:?}",
+            execute.effect
+        );
+        let attach = execute.sub_ability.as_deref().expect("attach continuation");
+        assert_eq!(
+            *attach.effect,
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::LastCreated,
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::One
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn armory_automaton_bare_it_host_stays_self_without_a_producer() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever this creature enters or attacks, you may attach any number of target Equipment to it. (Control of the Equipment doesn't change.)",
+            "Armory Automaton",
+            &[],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Construct".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Armory Automaton execute");
+        let Effect::Attach {
+            attachment, target, ..
+        } = &*execute.effect
+        else {
+            panic!("expected Attach, got {:?}", execute.effect);
+        };
+        let TargetFilter::Typed(typed) = attachment else {
+            panic!("expected typed Equipment attachment, got {attachment:?}");
+        };
+        assert!(typed.type_filters.iter().any(
+            |filter| matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Equipment")
+        ));
+        assert!(execute.sub_ability.is_none());
+        assert_eq!(*target, TargetFilter::SelfRef);
+    }
+
+    #[test]
     fn parse_attach_recipient_it_preserves_chosen_parent_target_for_self_subject() {
         let input = "attach up to one target Equipment you control to it";
         let lower = input.to_lowercase();
@@ -28375,6 +28660,188 @@ mod tests {
         }
     }
 
+    /// CR 201.2a + CR 400.1 + CR 608.2c: both word orders of the same-name zone exile,
+    /// across the owner and zone axes. Once the head is recognized the shape is
+    /// claimed (`Some`), and an owner, zone or tail it cannot represent is the inner
+    /// `None`; only a text that is not this shape gives the outer `None`.
+    #[test]
+    fn same_name_zone_exile_reads_both_word_orders_and_declines_the_rest() {
+        let with_reveal = ParseContext {
+            chain_prior_hand_reveal_target: Some(TargetFilter::Player),
+            ..ParseContext::default()
+        };
+        let without_reveal = ParseContext::default();
+
+        // Representable owners, each written in both word orders.
+        for (source, owner, zones) in [
+            // Legion's End's printed owner: the subject possessive, bound later.
+            (
+                "their hand and graveyard",
+                ControllerRef::ScopedPlayer,
+                vec![Zone::Hand, Zone::Graveyard],
+            ),
+            // No printed card exhibits these owner/word-order combinations; nearest printed cards: Legion's End, Hour of Glory.
+            (
+                "its controller's graveyard, hand, and library",
+                ControllerRef::ParentTargetController,
+                vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+            ),
+            (
+                "its owner's graveyard",
+                ControllerRef::ParentTargetOwner,
+                vec![Zone::Graveyard],
+            ),
+            (
+                "target player's hand",
+                ControllerRef::TargetPlayer,
+                vec![Zone::Hand],
+            ),
+            (
+                "your hand and graveyard",
+                ControllerRef::You,
+                vec![Zone::Hand, Zone::Graveyard],
+            ),
+        ] {
+            let expected = Some(Some((owner, zones)));
+            for text in [
+                format!("cards with that name from {source}"),
+                format!("cards with that name from {source}."),
+                format!("cards from {source} with the same name as that creature"),
+                format!("cards from {source} with that name."),
+            ] {
+                assert_eq!(
+                    try_parse_same_name_zone_exile(&text, &with_reveal),
+                    expected,
+                    "{text}"
+                );
+                assert_eq!(
+                    try_parse_same_name_zone_exile(&text, &without_reveal),
+                    expected,
+                    "a possessive needs no antecedent: {text}"
+                );
+            }
+        }
+
+        // Claimed, then declined, in both word orders. No printed card exhibits
+        // these owners, zone words or fragments; nearest printed card: Legion's End.
+        for (source, tail) in [
+            ("that player's hand and graveyard", ""),
+            ("target opponent's hand and graveyard", ""),
+            ("an opponent's hand", ""),
+            ("each opponent's hand and graveyard", ""),
+            ("each player's graveyard", ""),
+            ("his or her hand and graveyard", ""),
+            ("their deck", ""),
+            ("their hand and graveyard", " and shuffle"),
+            ("their hand", ", then draw a card"),
+        ] {
+            for text in [
+                format!("cards with that name from {source}{tail}"),
+                format!("cards from {source} with the same name as that creature{tail}"),
+            ] {
+                assert_eq!(
+                    try_parse_same_name_zone_exile(&text, &with_reveal),
+                    Some(None),
+                    "{text}"
+                );
+            }
+        }
+
+        // "from it" reads the recorded reveal's player.
+        let from_it = "cards from it with the same name as that creature";
+        for (reveal, owner) in [
+            (
+                TargetFilter::ParentTargetController,
+                ControllerRef::ParentTargetController,
+            ),
+            (
+                TargetFilter::ParentTargetOwner,
+                ControllerRef::ParentTargetOwner,
+            ),
+            (TargetFilter::Player, ControllerRef::TargetPlayer),
+            (TargetFilter::Controller, ControllerRef::You),
+        ] {
+            let ctx = ParseContext {
+                chain_prior_hand_reveal_target: Some(reveal.clone()),
+                ..ParseContext::default()
+            };
+            assert_eq!(
+                try_parse_same_name_zone_exile(from_it, &ctx),
+                Some(Some((owner, vec![Zone::Hand]))),
+                "{reveal:?}"
+            );
+        }
+        // No reveal, or a reveal the table cannot map to one player.
+        let any_reveal = ParseContext {
+            chain_prior_hand_reveal_target: Some(TargetFilter::Any),
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            try_parse_same_name_zone_exile(from_it, &any_reveal),
+            Some(None)
+        );
+        assert_eq!(
+            try_parse_same_name_zone_exile(from_it, &without_reveal),
+            Some(None)
+        );
+
+        // CR 608.2k: under a typed trigger subject "that creature" is the trigger's
+        // object, not a parent target, so even an explicit owner declines. A
+        // self-trigger subject keeps the parent-target reading. No printed card
+        // exhibits these shapes; nearest printed card: Hour of Glory.
+        let your = "cards with that name from your graveyard";
+        let typed_subject = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            try_parse_same_name_zone_exile(your, &typed_subject),
+            Some(None)
+        );
+        let self_subject = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            try_parse_same_name_zone_exile(your, &self_subject),
+            Some(Some((ControllerRef::You, vec![Zone::Graveyard])))
+        );
+
+        for text in [
+            // No name clause: the multi-zone player exile's class. No printed card exhibits this possessive; nearest printed card: Identity Crisis.
+            "cards from their hand and graveyard",
+            // Not a bare "cards" head. No printed card exhibits this fragment; nearest printed card: Legion's End.
+            "creature cards with that name from their hand",
+            "creature cards from their hand with that name",
+        ] {
+            assert_eq!(
+                try_parse_same_name_zone_exile(text, &with_reveal),
+                None,
+                "{text}"
+            );
+        }
+    }
+
+    /// CR 400.1: the possessive-zone recognizer keeps its no-name class, which the
+    /// same-name recognizer in front of it does not claim.
+    #[test]
+    fn multi_zone_player_exile_keeps_the_no_name_class() {
+        let ctx = ParseContext {
+            chain_prior_hand_reveal_target: Some(TargetFilter::Player),
+            ..ParseContext::default()
+        };
+        for text in [
+            "cards from target player's hand and graveyard",
+            "noncreature, nonland cards from that player's hand and graveyard",
+        ] {
+            assert_eq!(try_parse_same_name_zone_exile(text, &ctx), None, "{text}");
+            let (_, owner, zones) = try_parse_multi_zone_player_exile(text)
+                .unwrap_or_else(|| panic!("multi-zone player exile must claim: {text}"));
+            assert_eq!(owner, ControllerRef::TargetPlayer, "{text}");
+            assert_eq!(zones, vec![Zone::Hand, Zone::Graveyard], "{text}");
+        }
+    }
+
     #[test]
     fn parse_copy_stack_ability_target_preserves_unknown_qualifier_remainder() {
         use crate::types::ability::StackAbilityKind;
@@ -32584,6 +33051,90 @@ mod tests {
             );
             node = def.sub_ability.as_deref();
         }
+    }
+
+    /// The first trigger's Attach operands, with whether its parent carries `forward_result`.
+    fn first_trigger_attach(
+        oracle: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> (bool, TargetFilter, TargetFilter) {
+        let strings = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &strings(types),
+            &strings(subtypes),
+        );
+        let mut parent_forwards = false;
+        let mut node = parsed.triggers.iter().find_map(|t| t.execute.as_deref());
+        while let Some(def) = node {
+            assert!(
+                !matches!(*def.effect, Effect::Unimplemented { .. }),
+                "{name}: {:?}",
+                def.effect
+            );
+            if let Effect::Attach {
+                attachment, target, ..
+            } = &*def.effect
+            {
+                return (parent_forwards, attachment.clone(), target.clone());
+            }
+            parent_forwards = def.forward_result;
+            node = def.sub_ability.as_deref();
+        }
+        panic!("{name}: no Attach under its trigger");
+    }
+
+    /// CR 400.7j + CR 701.3a: "attach ~ to it" after a battlefield move keeps the source as
+    /// the attachment (`OriginalSource`) and the moved card as the host.
+    #[test]
+    fn attach_source_to_moved_card_is_original_source_attachment() {
+        for (name, types, subtypes, oracle) in [
+            (
+                "Deathrender",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2.\nWhenever equipped creature dies, you may put a creature card from your hand onto the battlefield and attach this Equipment to it.\nEquip {2}",
+            ),
+            (
+                "Last Voyage of the _____",
+                &["Enchantment"][..],
+                &[][..],
+                "When this enchantment enters, you may put a name sticker on it, then it becomes an Aura with enchant creature. Return a creature card from your graveyard to the battlefield and attach this Aura to it.\nEnchanted creature gets +2/+0 for each name sticker on this Aura with seven or fewer letters.\nWhen this Aura leaves the battlefield, sacrifice enchanted creature.",
+            ),
+            (
+                "Scythe of the Wretched",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2.\nWhenever a creature dealt damage by equipped creature this turn dies, return that card to the battlefield under your control. Attach this Equipment to that creature.\nEquip {4}",
+            ),
+            (
+                "Nim Deathmantle",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2, has intimidate, and is a black Zombie. (A creature with intimidate can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nWhenever a nontoken creature is put into your graveyard from the battlefield, you may pay {4}. If you do, return that card to the battlefield and attach this Equipment to it.\nEquip {4}",
+            ),
+        ] {
+            let (parent_forwards, attachment, target) = first_trigger_attach(oracle, name, types, subtypes);
+            assert!(parent_forwards, "{name}: the move forwards its result");
+            assert_eq!(attachment, TargetFilter::OriginalSource, "{name}");
+            assert_eq!(target, TargetFilter::ParentTarget, "{name}");
+        }
+
+        let (_, attachment, _) = first_trigger_attach(
+            "Enchant creature\nEnchanted creature can't attack or block, and its activated abilities can't be activated.\nWhenever a creature an opponent controls enters, you may attach this Aura to that creature.",
+            "Prison Term",
+            &["Enchantment"],
+            &["Aura"],
+        );
+        assert_eq!(
+            attachment,
+            TargetFilter::SelfRef,
+            "no prior move: the Aura stays SelfRef"
+        );
     }
 }
 
