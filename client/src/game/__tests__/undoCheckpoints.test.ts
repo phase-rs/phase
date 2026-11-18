@@ -37,7 +37,7 @@ describe("undo checkpoints", () => {
     expect(exportPersistenceState.mock.invocationCallOrder[0]).toBeLessThan(
       adapter.submitAction.mock.invocationCallOrder[0],
     );
-    expect(useGameStore.getState().stateHistory).toEqual([envelope]);
+    expect(useGameStore.getState().stateHistory).toEqual([{ state: envelope, logSeq: 0 }]);
   });
 
   it("AI-seat dispatch pushes no checkpoint but still applies", async () => {

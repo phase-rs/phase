@@ -1017,6 +1017,7 @@ fn phase_opens_with_triggers(state: &GameState, player: PlayerId, phase: Phase) 
                     ..
                 } => at == phase && for_player == player,
                 DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+                | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
                 | DelayedTriggerCondition::WhenLeavesPlay { .. }
                 | DelayedTriggerCondition::WhenDies { .. }
                 | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
