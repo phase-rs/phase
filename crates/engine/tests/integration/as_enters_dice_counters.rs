@@ -42,7 +42,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -2431,12 +2431,16 @@ fn an_answered_devour_completes_the_entry_for_a_third_player() {
 /// V9. CR 305.1: a land play a replacement kept off the battlefield reaches the
 /// take completed, so "When you play another land" fires as it always has. Not
 /// determined by the cards; preserved from base and labelled in `engine_replacement`.
+/// A Forest gives P0 the two untapped lands Lotus Vale's cost needs, so the
+/// replacement is offered (CR 118.3: an unpayable cost is never offered) and
+/// declined.
 #[test]
 fn a_replaced_land_play_stays_collectable() {
     let mut scenario = board(7);
     let city = scenario
         .add_land_from_oracle(P0, "City of Traitors", CITY_OF_TRAITORS)
         .id();
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
     let vale = {
         let mut builder = scenario.add_land_to_hand(P0, "Lotus Vale");
         builder.from_oracle_text(LOTUS_VALE);
@@ -2477,6 +2481,7 @@ fn a_replaced_land_play_stays_collectable() {
     settle(&mut runner, &mut events, DEFAULT_ANSWERS);
     assert_eq!(zone(runner.state(), vale), Zone::Graveyard);
     assert_eq!(zone(runner.state(), city), Zone::Graveyard);
+    assert_eq!(zone(runner.state(), forest), Zone::Battlefield);
 }
 
 /// CR 305.1 + CR 603.2: answering a shock land's entry choice completes its
