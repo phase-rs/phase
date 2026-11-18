@@ -44,7 +44,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{CastingPermission, ManaSpendPermission, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::ObjectId;
@@ -649,6 +649,58 @@ fn colorless_requirement_case(
             runner
                 .act(GameAction::SpendPoolMana { pip_id })
                 .expect("black mana is eligible for this spell's cost");
+
+            if grant == "Siphon Insight" && creature && vizier_controller == Some(P0) {
+                let state = runner.state();
+                let pending = state
+                    .pending_cast
+                    .as_ref()
+                    .expect("the Siphon creature cast remains pending during manual payment");
+                assert_eq!(
+                    pending.pinned_pool_units.len(),
+                    index + 1,
+                    "each manual pin is recorded on the pending cast"
+                );
+
+                let pool_units: Vec<_> = state.players[0].mana_pool.units().collect();
+                assert_eq!(
+                    pool_units.len(),
+                    index + 1,
+                    "the pool retains exactly the Swamp pips tapped so far"
+                );
+                assert!(
+                    pool_units.iter().all(|unit| unit.color == ManaType::Black),
+                    "each retained Swamp pip is black"
+                );
+                let mut pool_sources: Vec<_> =
+                    pool_units.iter().map(|unit| unit.source_id).collect();
+                let mut expected_sources: Vec<_> = lands.iter().take(index + 1).copied().collect();
+                pool_sources.sort_unstable();
+                expected_sources.sort_unstable();
+                assert_eq!(
+                    pool_sources, expected_sources,
+                    "the retained pool pips come from the Swamps tapped so far"
+                );
+
+                let mut pinned_pips = pending.pinned_pool_units.clone();
+                let mut pool_pips: Vec<_> = pool_units.iter().map(|unit| unit.pip_id).collect();
+                pinned_pips.sort_unstable();
+                pool_pips.sort_unstable();
+                assert_eq!(
+                    pinned_pips, pool_pips,
+                    "the pending pins name exactly the retained Swamp pips"
+                );
+
+                if index == 2 {
+                    assert_eq!(
+                        engine::game::casting::cast_payment_mana_spend_permission(
+                            state, P0, colorless,
+                        ),
+                        Some(ManaSpendPermission::AnyTypeOrColor),
+                        "the combined permission remains active after the third pin"
+                    );
+                }
+            }
 
             let remaining = derive_views(runner.state(), Some(P0)).pending_payment_remaining;
             if creature && index < 2 {
