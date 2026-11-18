@@ -6,6 +6,7 @@
 //!
 //! Runtime rows drive the real cast pipeline with verbatim Oracle text.
 
+use engine::game::filter_state_for_viewer;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;
@@ -242,6 +243,9 @@ const DIVINE_VISITATION: &str = "If one or more creature tokens would be created
 
 const JINNIE_FAY: &str = "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.";
 
+// Verbatim Oracle text (MTGJSON).
+const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
 /// The engine's creature-type options come from `all_creature_types`; pin the
 /// same list the as-enters-choice tests use so answers are always offered.
 const CREATURE_TYPES: [&str; 7] = [
@@ -333,11 +337,20 @@ fn answer_named_choice(runner: &mut GameRunner, choice: &str) -> PlayerId {
     player
 }
 
-/// Assert the live prompt is a CR 616.1 ordering choice and answer it so the
-/// candidate sourced from `first_source` applies first.
-fn answer_ordering_putting_first(runner: &mut GameRunner, first_source: ObjectId) {
+/// Assert the live prompt is a CR 616.1 ordering choice asked of `actor` over
+/// exactly the candidates sourced from `offered` (as a set), and answer it so
+/// the candidate sourced from `first_source` applies first.
+fn answer_ordering_putting_first(
+    runner: &mut GameRunner,
+    actor: PlayerId,
+    offered: &[ObjectId],
+    first_source: ObjectId,
+) {
     let WaitingFor::ReplacementChoice {
-        candidates, kind, ..
+        player,
+        candidates,
+        kind,
+        ..
     } = runner.state().waiting_for.clone()
     else {
         panic!(
@@ -350,6 +363,21 @@ fn answer_ordering_putting_first(runner: &mut GameRunner, first_source: ObjectId
         ReplacementChoiceKind::Order,
         "expected an ordering choice, got {kind:?}"
     );
+    assert_eq!(
+        player, actor,
+        "the ordering choice belongs to {actor:?}, got {player:?}"
+    );
+    let mut offered_sources: Vec<ObjectId> = candidates
+        .iter()
+        .map(|candidate| candidate.source_id)
+        .collect();
+    offered_sources.sort_by_key(|id| id.0);
+    let mut expected_sources = offered.to_vec();
+    expected_sources.sort_by_key(|id| id.0);
+    assert_eq!(
+        offered_sources, expected_sources,
+        "{actor:?} must be offered exactly its own candidates"
+    );
     let index = candidates
         .iter()
         .position(|candidate| candidate.source_id == first_source)
@@ -359,6 +387,87 @@ fn answer_ordering_putting_first(runner: &mut GameRunner, first_source: ObjectId
     runner
         .act(GameAction::ChooseReplacement { index })
         .expect("answer the ordering choice");
+}
+
+/// Accept index of an optional replacement prompt (index 1 declines).
+const ACCEPT: usize = 0;
+/// Decline index of an optional replacement prompt.
+const DECLINE: usize = 1;
+
+/// Assert the live prompt is an accept/decline choice for the replacement
+/// sourced from `source`, asked of `actor`, and answer it with `index`.
+fn answer_optional(runner: &mut GameRunner, actor: PlayerId, source: ObjectId, index: usize) {
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected an optional ReplacementChoice prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::OptionalBranch,
+        "expected an accept/decline choice, got {kind:?}"
+    );
+    assert_eq!(
+        player, actor,
+        "the accept/decline choice belongs to {actor:?}, got {player:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.source_id == source),
+        "the optional prompt must offer {source:?}'s replacement: {candidates:?}"
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("answer the optional replacement");
+}
+
+/// Cast Mystic Reflection on `chosen` and prove it resolved.
+fn resolve_reflection(runner: &mut GameRunner, mystic: ObjectId, chosen: ObjectId) {
+    runner.cast(mystic).target_object(chosen).resolve();
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: Mystic Reflection resolved"
+    );
+}
+
+/// The completion boundary of a paused clause: Priority, an empty stack and
+/// Death by Dragons in the graveyard, and the clause record released (CR
+/// 608.2f: the paused clause finished).
+fn assert_clause_completed(runner: &GameRunner, dragons: ObjectId) {
+    assert_quiet_completion(runner, "the token clause");
+    assert_eq!(
+        runner.state().objects[&dragons].zone,
+        Zone::Graveyard,
+        "Death by Dragons must reach the graveyard once the clause completes"
+    );
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause must be finished and its record taken"
+    );
+}
+
+/// Mystic Reflection's floating one-shot (the only floating shield in these
+/// setups) and whether it has been used.
+fn reflection_consumed(state: &GameState) -> bool {
+    assert_eq!(
+        state.pending_damage_replacements.len(),
+        1,
+        "reach guard: only Mystic Reflection's shield should be floating"
+    );
+    state.pending_damage_replacements[0].is_consumed
+}
+
+fn sorted(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
+    ids.sort_by_key(|id| id.0);
+    ids
 }
 
 fn assert_bears(state: &GameState, id: ObjectId, controller: PlayerId) {
@@ -505,6 +614,10 @@ fn death_by_dragons_reflection_into_automaton_asks_each_seat_independently() {
     let second = answer_named_choice(&mut runner, "Wizard");
     assert_eq!(second, P1, "the second choice belongs to P1's copy");
     assert_quiet_completion(&runner, "the token clause");
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause must be finished and its record taken"
+    );
 
     let state = runner.state();
     let p0_tokens = controlled_tokens(state, P0);
@@ -612,6 +725,10 @@ fn death_by_dragons_reflection_clause_publishes_both_seats_tokens_at_completion(
     let second = answer_named_choice(&mut runner, "Elf");
     assert_eq!(second, P1);
     assert_quiet_completion(&runner, "the token clause");
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause must be finished and its record taken"
+    );
 
     let state = runner.state();
     let p0_tokens = controlled_tokens(state, P0);
@@ -664,6 +781,10 @@ fn death_by_dragons_reflection_clause_excludes_first_seat_when_targeted() {
     let second = answer_named_choice(&mut runner, "Wizard");
     assert_eq!(second, P2, "the second choice belongs to P2's copy");
     assert_quiet_completion(&runner, "the token clause");
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause must be finished and its record taken"
+    );
 
     let state = runner.state();
     assert!(
@@ -697,11 +818,15 @@ fn death_by_dragons_reflection_clause_excludes_first_seat_when_targeted() {
     );
 }
 
-/// CR 608.2f + CR 614.5 + CR 616.1 (F2.1/F2.1b): Doubling Season plus Mystic
-/// Reflection on the compound event — the ordering choice applies per batch
-/// (CR 616.1f repeat), so P0 gets two Bears and P1 gets one, in either order.
-/// Pre-fix the legs run instead and P1 keeps a Dragon.
-fn season_reflection_into_bears(season_first: bool) {
+/// CR 608.2f + CR 614.5 + CR 616.1g (F2.1): Doubling Season plus Mystic
+/// Reflection on the compound event. Reflection modifies the entry contained
+/// in the creation, so it can't be chosen until Season has applied
+/// (CR 616.1g; Reflection ruling: "control-changing effects ..., then copy
+/// effects ..., then all other effects"). No ordering prompt is asked: P0 gets
+/// two Bears (doubled, then converted) and P1 gets one. Hardening: green at
+/// base by design; it pins that no prompt is asked at all.
+#[test]
+fn death_by_dragons_season_and_reflection_apply_per_batch_without_prompt() {
     let mut scenario = game();
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let season = season_in_hand(&mut scenario, P0);
@@ -712,34 +837,11 @@ fn season_reflection_into_bears(season_first: bool) {
         .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
         .id();
     let mut runner = scenario.build();
-    runner.cast(mystic).target_object(bears).resolve();
-    assert!(
-        runner.state().stack.is_empty(),
-        "reach guard: Mystic Reflection resolved"
-    );
+    resolve_reflection(&mut runner, mystic, bears);
     cast_permanent(&mut runner, season, "Doubling Season");
 
     let _ = runner.cast(dragons).target_player(P2).resolve();
-    // Exactly one ordering choice either way (compound post-fix, P0's leg
-    // pre-fix); the assertions below discriminate the two paths.
-    for _ in 0..8 {
-        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-            break;
-        }
-        match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice { .. } => {
-                let first = if season_first {
-                    season
-                } else {
-                    // The floating one-shot lives under the ObjectId(0) sentinel.
-                    ObjectId(0)
-                };
-                answer_ordering_putting_first(&mut runner, first);
-            }
-            other => panic!("unexpected prompt while ordering: {other:?}"),
-        }
-    }
-    assert_quiet_completion(&runner, "the token clause");
+    assert_clause_completed(&runner, dragons);
 
     let state = runner.state();
     let p0_tokens = controlled_tokens(state, P0);
@@ -759,35 +861,21 @@ fn season_reflection_into_bears(season_first: bool) {
         "the targeted player creates no tokens"
     );
     assert_no_dragons(state);
-    let mut expected = vec![p0_tokens[0], p0_tokens[1], p1_tokens[0]];
-    expected.sort_by_key(|id| id.0);
     assert_eq!(
         last_created_sorted(state),
-        expected,
+        sorted(vec![p0_tokens[0], p0_tokens[1], p1_tokens[0]]),
         "the created referent must be all three Bears"
     );
-    assert_eq!(
-        state.objects[&dragons].zone,
-        Zone::Graveyard,
-        "Death by Dragons must reach the graveyard once the clause completes"
-    );
 }
 
+/// CR 608.2f + CR 614.5 + CR 616.1 (F1): a declined Jinnie Fay keeps one
+/// shared entry. P0 alone decides Jinnie (it applies only to P0's tokens);
+/// after the decline, Reflection converts every seat's Dragon at once
+/// (rulings: "All the tokens enter at the same time."). Pre-fix the optional
+/// kept the sequential legs, so Reflection was used on P0's leg and P1 kept a
+/// Dragon.
 #[test]
-fn death_by_dragons_season_and_reflection_apply_per_batch_season_first() {
-    season_reflection_into_bears(true);
-}
-
-#[test]
-fn death_by_dragons_season_and_reflection_apply_per_batch_reflection_first() {
-    season_reflection_into_bears(false);
-}
-
-/// CR 608.2f + CR 614.5 (F2.2): any optional candidate keeps the legacy
-/// sequential legs — Reflection is consumed on the first seat only, so P1
-/// keeps a Dragon. Passes pre- and post-fix; guards the legs path.
-#[test]
-fn death_by_dragons_optional_replacement_keeps_sequential_legs() {
+fn death_by_dragons_declined_optional_keeps_one_shared_entry() {
     let mut scenario = game();
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let jinnie = scenario
@@ -803,68 +891,523 @@ fn death_by_dragons_optional_replacement_keeps_sequential_legs() {
     // Jinnie must enter BEFORE Reflection resolves: her own entry is a
     // creature entering, which would consume the one-shot (CR 614.5).
     cast_permanent(&mut runner, jinnie, "Jinnie Fay");
-    runner.cast(mystic).target_object(bears).resolve();
-    assert!(
-        runner.state().stack.is_empty(),
-        "reach guard: Mystic Reflection resolved"
-    );
+    resolve_reflection(&mut runner, mystic, bears);
 
     let _ = runner.cast(dragons).target_player(P2).resolve();
-    for _ in 0..12 {
-        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-            break;
-        }
-        match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice { kind, .. } => match kind {
-                ReplacementChoiceKind::Order => {
-                    answer_ordering_putting_first(&mut runner, ObjectId(0));
-                }
-                _ => {
-                    // Decline Jinnie Fay: index 0 accepts, index 1 declines.
-                    runner
-                        .act(GameAction::ChooseReplacement { index: 1 })
-                        .expect("decline the optional replacement");
-                }
-            },
-            other => panic!("unexpected prompt on the legs path: {other:?}"),
-        }
-    }
-    assert_quiet_completion(&runner, "the token clause");
+    answer_optional(&mut runner, P0, jinnie, DECLINE);
+    // No ordering prompt follows: Reflection is withheld until the creation's
+    // replacements are chosen (CR 616.1g), then applies alone.
+    assert_clause_completed(&runner, dragons);
 
     let state = runner.state();
     let p0_tokens = controlled_tokens(state, P0);
     assert_eq!(p0_tokens.len(), 1, "P0 must create one token");
     assert_bears(state, p0_tokens[0], P0);
     let p1_tokens = controlled_tokens(state, P1);
-    assert_eq!(
-        p1_tokens.len(),
-        1,
-        "P1 must create one token on the second leg"
-    );
-    assert_dragon(state, p1_tokens[0], P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
     assert!(
         controlled_tokens(state, P2).is_empty(),
         "the targeted player creates no tokens"
     );
-    assert_eq!(
-        state.pending_damage_replacements.len(),
-        1,
-        "only Mystic Reflection's shield should be floating"
-    );
+    assert_no_dragons(state);
     assert!(
-        state.pending_damage_replacements[0].is_consumed,
-        "Reflection must be consumed on the first seat only"
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
     );
     assert_eq!(
-        state.objects[&dragons].zone,
-        Zone::Graveyard,
-        "Death by Dragons must reach the graveyard once the clause completes"
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be both Bears"
     );
 }
 
-/// CR 608.2f + CR 614.5 + CR 616.1 (DUAL): Season plus Reflection into
-/// Automaton — one ordering choice, then three per-copy type choices (two for
-/// P0's doubled batch, one for P1's), each answered by its own controller.
+/// CR 608.2f + CR 614.5 + CR 616.1 (F1): accepting Jinnie Fay completes in
+/// one clause. The accept decision and the Cat/Dog choice are P0's (Jinnie
+/// applies only to P0's tokens; its chooser is its controller), and P1's
+/// Dragon is converted by Reflection.
+///
+/// P0's token identity is deliberately NOT asserted (E2, deferred follow-up):
+/// the rules-derived value is Grizzly Bears (one simultaneous entry, rulings
+/// of The Pit and Jinnie Fay), while the engine creates the accepted
+/// substitute as a post-replacement continuation after Reflection was used on
+/// P1's batch, so it enters as a Cat.
+/// CR 400.2: the paused clause record is server authority, absent from every viewer projection.
+#[test]
+fn death_by_dragons_accepted_optional_completes_one_clause() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie = scenario
+        .add_creature_to_hand_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    cast_permanent(&mut runner, jinnie, "Jinnie Fay");
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, jinnie, ACCEPT);
+    let WaitingFor::ChooseOneOfBranch { player, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "accepting Jinnie Fay must ask for Cat or Dog, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "Jinnie's controller chooses Cat or Dog");
+    assert!(
+        runner
+            .state()
+            .pending_simultaneous_token_clause
+            .as_ref()
+            .is_some_and(|record| !record.accumulated.is_empty()),
+        "reach guard: the paused clause record is installed and fed"
+    );
+    for viewer in [P0, P1, P2] {
+        assert!(
+            filter_state_for_viewer(runner.state(), viewer)
+                .pending_simultaneous_token_clause
+                .is_none(),
+            "viewer {viewer:?} must not receive the paused clause record"
+        );
+    }
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_some(),
+        "filtering must not alter the authoritative record"
+    );
+    runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("choose the Cat branch");
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
+    assert_eq!(state.objects[&p0_tokens[0]].controller, P0);
+    assert_ne!(
+        state.objects[&p0_tokens[0]].name, "Dragon",
+        "Jinnie replaced P0's Dragon"
+    );
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be P0's token and P1's Bear"
+    );
+}
+
+/// CR 608.2f + CR 614.5: accepting Jinnie Fay finishes the paused clause at the priority boundary, so the next simultaneous token clause still enters as one event.
+#[test]
+fn death_by_dragons_accepted_optional_releases_the_clause_for_the_next_fan_out() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie = scenario
+        .add_creature_to_hand_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic_1 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons_1 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mystic_2 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons_2 = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    cast_permanent(&mut runner, jinnie, "Jinnie Fay");
+    resolve_reflection(&mut runner, mystic_1, bears);
+
+    // First clause, exactly as the accepted-optional row: accept, then Cat.
+    let _ = runner.cast(dragons_1).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, jinnie, ACCEPT);
+    let WaitingFor::ChooseOneOfBranch { player, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "accepting Jinnie Fay must ask for Cat or Dog, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "Jinnie's controller chooses Cat or Dog");
+    runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("choose the Cat branch");
+    assert_clause_completed(&runner, dragons_1);
+    let p0_before = controlled_tokens(runner.state(), P0);
+    let p1_before = controlled_tokens(runner.state(), P1);
+
+    // Second clause: a fresh Reflection, then a second Death by Dragons.
+    resolve_reflection(&mut runner, mystic_2, bears);
+    let _ = runner.cast(dragons_2).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, jinnie, DECLINE);
+    assert_clause_completed(&runner, dragons_2);
+
+    let state = runner.state();
+    let p0_new: Vec<ObjectId> = controlled_tokens(state, P0)
+        .into_iter()
+        .filter(|id| !p0_before.contains(id))
+        .collect();
+    let p1_new: Vec<ObjectId> = controlled_tokens(state, P1)
+        .into_iter()
+        .filter(|id| !p1_before.contains(id))
+        .collect();
+    assert_eq!(p0_new.len(), 1, "P0 must create exactly one new token");
+    assert_bears(state, p0_new[0], P0);
+    assert_eq!(p1_new.len(), 1, "P1 must create exactly one new token");
+    assert_bears(state, p1_new[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert_eq!(
+        state.pending_damage_replacements.len(),
+        2,
+        "reach guard: both Mystic Reflections' shields should be floating"
+    );
+    assert!(
+        state
+            .pending_damage_replacements
+            .iter()
+            .all(|shield| shield.is_consumed),
+        "each Reflection must be used by its own shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_new[0], p1_new[0]]),
+        "the second created referent must be both new Bears"
+    );
+}
+
+/// CR 616.1 + CR 101.4: two Jinnie Fays, one per seat. Each applies only to
+/// its controller's tokens, so each owner decides its own in APNAP order (P0,
+/// then P1), and then Reflection converts the one shared entry.
+#[test]
+fn death_by_dragons_two_optional_owners_decide_in_apnap_order() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie_p0 = scenario
+        .add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let jinnie_p1 = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, jinnie_p0, DECLINE);
+    answer_optional(&mut runner, P1, jinnie_p1, DECLINE);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create one token");
+    assert_bears(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be both Bears"
+    );
+}
+
+/// CR 616.1 + CR 614.5 (F2): P0's Halving Season and P1's Doubling Season both
+/// apply only to P1's tokens, so P1 (the affected batch owner) orders them and
+/// is offered only those two (Halving Season rulings: "apply the replacement
+/// effects one at a time, rounding down each time"; "you choose the order ...
+/// no matter who controls the sources of those effects").
+fn halving_doubling_ordered_by_affected_owner(halving_first: bool) {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let halving = scenario
+        .add_enchantment_from_oracle(P0, "Halving Season", HALVING_SEASON)
+        .id();
+    let doubling_p1 = scenario
+        .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    let choices = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .filter(|action| matches!(action, GameAction::ChooseReplacement { .. }))
+        .count();
+    assert_eq!(choices, 2, "exactly P1's two candidates are answerable");
+    let first = if halving_first { halving } else { doubling_p1 };
+    answer_ordering_putting_first(&mut runner, P1, &[halving, doubling_p1], first);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0's creation is untouched");
+    assert_bears(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    let mut expected = vec![p0_tokens[0]];
+    if halving_first {
+        // 1 -> 0 (halved, rounded down) -> 0 (doubled).
+        assert!(p1_tokens.is_empty(), "P1 must create no tokens");
+    } else {
+        // 1 -> 2 (doubled) -> 1 (halved).
+        assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+        assert_bears(state, p1_tokens[0], P1);
+        expected.push(p1_tokens[0]);
+    }
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by P0's entering token"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(expected),
+        "the created referent must be exactly the Bears created"
+    );
+}
+
+#[test]
+fn death_by_dragons_halving_first_ordered_by_affected_owner() {
+    halving_doubling_ordered_by_affected_owner(true);
+}
+
+#[test]
+fn death_by_dragons_doubling_first_ordered_by_affected_owner() {
+    halving_doubling_ordered_by_affected_owner(false);
+}
+
+/// CR 616.1 + CR 101.4: P0's Halving Season applies to both P1's and P2's
+/// tokens; P1 and P2 each control a Doubling Season. Each batch owner orders
+/// its own candidates in APNAP order, so P2's ordering is not taken by P1.
+///
+/// Halving-first documents E1 (deferred follow-up): a shared candidate gets
+/// one opportunity over the one compound event (CR 614.5) and applies to
+/// every batch it reaches, so P1's choice of Halving Season also halves P2's
+/// batch to zero before P2 is asked. A per-player reading of CR 616.1 would
+/// let P2 order its own event; the follow-up that implements it flips this
+/// branch's assertions deliberately.
+fn shared_halving_orders_each_owner(p1_halving_first: bool) {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let halving = scenario
+        .add_enchantment_from_oracle(P0, "Halving Season", HALVING_SEASON)
+        .id();
+    let doubling_p1 = scenario
+        .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    let doubling_p2 = scenario
+        .add_enchantment_from_oracle(P2, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P0).resolve();
+    if p1_halving_first {
+        answer_ordering_putting_first(&mut runner, P1, &[halving, doubling_p1], halving);
+        assert_clause_completed(&runner, dragons);
+        let state = runner.state();
+        for player in [P0, P1, P2] {
+            assert!(
+                controlled_tokens(state, player).is_empty(),
+                "E1: halving both batches to zero leaves {player:?} no tokens"
+            );
+        }
+        assert_eq!(
+            state.objects[&bears].zone,
+            Zone::Battlefield,
+            "reach guard: the copy target is still on the battlefield"
+        );
+        // CR 701.7a: nothing entered, so the one-shot waits for a real entry.
+        assert!(
+            !reflection_consumed(state),
+            "Reflection must not be used when no token enters"
+        );
+        assert!(
+            last_created_sorted(state).is_empty(),
+            "no token was created"
+        );
+    } else {
+        answer_ordering_putting_first(&mut runner, P1, &[halving, doubling_p1], doubling_p1);
+        answer_ordering_putting_first(&mut runner, P2, &[halving, doubling_p2], doubling_p2);
+        assert_clause_completed(&runner, dragons);
+        let state = runner.state();
+        assert!(
+            controlled_tokens(state, P0).is_empty(),
+            "the targeted player creates no tokens"
+        );
+        // Each batch: 1 -> 2 (doubled) -> 1 (halved).
+        let p1_tokens = controlled_tokens(state, P1);
+        assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+        assert_bears(state, p1_tokens[0], P1);
+        let p2_tokens = controlled_tokens(state, P2);
+        assert_eq!(p2_tokens.len(), 1, "P2 must create one token");
+        assert_bears(state, p2_tokens[0], P2);
+        assert_no_dragons(state);
+        assert!(
+            reflection_consumed(state),
+            "Reflection must be used by the shared entry"
+        );
+        assert_eq!(
+            last_created_sorted(state),
+            sorted(vec![p1_tokens[0], p2_tokens[0]]),
+            "the created referent must be both Bears"
+        );
+    }
+}
+
+#[test]
+fn death_by_dragons_shared_halving_first_zeroes_every_batch() {
+    shared_halving_orders_each_owner(true);
+}
+
+#[test]
+fn death_by_dragons_shared_halving_asks_each_owner_in_apnap_order() {
+    shared_halving_orders_each_owner(false);
+}
+
+/// CR 101.4 + CR 101.4b + CR 616.1: an earlier APNAP owner's lone optional is
+/// decided before a later owner orders. P1's Jinnie Fay applies only to P1's
+/// tokens; P1's Halving Season applies only to P2's (ruling: "won't change the
+/// number of tokens you create"), as does P2's Doubling Season. P1 decides
+/// Jinnie first, then P2 orders its two candidates (rulings of The Pit and
+/// Liege of the Hollows: choices in turn order, then one simultaneous entry).
+#[test]
+fn death_by_dragons_earlier_owner_optional_precedes_later_ordering() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie_p1 = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let halving = scenario
+        .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+        .id();
+    let doubling_p2 = scenario
+        .add_enchantment_from_oracle(P2, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P0).resolve();
+    answer_optional(&mut runner, P1, jinnie_p1, DECLINE);
+    answer_ordering_putting_first(&mut runner, P2, &[halving, doubling_p2], doubling_p2);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
+    // 1 -> 2 (doubled) -> 1 (halved).
+    let p2_tokens = controlled_tokens(state, P2);
+    assert_eq!(p2_tokens.len(), 1, "P2 must create one token");
+    assert_bears(state, p2_tokens[0], P2);
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p1_tokens[0], p2_tokens[0]]),
+        "the created referent must be both Bears"
+    );
+}
+
+/// CR 109.5 + CR 111.2 + CR 608.2f: "If you would create" reaches only Jinnie's controller's tokens, so two opponents' simultaneous Dragons raise no prompt.
+#[test]
+fn death_by_dragons_opponents_tokens_are_not_offered_your_jinnie() {
+    let mut scenario = game();
+    let jinnie = scenario
+        .add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&jinnie].zone,
+        Zone::Battlefield,
+        "reach guard: Jinnie Fay is on the battlefield"
+    );
+
+    let _ = runner.cast(dragons).target_player(P0).resolve();
+    // No Jinnie prompt for either opponent's batch: the clause completes at once.
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    for player in [P1, P2] {
+        let tokens = controlled_tokens(state, player);
+        assert_eq!(
+            tokens.len(),
+            1,
+            "{player:?} must create exactly one Dragon, unreplaced by P0's Jinnie Fay"
+        );
+        assert_dragon(state, tokens[0], player);
+    }
+}
+
+/// CR 608.2f + CR 614.5 + CR 616.1g (DUAL): Season plus Reflection into
+/// Automaton — no ordering choice (Reflection is withheld until Season has
+/// applied), then three per-copy type choices (two for P0's doubled batch,
+/// one for P1's), each answered by its own controller.
 #[test]
 fn death_by_dragons_season_and_reflection_into_automaton_asks_three_choices() {
     let mut scenario = game();
@@ -892,8 +1435,10 @@ fn death_by_dragons_season_and_reflection_into_automaton_asks_three_choices() {
             break;
         }
         match runner.state().waiting_for.clone() {
-            WaitingFor::ReplacementChoice { .. } => {
-                answer_ordering_putting_first(&mut runner, season);
+            // CR 616.1g: Reflection is withheld until Season has applied, so
+            // no replacement prompt is asked at all.
+            WaitingFor::ReplacementChoice { player, kind, .. } => {
+                panic!("no replacement prompt is expected, got {kind:?} for {player:?}");
             }
             WaitingFor::NamedChoice { player, .. } => {
                 let prior = type_answers.iter().filter(|seat| **seat == player).count();
@@ -916,6 +1461,10 @@ fn death_by_dragons_season_and_reflection_into_automaton_asks_three_choices() {
         "two type choices for P0's doubled batch plus one for P1's"
     );
     assert_quiet_completion(&runner, "the token clause");
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause must be finished and its record taken"
+    );
 
     let state = runner.state();
     let p0_tokens = controlled_tokens(state, P0);

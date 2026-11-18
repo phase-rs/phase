@@ -2106,8 +2106,9 @@ pub(crate) fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
 /// Whether a replacement needs the shared accept/decline prompt. Rules-source
 /// replacements use the same prompt seam as optional card definitions.
 ///
-/// CR 608.2f (F1): shared with the simultaneous-token gate, which admits only
-/// mandatory candidates to the compound path.
+/// CR 608.2f (F1): shared with the simultaneous-token gate, which admits an
+/// optional candidate to the compound path only when it has one decider
+/// (`compound_optional_decider`).
 pub(crate) fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> bool {
     is_commander_hand_or_library_return_replacement(rid)
         // CR 702.52a: granted dredge is always `ReplacementMode::Optional`
@@ -2170,6 +2171,19 @@ fn replacement_choice_player(
     }
     let definition = replacement_definition_for_id(state, rid)?;
     match definition.choice_authority {
+        // CR 616.1 + CR 111.2: on a compound token event the affected player is
+        // the owner of the batch the optional applies to. The simultaneous-token
+        // gate admits only optionals reaching one owner
+        // (`compound_optional_decider`); the APNAP-first owner is the fallback
+        // for any other compound.
+        ReplacementChoiceAuthority::AffectedPlayer if proposed.has_appended_token_batches() => {
+            Some(
+                token_batch_owners_admitting(state, proposed, rid, replacement_registry())
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| proposed.affected_player(state)),
+            )
+        }
         ReplacementChoiceAuthority::AffectedPlayer => Some(proposed.affected_player(state)),
         ReplacementChoiceAuthority::SourceController => state
             .liminal_entries
@@ -12356,6 +12370,161 @@ fn token_batch_admits(
     find_applicable_replacements(state, &unmarked, registry).contains(&rid)
 }
 
+/// CR 111.2 + CR 101.4: the distinct owners of the batches of a compound token
+/// event that replacement `rid` applies to, in APNAP order. The creator of a
+/// token is its owner, so each batch's owner is the player that batch affects.
+/// For an event with no appended batch this is its own owner when `rid`
+/// applies to it.
+fn token_batch_owners_admitting(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+) -> Vec<PlayerId> {
+    let admitting: Vec<PlayerId> = proposed
+        .clone()
+        .into_token_batch_views()
+        .iter()
+        .filter(|view| token_batch_admits(state, view, rid, registry))
+        .filter_map(|view| match view {
+            ProposedEvent::CreateToken { owner, .. } => Some(*owner),
+            _ => None,
+        })
+        .collect();
+    owners_in_apnap_order(state, admitting)
+}
+
+/// Deduplicate `owners` and order them by CR 101.4 APNAP order; an owner
+/// absent from the turn order keeps its event position at the end.
+fn owners_in_apnap_order(state: &GameState, owners: Vec<PlayerId>) -> Vec<PlayerId> {
+    let mut ordered: Vec<PlayerId> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter(|player| owners.contains(player))
+        .collect();
+    for owner in owners {
+        if !ordered.contains(&owner) {
+            ordered.push(owner);
+        }
+    }
+    ordered
+}
+
+/// The prompt actor and the candidates offered to it on one pipeline pass.
+pub(crate) struct CompoundChoicePlan {
+    pub(crate) actor: PlayerId,
+    pub(crate) offered: Vec<ReplacementId>,
+}
+
+/// CR 616.1 + CR 101.4 + CR 111.2: who chooses among `choosable` on this pass,
+/// and which candidates they choose among. For a compound token event (several
+/// players each creating their own batch in one simultaneous event) each batch
+/// owner chooses for the replacements that apply to their own tokens, in APNAP
+/// order: the first owner whose own set demands a choice (a lone optional, or
+/// two or more whose order matters) acts first; with no demand anywhere every
+/// owner's set is mandatory and order-free, so the first owner with any
+/// candidate is offered its set. Recomputed every pass from the event's
+/// `applied` set (CR 616.1f), so no cursor is stored. Any other event yields
+/// the affected player and the whole choosable set.
+///
+/// `leaves_out_an_applicable_replacement` compares a park against the full
+/// choosable set; it is reachable only for payment, combat-damage and recovery
+/// prompts, never a compound `CreateToken` park, which is why an offered
+/// subset here cannot read as leaving a candidate out.
+pub(crate) fn compound_token_choice_plan(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    choosable: &[ReplacementId],
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+) -> CompoundChoicePlan {
+    let whole = || CompoundChoicePlan {
+        actor: proposed.affected_player(state),
+        offered: choosable.to_vec(),
+    };
+    let Some(views) = proposed.token_batch_views() else {
+        return whole();
+    };
+    let batch_owners: Vec<PlayerId> = views
+        .iter()
+        .filter_map(|view| match view {
+            ProposedEvent::CreateToken { owner, .. } => Some(*owner),
+            _ => None,
+        })
+        .collect();
+    let admitted: Vec<(ReplacementId, Vec<PlayerId>)> = choosable
+        .iter()
+        .map(|rid| {
+            (
+                *rid,
+                token_batch_owners_admitting(state, proposed, *rid, registry),
+            )
+        })
+        .collect();
+    let per_owner: Vec<(PlayerId, Vec<ReplacementId>)> = owners_in_apnap_order(state, batch_owners)
+        .into_iter()
+        .map(|owner| {
+            let reaching: Vec<ReplacementId> = admitted
+                .iter()
+                .filter(|(_, owners)| owners.contains(&owner))
+                .map(|(rid, _)| *rid)
+                .collect();
+            (owner, reaching)
+        })
+        .filter(|(_, reaching)| !reaching.is_empty())
+        .collect();
+    let chosen = per_owner
+        .iter()
+        .find(|(_, reaching)| owner_demands_choice(state, proposed, reaching))
+        .or_else(|| per_owner.first());
+    match chosen {
+        Some((actor, offered)) => CompoundChoicePlan {
+            actor: *actor,
+            offered: offered.clone(),
+        },
+        None => whole(),
+    }
+}
+
+/// CR 616.1: whether one batch owner's own candidate set needs that owner's
+/// choice — a lone optional (accept or decline), or two or more candidates
+/// whose order changes the outcome.
+fn owner_demands_choice(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    subset: &[ReplacementId],
+) -> bool {
+    match subset {
+        [] => false,
+        [only] => replacement_is_optional(state, *only),
+        _ => replacement_ordering_is_material(state, subset, proposed),
+    }
+}
+
+/// CR 616.1 + CR 101.4: the single player who decides optional replacement
+/// `rid` on `proposed`, or `None` when no one player does. For a compound
+/// token event an affected-player optional has one decider only when it
+/// applies to exactly one batch owner's tokens; a source-controller optional
+/// always has one. The simultaneous-token gate admits an optional to the
+/// compound event only when this is `Some`.
+pub(crate) fn compound_optional_decider(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<PlayerId> {
+    let affected_player_authority = !is_commander_hand_or_library_return_replacement(rid)
+        && !is_granted_dredge_replacement(rid)
+        && replacement_definition_for_id(state, rid).is_some_and(|definition| {
+            definition.choice_authority == ReplacementChoiceAuthority::AffectedPlayer
+        });
+    if affected_player_authority && proposed.has_appended_token_batches() {
+        let owners = token_batch_owners_admitting(state, proposed, rid, replacement_registry());
+        return match owners.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        };
+    }
+    replacement_choice_player(state, proposed, rid)
+}
+
 /// CR 614.1a + CR 614.5 + CR 616.1f: apply one chosen replacement to a compound
 /// token event — to every batch it applies to, leaving the others unchanged.
 /// The batches are one modified event, so the replacement gets one opportunity
@@ -14704,6 +14873,12 @@ fn pipeline_loop(
         // CR 616.1a-e: only the earliest CR 616.1 step present may be chosen now;
         // the rest are rediscovered once the chosen effect applies (CR 616.1f).
         let candidates = choosable_replacement_candidates(state, &proposed, candidates);
+        // CR 616.1 + CR 101.4: on a compound token event each batch owner
+        // chooses for its own tokens in APNAP order; everywhere else this is the
+        // affected player and the whole choosable set.
+        let plan = compound_token_choice_plan(state, &proposed, &candidates, registry);
+        let candidates = plan.offered;
+        let actor = plan.actor;
 
         // CR 616.1f: a changed remaining set stops a remembered sequence even
         // when only one mandatory replacement remains; park it for confirmation.
@@ -14713,7 +14888,7 @@ fn pipeline_loop(
                 .as_ref()
                 .is_none_or(|tail| {
                     auto_choice_event(&proposed).as_ref() == Some(&tail.event)
-                        && proposed.affected_player(state) == tail.player
+                        && actor == tail.player
                         && auto_choice_identities(state, &proposed, &candidates).is_some_and(
                             |identities| same_identity_set(&identities, &tail.remaining),
                         )
@@ -14729,7 +14904,7 @@ fn pipeline_loop(
             if !is_optional {
                 if let Some(tail) = state.replacement_auto_choice_tail.take() {
                     let matches = auto_choice_event(&proposed).as_ref() == Some(&tail.event)
-                        && proposed.affected_player(state) == tail.player
+                        && actor == tail.player
                         && auto_choice_identities(state, &proposed, &candidates).is_some_and(
                             |identities| same_identity_set(&identities, &tail.remaining),
                         );
@@ -14822,9 +14997,16 @@ fn pipeline_loop(
             // CR 616.1: If multiple replacement effects apply, the affected player
             // or controller of the affected object chooses which one to apply first,
             // even when every candidate is mandatory.
-            let affected = proposed.affected_player(state);
+            // The ordering park records `candidates = offered`, `ordering_peers`
+            // empty at the choice among candidates itself, and
+            // `choice_player = Some(actor)`, and replays with `actor`. The auto
+            // arm applies `offered[0]`. Any head is observationally equivalent
+            // for immaterial sets, and optionals divert via the lone/ordering arms.
+            // For a compound token event only; any other ordering park leaves
+            // `choice_player` as `None`, so its chooser stays the live affected player.
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
+            let recorded_chooser = proposed.has_appended_token_batches().then_some(actor);
             state.pending_replacement = Some(PendingReplacement {
                 proposed,
                 sacrifice_provenance: None,
@@ -14833,7 +15015,7 @@ fn pipeline_loop(
                 ordering_peers: Vec::new(),
                 depth,
                 is_optional: false,
-                choice_player: None,
+                choice_player: recorded_chooser,
                 exile_controller: None,
                 exile_duration: None,
                 exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -14847,7 +15029,7 @@ fn pipeline_loop(
                 delivery_boundary: None,
                 unrepresentable_life_change: state.ingress_life_policy(),
             });
-            return replay_pending_replacement(state, affected, events);
+            return replay_pending_replacement(state, actor, events);
         } else {
             // CR 616.1: the choice is degenerate here — every candidate ordering
             // yields an observationally identical outcome — so the prompt is

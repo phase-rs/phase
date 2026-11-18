@@ -388,31 +388,25 @@ pub(super) fn resume_active_draw_sequences(
     None
 }
 
-/// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
-/// action that can be parked waiting on it.
-///
-/// A simultaneous combat-damage batch (CR 510.2) parks in `state.pending_combat_lifelink`
-/// when a lifelink life gain meets two or more co-applicable replacements. This is the only
-/// boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
-/// join the batch's own CR 603.3b trigger batch — so the anchor is a LOCAL captured here, and
-/// the drain lives here rather than in `engine::resume_pending_continuation_if_priority`,
-/// which has no such anchor. Stored on the record it would be a persisted index into a
-/// finished action's event vector with no owner to clear it on every exit path; a stale one
-/// panics or folds unrelated events into the batch, while a local cannot go stale and
-/// `action_event_start <= events.len()` holds by construction. A wrapper rather than in-arm
-/// insertions, because the inner handler returns early from many points: one authority for
-/// `Execute`, `Prevented`, `NeedsChoice`, and a no-op whenever nothing is parked.
-///
 /// CR 608.2f + CR 614.5 (F1/F2): readiness gate for the deferred publication
 /// of a paused simultaneous multi-seat token clause. The clause finishes only
 /// once its record is installed, no replacement or entry choice is live, no
-/// compound cursor or copy owner remains, and the action is back at Priority.
+/// compound cursor, copy owner, unfinished resolving owner on top (the resumer
+/// loop's own set) or uncommitted entry remains, and the action is back at
+/// Priority. Evaluated at every pass boundary of the common priority resumer.
 /// Single-fire: the finish takes the record.
 fn simultaneous_token_clause_is_ready(state: &GameState) -> bool {
+    // CR 614.6: a post-replacement drain still on top is the replaced event's
+    // modified event still occurring, so the clause finishes after it. An entry
+    // not yet committed (a parked liminal entry or token battlefield entry)
+    // would be missing from the published union.
     if state.pending_simultaneous_token_clause.is_none()
         || state.pending_replacement.is_some()
         || !matches!(state.waiting_for, WaitingFor::Priority { .. })
         || state.active_copy_token().is_some()
+        || super::engine::top_frame_owes_resolving_work(state)
+        || state.pending_liminal_entry_resume.is_some()
+        || state.pending_token_battlefield_entry.is_some()
     {
         return false;
     }
@@ -545,6 +539,63 @@ fn finish_simultaneous_token_clause(state: &mut GameState, events: &mut Vec<Game
     state.pending_simultaneous_token_clause = None;
 }
 
+/// CR 608.2f + CR 608.2c (F1/F2): the single finish authority of a paused
+/// simultaneous token clause, called only from the common priority boundary
+/// (`engine::resume_pending_continuation_pass`). Single-fire: the finish takes
+/// the record.
+pub(super) fn finish_simultaneous_token_clause_if_ready(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if simultaneous_token_clause_is_ready(state) {
+        finish_simultaneous_token_clause(state, events);
+    }
+}
+
+/// The paused simultaneous token clause's identity at an action boundary:
+/// its creating instruction's source. One definition for the start capture
+/// and the end check of `feed_paused_token_clause_after_action`.
+pub(super) fn paused_token_clause_source(state: &GameState) -> Option<ObjectId> {
+    state
+        .pending_simultaneous_token_clause
+        .as_deref()
+        .map(|record| record.source_id)
+}
+
+/// The action-boundary feed of a paused simultaneous token clause: every
+/// action after the installing one belongs to the clause span until its
+/// finish, whatever it answered — a replacement choice, an as-enters or
+/// branch choice, a copy target, a payment, a trigger prompt — so its whole
+/// event buffer joins `accumulated`. Keyed on the record this action began
+/// with: the installing action (fed by its own clause slice) and a record
+/// another instruction installed during this action are never fed pre-clause
+/// events, and a clause that finished inside this action (whose finish fed
+/// the buffer itself) is gone. Called once per action, from
+/// `engine::apply_action_boundary_core`.
+pub(super) fn feed_paused_token_clause_after_action(
+    state: &mut GameState,
+    clause_at_start: Option<ObjectId>,
+    events: &[GameEvent],
+) {
+    if clause_at_start.is_some() && paused_token_clause_source(state) == clause_at_start {
+        effects::counters::feed_simultaneous_token_clause(state, events);
+    }
+}
+
+/// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
+/// action that can be parked waiting on it.
+///
+/// A simultaneous combat-damage batch (CR 510.2) parks in `state.pending_combat_lifelink`
+/// when a lifelink life gain meets two or more co-applicable replacements. This is the only
+/// boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
+/// join the batch's own CR 603.3b trigger batch — so the anchor is a LOCAL captured here, and
+/// the drain lives here rather than in `engine::resume_pending_continuation_if_priority`,
+/// which has no such anchor. Stored on the record it would be a persisted index into a
+/// finished action's event vector with no owner to clear it on every exit path; a stale one
+/// panics or folds unrelated events into the batch, while a local cannot go stale and
+/// `action_event_start <= events.len()` holds by construction. A wrapper rather than in-arm
+/// insertions, because the inner handler returns early from many points: one authority for
+/// `Execute`, `Prevented`, `NeedsChoice`, and a no-op whenever nothing is parked.
 pub(super) fn handle_replacement_choice(
     state: &mut GameState,
     index: usize,
@@ -2244,13 +2295,7 @@ fn handle_replacement_choice_inner(
                 // this call site adds none.
                 finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
 
-                // CR 608.2f + CR 614.5 (F1/F2): S2 — finish a paused
-                // simultaneous token clause whose every seat has committed,
-                // before the outer continuation resumes.
-                if simultaneous_token_clause_is_ready(state) {
-                    finish_simultaneous_token_clause(state, events);
-                }
-
+                // CR 608.2f: a paused simultaneous token clause finishes inside the resumer below (its first pass boundary), not here.
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 waiting_for = state.waiting_for.clone();
             }

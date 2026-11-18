@@ -25551,8 +25551,8 @@ enum SimultaneousTokenOutcome {
     /// The pipeline parked for a CR 616.1 ordering choice, or delivery paused
     /// on an entry-copy choice. The clause record is installed and the B0
     /// clause slice is fed; `waiting_for` is set exactly as the single-seat
-    /// path sets it and the driver returns to the waiter. The Execute-arm
-    /// priority block finishes the clause (terminal events, player actions,
+    /// path sets it and the driver returns to the waiter. The common priority
+    /// boundary finishes the clause (terminal events, player actions,
     /// clause results, per-seat union) once every seat's entry has committed.
     Waiting,
     /// The shape is not eligible (or a proposal parked/failed); the driver
@@ -25632,13 +25632,15 @@ fn simultaneous_token_fan_out_applies(
 /// consumed one-shot (Mystic Reflection) converts every seat instead of only
 /// the first seat's. Returns `Done` with per-seat results filled (the driver
 /// continues to the shared clause publication), `Waiting` with the clause
-/// record installed when the pipeline or delivery parked (finished later by
-/// the Execute-arm priority block), or `NotApplicable` without mutating
-/// state. Triage: any optional candidate keeps the legacy legs (per-seat
-/// accept/decline); at most one mandatory candidate auto-applies; several
-/// mandatory candidates ride the compound iff their order is immaterial or a
-/// whole-entry one-shot copy rides along (CR 614.5 converts every batch in
-/// one application).
+/// record installed when the pipeline or delivery parked (finished later at
+/// the common priority boundary, `resume_pending_continuation_if_priority`),
+/// or `NotApplicable` without mutating
+/// state. Triage: an optional candidate rides the compound when it has one
+/// decider (the pipeline asks each affected owner in APNAP order, CR 616.1 +
+/// CR 101.4), and otherwise keeps the legacy legs; at most one mandatory
+/// candidate auto-applies; several mandatory candidates ride the compound iff
+/// their order is immaterial or a whole-entry one-shot copy rides along
+/// (CR 614.5 converts every batch in one application).
 fn try_resolve_simultaneous_token_fan_out(
     state: &mut GameState,
     scoped_template: &ResolvedAbility,
@@ -25717,24 +25719,25 @@ fn try_resolve_simultaneous_token_fan_out(
         applied,
     };
 
-    // CR 616.1 (F2): triage the compound's candidates. Any optional
-    // candidate keeps the legacy legs (per-seat accept/decline prompts); at
+    // CR 616.1 + CR 101.4 (F2): triage the compound's candidates. An
+    // optional candidate rides the compound when exactly one player decides
+    // it (it reaches one batch owner's tokens, or its source's controller
+    // decides); the pipeline then asks each affected owner in APNAP order.
+    // An optional with several deciders, or none, keeps the legacy legs. At
     // most one mandatory candidate auto-applies below. Several mandatory
     // candidates ride the compound iff their order is immaterial (the
     // pipeline auto-applies every order-free set) or a whole-entry one-shot
-    // copy rides along (CR 614.5 converts every batch in one application, so
-    // the ordering prompt is answered once for the whole event, not per
-    // seat).
+    // copy rides along (CR 614.5 converts every batch in one application).
     let candidates = crate::game::replacement::find_applicable_replacements(
         state,
         &compound,
         crate::game::replacement::replacement_registry(),
     );
     // Sentinel-aware (commander/dredge/registry-hosted included).
-    if candidates
-        .iter()
-        .any(|rid| crate::game::replacement::replacement_is_optional(state, *rid))
-    {
+    if candidates.iter().any(|rid| {
+        crate::game::replacement::replacement_is_optional(state, *rid)
+            && crate::game::replacement::compound_optional_decider(state, &compound, *rid).is_none()
+    }) {
         return SimultaneousTokenOutcome::NotApplicable;
     }
     if candidates.len() > 1
@@ -25773,8 +25776,8 @@ fn try_resolve_simultaneous_token_fan_out(
                     .is_completed();
             if !completed {
                 // The B0 park: this action's clause slice joins the span; the
-                // Execute-arm priority block finishes the clause once every
-                // seat's entry has committed.
+                // common priority boundary (`resume_pending_continuation_if_priority`)
+                // finishes the clause once every seat's entry has committed.
                 counters::feed_simultaneous_token_clause(state, &events[scoped_events_before..]);
                 return SimultaneousTokenOutcome::Waiting;
             }
@@ -25788,7 +25791,8 @@ fn try_resolve_simultaneous_token_fan_out(
         crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
             // The B0 park: this action's clause slice joins the span; the
             // answer resumes through the ordinary replacement path, and the
-            // Execute-arm priority block finishes the clause at completion.
+            // common priority boundary (`resume_pending_continuation_if_priority`)
+            // finishes the clause at completion.
             counters::feed_simultaneous_token_clause(state, &events[scoped_events_before..]);
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);

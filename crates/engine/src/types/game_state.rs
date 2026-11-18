@@ -33010,18 +33010,21 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 
 /// CR 608.2f + CR 614.5: a simultaneous multi-seat bare-token clause whose
 /// compound `CreateToken` event paused mid-flight — on a CR 616.1 ordering
-/// choice (several mandatory replacements) or inside delivery (an entry-copy
-/// one-shot's copies pausing for as-enters choices). Installed before the
-/// pipeline runs; the counter-drain feeds reunite every action buffer's clause
-/// span into `accumulated`, and the Execute-arm priority block finishes the
+/// choice (several mandatory replacements), inside delivery (an entry-copy
+/// one-shot's copies pausing for as-enters choices), or on an optional
+/// replacement's accept/decline and its substitute's prompt. Installed before
+/// the pipeline runs; the installer's clause slice, the counter-drain feeds
+/// and the action-boundary feed (every whole action buffer after the
+/// installing one, `engine::apply_action_boundary_core`) reunite the clause
+/// span into `accumulated`, and the common priority boundary finishes the
 /// clause (terminal events, player actions, clause results, per-seat union)
-/// once no prompt, replacement, cursor, or copy owner remains.
+/// once no prompt, replacement, cursor, copy owner, resolving owner, or
+/// uncommitted entry remains.
 ///
-/// Transient pause state holding only public-board events. Unlike its
-/// `pending_combat_lifelink` sibling (stripped in `visibility.rs` because a
-/// combat batch can carry redactable events), this record needs no viewer
-/// filtering: every fed span is token-entry public-board events under the
-/// compound gate.
+/// Server authority, stripped from every viewer projection in `visibility.rs`
+/// like its `pending_combat_lifelink` sibling: the action-boundary feed
+/// carries every event of each action taken while the clause is paused, a
+/// departure's hidden-zone moves among them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSimultaneousTokenClause {
     /// The creating instruction's source, naming the deferred terminal events.
@@ -33073,9 +33076,9 @@ pub struct PendingReplacement {
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
     #[serde(default)]
     pub is_optional: bool,
-    /// Choice authority captured when an optional replacement is offered. This
-    /// is deliberately separate from CR 616 ordering, whose chooser remains
-    /// the affected player.
+    /// Choice authority captured when an optional replacement is offered, and,
+    /// for a compound token event (one with appended batches), the batch owner asked to order
+    /// (CR 616.1 + CR 101.4). `None` means the chooser is the affected player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice_player: Option<PlayerId>,
     /// CR 603.3a + CR 109.5: preserve the controller that resolved a
