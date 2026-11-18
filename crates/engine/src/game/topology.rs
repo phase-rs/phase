@@ -209,6 +209,21 @@ pub(crate) fn team_has_passed(state: &GameState, player: PlayerId) -> bool {
         .all(|member| state.priority_passes.contains(&member))
 }
 
+/// CR 805.5b: the seat whose pass moves `holder`'s team toward passing — the
+/// holder unless it already passed, otherwise its first living teammate that has
+/// not. An individual seat is its own whole team, so this is always `holder`
+/// there. A driver that passes for "no one on the team acts" submits this seat;
+/// re-submitting the holder's recorded pass leaves the team holding priority.
+pub(crate) fn next_team_passer(state: &GameState, holder: PlayerId) -> PlayerId {
+    if !state.priority_passes.contains(&holder) {
+        return holder;
+    }
+    team_members(state, holder)
+        .into_iter()
+        .find(|member| !state.priority_passes.contains(member))
+        .unwrap_or(holder)
+}
+
 /// CR 805.5b: every living player across all teams, in team order. All teams
 /// pass in succession exactly when every member of this set has passed.
 pub(crate) fn all_living_players_in_team_order(state: &GameState) -> Vec<PlayerId> {

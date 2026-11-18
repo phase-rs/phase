@@ -1785,13 +1785,17 @@ impl GameRunner {
         let holding_team = super::topology::team_id(&self.state, holder);
         let mut seats = vec![holder];
         seats.extend(super::players::teammates(&self.state, holder));
-        // CR 805.5b: a recorded pass is idempotent — re-applying one errors,
-        // so skip seats that already passed and keep the remaining passes'
-        // events. Collected up front: the filter borrows the pass records
-        // while the submit loop below needs the state mutably.
+        // CR 117.3d + CR 117.4: the holder holds priority, so its pass is
+        // always submitted — even over a pass recorded earlier in the window
+        // (CR 117.5: a trigger put on the stack as a player would receive
+        // priority hands priority back without clearing that record). Skipping the holder would submit nothing and leave every
+        // drain loop spinning on an unchanged window. CR 805.5b: a teammate
+        // that already passed is skipped — its pass stands until a game
+        // action clears it. Collected up front: the filter borrows the pass
+        // records while the submit loop below needs the state mutably.
         let seats: Vec<PlayerId> = seats
             .into_iter()
-            .filter(|seat| !self.state.priority_passes.contains(seat))
+            .filter(|&seat| seat == holder || !self.state.priority_passes.contains(&seat))
             .collect();
         let mut events = Vec::new();
         for seat in seats {
