@@ -157,8 +157,7 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
 
     stableCountRef.current = 0;
     prevRectsRef.current = new Map();
-    // The pending frame, or null once polling has stopped.
-    let rafId: number | null = null;
+    let rafId = 0;
 
     function poll() {
       const currentRects = new Map<string, DOMRect>();
@@ -216,28 +215,25 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
       if (stableCountRef.current < 10) {
         rafId = requestAnimationFrame(poll);
       } else {
-        rafId = null;
+        rafId = 0;
       }
     }
 
-    // A scroll moves an arc's ends without changing the arcs: the stack panel
-    // scrolls its pile when it is too short for the whole pile (#11119). Any
-    // scroll restarts the polling, which stops again once the ends hold still.
-    // Scroll events do not bubble, so the listener captures them instead.
-    function handleScroll() {
+    const restartPolling = () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
       stableCountRef.current = 0;
-      if (rafId === null) {
-        rafId = requestAnimationFrame(poll);
-      }
-    }
+      rafId = requestAnimationFrame(poll);
+    };
 
     rafId = requestAnimationFrame(poll);
-    document.addEventListener("scroll", handleScroll, { capture: true, passive: true });
+    // A scroll moves an arc's ends without changing the arcs: the stack panel
+    // scrolls its pile when it is too short for all of it (#11119). As in
+    // `useRafPositions`, a capture-phase `scroll` listener sees scrolls inside
+    // inner containers, and restarts the polling that had settled.
+    window.addEventListener("scroll", restartPolling, true);
     return () => {
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-      }
-      document.removeEventListener("scroll", handleScroll, { capture: true });
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      window.removeEventListener("scroll", restartPolling, true);
     };
   }, [arcs]);
 
