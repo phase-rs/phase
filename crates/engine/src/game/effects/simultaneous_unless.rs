@@ -643,8 +643,9 @@ fn deliver_choices(
         .collect();
 
     // CR 118.12: the discard node is a cost payment, so its discards are not
-    // an effect's (no Library-of-Leng-class replacement, no forced-discard
-    // muzzle); each unpaid instance is the template bound to its own seat.
+    // an effect's (no Library-of-Leng-class replacement; the forced-discard
+    // muzzle belongs to the choice, #11091); each unpaid instance is the
+    // template bound to its own seat.
     let nodes = (!discards.is_empty())
         .then(|| {
             super::scoped_discard::scoped_discard_delivery_node(

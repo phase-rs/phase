@@ -373,9 +373,11 @@ pub fn resolve(
 
             // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
             // opponent's spell or ability can't force the protected player to
-            // discard ANY card, regardless of which one. CR 118.12: a cost the
-            // payer chose to pay is not the opponent's ability causing a
-            // discard, so the muzzle reads only an effect's discard.
+            // discard ANY card, regardless of which one. CR 118.12: a cost
+            // discard is the payment the payer already chose. Whether a
+            // Tamiyo-class static lets them choose it is decided at the choice
+            // (Tamiyo's ruling: "you can't choose to sacrifice or discard"; the
+            // gate is missing, #11091), so delivery does not re-read the muzzle.
             if cause == DiscardCause::Effect
                 && crate::game::static_abilities::forced_action_muzzled(
                     state,

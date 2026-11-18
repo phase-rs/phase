@@ -1473,6 +1473,76 @@ fn viper_sacrifice_then_discard_replacement_choices_resume_in_order() {
     assert_poll_released(&runner, P0, "after the second replacement answer");
 }
 
+/// V9c. CR 603.2 + CR 603.3 + CR 616.1: the last answer is a sacrifice pick,
+/// the sacrifice completes, and the delivery then pauses on the discard's
+/// replacement choice. Mazirek, Kraul Death Priest ("Whenever a player
+/// sacrifices another permanent, put a +1/+1 counter on each creature you
+/// control.") triggers on the completed sacrifice; that trigger goes on the
+/// stack once a player would receive priority, and resolves.
+#[test]
+fn viper_last_sacrifice_pick_before_a_paused_discard_keeps_its_triggers() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(3, 0);
+    let mazirek = scenario.add_real_card(P0, "Mazirek, Kraul Death Priest", Zone::Battlefield, db);
+    // P2's Leyline replaces only an opponent's card, so P2's Bears meet Rest in
+    // Peace alone while P1's card meets both.
+    scenario.add_real_card(P2, "Leyline of the Void", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "Rest in Peace", Zone::Battlefield, db);
+    let mut runner = viper_attacks(scenario, viper);
+    let card = object_named(&runner, "Filler Card 1");
+    let bears = object_named(&runner, "Grizzly Bears 2");
+
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, card);
+    choose_branch(&mut runner, Branch::Sacrifice);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::WardSacrificeChoice { player: P2, .. }
+        ),
+        "reach guard: the last answer is P2's sacrifice pick, got {:?}",
+        runner.state().waiting_for
+    );
+    pick(&mut runner, bears);
+
+    assert_eq!(
+        zone_of(&runner, bears),
+        Zone::Exile,
+        "reach guard: the sacrifice completed before the discard paused"
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => assert_eq!(*player, P1),
+        other => panic!("expected P1's CR 616.1 choice for its card, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 orders the replacements");
+
+    assert_eq!(zone_of(&runner, card), Zone::Exile);
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.life(P2), 20);
+    assert_poll_released(&runner, P0, "after the replacement answer");
+    assert_eq!(
+        stack_entries_from(&runner, mazirek) + deferred_from(&runner, mazirek),
+        1,
+        "Mazirek's trigger on P2's sacrifice is put on the stack"
+    );
+
+    runner.advance_until_stack_empty();
+    for creature in [viper, mazirek] {
+        assert_eq!(
+            runner.state().objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "Mazirek's trigger resolved: a +1/+1 counter on each creature P0 controls"
+        );
+    }
+}
+
 /// V10. CR 118.12: the chosen discard pays a cost, so Library of Leng ("If an
 /// effect causes you to discard a card, …") does not apply.
 #[test]
@@ -2236,8 +2306,9 @@ fn hag_unless_prompt_settles_its_trigger_before_the_answer() {
 }
 
 /// P. CR 101.4a + CR 101.4b: earlier answers are public, but a card chosen to
-/// be discarded stays unrevealed ("cards chosen to be discarded this way won't
-/// be revealed until they're discarded") except to its chooser.
+/// be discarded stays unrevealed except to its chooser (Rottenmouth Viper's
+/// 2024-07-26 ruling: "cards chosen to be discarded this way won't be revealed
+/// until they're discarded").
 #[test]
 fn viper_hidden_discard_is_projected_only_to_its_chooser() {
     let (mut runner, _) = viper_attacking_with_blight_counters(3, 1);

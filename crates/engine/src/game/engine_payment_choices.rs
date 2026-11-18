@@ -3924,20 +3924,24 @@ pub(super) fn set_active_priority(state: &mut GameState) {
 
 /// CR 101.4: a pick answering an open choose-all-then-act poll. The last
 /// answer settles the poll; the reducer epilogue runs this action's post-action
-/// pipeline (the ward-choice arms return their wait to it).
+/// pipeline when the settle leaves a priority wait (the ward-choice arms return
+/// their wait to it).
 fn answer_simultaneous_unless_pick(
     state: &mut GameState,
     prompt: &WaitingFor,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let event_start = events.len();
     match effects::simultaneous_unless::answer_pick(state, prompt, chosen)
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?
     {
         effects::simultaneous_unless::WalkOutcome::Prompted => Ok(state.waiting_for.clone()),
-        effects::simultaneous_unless::WalkOutcome::Complete => {
-            settle_simultaneous_unless(state, events, SettlePipeline::ReducerEpilogue)
-        }
+        effects::simultaneous_unless::WalkOutcome::Complete => settle_simultaneous_unless(
+            state,
+            events,
+            SettlePipeline::ReducerEpilogue { event_start },
+        ),
     }
 }
 
@@ -3948,8 +3952,10 @@ enum SettlePipeline {
     /// the pipeline over the action's events from `event_start`.
     RunFrom { event_start: usize },
     /// The answering handler returns its wait to the reducer, whose epilogue
-    /// runs the pipeline.
-    ReducerEpilogue,
+    /// runs the pipeline under a priority wait. Any other wait the settle leaves
+    /// gets no pipeline there, so the settle runs it over the action's events
+    /// from `event_start`, as `RunFrom` does.
+    ReducerEpilogue { event_start: usize },
 }
 
 /// CR 101.4 + CR 608.2f: the last answer of a choose-all-then-act poll is in;
@@ -3979,20 +3985,28 @@ fn settle_simultaneous_unless(
         effects::simultaneous_unless::DeliveryOutcome::Delivered { .. } => {}
     }
     resume_pending_continuation_if_priority(state, events)?;
-    match pipeline {
-        SettlePipeline::RunFrom { event_start } => {
-            let default_wf = state.waiting_for.clone();
-            let wf = engine_priority::run_post_action_pipeline_from(
-                state,
-                events,
-                event_start,
-                &default_wf,
-                false,
-                false,
-            )?;
-            state.waiting_for = wf;
+    let pipeline_start = match pipeline {
+        SettlePipeline::RunFrom { event_start } => Some(event_start),
+        // CR 603.2 + CR 603.3 + CR 616.1: a delivery paused on a replacement
+        // choice after earlier chosen actions completed (a sacrifice before a
+        // discard) leaves no priority wait, so the reducer epilogue runs no
+        // pipeline. The completed actions' triggers are collected here and wait
+        // in the deferred queue until a player would receive priority.
+        SettlePipeline::ReducerEpilogue { event_start } => {
+            (!matches!(state.waiting_for, WaitingFor::Priority { .. })).then_some(event_start)
         }
-        SettlePipeline::ReducerEpilogue => {}
+    };
+    if let Some(event_start) = pipeline_start {
+        let default_wf = state.waiting_for.clone();
+        let wf = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        )?;
+        state.waiting_for = wf;
     }
     Ok(state.waiting_for.clone())
 }

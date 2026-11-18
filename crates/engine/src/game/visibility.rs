@@ -1601,9 +1601,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     }
     // CR 101.4a + CR 101.4b: a choose-all-then-act unless poll's answers are
     // public, but a card chosen to be discarded stays unrevealed until it is
-    // discarded ("cards chosen to be discarded this way won't be revealed until
-    // they're discarded"), so a seated viewer keeps only its own hidden picks
-    // and an unseated viewer none.
+    // discarded (Rottenmouth Viper's 2024-07-26 ruling: "cards chosen to be
+    // discarded this way won't be revealed until they're discarded"), so a
+    // seated viewer keeps only its own hidden picks and an unseated viewer
+    // none.
     if let Some(poll) = filtered.pending_simultaneous_unless.as_deref_mut() {
         poll.hidden_discards
             .retain(|(seat, _)| Some(*seat) == viewer);
