@@ -6,12 +6,15 @@ use crate::types::ability::{
     DestinationConstraint, DieResultFilter, EffectKind, ManaAbilityProducedFilter,
     OriginConstraint, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
-use crate::types::events::{BoundActivationCost, ExertOrigin, GameEvent, PlayerActionKind};
+use crate::types::events::{
+    BoundActivationCost, ExertOrigin, GameEvent, PlayerActionKind, TriggeredAbilityOrigin,
+};
 use crate::types::game_state::{DamageRecord, GameState, TriggerSourceContext};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::statics::TriggerCause;
 use crate::types::triggers::{
-    AbilityLifecyclePoint, ControlChangeSide, PlaneswalkRole, TriggerMode,
+    AbilityLifecyclePoint, CausedAbilitySource, ControlChangeSide, PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
 
@@ -262,9 +265,12 @@ fn trigger_route(mode: &TriggerMode) -> Option<TriggerRoute> {
         TriggerMode::CounterPlayerAddedAll => silent(match_counter_player_added_all),
         // The matcher reads only `AttractionVisited`; routing one of these modes elsewhere
         // rewrites its arm, and with it its class.
+        // CR 603.2 + CR 603.3b: "Whenever [cause] causes a triggered ability
+        // [of that creature] to trigger" reads only `AbilityTriggered`, an event
+        // no departure produces.
+        TriggerMode::AbilityTriggered { .. } => silent(match_ability_triggered),
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::CounterTypeAddedAll
@@ -503,6 +509,32 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     ] {
         r.insert(TriggerMode::Planeswalked { role }, match_planeswalked);
     }
+    // CR 603.2 + CR 603.3b: one matcher for every observer shape; it reads the
+    // cause and source off the trigger's mode. One representative key per
+    // printed cause: Firebender Ascension, Aboleth Spawn, Strict Proctor.
+    for (cause, source) in [
+        (
+            TriggerCause::CreatureAttacking,
+            CausedAbilitySource::CausingObject,
+        ),
+        (
+            TriggerCause::EntersBattlefield {
+                core_types: Vec::new(),
+            },
+            CausedAbilitySource::CausingObject,
+        ),
+        (
+            TriggerCause::EntersBattlefield {
+                core_types: Vec::new(),
+            },
+            CausedAbilitySource::Any,
+        ),
+    ] {
+        r.insert(
+            TriggerMode::AbilityTriggered { cause, source },
+            match_ability_triggered,
+        );
+    }
     // CR 603.2 + CR 603.10 / CR 603.10d: one matcher for both control-change
     // sides; it reads the side off the trigger's mode. Each side is a distinct
     // registry key (side participates in `TriggerMode`'s Hash/Eq).
@@ -586,7 +618,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::DamagePreventedOnce,
         TriggerMode::AbilityCast,
         TriggerMode::AbilityResolves,
-        TriggerMode::AbilityTriggered,
         TriggerMode::SpellAbilityCast,
         TriggerMode::SpellAbilityCopy,
         // TriggerMode::CounterPlayerAddedAll — moved to real matcher above
@@ -1374,6 +1405,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        // CR 603.2: an ability triggering names no object subject of its own;
+        // its cause subjects belong to the observer matcher.
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
@@ -2438,127 +2472,227 @@ pub(super) fn match_enlisted(
     matches!(event, GameEvent::CreatureEnlisted { attacker, .. } if *attacker == source_id)
 }
 
+/// CR 603.2 + CR 603.3b: "Whenever [cause] causes a triggered ability [of that
+/// creature] to trigger" (Firebender Ascension, Aboleth Spawn, Strict Proctor).
+/// The subjects come only from the event's `causes` record (charter D2/D4): it
+/// never re-evaluates the observed trigger's filters. CR 603.2c: one
+/// `AbilityTriggered` occurrence triggers the observer at most once.
+pub(super) fn match_ability_triggered(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    let TriggerMode::AbilityTriggered { cause, source } = &trigger.mode else {
+        return false;
+    };
+    let GameEvent::AbilityTriggered {
+        source_id,
+        origin,
+        causes,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let controller = source_context.lki.controller;
+    // CR 603.10: a subject that has left since (a creature that entered and
+    // died) is read with look-back through the observer's own `valid_card`.
+    let mut subjects = causes
+        .iter()
+        .filter(|cause_event| {
+            super::triggers::trigger_cause_matches(state, cause, Some(cause_event), controller)
+        })
+        .flat_map(|cause_event| cause_subjects(cause, cause_event))
+        .filter(|subject| valid_card_matches_with_lki(trigger, state, *subject, source_context));
+    match source {
+        // "a triggered ability of that creature": the ability is the causing
+        // object's own (CR 603.7: a delayed triggered ability is not an ability
+        // its source has, the same reading `doubler_applies` uses for CR 603.2d).
+        CausedAbilitySource::CausingObject => {
+            *origin == TriggeredAbilityOrigin::SourceAbility
+                && subjects.any(|subject| subject == *source_id)
+        }
+        CausedAbilitySource::Any => subjects.next().is_some(),
+    }
+}
+
+/// CR 508.1a + CR 603.6a: the cause subjects one recorded cause event names
+/// for `cause`: the declared attackers of an attack declaration, or the
+/// entering object of a battlefield entry. Every other cause names no subject
+/// (no printed observer uses it; fail closed).
+fn cause_subjects(cause: &TriggerCause, event: &GameEvent) -> Vec<ObjectId> {
+    match cause {
+        TriggerCause::CreatureAttacking => match event {
+            GameEvent::AttackersDeclared { attacker_ids, .. } => attacker_ids.clone(),
+            _ => Vec::new(),
+        },
+        TriggerCause::EntersBattlefield { .. } => match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                ..
+            } => vec![*object_id],
+            _ => Vec::new(),
+        },
+        TriggerCause::Any
+        | TriggerCause::CreatureDying
+        | TriggerCause::ControlledCreatureDealtDamage
+        | TriggerCause::ControllerCastOrCopiedSpell { .. }
+        | TriggerCause::RoomEntered
+        | TriggerCause::BattlefieldTransition { .. } => Vec::new(),
+    }
+}
+
+/// CR 603.2c + CR 508.3a: one firing of an `Attacks` trigger. `context` is the
+/// firing's narrowed resolution context (today's `matching_attack_events`
+/// element); `admitted` is one `AttackersDeclared` naming every attacker this
+/// firing's own admission accepted (charter D4), which differs from `context`
+/// only in the per-defending-player branches, where the context names the
+/// first qualifying attacker.
+pub(super) struct AttackFiring {
+    pub(super) context: GameEvent,
+    pub(super) admitted: GameEvent,
+}
+
 pub(super) fn matching_attack_events(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> Vec<GameEvent> {
-    if let GameEvent::AttackersDeclared {
+    attack_firings(event, trigger, source_context, state)
+        .into_iter()
+        .map(|firing| firing.context)
+        .collect()
+}
+
+/// CR 603.2c + CR 508.3a + CR 508.3b + CR 508.3d: the firings one attack
+/// declaration produces for an `Attacks` trigger, each with its narrowed
+/// context and its admitted attacker set (the cause record, charter D4). The
+/// single authority behind [`matching_attack_events`].
+pub(super) fn attack_firings(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> Vec<AttackFiring> {
+    let GameEvent::AttackersDeclared {
         attacker_ids,
         defending_player,
         attacks,
         declaration_records,
         ..
     } = event
-    {
-        if let Some(filter) = trigger
-            .valid_source
-            .as_ref()
-            .filter(|filter| filter.is_player_scope())
-        {
-            // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
-            // once per attacked defending player, not once per attacking
-            // creature, while still carrying a single defending-player context.
-            let Some(attacking_player) = attacker_ids
-                .iter()
-                .find_map(|id| state.objects.get(id).map(|o| o.controller))
-            else {
-                return Vec::new();
-            };
-            if !player_matches_filter(filter, state, attacking_player, source_context) {
-                return Vec::new();
-            }
-            let mut seen_defending_players = Vec::new();
-            return attacker_ids
-                .iter()
-                .filter_map(|id| {
-                    let target = attacks
-                        .iter()
-                        .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
-                        .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
-                    if !attack_target_matches(
-                        trigger,
-                        state,
-                        target,
-                        *defending_player,
-                        source_context,
-                    ) {
-                        return None;
-                    }
-                    let event_defending_player =
-                        crate::game::combat::defending_player_for_target_or(
-                            state,
-                            target,
-                            *defending_player,
-                        );
-                    if seen_defending_players.contains(&event_defending_player) {
-                        return None;
-                    }
-                    seen_defending_players.push(event_defending_player);
-                    Some(GameEvent::AttackersDeclared {
-                        attacker_ids: vec![*id],
-                        defending_player: event_defending_player,
-                        attacks: vec![(*id, target)],
-                        // The trigger source is narrowed to this attacker, but
-                        // event-scoped conditions such as Pack Tactics still
-                        // refer to the full declaration batch.
-                        declaration_records: declaration_records.clone(),
-                    })
-                })
-                .collect();
-        }
-
-        // Find which attacker(s) satisfy the creature / attacking-player filter.
-        //
-        // CR 508.3b: "Whenever [player] is attacked" triggers once per
-        // attacked player, not once per attacking creature. Deduplicate when
-        // the trigger has valid_target set but no valid_card/valid_source
-        // (the player-is-attacked pattern).
-        let dedup_by_player = trigger.valid_target.is_some()
-            && trigger.valid_card.is_none()
-            && trigger.valid_source.is_none();
-        let mut seen_defending_players: Vec<PlayerId> = Vec::new();
-
-        attacker_ids
+    else {
+        return Vec::new();
+    };
+    let attack_target_of = |id: ObjectId| {
+        attacks
             .iter()
-            .filter_map(|id| {
-                if !attack_declaration_attacker_matches(trigger, state, *id, source_context) {
-                    return None;
-                }
-                let target = attacks
-                    .iter()
-                    .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
-                    .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
-                if !attack_target_matches(trigger, state, target, *defending_player, source_context)
-                {
-                    return None;
-                }
-                let event_defending_player = crate::game::combat::defending_player_for_target_or(
-                    state,
-                    target,
-                    *defending_player,
-                );
-                if dedup_by_player {
-                    if seen_defending_players.contains(&event_defending_player) {
-                        return None;
-                    }
-                    seen_defending_players.push(event_defending_player);
-                }
-                Some(GameEvent::AttackersDeclared {
-                    attacker_ids: vec![*id],
-                    defending_player: event_defending_player,
-                    attacks: vec![(*id, target)],
-                    // Keep the complete declaration for event-scoped
-                    // conditions; `attacker_ids` remains the per-trigger
-                    // source identity.
-                    declaration_records: declaration_records.clone(),
-                })
-            })
-            .collect()
-    } else {
-        Vec::new()
+            .find_map(|(attacker_id, target)| (*attacker_id == id).then_some(*target))
+            .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player))
+    };
+    let player_scope = trigger
+        .valid_source
+        .as_ref()
+        .filter(|filter| filter.is_player_scope());
+    if let Some(filter) = player_scope {
+        // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
+        // once per attacked defending player, not once per attacking
+        // creature, while still carrying a single defending-player context.
+        let Some(attacking_player) = attacker_ids
+            .iter()
+            .find_map(|id| state.objects.get(id).map(|o| o.controller))
+        else {
+            return Vec::new();
+        };
+        if !player_matches_filter(filter, state, attacking_player, source_context) {
+            return Vec::new();
+        }
     }
+    // CR 508.3b: "Whenever [player] is attacked" triggers once per
+    // attacked player, not once per attacking creature. Deduplicate when
+    // the trigger has valid_target set but no valid_card/valid_source
+    // (the player-is-attacked pattern).
+    let dedup_by_player = player_scope.is_some()
+        || (trigger.valid_target.is_some()
+            && trigger.valid_card.is_none()
+            && trigger.valid_source.is_none());
+    // Every attacker this trigger admits, with its target and the defending
+    // player its firing is grouped under. The player-scope branch filters
+    // only the attack target (its subject is the attacking player).
+    let accepted: Vec<(ObjectId, crate::game::combat::AttackTarget, PlayerId)> = attacker_ids
+        .iter()
+        .filter_map(|id| {
+            if player_scope.is_none()
+                && !attack_declaration_attacker_matches(trigger, state, *id, source_context)
+            {
+                return None;
+            }
+            let target = attack_target_of(*id);
+            if !attack_target_matches(trigger, state, target, *defending_player, source_context) {
+                return None;
+            }
+            let event_defending_player = crate::game::combat::defending_player_for_target_or(
+                state,
+                target,
+                *defending_player,
+            );
+            Some((*id, target, event_defending_player))
+        })
+        .collect();
+    let narrowed = |id: ObjectId, target, event_defending_player| GameEvent::AttackersDeclared {
+        attacker_ids: vec![id],
+        defending_player: event_defending_player,
+        attacks: vec![(id, target)],
+        // The trigger source is narrowed to this attacker, but event-scoped
+        // conditions such as Pack Tactics still refer to the full
+        // declaration batch; `attacker_ids` remains the per-trigger source
+        // identity.
+        declaration_records: declaration_records.clone(),
+    };
+    if !dedup_by_player {
+        return accepted
+            .into_iter()
+            .map(|(id, target, event_defending_player)| {
+                let context = narrowed(id, target, event_defending_player);
+                AttackFiring {
+                    admitted: context.clone(),
+                    context,
+                }
+            })
+            .collect();
+    }
+    let mut seen_defending_players: Vec<PlayerId> = Vec::new();
+    accepted
+        .iter()
+        .filter_map(|&(id, target, event_defending_player)| {
+            if seen_defending_players.contains(&event_defending_player) {
+                return None;
+            }
+            seen_defending_players.push(event_defending_player);
+            // CR 508.3d + CR 603.2c: the firing for this attacked player is
+            // caused by every admitted attacker grouped under it.
+            let group: Vec<_> = accepted
+                .iter()
+                .filter(|(_, _, player)| *player == event_defending_player)
+                .map(|(attacker, attack_target, _)| (*attacker, *attack_target))
+                .collect();
+            let group_ids: Vec<ObjectId> = group.iter().map(|(attacker, _)| *attacker).collect();
+            Some(AttackFiring {
+                context: narrowed(id, target, event_defending_player),
+                admitted: GameEvent::AttackersDeclared {
+                    declaration_records: super::triggers::declaration_records_for_attackers(
+                        event, &group_ids,
+                    ),
+                    attacker_ids: group_ids,
+                    defending_player: event_defending_player,
+                    attacks: group,
+                },
+            })
+        })
+        .collect()
 }
 
 /// CR 508.1 + CR 508.3b + CR 508.3d: whether one declared attacker satisfies
@@ -6831,6 +6965,32 @@ mod tests {
                 registry.contains_key(&TriggerMode::ChangesController { side }),
                 "registry must key ChangesController {{ side: {side:?} }}"
             );
+        }
+    }
+
+    /// CR 603.2 + CR 603.3b: the three printed observer shapes are registry
+    /// keys (`HashMap` insert is not compile-enforced).
+    #[test]
+    fn trigger_registry_includes_printed_ability_triggered_shapes() {
+        use crate::types::statics::TriggerCause;
+        use crate::types::triggers::CausedAbilitySource;
+        let registry = build_trigger_registry();
+        for (cause, source) in [
+            (
+                TriggerCause::CreatureAttacking,
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield { core_types: vec![] },
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield { core_types: vec![] },
+                CausedAbilitySource::Any,
+            ),
+        ] {
+            let mode = TriggerMode::AbilityTriggered { cause, source };
+            assert!(registry.contains_key(&mode), "registry must key {mode:?}");
         }
     }
 

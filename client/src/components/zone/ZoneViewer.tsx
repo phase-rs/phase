@@ -141,16 +141,15 @@ export function ZoneViewer({
       bodyClassName="flex min-h-0 flex-col"
       overlayClassName="z-[60]"
     >
-      <div className="min-h-0 flex-1 px-2 pb-2 lg:px-6 lg:pb-6">
+      {/* A flex column, so below lg the card strip grows into the panel body
+          and sizes its cards from the height it gets (see ScrollableCardStrip). */}
+      <div className="flex min-h-0 flex-1 flex-col px-2 pb-2 lg:px-6 lg:pb-6">
         {cards.length === 0 ? (
           <p className="py-8 text-center text-sm italic text-gray-600">
             {t("zone.noCardsIn", { zone: t(ZONE_TITLE_LOWER_KEYS[zone]) })}
           </p>
         ) : (
-          <ScrollableCardStrip
-            stripClassName="zone-viewer-strip"
-            innerClassName="flex items-center gap-2 lg:gap-3"
-          >
+          <ScrollableCardStrip stripClassName="zone-viewer-strip">
             {cards.map((obj) => {
               // CR 702.81a + CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
               // Engine surfaces a CastSpell-family action for every legally
@@ -307,11 +306,10 @@ function ZoneCard({
       {/* Resolve the image via the engine's printed_ref (oracle_id + face)
           like every other object-rendering modal — name-only lookup fails for
           DFC / transformed / back-face cards (e.g. a transformed planeswalker),
-          which then falls back to the broken-image div. In the zone strip that
-          fallback is sized up to ~560px, so a failed image rendered "huge" with
-          text instead of art. `faceDown` overrides all of that with the shared
-          card-back placeholder (CardImage.tsx) whenever this viewer has no
-          look-permission on a face-down exile (see `hiddenFromViewer` above) —
+          which then falls back to the broken-image div. `faceDown` overrides
+          all of that with the shared card-back placeholder (CardImage.tsx)
+          whenever this viewer has no look-permission on a face-down exile
+          (see `hiddenFromViewer` above) —
           it must NOT be the raw `obj.face_down`, which is also true for the
           legitimate Hideaway/Foretell controller who the engine intends to
           let see the real card. */}
