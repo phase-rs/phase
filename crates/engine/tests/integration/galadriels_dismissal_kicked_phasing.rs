@@ -353,6 +353,8 @@ const CLOUDSHIFT: &str =
 const SPELLSKITE: &str = "{U/P}: Change a target of target spell or ability to this creature. \
 ({U/P} can be paid with either {U} or 2 life.)";
 
+const DOOM_BLADE: &str = "Destroy target nonblack creature.";
+
 /// Pacifism — verbatim Oracle text.
 const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
 
@@ -522,12 +524,13 @@ fn open_barn_prompt(
 
 /// One unattached creature per opponent — the shape a response-window test
 /// needs, where blinking or destroying one opponent's pick must not disturb the
-/// other's. P1 holds a free Cloudshift.
+/// other's. P1 holds a free Cloudshift and a free Doom Blade.
 struct BarnTwoBoard {
     runner: GameRunner,
     host: ObjectId,
     aura: ObjectId,
     cloudshift: ObjectId,
+    removal: ObjectId,
 }
 
 fn barn_board_two_creatures() -> BarnTwoBoard {
@@ -544,6 +547,10 @@ fn barn_board_two_creatures() -> BarnTwoBoard {
         .add_spell_to_hand_from_oracle(P1, "Cloudshift", true, CLOUDSHIFT)
         .with_mana_cost(ManaCost::generic(0))
         .id();
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P1, "Doom Blade", true, DOOM_BLADE)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
     let mut runner = scenario.build();
     install_barn_planes(&mut runner);
     assert_eq!(
@@ -556,6 +563,7 @@ fn barn_board_two_creatures() -> BarnTwoBoard {
         host: first,
         aura: second,
         cloudshift,
+        removal,
     }
 }
 
@@ -575,6 +583,7 @@ fn childhood_barn_blinked_pick_is_dropped_and_the_other_still_phases_out() {
         host: first,
         aura: second,
         cloudshift,
+        ..
     } = barn_board_two_creatures();
     let p2 = PlayerId(2);
 
@@ -874,7 +883,7 @@ fn barn_board_single_pick() -> (GameRunner, ObjectId, ObjectId) {
 }
 
 /// CR 608.2b: when EVERY announced occurrence of the chaos ability is illegal
-/// at resolution, none of the ability happens — no untap, no phase-out, no
+/// at resolution, no observable part of the ability happens — no phase-out, no
 /// can't-phase-in rider, and no delayed phase-in. This is the all-`Dropped`
 /// shape of the fanout arm, reached through the production entry.
 #[test]
@@ -963,6 +972,143 @@ fn childhood_barn_single_blinked_pick_lets_the_whole_ability_do_nothing() {
     // `ReplacementDefinition`, so the blinked object returns untapped whether or
     // not the untap instruction ran. Tappedness therefore cannot witness it.
     // The fizzle's own evidence (no phase-out, no delayed clause) does.
+}
+
+/// CR 608.2b + CR 115.1: the EMPTY-POOL response. The first opponent's only
+/// announced permanent is destroyed in response, so that header's slot has no
+/// legal object at resolution; the later opponent's announced pick must still
+/// phase out, still carry the can't-phase-in rider, and still receive the
+/// delayed phase-in.
+///
+/// This is the half the blink cases cannot reach: Cloudshift returns a legal
+/// permanent to that opponent, so their pool is never empty.
+#[test]
+fn childhood_barn_removal_response_keeps_the_other_opponents_pick() {
+    use engine::game::effects::phase_out::resolve_phase_in;
+    use engine::types::player::PlayerId;
+    use engine::types::zones::Zone;
+
+    let BarnTwoBoard {
+        mut runner,
+        host: first,
+        aura: second,
+        removal,
+        ..
+    } = barn_board_two_creatures();
+    let p2 = PlayerId(2);
+
+    let mut events = Vec::new();
+    let target_slots = open_barn_prompt(&mut runner, &mut events);
+    assert_eq!(
+        target_slots.len(),
+        4,
+        "one header + object slot per opponent"
+    );
+
+    events.extend(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Player(P1),
+                    TargetRef::Object(first),
+                    TargetRef::Player(p2),
+                    TargetRef::Object(second),
+                ],
+            })
+            .expect("Barn accepts one permanent from each opponent")
+            .events,
+    );
+
+    // P1 destroys its OWN announced pick in response, emptying its pool.
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ) {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority toward P1's response window")
+                .events,
+        );
+    }
+    runner.cast(removal).target_object(first).commit();
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority through Doom Blade and the chaos ability")
+                .events,
+        );
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "Doom Blade and the chaos ability must both resolve"
+    );
+    assert_eq!(
+        runner.state().objects[&first].zone,
+        Zone::Graveyard,
+        "reach guard: the first opponent's pool is empty at resolution"
+    );
+
+    let phased_out = |object_id: ObjectId| {
+        events.iter().find_map(|event| match event {
+            GameEvent::PermanentPhasedOut {
+                object_id: event_id,
+                indirect,
+            } if *event_id == object_id => Some(*indirect),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        phased_out(first),
+        None,
+        "the destroyed pick is not on the battlefield to phase out"
+    );
+    assert_eq!(
+        phased_out(second),
+        Some(false),
+        "the later opponent's pick still phases out"
+    );
+
+    let delayed_targets: Vec<ObjectId> = runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .flat_map(|trigger| trigger.ability.targets.iter())
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    assert!(
+        delayed_targets.contains(&second),
+        "the surviving pick receives the delayed phase-in, got {delayed_targets:?}"
+    );
+
+    // CR 101.2 + CR 702.26b: the rider holds for the survivor.
+    let phase_in = engine::types::ability::ResolvedAbility::new(
+        engine::types::ability::Effect::PhaseIn {
+            target: engine::types::ability::TargetFilter::SpecificObject { id: second },
+        },
+        vec![TargetRef::Object(second)],
+        second,
+        P0,
+    );
+    let mut phase_in_events = Vec::new();
+    resolve_phase_in(runner.state_mut(), &phase_in, &mut phase_in_events)
+        .expect("explicit phase-in resolves");
+    assert!(
+        runner.state().objects[&second].is_phased_out(),
+        "the survivor keeps its can't-phase-in restriction while Barn is face up"
+    );
 }
 
 /// CR 115.7a + CR 115.1: Spellskite forces "a target" of the Barn's chaos
