@@ -9179,11 +9179,11 @@ fn parse_graveyard_redirect_replacement(
                 ),
             ))
             .parse(i)?;
-            // CR 400.1 + CR 700.4: the optional stated origin. `Some(None)` is
-            // "from anywhere" (no narrowing); `Some(Some(zone))` narrows the
-            // affected-object filter to that zone below.
+            // CR 400.1 + CR 700.4: the optional stated origin. `None` = no "from"
+            // clause; `Some(None)` = "from anywhere" (explicit, no narrowing, but
+            // sets active_zones to all zones per CR 113.6b); `Some(Some(zone))`
+            // = specific zone (narrows filter AND sets active_zones to that zone).
             let (i, origin) = opt(parse_graveyard_move_origin).parse(i)?;
-            let origin = origin.flatten();
             // CR 614.1a + CR 611.2a + CR 514.2: a stated window may sit INSIDE
             // the antecedent — "if a card would be put into your graveyard from
             // anywhere THIS TURN, exile that card instead" (Yawgmoth's Will /
@@ -9282,12 +9282,13 @@ fn parse_graveyard_redirect_replacement(
     // host and admits no type phrase; every other subject is read by
     // `graveyard_replacement_subject_filter`, which declines the bare card/token
     // nouns the token axis already owns.
-    let subject_filter = (!graveyard_replacement_subject_is_self_referential(subject))
+    let is_self_replacement = graveyard_replacement_subject_is_self_referential(subject);
+    let subject_filter = (!is_self_replacement)
         .then(|| graveyard_replacement_subject_filter(subject))
         .flatten();
     let props_filter =
         (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
-    let valid_card = if graveyard_replacement_subject_is_self_referential(subject) {
+    let valid_card = if is_self_replacement {
         Some(TargetFilter::SelfRef)
     } else {
         match (subject_filter, props_filter) {
@@ -9300,8 +9301,10 @@ fn parse_graveyard_redirect_replacement(
         }
     };
     // CR 400.1 + CR 700.4: fold the stated origin in last, so it applies to
-    // whichever shape the subject/ownership axes produced.
-    let valid_card = match origin {
+    // whichever shape the subject/ownership axes produced. `origin.flatten()`
+    // converts `Some(None)` ("from anywhere") to `None` (no filter narrowing),
+    // while preserving `Some(Some(zone))` as `Some(zone)`.
+    let valid_card = match origin.flatten() {
         Some(zone) => Some(constrain_filter_to_origin_zone(valid_card, zone)),
         None => valid_card,
     };
@@ -9403,6 +9406,45 @@ fn parse_graveyard_redirect_replacement(
         .description(original_text.to_string());
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
+    }
+
+    // CR 113.6b: "An ability that states which zones it functions in functions
+    // only from those zones." When the antecedent explicitly states a "from"
+    // clause, the replacement functions only from the stated zone(s).
+    // - `origin == Some(None)` = explicit "from anywhere" → all zones except Graveyard
+    // - `origin == Some(Some(zone))` = explicit "from <zone>" → only that zone
+    // - `origin == None` = no "from" clause → default (battlefield/command)
+    //
+    // CR 113.6b + Rest in Peace ruling: `active_zones` gates the object that HOSTS
+    // the ability. The antecedent's "from" clause describes the object MOVING to the
+    // graveyard. These are the same object for printed self-replacements (Darksteel
+    // Colossus, Nexus of Fate), but NOT for printed replacements affecting other
+    // objects (Rest in Peace, Leyline of the Void). For the latter, the host's
+    // default functioning zones (battlefield/command) are preserved, and the named
+    // origin is applied only to the affected-card filter (done above via
+    // `constrain_filter_to_origin_zone`).
+    if let Some(inner) = origin {
+        if is_self_replacement {
+            match inner {
+                None => {
+                    // "from anywhere" — functions from all zones except Graveyard
+                    def = def.active_zones(
+                        crate::types::zones::Zone::ALL
+                            .iter()
+                            .copied()
+                            .filter(|z| *z != crate::types::zones::Zone::Graveyard)
+                            .collect(),
+                    );
+                }
+                Some(zone) => {
+                    // "from <specific zone>" — functions only from that zone
+                    def = def.active_zones(vec![zone]);
+                }
+            }
+        }
+        // For non-self replacements (Rest in Peace, etc.), preserve the host's
+        // default functioning zones. The origin is already applied to the affected-
+        // card filter via `constrain_filter_to_origin_zone` above.
     }
 
     // CR 514.2 + CR 611.2a + CR 604.2: stamp the stated antecedent window onto
@@ -21861,6 +21903,68 @@ mod tests {
         );
     }
 
+    /// CR 113.6b: "An ability that states which zones it functions in functions
+    /// only from those zones." When the antecedent explicitly says "from
+    /// anywhere", the replacement's `active_zones` must include all zones (except
+    /// Graveyard) so it functions from Library (mill), Hand (discard), Stack
+    /// (counter), Exile, Command, and Battlefield.
+    #[test]
+    fn replacement_from_anywhere_sets_active_zones() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from anywhere, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-anywhere shuffle-back must parse");
+
+        // Verify active_zones is set to all zones except Graveyard
+        let expected_zones: Vec<Zone> = Zone::ALL
+            .iter()
+            .copied()
+            .filter(|z| *z != Zone::Graveyard)
+            .collect();
+        assert_eq!(
+            def.active_zones, expected_zones,
+            "from anywhere must set active_zones to all zones except Graveyard"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_battlefield_sets_active_zones_to_battlefield() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from the battlefield, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-battlefield shuffle-back must parse");
+
+        // Verify active_zones is set to only Battlefield
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Battlefield],
+            "from the battlefield must set active_zones to only Battlefield"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_library_sets_active_zones_to_library() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from a library, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-library shuffle-back must parse");
+
+        // Verify active_zones is set to only Library
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Library],
+            "from a library must set active_zones to only Library"
+        );
+    }
+
     /// CR 608.2n + CR 614.1a (issue #2897): card-name subjects normalize to `~`
     /// and must carry `valid_card: SelfRef`, not an absent filter that the
     /// stack-self-move gate would reject.
@@ -26709,6 +26813,10 @@ mod tests {
         // The unfiltered `Any` scope includes tokens and currently also admits spell
         // copies, which the printed "a card or token" subject excludes.
         assert!(def.valid_card.is_none());
+        assert!(
+            def.active_zones.is_empty(),
+            "non-self 'from anywhere' replacement must keep default active_zones (CR 113.6b)"
+        );
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -26728,6 +26836,10 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        assert!(
+            def.active_zones.is_empty(),
+            "non-self 'from anywhere' replacement must keep default active_zones (CR 113.6b)"
+        );
         // valid_card should scope to opponent-owned cards AND admit only objects
         // represented by a card: CR 108.2 + CR 108.2b — "a card" (no "or token")
         // excludes tokens, so a dying token reaches the graveyard (dies-triggers

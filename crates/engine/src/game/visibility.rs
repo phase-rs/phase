@@ -8607,6 +8607,7 @@ mod tests {
         caster: PlayerId,
     ) -> Box<PendingCast> {
         Box::new(PendingCast {
+            alternative_cost_keyword: None,
             object_id,
             card_id,
             ability: Box::new(ResolvedAbility::new(

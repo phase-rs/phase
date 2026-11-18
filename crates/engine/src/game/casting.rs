@@ -953,6 +953,22 @@ struct PreparedSpellCast {
     /// (`stamp_prepared_cast_context`); `AwaitingSlot` must first get its
     /// per-type slot from `ChoosePermanentTypeSlot`.
     graveyard_authority: Option<GraveyardAuthorityResolution>,
+    /// CR 113.2c + CR 601.2b: the keyword instance this cast announced for an
+    /// instance-elected method (`keywords::instance_elected_kind`); `None`
+    /// otherwise. Copied onto every pending cast built from this preparation.
+    alternative_cost_keyword: Option<Keyword>,
+}
+
+/// CR 601.2b: how a preparation picks the keyword instance of an
+/// instance-elected casting method.
+#[derive(Debug, Clone, Copy)]
+enum InstanceElection<'a> {
+    /// The instance the cast announces; `None` announces none, which a card
+    /// with a single instance answers and a card with several refuses.
+    Announced(Option<&'a Keyword>),
+    /// The single-instance reader's instance: the route an unannounced cast
+    /// took before instances were elected. Read-only pricing for AI reach.
+    BaseDefault,
 }
 
 pub struct PriorityCastProbe {
@@ -1864,24 +1880,44 @@ fn graveyard_object_castable_by_permission_sources(
     })
 }
 
-/// CR 702.138a + CR 601.2f-h: Check that the player can pay escape's additional
-/// (exile) cost. Delegates the whole residual `AbilityCost` to the single
-/// affordability authority `AbilityCost::is_payable` — its Composite arm requires
-/// ALL sub-costs payable and routes each `Exile` sub-cost (the graveyard clause
-/// and the battlefield "Exile a land you control" clause on Lunar Hatchling)
-/// through the same `exile_cost_effective_zone` + `eligible_exile_cost_objects`
-/// functions the payment arm uses, so the pre-check and payment-time eligibility
-/// match by construction. Returns `false` for an unparsed/placeholder escape
-/// (no residual), correctly gating it out of legal actions.
+/// CR 702.138a + CR 601.2f-h: Check that the player can pay the additional
+/// (exile) cost of SOME escape instance of the card (CR 113.2c: each instance
+/// is its own alternative cost; the exact instance a cast announces is checked
+/// on its prepared cast, `escape_instance_residual_payable`). Delegates each
+/// residual `AbilityCost` to the single affordability authority
+/// `AbilityCost::is_payable` — its Composite arm requires ALL sub-costs payable
+/// and routes each `Exile` sub-cost (the graveyard clause and the battlefield
+/// "Exile a land you control" clause on Lunar Hatchling) through the same
+/// `exile_cost_effective_zone` + `eligible_exile_cost_objects` functions the
+/// payment arm uses, so the pre-check and payment-time eligibility match by
+/// construction. Returns `false` for an unparsed/placeholder escape (no
+/// residual), correctly gating it out of legal actions.
 fn can_pay_escape_additional_cost(
     state: &GameState,
     player: PlayerId,
     escape_obj_id: ObjectId,
 ) -> bool {
-    let Some((_, residual)) = super::keywords::effective_escape_data(state, escape_obj_id) else {
-        return false;
-    };
-    residual.is_payable_for_spell(state, player, escape_obj_id)
+    super::keywords::effective_keyword_instances(state, escape_obj_id, KeywordKind::Escape)
+        .iter()
+        .filter_map(|keyword| super::keywords::escape_data_of(state, escape_obj_id, keyword))
+        .any(|(_, residual)| residual.is_payable_for_spell(state, player, escape_obj_id))
+}
+
+/// CR 702.138a + CR 601.2h: the exile residual of the escape instance a
+/// prepared cast announced is payable.
+fn escape_instance_residual_payable(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+) -> bool {
+    super::keywords::bound_escape_data(
+        state,
+        prepared.object_id,
+        prepared.alternative_cost_keyword.as_ref(),
+    )
+    .ok()
+    .flatten()
+    .is_some_and(|(_, residual)| residual.is_payable_for_spell(state, player, prepared.object_id))
 }
 
 /// CR 702.180: Check if an object has the Harmonize keyword. Off-zone-aware so a
@@ -3551,6 +3587,7 @@ fn begin_emerge_cost_before_targets(
         distribute,
         prepared.origin_zone,
         prepared.payment_mode,
+        prepared.alternative_cost_keyword.clone(),
         events,
     )
 }
@@ -8346,10 +8383,10 @@ pub fn graveyard_slot_demand(
 
 /// CR 601.2a + CR 601.2f: can some announced way to cast `object_id` from the
 /// graveyard be paid now with automatic mana payment? When several graveyard
-/// permissions could authorize the cast there is no single exact cost
-/// (`effective_spell_cost` is `None` until one is announced), so the cast is
-/// payable when any option of its announcement menu is. `false` off the
-/// graveyard, or with no option.
+/// permissions or several flashback/escape instances (CR 113.2c) could
+/// authorize the cast there is no single exact cost (`effective_spell_cost`
+/// is `None` until one is announced), so the cast is payable when any option
+/// of its announcement menu is. `false` off the graveyard, or with no option.
 pub fn graveyard_cast_payable_by_some_option(
     state: &GameState,
     player: PlayerId,
@@ -8368,7 +8405,9 @@ pub fn graveyard_cast_payable_by_some_option(
     // the spell's types sees the right ones.
     casting_candidates(state, player, object_id)
         .into_iter()
-        .filter(|candidate| candidate.announcement.is_some())
+        .filter(|candidate| {
+            candidate.announcement.is_some() || candidate.alternative_cost_keyword.is_some()
+        })
         .any(|candidate| {
             let Ok(option) = prepare_casting_variant_on_face(
                 state,
@@ -8378,6 +8417,7 @@ pub fn graveyard_cast_payable_by_some_option(
                 CastingVariantFace::Current,
                 CastingMode::Actual,
                 candidate.announcement.as_ref(),
+                candidate.election(),
             ) else {
                 return false;
             };
@@ -8913,6 +8953,7 @@ fn prepare_casting_variant(
     variant: CastingVariant,
     mode: CastingMode,
     announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
+    election: InstanceElection<'_>,
 ) -> Result<PreparedCastingVariant, EngineError> {
     let mut transformed_state = state.clone();
     apply_casting_variant_characteristics(&mut transformed_state, object_id, variant)?;
@@ -8925,6 +8966,7 @@ fn prepare_casting_variant(
         None,
         mode,
         announcement,
+        election,
     )?;
     Ok(PreparedCastingVariant {
         transformed_state,
@@ -8935,6 +8977,7 @@ fn prepare_casting_variant(
 /// Prepare one exact menu tuple. A Fuse pair's right-half cast must install the
 /// existing one-time split-face projection before every legality and cost
 /// reader; Fuse itself always remains the left/current combined spell.
+#[allow(clippy::too_many_arguments)]
 fn prepare_casting_variant_on_face(
     state: &GameState,
     player: PlayerId,
@@ -8943,6 +8986,7 @@ fn prepare_casting_variant_on_face(
     face: CastingVariantFace,
     mode: CastingMode,
     announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
+    election: InstanceElection<'_>,
 ) -> Result<PreparedCastingVariant, EngineError> {
     let fuse_pair = is_uncommitted_hand_fuse_pair(state, object_id);
     let valid = match face {
@@ -8985,9 +9029,25 @@ fn prepare_casting_variant_on_face(
             // object. Record it so a paused cast cannot re-open the prompt.
             object.cast_face_committed = true;
         }
-        prepare_casting_variant(&projected, player, object_id, variant, mode, announcement)
+        prepare_casting_variant(
+            &projected,
+            player,
+            object_id,
+            variant,
+            mode,
+            announcement,
+            election,
+        )
     } else {
-        prepare_casting_variant(state, player, object_id, variant, mode, announcement)
+        prepare_casting_variant(
+            state,
+            player,
+            object_id,
+            variant,
+            mode,
+            announcement,
+            election,
+        )
     }
 }
 
@@ -9012,16 +9072,28 @@ fn casting_variant_choice_set(
     object_id: ObjectId,
     probe: Option<&PriorityCastProbe>,
 ) -> CastingVariantChoiceSet {
-    let mut candidates = casting_candidates(state, player, object_id);
+    choice_set_from_candidates(
+        state,
+        player,
+        object_id,
+        casting_candidates(state, player, object_id),
+        probe,
+    )
+}
+
+fn choice_set_from_candidates(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    mut candidates: Vec<CastingCandidate>,
+    probe: Option<&PriorityCastProbe>,
+) -> CastingVariantChoiceSet {
     candidates.dedup();
     let had_multiple_candidates = candidates.len() > 1;
     let mut options = Vec::new();
 
-    for CastingCandidate {
-        variant,
-        announcement,
-    } in candidates
-    {
+    for candidate in candidates {
+        let variant = candidate.variant;
         let faces: &[CastingVariantFace] = if is_uncommitted_hand_fuse_pair(state, object_id) {
             match variant {
                 CastingVariant::Normal | CastingVariant::HandPermission { .. } => {
@@ -9038,26 +9110,38 @@ fn casting_variant_choice_set(
             &[CastingVariantFace::Current]
         };
         for &face in faces {
-            let Ok(candidate) = prepare_casting_variant_on_face(
+            let Ok(prepared) = prepare_casting_variant_on_face(
                 state,
                 player,
                 object_id,
                 variant,
                 face,
                 CastingMode::Actual,
-                announcement.as_ref(),
+                candidate.announcement.as_ref(),
+                candidate.election(),
             ) else {
                 continue;
             };
             if !can_cast_prepared_now_with_probe(
-                &candidate.transformed_state,
+                &prepared.transformed_state,
                 player,
-                &candidate.prepared,
+                &prepared.prepared,
                 probe,
             ) {
                 continue;
             }
-            options.push(casting_variant_choice_option(player, &candidate, face));
+            let Some(option) = casting_variant_choice_option(player, &prepared, face) else {
+                continue;
+            };
+            // CR 601.2b: two instances whose alternative costs come to the same
+            // total, method and authority are one choice for the caster; the
+            // first (in keyword-list order) stands for both.
+            if !options
+                .iter()
+                .any(|existing| same_cast_option_but_instance(existing, &option))
+            {
+                options.push(option);
+            }
         }
     }
 
@@ -9069,25 +9153,29 @@ fn casting_variant_choice_set(
 
 /// CR 601.2b + CR 601.2f-h: the menu entry for a prepared casting option: its
 /// method, face and mana cost, and the non-mana part of an alternative cost the
-/// option pays (Blitz's "Discard a card", Bestow's "Collect evidence 6"), read
-/// from the same authority payment charges (`alternative_cost_residual`), so the
-/// menu shows what the option will actually cost.
+/// option pays (Blitz's "Discard a card", Bestow's "Collect evidence 6", an
+/// escape instance's exile clause), read from the same authority payment
+/// charges (`alternative_cost_residual`), so the menu shows what the option
+/// will actually cost. `None` when that residual can't be read for the
+/// option's announced instance: the option is not offered.
 fn casting_variant_choice_option(
     player: PlayerId,
     candidate: &PreparedCastingVariant,
     face: CastingVariantFace,
-) -> CastingVariantChoiceOption {
-    CastingVariantChoiceOption {
+) -> Option<CastingVariantChoiceOption> {
+    let residual = casting_costs::alternative_cost_residual(
+        &candidate.transformed_state,
+        player,
+        candidate.prepared.object_id,
+        candidate.prepared.casting_variant,
+        candidate.prepared.alternative_cost_keyword.as_ref(),
+    )
+    .ok()?;
+    Some(CastingVariantChoiceOption {
         variant: candidate.prepared.casting_variant,
         face,
         mana_cost: candidate.prepared.mana_cost.clone(),
-        additional_cost: casting_costs::alternative_cost_residual(
-            &candidate.transformed_state,
-            player,
-            candidate.prepared.object_id,
-            candidate.prepared.casting_variant,
-        )
-        .map(|cost| {
+        additional_cost: residual.map(|cost| {
             resolved_cost_for_display(
                 &candidate.transformed_state,
                 player,
@@ -9100,7 +9188,8 @@ fn casting_variant_choice_option(
             .graveyard_authority
             .as_ref()
             .map(|resolution| resolution.authority().choice()),
-    }
+        alternative_cost_keyword: candidate.prepared.alternative_cost_keyword.clone(),
+    })
 }
 
 /// CR 601.2f-h: an option's non-mana cost with each life amount the engine can
@@ -9150,6 +9239,112 @@ pub fn current_casting_variant_choice_options(
     casting_variant_choice_set(state, player, object_id, None).options
 }
 
+/// CR 601.2b + CR 601.2f: the cast an unannounced `CastSpell` of `object_id`
+/// priced before casts announced a keyword instance: the casting method the
+/// preparation precedence picks, with each instance-elected method at its
+/// single-instance reader's instance (the latest applied grant). Read-only;
+/// AI reach prices its first, baseline pass from it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefaultCastElection {
+    pub variant: CastingVariant,
+    pub alternative_cost_keyword: Option<Keyword>,
+    pub mana_cost: ManaCost,
+}
+
+pub fn default_cast_election(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<DefaultCastElection> {
+    prepare_spell_cast_announced(
+        state,
+        player,
+        object_id,
+        None,
+        None,
+        None,
+        CastingMode::Actual,
+        None,
+        InstanceElection::BaseDefault,
+    )
+    .ok()
+    .map(|prepared| DefaultCastElection {
+        variant: prepared.casting_variant,
+        alternative_cost_keyword: prepared.alternative_cost_keyword,
+        mana_cost: prepared.mana_cost,
+    })
+}
+
+/// CR 601.2b: the casting option an unannounced `CastSpell` of `object_id` was
+/// routed through before casts announced a keyword instance — the sole legal
+/// option of the menu built with each instance-elected method at its
+/// single-instance reader's instance. `None` when that menu had no option (the
+/// plain prepared cast) or several (a menu the caster answered). Read-only; AI
+/// reach answers a menu the candidate cast now shows with it.
+pub fn base_auto_cast_option(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<CastingVariantChoiceOption> {
+    let candidates = casting_candidates(state, player, object_id)
+        .into_iter()
+        .filter(|candidate| {
+            let Some(keyword) = candidate.alternative_cost_keyword.as_ref() else {
+                return true;
+            };
+            super::keywords::default_keyword_instance(state, object_id, keyword.kind()).as_ref()
+                == Some(keyword)
+        })
+        .collect();
+    let mut options =
+        choice_set_from_candidates(state, player, object_id, candidates, None).options;
+    (options.len() == 1).then(|| options.remove(0))
+}
+
+/// CR 113.2c + CR 601.2b: the menu's only option when it names a keyword
+/// instance — the cast an unannounced `CastSpell` goes ahead with, no menu.
+fn sole_keyed_option(choices: &CastingVariantChoiceSet) -> Option<&CastingVariantChoiceOption> {
+    match choices.options.as_slice() {
+        [option] if option.alternative_cost_keyword.is_some() => Some(option),
+        _ => None,
+    }
+}
+
+/// CR 113.2c + CR 601.2b: prepare `option` for the instance it names, the way
+/// the cast announces it.
+fn prepare_keyed_option(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    option: &CastingVariantChoiceOption,
+) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_announced(
+        state,
+        player,
+        object_id,
+        Some(option.variant),
+        None,
+        None,
+        CastingMode::Actual,
+        None,
+        InstanceElection::Announced(option.alternative_cost_keyword.as_ref()),
+    )
+}
+
+/// CR 601.2b: two options that pay the same method, face, total and non-mana
+/// cost under the same authority are the same choice for the caster, whichever
+/// keyword instance stands for them.
+pub fn same_cast_option_but_instance(
+    a: &CastingVariantChoiceOption,
+    b: &CastingVariantChoiceOption,
+) -> bool {
+    a.variant == b.variant
+        && a.face == b.face
+        && a.mana_cost == b.mana_cost
+        && a.additional_cost == b.additional_cost
+        && a.authority == b.authority
+}
+
 /// Project an Evoke cast through the engine's cast-variant and zone-move
 /// authorities through its attempted battlefield entry.
 ///
@@ -9176,6 +9371,7 @@ pub fn project_evoke_entry_state(
         CastingVariant::Evoke,
         CastingMode::Display,
         None,
+        InstanceElection::Announced(None),
     )
     .ok()?;
     let mut events = Vec::new();
@@ -9209,6 +9405,9 @@ pub fn project_evoke_entry_state(
 struct CastingCandidate {
     variant: CastingVariant,
     announcement: Option<crate::types::game_state::AnnouncedGraveyardPermission>,
+    /// CR 113.2c + CR 601.2b: the keyword instance an instance-elected method
+    /// pays; one candidate per distinct instance.
+    alternative_cost_keyword: Option<Keyword>,
 }
 
 impl CastingCandidate {
@@ -9216,6 +9415,7 @@ impl CastingCandidate {
         Self {
             variant,
             announcement: None,
+            alternative_cost_keyword: None,
         }
     }
 
@@ -9226,7 +9426,20 @@ impl CastingCandidate {
         Self {
             variant,
             announcement: Some(announcement),
+            alternative_cost_keyword: None,
         }
+    }
+
+    fn keyed(variant: CastingVariant, keyword: Keyword) -> Self {
+        Self {
+            variant,
+            announcement: None,
+            alternative_cost_keyword: Some(keyword),
+        }
+    }
+
+    fn election(&self) -> InstanceElection<'_> {
+        InstanceElection::Announced(self.alternative_cost_keyword.as_ref())
     }
 }
 
@@ -9728,14 +9941,40 @@ fn casting_candidates(
         }
     }
 
-    let mut candidates: Vec<CastingCandidate> = candidates
-        .into_iter()
-        .map(CastingCandidate::plain)
-        .collect();
     let rest = candidates.split_off(graveyard_permission_index.min(candidates.len()));
+    let mut candidates = instance_candidates(state, object_id, candidates);
     candidates.extend(graveyard_permission_options);
-    candidates.extend(rest);
+    candidates.extend(instance_candidates(state, object_id, rest));
     candidates
+}
+
+/// CR 113.2c + CR 601.2b: one candidate per distinct keyword instance of an
+/// instance-elected method (each instance is its own alternative cost); every
+/// other method stays one plain candidate. An instance whose cost can't be
+/// read (an unparsed escape with no residual) offers nothing.
+fn instance_candidates(
+    state: &GameState,
+    object_id: ObjectId,
+    variants: Vec<CastingVariant>,
+) -> Vec<CastingCandidate> {
+    variants
+        .into_iter()
+        .flat_map(
+            |variant| match super::keywords::instance_elected_kind(variant) {
+                Some(kind) => super::keywords::effective_keyword_instances(state, object_id, kind)
+                    .into_iter()
+                    .filter(|keyword| match variant {
+                        CastingVariant::Escape => {
+                            super::keywords::escape_data_of(state, object_id, keyword).is_some()
+                        }
+                        _ => true,
+                    })
+                    .map(|keyword| CastingCandidate::keyed(variant, keyword))
+                    .collect(),
+                None => vec![CastingCandidate::plain(variant)],
+            },
+        )
+        .collect()
 }
 
 fn prepare_spell_cast_with_variant_override_inner(
@@ -9756,6 +9995,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         casting_permission_index_override,
         mode,
         None,
+        InstanceElection::Announced(None),
     )
 }
 
@@ -9763,6 +10003,7 @@ fn prepare_spell_cast_with_variant_override_inner(
 /// a specific graveyard permission (CR 601.2a + CR 601.2b; see
 /// `resolve_graveyard_authority`). `None` announces none: a sole usable
 /// permission is still found, and several are refused as ambiguous.
+/// `election` picks the keyword instance of an instance-elected method.
 #[allow(clippy::too_many_arguments)]
 fn prepare_spell_cast_announced(
     state: &GameState,
@@ -9773,6 +10014,7 @@ fn prepare_spell_cast_announced(
     casting_permission_index_override: Option<CastingPermissionIndex>,
     mode: CastingMode,
     announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
+    election: InstanceElection<'_>,
 ) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
         .objects
@@ -9792,17 +10034,29 @@ fn prepare_spell_cast_announced(
     // CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: Cards in graveyard with
     // graveyard-cast keywords.
     let graveyard_keywords_open = graveyard_keyword_routes_open(state, obj, player);
-    let has_escape = graveyard_keywords_open
+    // CR 118.9a + CR 608.2g: a cast bound to a resolution offer's grant pays that
+    // grant's cost. A graveyard keyword whose own alternative cost would be a
+    // second one (Flashback, Escape, Harmonize, Mayhem, Disturb) is not its
+    // route, so no instance of it is elected. Routes with no alternative cost of
+    // their own (Retrace, Jump-start, Aftermath) and exile routes (Suspend) keep
+    // their meaning.
+    let keyword_alternative_costs_open =
+        graveyard_keywords_open && casting_permission_index_override.is_none();
+    let has_escape = keyword_alternative_costs_open
         && super::keywords::object_has_effective_keyword_kind(
             state,
             object_id,
             KeywordKind::Escape,
         );
-    let has_mayhem = mayhem_castable_from_graveyard(state, player, object_id);
+    let has_mayhem = casting_permission_index_override.is_none()
+        && mayhem_castable_from_graveyard(state, player, object_id);
     // CR 601.2a + CR 601.3: A graveyard grant's own condition controls whose
     // turn permits the cast. The exact permission is resolved once the casting
-    // method is known (see `graveyard_authority`).
-    let graveyard_permission_route = obj.zone == Zone::Graveyard;
+    // method is known (see `graveyard_authority`). A cast bound to an indexed
+    // resolution permission (CR 608.2g) already has its authority, so no
+    // graveyard grant (Kess, Dissident Mage) is elected for it.
+    let graveyard_permission_route =
+        obj.zone == Zone::Graveyard && casting_permission_index_override.is_none();
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
     let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
     // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
@@ -10202,21 +10456,21 @@ fn prepare_spell_cast_announced(
     // harmonize whose cost equals the card's mana cost (Songcrafter Mage) is paid
     // correctly. Tap cost reduction is handled in
     // casting_costs::pay_and_push_adventure.
-    let harmonize_cost = if graveyard_keywords_open {
+    let harmonize_cost = if keyword_alternative_costs_open {
         super::keywords::effective_harmonize_cost(state, object_id)
     } else {
         None
     };
 
     // CR 702.34a: Flashback — use flashback cost when casting from graveyard.
-    let flashback_cost = if graveyard_keywords_open {
+    let flashback_cost = if keyword_alternative_costs_open {
         super::keywords::effective_flashback_cost(state, object_id)
     } else {
         None
     };
 
     // CR 702.146a: Disturb — use disturb cost when casting from graveyard.
-    let disturb_cost = if graveyard_keywords_open {
+    let disturb_cost = if keyword_alternative_costs_open {
         super::keywords::effective_disturb_cost(state, object_id)
     } else {
         None
@@ -10401,6 +10655,46 @@ fn prepare_spell_cast_announced(
         }
         _ => casting_variant,
     };
+    // CR 113.2c + CR 601.2b + CR 118.9a: a card with several distinct instances
+    // of the chosen method's keyword (Deep Analysis' printed flashback and
+    // Lier's granted one) has one alternative cost per instance, and the cast
+    // pays the one it announces. The election is bound here, once; the total
+    // cost is locked from it (CR 601.2f).
+    let alternative_cost_keyword = match (
+        super::keywords::instance_elected_kind(casting_variant),
+        election,
+    ) {
+        (Some(kind), InstanceElection::Announced(named)) => {
+            super::keywords::elect_alternative_cost_keyword(state, object_id, kind, named)?
+        }
+        (Some(kind), InstanceElection::BaseDefault) => {
+            super::keywords::default_keyword_instance(state, object_id, kind)
+        }
+        (None, InstanceElection::Announced(Some(_))) => {
+            return Err(EngineError::InvalidAction(
+                "This casting method has no keyword instance to announce".to_string(),
+            ));
+        }
+        (None, InstanceElection::Announced(None) | InstanceElection::BaseDefault) => None,
+    };
+    let (escape_cost, flashback_mana_cost, flashback_non_mana_cost) =
+        match (casting_variant, alternative_cost_keyword.as_ref()) {
+            (CastingVariant::Escape, Some(keyword)) => {
+                let (mana, _) = super::keywords::escape_data_of(state, object_id, keyword)
+                    .ok_or_else(|| {
+                        EngineError::ActionNotAllowed(
+                            "The announced escape cost can't be paid".to_string(),
+                        )
+                    })?;
+                (Some(mana), flashback_mana_cost, flashback_non_mana_cost)
+            }
+            (CastingVariant::Flashback, Some(keyword)) => {
+                let elected = super::keywords::flashback_cost_of(state, object_id, keyword);
+                let (mana, non_mana) = split_flashback_cost_components(elected.as_ref());
+                (escape_cost, mana, non_mana)
+            }
+            _ => (escape_cost, flashback_mana_cost, flashback_non_mana_cost),
+        };
     // CR 702.96a + CR 604.1: read the overload cost from effective keywords so a
     // granted Overload (CastWithKeyword) substitutes its cost, mirroring the
     // Evoke/Emerge effective-keyword cost reads below.
@@ -11103,6 +11397,7 @@ fn prepare_spell_cast_announced(
         origin_zone,
         payment_mode: CastPaymentMode::Auto,
         graveyard_authority,
+        alternative_cost_keyword,
     })
 }
 
@@ -17300,6 +17595,7 @@ pub fn handle_surge_cost_choice_with_payment_mode(
                 option.variant,
                 option.face,
                 None,
+                None,
                 payment_mode,
                 events,
             )
@@ -17592,6 +17888,7 @@ fn continue_cast_with_variant(
     variant: CastingVariant,
     face: CastingVariantFace,
     announcement: Option<&crate::types::game_state::AnnouncedGraveyardPermission>,
+    alternative_cost_keyword: Option<&Keyword>,
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -17603,6 +17900,7 @@ fn continue_cast_with_variant(
         face,
         CastingMode::Actual,
         announcement,
+        InstanceElection::Announced(alternative_cost_keyword),
     )?;
     continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
 }
@@ -17713,6 +18011,7 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             .authority
             .as_ref()
             .map(|authority| &authority.announcement),
+        InstanceElection::Announced(option.alternative_cost_keyword.as_ref()),
     )?;
     // CR 601.2a: prepared first, so an announcement the resolver refuses
     // (a stale or shared-slot grant) says why.
@@ -17726,7 +18025,7 @@ pub fn handle_casting_variant_choice_with_payment_mode(
         ));
     }
     let fresh = casting_variant_choice_option(player, &candidate, option.face);
-    if fresh != *option
+    if fresh.as_ref() != Some(option)
         || !can_cast_prepared_now_with_probe(
             &candidate.transformed_state,
             player,
@@ -17738,6 +18037,24 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             "Chosen cast variant is no longer legal".to_string(),
         ));
     }
+    // CR 601.2g-h: the answer elects the option this cast pays, so an automatic
+    // mode is classified from that option's prepared cost under its payment
+    // terms, as a cast offered with one route is when offered. An explicit mode
+    // is kept.
+    let payment_mode = match payment_mode {
+        CastPaymentMode::Auto => {
+            let options_state = &candidate.transformed_state;
+            let terms = prepared_payment_terms_state(options_state, &candidate.prepared);
+            payment_mode_for_prepared_spell_cost(
+                terms.as_ref().unwrap_or(options_state),
+                player,
+                object_id,
+                &candidate.prepared.mana_cost,
+                &super::mana_sources::activatable_mana_source_selections(state, player),
+            )
+        }
+        CastPaymentMode::AutoExceptSacrificialMana | CastPaymentMode::Manual => payment_mode,
+    };
     continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
 }
 
@@ -19062,6 +19379,7 @@ pub fn handle_cast_spell_with_payment_mode(
                     .authority
                     .as_ref()
                     .map(|authority| &authority.announcement),
+                option.alternative_cost_keyword.as_ref(),
                 payment_mode,
                 events,
             );
@@ -19097,6 +19415,7 @@ pub fn handle_cast_spell_with_payment_mode(
             option.variant,
             option.face,
             None,
+            None,
             payment_mode,
             events,
         );
@@ -19120,6 +19439,7 @@ pub fn handle_cast_spell_with_payment_mode(
             CastingVariantFace::Current,
             CastingMode::Actual,
             None,
+            InstanceElection::Announced(None),
         )
         .ok()
     })
@@ -19168,6 +19488,7 @@ pub fn handle_cast_spell_with_payment_mode(
             object_id,
             variant,
             face,
+            None,
             None,
             payment_mode,
             events,
@@ -20035,6 +20356,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         CastingVariant::Prototype,
                         CastingMode::Display,
                         None,
+                        InstanceElection::Announced(None),
                     )
                     .is_ok_and(|projected| {
                         can_cast_prepared_now_with_probe(
@@ -20253,6 +20575,7 @@ pub fn handle_permanent_type_slot_choice_with_payment_mode(
         None,
         CastingMode::Actual,
         announcement.as_ref(),
+        InstanceElection::Announced(None),
     )?;
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
@@ -20395,6 +20718,7 @@ fn pending_cast_from_prepared(
     );
     pending.base_cost = Some(prepared.base_mana_cost.clone());
     pending.casting_variant = prepared.casting_variant;
+    pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
     pending.casting_permission_index = prepared.casting_permission_index;
     pending.cast_timing_permission = prepared.cast_timing_permission;
     pending.distribute = prepared
@@ -20483,6 +20807,7 @@ fn continue_with_prepared(
                     ability_def.distribute.clone(),
                     prepared.origin_zone,
                     prepared.payment_mode,
+                    prepared.alternative_cost_keyword.clone(),
                     events,
                 );
             }
@@ -20508,6 +20833,7 @@ fn continue_with_prepared(
             );
             pending_modal.base_cost = Some(prepared.base_mana_cost.clone());
             pending_modal.casting_variant = prepared.casting_variant;
+            pending_modal.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
             pending_modal.casting_permission_index = prepared.casting_permission_index;
             pending_modal.cast_timing_permission = prepared.cast_timing_permission;
             pending_modal.distribute = ability_def.distribute.clone();
@@ -20624,6 +20950,7 @@ fn continue_with_prepared(
                     prepared.cast_timing_permission,
                     prepared.origin_zone,
                     prepared.payment_mode,
+                    prepared.alternative_cost_keyword.clone(),
                     events,
                 );
             } else {
@@ -20707,6 +21034,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
+                prepared.alternative_cost_keyword.clone(),
                 events,
             );
         } else {
@@ -20746,6 +21074,7 @@ fn continue_with_prepared(
             prepared.payment_mode,
             player,
             splice_eligible,
+            prepared.alternative_cost_keyword.clone(),
         ));
     }
 
@@ -20798,6 +21127,7 @@ fn continue_with_prepared(
                     .and_then(|a| a.distribute.clone()),
                 prepared.origin_zone,
                 prepared.payment_mode,
+                prepared.alternative_cost_keyword.clone(),
                 events,
             );
         }
@@ -20810,6 +21140,7 @@ fn continue_with_prepared(
             );
             pending_x.base_cost = Some(prepared.base_mana_cost.clone());
             pending_x.casting_variant = prepared.casting_variant;
+            pending_x.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
             pending_x.casting_permission_index = prepared.casting_permission_index;
             pending_x.cast_timing_permission = prepared.cast_timing_permission;
             pending_x.distribute = prepared
@@ -20854,6 +21185,7 @@ fn continue_with_prepared(
                 .and_then(|a| a.distribute.clone()),
             prepared.origin_zone,
             prepared.payment_mode,
+            prepared.alternative_cost_keyword.clone(),
             events,
         );
     } else if (requires_additional_cost_declaration_before_targets(&resolved)
@@ -20883,6 +21215,7 @@ fn continue_with_prepared(
                 .and_then(|a| a.distribute.clone()),
             prepared.origin_zone,
             prepared.payment_mode,
+            prepared.alternative_cost_keyword.clone(),
             events,
         );
     }
@@ -20924,6 +21257,7 @@ fn continue_with_prepared(
                 );
                 pending.base_cost = Some(prepared.base_mana_cost.clone());
                 pending.casting_variant = prepared.casting_variant;
+                pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
                 pending.casting_permission_index = prepared.casting_permission_index;
                 pending.cast_timing_permission = prepared.cast_timing_permission;
                 pending.distribute = prepared
@@ -20968,6 +21302,7 @@ fn continue_with_prepared(
                     .and_then(|a| a.distribute.clone()),
                 prepared.origin_zone,
                 prepared.payment_mode,
+                prepared.alternative_cost_keyword.clone(),
                 events,
             );
         }
@@ -20996,6 +21331,7 @@ fn continue_with_prepared(
                     .and_then(|a| a.distribute.clone()),
                 prepared.origin_zone,
                 prepared.payment_mode,
+                prepared.alternative_cost_keyword.clone(),
                 events,
             );
         }
@@ -21035,6 +21371,7 @@ fn continue_with_prepared(
                         .and_then(|a| a.distribute.clone()),
                     prepared.origin_zone,
                     prepared.payment_mode,
+                    prepared.alternative_cost_keyword.clone(),
                     events,
                 );
             } else {
@@ -21057,6 +21394,7 @@ fn continue_with_prepared(
                         .and_then(|a| a.distribute.clone()),
                     prepared.origin_zone,
                     prepared.payment_mode,
+                    prepared.alternative_cost_keyword.clone(),
                     events,
                 );
             }
@@ -21099,6 +21437,7 @@ fn continue_with_prepared(
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
                 prepared.payment_mode,
+                prepared.alternative_cost_keyword.clone(),
                 events,
             );
         }
@@ -21134,6 +21473,7 @@ fn continue_with_prepared(
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,
+        prepared.alternative_cost_keyword.clone(),
         events,
     )
 }
@@ -21266,6 +21606,7 @@ fn continue_with_no_ability(
         prepared.cast_timing_permission,
         prepared.origin_zone,
         prepared.payment_mode,
+        prepared.alternative_cost_keyword.clone(),
         events,
     )
 }
@@ -21404,7 +21745,12 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         return Ok(Vec::new());
     }
 
-    let prepared = prepare_spell_cast(state, player, object_id)?;
+    // CR 113.2c + CR 601.2b: a sole option that names a keyword instance is
+    // prepared for that instance, exactly as the cast announces it.
+    let prepared = match sole_keyed_option(&choices) {
+        Some(option) => prepare_keyed_option(state, player, object_id, option)?,
+        None => prepare_spell_cast(state, player, object_id)?,
+    };
     // CR 601.2b: Modal choices are announced before targets, so a modal spell
     // has no single target-slot preview until modes are chosen.
     if prepared.modal.is_some() {
@@ -21986,6 +22332,17 @@ fn castable_spell_verdict_with_probe(
             });
         }
         let choices = casting_variant_choice_set(state, player, object_id, probe);
+        // CR 113.2c + CR 601.2g-h: a sole keyed option is the cast that goes
+        // ahead without a menu, so its prepared cost and terms classify the
+        // payment mode (a sacrificial source keeps its explicit choice).
+        if let Some(prepared) = sole_keyed_option(&choices)
+            .and_then(|option| prepare_keyed_option(state, player, object_id, option).ok())
+        {
+            return Some(CastableSpellVerdict {
+                payment_state: prepared_payment_terms_state(state, &prepared),
+                prepared_cost: Some(prepared.mana_cost),
+            });
+        }
         return (!choices.options.is_empty()).then_some(CastableSpellVerdict {
             payment_state: None,
             prepared_cost: None,
@@ -22270,7 +22627,7 @@ fn can_cast_prepared_now_with_probe(
     // (exile) cost — usually exiling other graveyard cards, plus any battlefield
     // exile clause (Lunar Hatchling's "Exile a land you control").
     if prepared.casting_variant == CastingVariant::Escape
-        && !can_pay_escape_additional_cost(state, player, prepared.object_id)
+        && !escape_instance_residual_payable(state, player, prepared)
     {
         return false;
     }
@@ -22351,14 +22708,21 @@ fn can_cast_prepared_now_with_probe(
 
     // CR 702.34a + CR 118.3 + CR 601.2h: Flashback's alternative cost must be
     // payable in full. Pre-check every non-mana component so legal actions do
-    // not offer a cast that the payment pipeline must reject later.
+    // not offer a cast that the payment pipeline must reject later. The
+    // components are the announced instance's (CR 113.2c + CR 601.2b).
     if prepared.casting_variant == CastingVariant::Flashback {
-        if let Some(FlashbackCost::NonMana(ref cost)) =
-            super::keywords::effective_flashback_cost(state, prepared.object_id)
-        {
-            if !cost.is_payable_for_spell(state, player, prepared.object_id) {
+        match super::keywords::bound_flashback_cost(
+            state,
+            prepared.object_id,
+            prepared.alternative_cost_keyword.as_ref(),
+        ) {
+            Ok(Some(FlashbackCost::NonMana(ref cost)))
+                if !cost.is_payable_for_spell(state, player, prepared.object_id) =>
+            {
                 return false;
             }
+            Err(_) => return false,
+            Ok(_) => {}
         }
     }
 
@@ -22485,6 +22849,7 @@ fn can_cast_prepared_now_with_probe(
         );
         pending.base_cost = Some(prepared.base_mana_cost.clone());
         pending.casting_variant = prepared.casting_variant;
+        pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
         pending.cast_timing_permission = prepared.cast_timing_permission;
         pending.origin_zone = prepared.origin_zone;
         pending.payment_mode = prepared.payment_mode;
@@ -22736,6 +23101,7 @@ fn target_dependent_reduction_makes_payable(
             );
             pending.base_cost = Some(prepared.base_mana_cost.clone());
             pending.casting_variant = prepared.casting_variant;
+            pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
             if accept_defiler {
                 pending
                     .accepted_cost_reductions

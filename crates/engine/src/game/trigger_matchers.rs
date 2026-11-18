@@ -4327,6 +4327,15 @@ pub(super) fn match_revealed(
 /// was tapped for mana (`mana_source`) match the trigger's `valid_card` filter
 /// (or, absent a filter, equal the trigger source itself)?
 ///
+/// CR 106.12a + CR 608.2h: Evaluated with LKI fallback
+/// (`valid_card_matches_with_lki`). A "tapped for mana" trigger triggers when
+/// the mana ability resolves and produces mana (CR 106.12a), and the mana
+/// source may already have left the battlefield as part of paying that
+/// ability's activation cost before then (e.g., Tinder Farm sacrificed as
+/// cost under Yavimaya and Vernal Bloom), so its characteristics are read
+/// through last-known information (CR 608.2h), where the layer state the
+/// departure snapshot captured still applies.
+///
 /// Extracted as a standalone authority so the aura mana-refund probe
 /// (`mana_sources::aura_taps_for_mana_sources_for_land`) can ask the same
 /// question without synthesizing a `GameEvent`.
@@ -4337,7 +4346,7 @@ pub(crate) fn taps_for_mana_card_matches(
     source_context: &TriggerSourceContext,
 ) -> bool {
     if trigger.valid_card.is_some() {
-        valid_card_matches(trigger, state, mana_source, source_context)
+        valid_card_matches_with_lki(trigger, state, mana_source, source_context)
     } else {
         mana_source == source_event_subject_id(source_context)
     }

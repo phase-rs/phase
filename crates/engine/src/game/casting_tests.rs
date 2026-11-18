@@ -2730,6 +2730,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
         CastingVariantFace::Current,
         CastingMode::Actual,
         None,
+        super::super::casting::InstanceElection::Announced(None),
     )
     .expect("ordinary casts must accept their explicit Current face");
     assert_eq!(current.prepared.casting_variant, CastingVariant::Normal);
@@ -2744,6 +2745,7 @@ fn ordinary_cast_preparation_accepts_only_current_face() {
                 face,
                 CastingMode::Actual,
                 None,
+                super::super::casting::InstanceElection::Announced(None),
             )
             .is_err(),
             "ordinary casts must reject the split-only {face:?} selector"
@@ -14973,6 +14975,7 @@ fn x_cost_alt_cost_max_and_charge_derive_from_alt_base() {
         spell,
         CastingVariant::Overload,
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         None,
         CastPaymentMode::Auto,
         &mut events,
@@ -32684,6 +32687,7 @@ fn finalize_refuses_a_per_type_graveyard_authority_without_a_slot() {
         None,
         CastingMode::Actual,
         None,
+        super::super::casting::InstanceElection::Announced(None),
     )
     .expect("the slotted cast prepares");
     let mut prepared = slotted;
@@ -50616,6 +50620,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
         },
         crate::types::game_state::CastingVariantFace::Current,
         None,
+        None,
         CastPaymentMode::Auto,
         &mut denied_events,
     );
@@ -50633,6 +50638,7 @@ fn exile_static_any_color_is_bound_to_elected_source() {
             frequency: CastFrequency::Unlimited,
         },
         crate::types::game_state::CastingVariantFace::Current,
+        None,
         None,
         CastPaymentMode::Auto,
         &mut allowed_events,
@@ -58006,6 +58012,34 @@ fn resolution_face_projection_limits_aftermath_half_to_graveyard() {
             "the aftermath half must be legal only from the graveyard, not {zone:?}"
         );
     }
+}
+
+/// CR 702.127a + CR 608.2g: a resolution cast of an aftermath half from the
+/// graveyard stays an Aftermath cast, so a bounce exiles it rather than
+/// returning it to hand.
+#[test]
+fn resolution_cast_aftermath_half_exiles_when_bounced() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Instant, CoreType::Sorcery);
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, spell, Zone::Graveyard, &mut events);
+    mark_resolution_test_back_face_as_aftermath(&mut state, spell);
+    let request =
+        resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)));
+    initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut events)
+        .expect("the aftermath half is cast during resolution");
+    let bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::StackSpell,
+            destination: None,
+            selection: crate::types::ability::BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(spell)],
+        ObjectId(100),
+        PlayerId(1),
+    );
+    crate::game::effects::bounce::resolve(&mut state, &bounce, &mut events).expect("bounce");
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
 }
 
 // --- Conduit of Worlds line-2 end-to-end (Steps 5/6/7) --------------------
