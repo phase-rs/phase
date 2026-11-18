@@ -3179,26 +3179,32 @@ fn a_wither_leg_pauses_on_its_counters_inside_a_resumed_combat_batch() {
                 "{label}"
             );
             assert_eq!(minus_counters(&runner, constrictor), 2, "{label}");
+            // The leg's damage and its lifelink gain are both emitted by the third answer.
+            let third_answer = combat.answered_at[2];
             let ripper_leg = dealt(&combat.events, ripper, constrictor);
             assert_eq!(ripper_leg.len(), 1, "{label}");
             assert_eq!(ripper_leg[0].1, 2, "{label}");
+            assert!(ripper_leg[0].0 >= third_answer, "{label}");
             assert_eq!(
                 damage_records(&runner, ripper, constrictor),
                 vec![2],
                 "{label}"
             );
             assert_eq!(records_from(&runner, ripper), 1, "{label}");
-            let gains: Vec<i32> = combat
+            let gains: Vec<(usize, i32)> = combat
                 .events
                 .iter()
-                .filter_map(|e| match e {
+                .enumerate()
+                .filter_map(|(index, e)| match e {
                     GameEvent::LifeChanged {
                         player_id, amount, ..
-                    } if *player_id == P0 => Some(*amount),
+                    } if *player_id == P0 => Some((index, *amount)),
                     _ => None,
                 })
                 .collect();
-            assert_eq!(gains, vec![2], "{label}");
+            assert_eq!(gains.len(), 1, "{label}");
+            assert_eq!(gains[0].1, 2, "{label}");
+            assert!(gains[0].0 >= third_answer, "{label}");
             assert_eq!(runner.state().players[0].life, 22, "{label}");
             assert_eq!(combat.choosers, vec![P0, P0, P1], "{label}");
             assert_eq!(
@@ -3336,11 +3342,13 @@ pub(super) fn faithmender_and_leyline(scenario: &mut GameScenario) -> ObjectId {
 }
 
 /// What one combat showed: its events, and the candidate sources of each CR 616.1 prompt it
-/// answered, with the player each was asked of.
+/// answered, with the player each was asked of and the number of events emitted before its
+/// answer.
 pub(super) struct Combat {
     pub(super) events: Vec<GameEvent>,
     pub(super) prompts: Vec<Vec<ObjectId>>,
     pub(super) choosers: Vec<PlayerId>,
+    pub(super) answered_at: Vec<usize>,
 }
 
 /// Drive one combat from the precombat main phase to the end of combat: P0 attacks P1 with
@@ -3391,6 +3399,7 @@ pub(super) fn fight_driving(
         events: Vec::new(),
         prompts: Vec::new(),
         choosers: Vec::new(),
+        answered_at: Vec::new(),
     };
     let (mut attacked, mut blocked) = (false, false);
     for _ in 0..400 {
@@ -3459,6 +3468,7 @@ pub(super) fn fight_driving(
                     .prompts
                     .push(candidates.iter().map(|c| c.source_id).collect());
                 combat.choosers.push(*player);
+                combat.answered_at.push(combat.events.len());
                 None
             }
             // Any other prompt the combat raises (a zone choice, a named choice) is `answer`'s.
