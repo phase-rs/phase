@@ -10398,10 +10398,20 @@ enum StructuralFeature {
     /// choice of its own: its "may" (Battletide Alchemist: "you may prevent X of that damage"),
     /// or a choice its action or rider makes (Dralnu, Lich Lord: "sacrifice that many permanents
     /// instead"; Channel Harm: "you may have Channel Harm deal that much damage to target
-    /// creature"). Combat damage can't pause for a player's answer (Command Zone #140): the combat
-    /// batch answers it (`replacement::settle_combat_rider_pauses`) or skips the source's damage.
-    /// The card parses, and outside combat the choice is asked, so nothing else in coverage can
-    /// see it.
+    /// creature"). A combat damage leg asks these: its CR 616.1 order and "may"
+    /// (`CombatDamageReplacementStep::NeedsChoice`), and a prompt raised by the leg's own rider or
+    /// substitute (`CombatDamageReplacementStep::ContinuationPaused`). Two drains still settle a
+    /// rider's choices inside the combat batch, in the player's place
+    /// (`replacement::drain_combat_damage_rider` → `settle_combat_rider_pauses`): the aggregate
+    /// prevention-rider drain after combat damage (`combat_damage::fire_combat_prevention_riders`,
+    /// CR 615.5: Channel Harm's rider), and the drain of an earlier rider inside a leg, ahead of a
+    /// damage substitution (`replacement::stash_damage_substitute`).
+    ///
+    /// The marker classifies cards conservatively: it is emitted for every combat-reachable damage
+    /// replacement or prevention rider that asks a choice, whichever path runs it, so a card whose
+    /// choice is asked only at the leg (Dralnu's sacrifice, Battletide Alchemist's "may") may still
+    /// carry it. Narrowing it to the two in-batch drains is Command Zone #267. The card parses,
+    /// and outside combat the choice is asked, so nothing else in coverage can see it.
     DamageReplacementChoiceUnaskedInCombat,
     /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement
     /// `replacement::is_damage_substitution` selects: Phytohydra, Force Bubble, Nefarious Lich,
