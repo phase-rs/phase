@@ -127,9 +127,12 @@ describe("ChoiceModal layout", () => {
     cardImage.src = CARD_ART;
     rerender(choiceModal({ layout: "columns" }));
 
-    // The art band lands at the top of the same card column, and nothing else moves.
+    // The art band lands at the top of the same card column, still in columns,
+    // and nothing else moves.
     const art = document.querySelector(`img[src="${CARD_ART}"]`);
     expect(art).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveClass("max-w-3xl");
+    expect(columns).toHaveClass("grid", "grid-cols-2");
     expect(cardColumn.firstElementChild).toBe(art?.parentElement);
     expect(screen.queryByRole("img", { name: CARD_NAME })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Yes" }).parentElement).toBe(actionRow);

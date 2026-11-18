@@ -343,6 +343,8 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
   it("puts the loaded card art in the left column, beside the actions and the remember toggles", () => {
     cardImage.src = RHYSTIC_STUDY_ART;
     setScreen(844, 390);
+    // Reach guard: the screen above is the one the layout keys on.
+    expect(window.matchMedia(SHORT_LANDSCAPE_QUERY).matches).toBe(true);
 
     renderRhysticStudy();
 
