@@ -1417,7 +1417,6 @@ pub fn resolve(
     } else {
         targeted_objects
     };
-    eprintln!("DEBUG ChangeZone Exile: ability.source_id={:?}, targeted_objects={:?}, ability.targets={:?}, target_filter={:?}", ability.source_id, targeted_objects, ability.targets, target_filter);
 
     // CR 614.12: the event's effect-carried entry modifications, resolved per
     // member by `resolve_change_zone_member_entry` before any member moves.

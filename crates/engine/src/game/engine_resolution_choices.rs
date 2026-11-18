@@ -46,37 +46,12 @@ use crate::types::proposed_event::TokenAttackRequest;
 /// untargeted `TargetOnly` chooser, whose pick is the whole choice (CR 115.10a).
 /// A `Stack`-timed `TargetOnly` is an ordinary wrapper and keeps the forward.
 fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
-    use crate::types::ability::{
-        Effect, TargetChoiceTiming, TargetFilter, ZoneChoiceCandidateSource,
-    };
-    let result = !matches!(
+    use crate::types::ability::{Effect, TargetChoiceTiming};
+    !matches!(
         chain.effect,
         Effect::PutCounter { .. } | Effect::ChooseCounterKind { .. }
     ) && !(matches!(chain.effect, Effect::TargetOnly { .. })
         && chain.target_choice_timing == TargetChoiceTiming::Resolution)
-    // Legacy candidate source (anaphoric "those cards" from a parent RevealHand/
-    // ChooseFromZone) is a simple choose-N, not a partition — only the chosen
-    // cards are forwarded to the sub-ability via ParentTarget; unchosen cards
-    // remain in their original zone (CR 608.2c).
-    && !matches!(
-        chain.effect,
-        Effect::ChooseFromZone {
-            candidate_source: ZoneChoiceCandidateSource::Legacy,
-            ..
-        }
-    )
-    // A ChangeZone (Exile/PutIntoHand/etc.) with ParentTarget only acts on the
-    // chosen cards from a preceding ChooseFromZone. It is not a partition
-    // effect — the unchosen cards are not "the rest" to be moved elsewhere.
-    && !matches!(
-        chain.effect,
-        Effect::ChangeZone { target: TargetFilter::ParentTarget, .. }
-    );
-    eprintln!(
-        "DEBUG continuation_forwards_unchosen_complement: effect={:?}, result={}",
-        chain.effect, result
-    );
-    result
 }
 
 /// CR 115.1a + CR 601.2c + CR 702.47d: Dig's selected result cannot replace
@@ -6374,11 +6349,6 @@ pub(super) fn handle_resolution_choice(
                     "Selected cards do not satisfy the tracked-set choice constraint".to_string(),
                 ));
             }
-
-            eprintln!(
-                "DEBUG ChooseFromZoneChoice: chosen={:?}, cards={:?}, count={}, up_to={}",
-                chosen, cards, count, up_to
-            );
 
             if matches!(reciprocal_role, Some(ReciprocalZoneChoiceRole::Produce)) {
                 let first = *chosen.first().ok_or_else(|| {

@@ -4713,44 +4713,43 @@ fn parse_hand_reveal_target_and_card_filter(
     // CR 107.1c + CR 701.20a: "any number of [type] cards in your hand" lets the
     // player choose which matching cards (zero or more) to reveal; "all [type]
     // cards" / "each [type] card" keep the historical single post-reveal choice.
-    if let Ok((after_quantifier, cardinality)) = alt((
+    if let Ok((after_quantifier, (cardinality, noun_marker, noun_in, noun_from))) = alt((
         value(
-            ObjectSelectionCardinality::AnyNumber,
+            (
+                ObjectSelectionCardinality::AnyNumber,
+                " cards",
+                " cards in ",
+                " cards from ",
+            ),
             tag::<_, _, OracleError<'_>>("any number of "),
         ),
-        value(ObjectSelectionCardinality::SINGLE, tag("all ")),
-        value(ObjectSelectionCardinality::SINGLE, tag("each ")),
+        value(
+            (
+                ObjectSelectionCardinality::SINGLE,
+                " cards",
+                " cards in ",
+                " cards from ",
+            ),
+            tag("all "),
+        ),
+        value(
+            (
+                ObjectSelectionCardinality::SINGLE,
+                " card",
+                " card in ",
+                " card from ",
+            ),
+            tag("each "),
+        ),
     ))
     .parse(after_reveal_lower)
     {
-        let (hand_phrase, descriptor) = if cardinality == ObjectSelectionCardinality::AnyNumber
-            || after_quantifier.starts_with("all ")
-        {
-            // "any number of <filter> cards in/from" or "all <filter> cards in/from"
-            let Ok((hand_phrase, descriptor)) = terminated(
-                take_until::<_, _, OracleError<'_>>(" cards"),
-                alt((
-                    tag::<_, _, OracleError<'_>>(" cards in "),
-                    tag(" cards from "),
-                )),
-            )
-            .parse(after_quantifier) else {
-                return (TargetFilter::Any, TargetFilter::None, cardinality);
-            };
-            (hand_phrase, descriptor)
-        } else {
-            // "each <filter> card in/from"
-            let Ok((hand_phrase, descriptor)) = terminated(
-                take_until::<_, _, OracleError<'_>>(" card"),
-                alt((
-                    tag::<_, _, OracleError<'_>>(" card in "),
-                    tag(" card from "),
-                )),
-            )
-            .parse(after_quantifier) else {
-                return (TargetFilter::Any, TargetFilter::None, cardinality);
-            };
-            (hand_phrase, descriptor)
+        let Ok((hand_phrase, descriptor)) = terminated(
+            take_until::<_, _, OracleError<'_>>(noun_marker),
+            alt((tag::<_, _, OracleError<'_>>(noun_in), tag(noun_from))),
+        )
+        .parse(after_quantifier) else {
+            return (TargetFilter::Any, TargetFilter::None, cardinality);
         };
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)
@@ -4761,7 +4760,9 @@ fn parse_hand_reveal_target_and_card_filter(
         let singular = format!("{} card", descriptor.trim());
         let (filter, rem) =
             parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
-        if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
+        if rem.trim().is_empty()
+            && matches!(filter, TargetFilter::Typed(_) | TargetFilter::Or { .. })
+        {
             return (target, filter, cardinality);
         }
         return (target, TargetFilter::None, cardinality);
@@ -31602,16 +31603,83 @@ mod tests {
     /// is a whole-hand reveal restricted to a typed filter, not an unfiltered one.
     #[test]
     fn parse_hand_reveal_each_filtered_card() {
-        let input = "reveals each nonland card in their hand";
-        let lower = input.to_lowercase();
-        let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
-        let Some(HandRevealImperativeAst::RevealAll { card_filter, .. }) = result else {
-            panic!("{input}: expected RevealAll, got {result:?}");
-        };
-        assert!(
-            matches!(card_filter, TargetFilter::Typed(_)),
-            "expected typed nonland filter, got {card_filter:?}"
-        );
+        for input in [
+            "reveals each nonland card in their hand",
+            "reveals each nonland card from their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::SINGLE);
+            assert!(
+                matches!(card_filter, TargetFilter::Typed(_)),
+                "{input}: expected typed nonland filter, got {card_filter:?}"
+            );
+        }
+    }
+
+    /// CR 701.20a: "reveals all nonland cards in their hand" (Thought Partition, Juggernaut Peddler)
+    /// and "reveals all creature and land cards in their hand" (Boareskyr Tollkeeper)
+    /// retain the typed filter.
+    #[test]
+    fn parse_hand_reveal_all_filtered_cards() {
+        for input in [
+            "reveals all nonland cards in their hand",
+            "reveals all nonland cards from their hand",
+            "reveals all creature and land cards in their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::SINGLE);
+            assert!(
+                matches!(
+                    card_filter,
+                    TargetFilter::Typed(_) | TargetFilter::Or { .. }
+                ),
+                "{input}: expected typed or disjunctive filter, got {card_filter:?}"
+            );
+        }
+    }
+
+    /// CR 107.1c + CR 701.20a: "any number of" preserves ObjectSelectionCardinality::AnyNumber
+    /// and the typed filter.
+    #[test]
+    fn parse_hand_reveal_any_number_filtered_cards() {
+        for input in [
+            "reveals any number of creature cards from their hand",
+            "reveals any number of nonland cards in their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::AnyNumber);
+            assert!(
+                matches!(card_filter, TargetFilter::Typed(_)),
+                "{input}: expected typed filter, got {card_filter:?}"
+            );
+        }
     }
 
     /// CR 107.1: Bare-ref subsumption regression — "equal to the number of
