@@ -2,6 +2,12 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CardArtFallback } from "../CardArtFallback.tsx";
+import { CardBackFallback } from "../CardBackFallback.tsx";
+
+// The card back renders its fallback div only while it has no image.
+vi.mock("../../../hooks/useCardImage.ts", () => ({
+  useCardBackImage: () => ({ src: null, isLoading: false }),
+}));
 
 // Regression tests for #11008: the mobile preview's artless tile offers a
 // one-tap reload, the tap never reaches the preview around it, and its text
@@ -49,14 +55,38 @@ describe("CardArtFallback reload", () => {
     expect(onSurfaceClick).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the button outside the image role, so assistive tech can reach it", () => {
+  // An `img` role makes everything inside it presentational, so a screen
+  // reader would read neither the rules text nor the button inside it.
+  it("keeps the rules text and the button outside the image role, so assistive tech reads and reaches them", () => {
     render(
       <CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} variant="preview" className="h-96 w-72" onReload={vi.fn()} />,
     );
 
-    const tile = screen.getByRole("img", { name: CARD_NAME });
-    expect(tile).toHaveTextContent("less to cast.");
-    expect(tile).not.toContainElement(screen.getByRole("button", { name: RELOAD }));
+    // Reach guard: the tile names itself by its image role.
+    expect(screen.getByRole("img", { name: CARD_NAME })).toBeInTheDocument();
+    const rules = screen.getByText(/less to cast\./);
+    expect(rules.closest("[role='img']")).toBeNull();
+    expect(screen.getByRole("button", { name: RELOAD }).closest("[role='img']")).toBeNull();
+  });
+
+  // The zone-viewer and card-choice strips size card faces by `data-card-face`
+  // (index.css). happy-dom applies no CSS, so where the hook sits is pinned by
+  // attribute: on the tile root, never on the name line inside it.
+  it("marks the tile root, not its name line, as the card face the strips size", () => {
+    const { container } = render(
+      <CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} variant="preview" className="h-96 w-72" onReload={vi.fn()} />,
+    );
+
+    const name = screen.getByRole("img", { name: CARD_NAME });
+    expect(container.querySelectorAll("[data-card-face]")).toHaveLength(1);
+    expect(container.firstElementChild).toHaveAttribute("data-card-face");
+    expect(name).not.toHaveAttribute("data-card-face");
+  });
+
+  it("marks the card back's fallback as a card face the strips size too", () => {
+    render(<CardBackFallback className="h-40 w-28" />);
+
+    expect(screen.getByRole("img", { name: "Card back" })).toHaveAttribute("data-card-face");
   });
 
   it("draws no button without a reload", () => {
@@ -69,16 +99,16 @@ describe("CardArtFallback reload", () => {
   // happy-dom applies no CSS, so the text size is pinned by class.
   it("sets the preview tile's name and rules text larger than a board tile's", () => {
     const { rerender } = render(<CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} className="h-40 w-28" />);
-    // The tile's text is its name, then its rules text.
-    const boardText = screen.getByRole("img", { name: CARD_NAME });
-    expect(boardText.firstElementChild).toHaveClass("text-xs");
-    expect(boardText.lastElementChild).toHaveClass("text-[10px]");
-    expect(boardText.lastElementChild).toHaveTextContent("less to cast.");
+    // The tile's name carries its image role; its rules text follows it.
+    const boardName = screen.getByRole("img", { name: CARD_NAME });
+    expect(boardName).toHaveClass("text-xs");
+    expect(boardName.nextElementSibling).toHaveClass("text-[10px]");
+    expect(boardName.nextElementSibling).toHaveTextContent("less to cast.");
 
     rerender(<CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} variant="preview" className="h-96 w-72" />);
-    const previewText = screen.getByRole("img", { name: CARD_NAME });
-    expect(previewText.firstElementChild).toHaveClass("text-base");
-    expect(previewText.lastElementChild).toHaveClass("text-sm");
-    expect(previewText.lastElementChild).toHaveTextContent("less to cast.");
+    const previewName = screen.getByRole("img", { name: CARD_NAME });
+    expect(previewName).toHaveClass("text-base");
+    expect(previewName.nextElementSibling).toHaveClass("text-sm");
+    expect(previewName.nextElementSibling).toHaveTextContent("less to cast.");
   });
 });

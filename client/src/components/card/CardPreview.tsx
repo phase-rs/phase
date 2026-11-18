@@ -494,7 +494,9 @@ function CardPreviewInner({
   // stays readable while its art is missing, and names the card in the same
   // language. As in `CardImage`, the lookup waits until the tile shows. Without
   // a game object the front face is already looked up, and a token carries its
-  // own rules text.
+  // own rules text. The preview that follows a finger held on the hand takes no
+  // taps and closes when the finger lifts, so it keeps its name-only
+  // placeholder; the hand drawer's modal preview carries the text and reload.
   const showsMobileArtFallback = missingArt != null && isMobile && !handPreview && !suppressArtLookup;
   const objectFallbackFace = useEngineCardData(
     showsMobileArtFallback && obj && !isToken ? cardName : null,

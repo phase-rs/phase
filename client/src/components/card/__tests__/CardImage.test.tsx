@@ -78,7 +78,8 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     render(<CardImage cardName="Haywire Mite" />);
 
-    expect(screen.getByRole("img", { name: "機能不全ダニ" })).toHaveTextContent("日本語の印刷本文");
+    expect(screen.getByRole("img", { name: "機能不全ダニ" })).toBeInTheDocument();
+    expect(screen.getByText("日本語の印刷本文")).toBeInTheDocument();
     expect(mockUseEngineCardData).toHaveBeenCalledWith("Haywire Mite");
   });
 
@@ -98,10 +99,11 @@ describe("CardImage art fallback (issue #6156)", () => {
       />,
     );
 
-    const tile = screen.getByRole("img", { name: "Banana" });
+    // The rules text sits beside the tile's image role, readable as text.
     // Use textContent so the assertion is robust to how RichLabel segments the
     // text around mana symbols (the "{T}" renders as a symbol, not text).
-    expect(tile.textContent).toContain("You gain 1 life.");
+    const rules = screen.getByRole("img", { name: "Banana" }).nextElementSibling;
+    expect(rules?.textContent).toContain("You gain 1 life.");
   });
 
   it("falls back to the name text tile when a resolved image fails to load", () => {

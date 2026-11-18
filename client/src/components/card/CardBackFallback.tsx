@@ -31,6 +31,7 @@ export function CardBackFallback({ className = "", style }: CardBackFallbackProp
     <div
       role="img"
       aria-label={label}
+      data-card-face
       className={`aspect-[488/680] overflow-hidden bg-[#17191d] p-[6%] ${className}`}
       style={style}
     >

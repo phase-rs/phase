@@ -41,6 +41,14 @@ vi.mock("../../../hooks/useIsMobile.ts", () => ({
 const RELOAD = "Tap to reload art";
 const DESKTOP_RELOAD = "Reload art";
 
+/** The artless tile's rules text: ordinary text beside the image role that
+ *  names the tile, so assistive tech reads it. */
+function tileRulesText(name: string): HTMLElement {
+  const rules = screen.getByRole("img", { name }).nextElementSibling;
+  if (!(rules instanceof HTMLElement)) throw new Error(`the ${name} tile shows no rules text`);
+  return rules;
+}
+
 function failedArt(reload: () => void) {
   return { src: null, isLoading: false, isRotated: false, isFlip: false, reload };
 }
@@ -88,9 +96,9 @@ describe("CardPreview artless mobile tile", () => {
     inspect(sculptor());
     const { container } = render(<CardPreview cardName={SCULPTOR} onDismiss={onDismiss} />);
 
-    const tile = screen.getByRole("img", { name: SCULPTOR });
-    expect(tile).toHaveTextContent("Artifact spells you cast cost");
-    expect(tile).toHaveTextContent("less to cast.");
+    const rules = tileRulesText(SCULPTOR);
+    expect(rules).toHaveTextContent("Artifact spells you cast cost");
+    expect(rules).toHaveTextContent("less to cast.");
 
     const button = screen.getByRole("button", { name: RELOAD });
     fireEvent.pointerDown(button);
@@ -119,7 +127,7 @@ describe("CardPreview artless mobile tile", () => {
     vi.mocked(useCardImage).mockImplementation(() => failedArt(vi.fn()));
     rerender(<CardPreview cardName={SCULPTOR} />);
     expect(useEngineCardData).toHaveBeenCalledWith(SCULPTOR);
-    expect(screen.getByRole("img", { name: SCULPTOR })).toHaveTextContent("less to cast.");
+    expect(tileRulesText(SCULPTOR)).toHaveTextContent("less to cast.");
   });
 
   it("names the tile in the language of its rules text", () => {
@@ -129,7 +137,7 @@ describe("CardPreview artless mobile tile", () => {
     inspect(sculptor());
     render(<CardPreview cardName={SCULPTOR} />);
 
-    expect(screen.getByRole("img", { name: "エーテリウムの彫刻家" })).toHaveTextContent("日本語の印刷本文");
+    expect(tileRulesText("エーテリウムの彫刻家")).toHaveTextContent("日本語の印刷本文");
   });
 
   // A hidden face's art is the card back, so the artless tile, and with it
@@ -197,7 +205,7 @@ describe("CardPreview artless mobile tile", () => {
     inspect(token);
     render(<CardPreview cardName="Food" />);
 
-    expect(screen.getByRole("img", { name: "Food" })).toHaveTextContent("You gain 3 life.");
+    expect(tileRulesText("Food")).toHaveTextContent("You gain 3 life.");
     expect(useEngineCardData).not.toHaveBeenCalledWith("Food");
   });
 
@@ -228,17 +236,76 @@ describe("CardPreview artless mobile tile", () => {
     expect(onDismiss).not.toHaveBeenCalled();
   });
 
+  // A hand card opened from the hand drawer has no held fan card behind it (the
+  // fanned hand stays mounted under the drawer, its card at rest), so it gets
+  // the full modal preview, with the rules text and the reload.
+  it("gives a hand card inspected from the hand drawer the modal preview with the reload", () => {
+    const reload = vi.fn();
+    vi.mocked(useCardImage).mockImplementation(() => failedArt(reload));
+    const card = gameObjectFactory
+      .creature(1, 2)
+      .inHand()
+      .named(SCULPTOR)
+      .build({ printed_ref: { oracle_id: "oracle-etherium-sculptor", face_name: SCULPTOR } });
+    const restingFanCard = document.createElement("div");
+    restingFanCard.setAttribute("data-hand-card", "");
+    restingFanCard.setAttribute("data-object-id", String(card.id));
+    document.body.appendChild(restingFanCard);
+    try {
+      inspect(card);
+      render(<CardPreview cardName={SCULPTOR} objectId={card.id} handSourceObjectId={card.id} />);
+
+      expect(tileRulesText(SCULPTOR)).toHaveTextContent("less to cast.");
+      fireEvent.click(screen.getByRole("button", { name: RELOAD }));
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      restingFanCard.remove();
+    }
+  });
+
+  // In the default follow and Shift preview modes, the preview of a fan card a
+  // finger holds follows the finger: it takes no taps (it is
+  // `pointer-events-none`, and the hand keeps the held finger's pointer
+  // captured) and closes when the finger lifts, so a button there could never
+  // be tapped. It keeps the name-only placeholder.
+  it("offers no reload on the preview that follows a finger held on the hand", () => {
+    const card = gameObjectFactory
+      .creature(1, 2)
+      .inHand()
+      .named(SCULPTOR)
+      .build({ printed_ref: { oracle_id: "oracle-etherium-sculptor", face_name: SCULPTOR } });
+    const heldFanCard = document.createElement("div");
+    heldFanCard.setAttribute("data-hand-card", "");
+    heldFanCard.setAttribute("data-object-id", String(card.id));
+    heldFanCard.setAttribute("data-hand-touch-active", "true");
+    document.body.appendChild(heldFanCard);
+    try {
+      inspect(card);
+      const { container } = render(
+        <CardPreview cardName={SCULPTOR} objectId={card.id} handSourceObjectId={card.id} />,
+      );
+
+      // Reach guard: the hand preview (not the modal) rendered the artless card.
+      expect(screen.getByRole("img", { name: SCULPTOR })).toBeInTheDocument();
+      expect(container.querySelector("[data-card-preview]")).toHaveClass("pointer-events-none");
+      expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
+      expect(screen.queryByRole("button", { name: DESKTOP_RELOAD })).toBeNull();
+    } finally {
+      heldFanCard.remove();
+    }
+  });
+
   it("keeps the rules text but no reload on the compact peek, which dismisses on any tap", () => {
     inspect(sculptor());
     render(<CardPreview cardName={SCULPTOR} mobileLayout="compact" />);
 
     // Reach guard: the artless tile, with its text, is what rendered.
-    const tile = screen.getByRole("img", { name: SCULPTOR });
-    expect(tile).toHaveTextContent("less to cast.");
+    const rules = tileRulesText(SCULPTOR);
+    expect(rules).toHaveTextContent("less to cast.");
     expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
     // A scroll closes the peek, so its rules text clips rather than scrolls.
-    expect(tile.lastElementChild).toHaveClass("overflow-hidden");
-    expect(tile.lastElementChild).not.toHaveClass("overflow-y-auto");
+    expect(rules).toHaveClass("overflow-hidden");
+    expect(rules).not.toHaveClass("overflow-y-auto");
   });
 });
 

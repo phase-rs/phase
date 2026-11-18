@@ -734,10 +734,12 @@ select.select-dark option {
 
 /* Horizontal card strip: cards sized by viewport height for Arena-style horizontal scroll.
    Cards get an explicit height derived from viewport so they're large and readable.
-   Width follows from the 5:7 aspect ratio. */
-.zone-viewer-strip [role="img"],
+   Width follows from the 5:7 aspect ratio. Keyed on `data-card-face` (the artless
+   card tile and the card back), not on an ARIA role: the artless tile's image role
+   sits on its name line, which must keep its own size. */
+.zone-viewer-strip [data-card-face],
 .zone-viewer-strip .animate-pulse,
-.card-choice-strip [role="img"],
+.card-choice-strip [data-card-face],
 .card-choice-strip .animate-pulse {
   --strip-card-h: clamp(240px, 64vh, 560px);
   width: auto !important;

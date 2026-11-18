@@ -90,6 +90,9 @@ const tileClassesByVariant = {
  * by name wherever it appears rather than rendering as a blank/black square,
  * and the two renders cannot drift apart. The mobile preview uses it too.
  *
+ * The tile root carries `data-card-face`, the hook the zone-viewer and
+ * card-choice strips size card faces by (index.css).
+ *
  * The desktop `CardPreview` deliberately keeps its own placeholder: the hover
  * preview is an order of magnitude larger and centres a single name at
  * `text-sm`, which this tile's top-aligned heading would not reproduce. It
@@ -111,12 +114,13 @@ export function CardArtFallback({
     <div
       className={`${className} bg-gray-800 shadow-md overflow-hidden flex flex-col ${classes.tile}`}
       style={style}
+      data-card-face
     >
-      {/* The image role sits on the text alone: an `img` hides whatever it
-          contains from assistive tech, and the reload button must stay
-          reachable. */}
-      <div role="img" aria-label={name} className={`flex min-h-0 flex-1 flex-col overflow-hidden ${classes.body}`}>
-        <div className={classes.name}>
+      <div className={`flex min-h-0 flex-1 flex-col overflow-hidden ${classes.body}`}>
+        {/* The image role sits on the name alone: an `img` hides whatever it
+            contains from assistive tech, so the rules text and the reload
+            button stay outside it, readable as text and reachable. */}
+        <div role="img" aria-label={name} className={classes.name}>
           {name}
         </div>
         {classes.rules && oracleText && (
