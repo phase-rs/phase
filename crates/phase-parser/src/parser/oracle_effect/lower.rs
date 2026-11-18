@@ -12520,7 +12520,7 @@ pub(crate) struct WhereXBinding<'a> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum WhereXSlot {
     /// A count, amount or set P/T value. Count/amount handlers clamp a negative
-    /// result themselves (CR 107.1b); setting P/T is CR 107.1b's exception.
+    /// result themselves (CR 107.1b); CR 107.1b exempts effects that set P/T.
     #[default]
     Amount,
     /// The signed amount a "gets ±X/±X" modification adds (CR 613.4c), where a
@@ -12593,8 +12593,7 @@ impl<'a> WhereXBinding<'a> {
 /// object's characteristic, a negative characteristic gives X = 0 (Arahbo, Roar
 /// of the World ruling: "If the attacking Cat's power is negative at that time,
 /// X is 0."). Scoped to the rung binding: X is rung-bound when the same
-/// expression read without the rung differs. Other signed pumps are a separate
-/// change.
+/// expression read without the rung differs.
 fn clamp_rung_bound_pt_adjustment(
     x: QuantityExpr,
     expression: &str,
@@ -13833,8 +13832,7 @@ fn apply_where_x_continuous_modification(
     unbound: &mut Option<String>,
 ) {
     match modification {
-        // CR 107.1b: setting P/T to a value is the rule's exception, so X stays
-        // an `Amount` here.
+        // CR 107.1b exempts effects that set P/T, so X stays an `Amount` here.
         ContinuousModification::SetDynamicPower { value, .. }
         | ContinuousModification::SetDynamicToughness { value, .. }
         | ContinuousModification::SetPowerDynamic { value, .. }

@@ -6,8 +6,8 @@
 //! the Aura, Equipment or Arahbo that carries the ability.
 //! CR 608.2h + CR 603.10a: a dies trigger looks back in time, so the dying
 //! creature's power/toughness is its last known information on the battlefield
-//! (every fixture adds a +1/+1 counter, which ceases to exist in the graveyard,
-//! so a live read and the LKI read differ).
+//! (every dies-trigger fixture adds a +1/+1 counter, which ceases to exist in
+//! the graveyard, so a live read and the LKI read differ).
 //! CR 107.1b: Arahbo's X feeds a signed "+X/+X"; a negative attacking Cat gives
 //! X = 0 (Arahbo ruling: "If the attacking Cat's power is negative at that time,
 //! X is 0.").
@@ -595,7 +595,11 @@ fn arahbo_pumps_attacking_cat_by_its_own_power() {
     );
     assert_eq!(pt(&mut runner, cat), (12, 11));
     advance_to_end_step(&mut runner);
-    assert_eq!(pt(&mut runner, cat), (12, 11), "latched for the turn");
+    assert_eq!(
+        pt(&mut runner, cat),
+        (12, 11),
+        "the bonus lasts until end of turn"
+    );
 }
 
 /// R6b — Arahbo ruling: "If multiple Cats attack, Arahbo's last ability

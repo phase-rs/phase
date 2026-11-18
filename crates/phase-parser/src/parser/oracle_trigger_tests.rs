@@ -36531,12 +36531,10 @@ fn reanimator_aura_grant_etb_lowers_to_grant_chain() {
 /// #5253 (Railway Brawler): "Whenever another creature you control enters, put
 /// X +1/+1 counters on it, where X is its power." The "its" in the count clause
 /// is the ENTERING creature (the counter recipient), not the ability carrier.
-/// The where-X characteristic rung (`PlayerAntecedents::characteristic_pronoun_owner`)
-/// now binds "its power" to `EventSource` structurally, because the trigger
-/// body's "it" names the entering creature; the enters-trigger counter lift
-/// (`lift_counter_count_self_scope_to_event_source`) is redundant for this
-/// shape. Either way the count must not read Railway Brawler's own power (the
-/// #5253 bug), and it is not clamped (a count slot, CR 107.1b is the handler's).
+/// The where-X characteristic rung binds the count to the entering creature
+/// (`EventSource`); a count read off the source would read Railway Brawler's
+/// power (the #5253 bug), and this assertion goes red. The count is not clamped
+/// (a count slot, CR 107.1b is the handler's).
 #[test]
 fn railway_brawler_counter_count_reads_entering_creature_power() {
     let parsed = parse_oracle_text(
@@ -36588,12 +36586,9 @@ fn railway_brawler_counter_count_reads_entering_creature_power() {
     );
 }
 
-/// Negative reach-guard for the #5253 lift: a genuine self-power counter read —
+/// Negative reach-guard for #5253: a genuine self-power counter read —
 /// "Whenever ~ attacks, put a number of +1/+1 counters on ~ equal to its power"
-/// — must KEEP `scope: Source`. The lift only fires on a single-object
-/// zone-change trigger whose counter target is the event object; an attacks
-/// trigger putting counters on the source (`SelfRef`) is untouched, so the
-/// carrier's own power is preserved.
+/// — must KEEP `scope: Source`, so the carrier's own power is preserved.
 #[test]
 fn self_power_counter_on_source_keeps_source_scope() {
     let parsed = parse_oracle_text(
@@ -36615,7 +36610,7 @@ fn self_power_counter_on_source_keeps_source_scope() {
 
     // Whether or not this exact phrasing fully parses, if it DOES produce a
     // PutCounter with a per-object power ref, that ref must stay Source-scoped
-    // (an attacks trigger is not a zone-change trigger, so the lift is inert).
+    // (on an attacks trigger, "its" is the carrier).
     if let Some(QuantityExpr::Ref {
         qty: QuantityRef::Power { scope },
     }) = count
@@ -44855,7 +44850,7 @@ fn where_x_its_characteristic_binds_trigger_event_object() {
     }
 }
 
-/// #7851 preservation, CR 113.7 + CR 608.2k: an explicit self-reference
+/// #7851 preservation, CR 201.5 + CR 113.7: an explicit self-reference
 /// ("Ratatwotwo's power", "this creature's power") names the ability's source
 /// even when the trigger's "it" names another object; the rung never touches
 /// it and no clamp is added. Verbatim Oracle text. Ratatwotwo's trigger mode

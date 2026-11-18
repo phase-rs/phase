@@ -6986,8 +6986,7 @@ mod tests {
     /// OWN power, not Railway Brawler's. The source and entering creature have
     /// DIFFERENT power so the referent is observable. The where-X
     /// characteristic rung binds the count to the entering creature
-    /// (`EventSource`), and the enters counter lift covers counts the rung
-    /// leaves `Source`; a count read off the source would read Railway
+    /// (`EventSource`); a count read off the source would read Railway
     /// Brawler's power (the #5253 bug), and this assertion goes red.
     #[test]
     fn railway_brawler_counters_entering_creature_by_its_own_power() {
