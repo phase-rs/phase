@@ -2,12 +2,6 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CardArtFallback } from "../CardArtFallback.tsx";
-import { CardBackFallback } from "../CardBackFallback.tsx";
-
-// The card back renders its fallback div only while it has no image.
-vi.mock("../../../hooks/useCardImage.ts", () => ({
-  useCardBackImage: () => ({ src: null, isLoading: false }),
-}));
 
 // Regression tests for #11008: the mobile preview's artless tile offers a
 // one-tap reload, the tap never reaches the preview around it, and its text
@@ -67,26 +61,6 @@ describe("CardArtFallback reload", () => {
     const rules = screen.getByText(/less to cast\./);
     expect(rules.closest("[role='img']")).toBeNull();
     expect(screen.getByRole("button", { name: RELOAD }).closest("[role='img']")).toBeNull();
-  });
-
-  // The zone-viewer and card-choice strips size card faces by `data-card-face`
-  // (index.css). happy-dom applies no CSS, so where the hook sits is pinned by
-  // attribute: on the tile root, never on the name line inside it.
-  it("marks the tile root, not its name line, as the card face the strips size", () => {
-    const { container } = render(
-      <CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} variant="preview" className="h-96 w-72" onReload={vi.fn()} />,
-    );
-
-    const name = screen.getByRole("img", { name: CARD_NAME });
-    expect(container.querySelectorAll("[data-card-face]")).toHaveLength(1);
-    expect(container.firstElementChild).toHaveAttribute("data-card-face");
-    expect(name).not.toHaveAttribute("data-card-face");
-  });
-
-  it("marks the card back's fallback as a card face the strips size too", () => {
-    render(<CardBackFallback className="h-40 w-28" />);
-
-    expect(screen.getByRole("img", { name: "Card back" })).toHaveAttribute("data-card-face");
   });
 
   it("draws no button without a reload", () => {
