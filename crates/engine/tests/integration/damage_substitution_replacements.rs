@@ -4280,6 +4280,8 @@ fn protection_prevents_ahead_of_szadeks_choice() {
     assert_eq!(plus_counters(&runner, szadek), 0);
     assert_eq!(library_and_graveyard(&runner, P1), (7, 0));
     assert_eq!(life(&runner, P1), 20);
+    assert_at_rest(&runner);
+    assert!(runner.state().pending_combat_lifelink.is_none());
 }
 
 /// "dealt to you" and "dealt to this creature" name only their recipient (CR 614.1a).
@@ -4867,6 +4869,8 @@ fn szadeks_substitution_leaves_a_shared_shield_for_the_other_attacker() {
             assert_eq!(prevented_from, vec![(szadek, 4)]);
             assert_eq!(life(&runner, P1), 16);
         }
+        assert_at_rest(&runner);
+        assert!(runner.state().pending_combat_lifelink.is_none());
     }
 }
 
@@ -4908,6 +4912,8 @@ fn two_undead_alchemists_replace_a_zombies_damage_once() {
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+        assert_at_rest(&runner);
+        assert!(runner.state().pending_combat_lifelink.is_none());
     }
 }
 

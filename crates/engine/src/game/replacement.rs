@@ -25696,8 +25696,7 @@ mod tests {
                 "an unimplemented action",
                 with(&|repl| {
                     if let Some(execute) = repl.execute.as_mut() {
-                        execute.effect =
-                            Box::new(Effect::unimplemented("substitute", "an unparsed action"));
+                        *execute.effect = Effect::unimplemented("substitute", "an unparsed action");
                     }
                 }),
             ),

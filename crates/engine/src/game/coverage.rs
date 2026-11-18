@@ -10407,7 +10407,8 @@ enum StructuralFeature {
     /// stated quality to a permanent or player with protection is prevented."), so the affected
     /// player never chooses between them (CR 616.1e): Pyroclasm at a Silver Knight under an
     /// opposing Soul-Scar Mage, or Szadek's combat damage to a player under Teferi's Protection.
-    /// The card parses, and with no protection it works, so nothing else in coverage can see it.
+    /// The card parses. This fence records the missing order choice against protection, so nothing
+    /// else in coverage can see it.
     DamageSubstitutionChoiceIncomplete,
     /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next 1 damage that would be
     /// dealt to this creature this turn is dealt to target creature you control instead." —
