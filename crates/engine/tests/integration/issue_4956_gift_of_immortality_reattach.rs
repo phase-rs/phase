@@ -986,6 +986,124 @@ fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
     );
 }
 
+/// CR 109.5 + CR 113.8: Next of Kin's "you own" and "your ... command zone"
+/// are scoped to the Aura's controller, even when that player differs from
+/// its owner. Both of the controller's named-zone candidates are eligible;
+/// the Aura owner's candidates are decoys.
+#[test]
+fn next_of_kin_uses_aura_controller_for_owned_zone_union() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let owner_hand_decoy = scenario
+        .add_creature_to_hand(P0, "Aura Owner Hand Decoy", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    let owner_command_decoy = scenario
+        .add_creature_to_hand(P0, "Aura Owner Command Decoy", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(owner_command_decoy);
+    let controller_hand = scenario
+        .add_creature_to_hand(P1, "Aura Controller Hand Candidate", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    let controller_command = scenario
+        .add_creature_to_hand(P1, "Aura Controller Command Candidate", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(controller_command);
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let confiscate = scenario.add_real_card(P1, "Confiscate", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P1,
+        [
+            ManaType::Blue,
+            ManaType::Blue,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, engine::types::identifiers::ObjectId(0), false, vec![]))
+        .collect(),
+    );
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    runner.cast(confiscate).target_object(aura).resolve();
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&aura].owner, P0);
+    assert_eq!(runner.state().objects[&confiscate].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&confiscate].attached_to,
+        Some(AttachTarget::Object(aura))
+    );
+    assert_eq!(runner.state().objects[&aura].controller, P1);
+
+    let mut death_events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut death_events);
+    process_triggers(runner.state_mut(), &death_events);
+    let mut observations = DrainObservations::default();
+    let consumed_choice =
+        drain_priority_preferring_observed(&mut runner, &[controller_command], &mut observations);
+
+    assert!(observations.saw_optional);
+    assert!(
+        consumed_choice,
+        "the controller-owned pair must open a choice"
+    );
+    assert_eq!(observations.zone_choices.len(), 1);
+    let offered = &observations.zone_choices[0];
+    assert!(offered.contains(&controller_hand) && offered.contains(&controller_command));
+    assert!(
+        !offered.contains(&owner_hand_decoy) && !offered.contains(&owner_command_decoy),
+        "eligibility follows the Aura controller's ownership, not its owner's: {offered:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&controller_command].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(runner.state().objects[&controller_hand].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&owner_hand_decoy].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&owner_command_decoy].zone,
+        Zone::Command
+    );
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    runner.advance_to_end_step();
+    advance_through_delayed_end(&mut runner);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(controller_command)),
+        "the delayed Attach must bind the selected controller-owned card"
+    );
+}
+
 /// CR 400.6 + CR 608.2c: Next of Kin's selected-object origin controls the
 /// proposed zone-change event for a singleton from either named zone. The
 /// replacement is a supplementary synthetic seam fixture, not a printed card
