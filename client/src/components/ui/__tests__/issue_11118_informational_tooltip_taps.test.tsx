@@ -18,12 +18,15 @@ import { BoardInteractionContext } from "../../board/BoardInteractionContext.tsx
 import { DayNightBadge } from "../../hud/HudBadges.tsx";
 import { TurnStatusLine } from "../../hud/TurnStatusLine.tsx";
 import { CommandZone } from "../../zone/CommandZone.tsx";
+import { CounterTooltip } from "../CounterTooltip.tsx";
 
 // Issue #11118: a tap no longer opens a GameplayTooltip unless its trigger only
 // explains something and opts in with `touch="toggle"`. These are the triggers
-// that opt in besides the card preview's keywords (tested beside CardPreview):
-// none sits inside a control whose tap acts. The emblem chip is one only while
-// it is inert; an activatable chip's tap activates it and shows nothing.
+// that opt in besides the card preview's keywords and counters (tested beside
+// CardPreview): none sits inside a control whose tap acts. `CounterTooltip`
+// passes the choice through, since a counter on a battlefield card sits on a
+// card whose tap acts. The emblem chip is one only while it is inert; an
+// activatable chip's tap activates it and shows nothing.
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
@@ -227,6 +230,34 @@ describe("issue #11118: informational tooltips open on a tap and close on the ne
 
     expect(chip).not.toHaveAttribute("data-activatable");
     expectTapToToggle(chip, tooltip);
+  });
+
+  it("a counter shows nothing on a tap by default, as on a card whose tap acts", () => {
+    render(
+      <CounterTooltip type="charge" count={2}>
+        <span>charge: 2</span>
+      </CounterTooltip>,
+    );
+    const counter = screen.getByText("charge: 2").closest(".group");
+    if (!counter) throw new Error("the counter has no tooltip trigger");
+    const tooltip = screen.getByRole("tooltip", { hidden: true });
+
+    tap(counter);
+
+    expect(tooltip).toBeInTheDocument();
+    expect(tooltip).not.toBeVisible();
+  });
+
+  it("a counter that opts in, as in the card preview, opens on a tap", () => {
+    render(
+      <CounterTooltip type="charge" count={2} touch="toggle">
+        <span>charge: 2</span>
+      </CounterTooltip>,
+    );
+    const counter = screen.getByText("charge: 2").closest(".group");
+    if (!counter) throw new Error("the counter has no tooltip trigger");
+
+    expectTapToToggle(counter, screen.getByRole("tooltip", { hidden: true }));
   });
 
   it("an activatable emblem chip activates on a tap and shows nothing", () => {

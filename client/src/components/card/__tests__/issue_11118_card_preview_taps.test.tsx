@@ -8,10 +8,10 @@ import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 import { CardPreview } from "../CardPreview.tsx";
 
 // Issue #11118: a tap no longer opens gameplay tooltips, so a tap on Resolve
-// leaves the board clear. A keyword's reminder text in the card preview only
-// explains, and on a touch tablet wide enough for this preview a tap is the
-// only way to read it, so the keyword opts in to opening on a tap and closing
-// on the next one.
+// leaves the board clear. A keyword's reminder text and a counter's
+// explanation in the card preview only explain, and on a touch tablet wide
+// enough for this preview a tap is the only way to read them, so both opt in
+// to opening on a tap and closing on the next one.
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: vi.fn((cardName: string) => ({
@@ -41,16 +41,17 @@ function renderFlyingPreview() {
     name: "Serra Angel",
     keywords: ["Flying"],
     base_keywords: ["Flying"],
+    counters: { charge: 2 },
   });
-  useGameStore.setState({
-    gameState: buildGameState({
-      objects: buildObjectMap(object),
-      next_object_id: 102,
-      battlefield: [object.id],
-      next_timestamp: 2,
-    }),
-    spellCosts: {},
+  const gameState = buildGameState({
+    objects: buildObjectMap(object),
+    next_object_id: 102,
+    battlefield: [object.id],
+    next_timestamp: 2,
   });
+  // The engine's counter projection is the one source of the preview's counter rows.
+  gameState.derived = { counter_display: { [object.id]: { pills: [{ counter: "charge", count: 2 }] } } };
+  useGameStore.setState({ gameState, spellCosts: {} });
   useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
 
   render(
@@ -61,26 +62,32 @@ function renderFlyingPreview() {
   );
   const keyword = screen.getByText("Flying").closest<HTMLElement>("[aria-describedby]");
   if (!keyword) throw new Error("the Flying keyword has no described trigger");
+  const counter = screen.getByText("charge: 2").closest<HTMLElement>(".group");
+  if (!counter) throw new Error("the charge counter has no tooltip trigger");
   return {
     keyword,
     reminder: screen.getByText(/creatures with flying or reach/).closest('[role="tooltip"]'),
+    counter,
+    counterExplanation: screen.getByText(/2 charge counters/i).closest('[role="tooltip"]'),
     elsewhere: screen.getByRole("button", { name: "Elsewhere" }),
   };
 }
 
 // A subset, in order, of the events a browser sends for a finger tapping an
-// element: the finger lifting fires `pointerleave`, and the focus and `click`
-// come after it.
+// element: the finger lifting fires `pointerleave`, and the focus (for a
+// focusable element) and `click` come after it. happy-dom reports a tabIndex
+// of -1 for any element without a `tabindex` attribute, buttons included; the
+// keyword carries `tabindex="0"` and the counter carries none.
 function tap(element: HTMLElement) {
   fireEvent.pointerEnter(element, { pointerType: "touch" });
   fireEvent.pointerDown(element, { pointerType: "touch" });
   fireEvent.pointerUp(element, { pointerType: "touch" });
   fireEvent.pointerLeave(element, { pointerType: "touch" });
-  act(() => element.focus());
+  if (element.tabIndex >= 0) act(() => element.focus());
   fireEvent.click(element);
 }
 
-describe("issue #11118: a tap on a keyword in the card preview shows its reminder text", () => {
+describe("issue #11118: a tap in the card preview shows a keyword's or a counter's explanation", () => {
   beforeEach(() => {
     focusVisible = false;
     const matches = Element.prototype.matches;
@@ -128,5 +135,26 @@ describe("issue #11118: a tap on a keyword in the card preview shows its reminde
     expect(keyword).toHaveFocus();
     expect(reminder).toBeInTheDocument();
     expect(reminder).not.toBeVisible();
+  });
+
+  it("lets a counter take pointer events inside the click-through preview", () => {
+    const { counter } = renderFlyingPreview();
+
+    // The desktop preview is `pointer-events-none`, so a counter is reachable
+    // only if the nearest pointer-events rule above it turns them back on.
+    const nearestRule = counter.closest(".pointer-events-auto, .pointer-events-none");
+    expect(nearestRule).toHaveClass("pointer-events-auto");
+  });
+
+  it("opens a counter's explanation on a tap and closes it on the next tap", () => {
+    const { counter, counterExplanation } = renderFlyingPreview();
+    expect(counterExplanation).not.toBeVisible();
+
+    tap(counter);
+    expect(counterExplanation).toBeVisible();
+
+    tap(counter);
+    expect(counterExplanation).toBeInTheDocument();
+    expect(counterExplanation).not.toBeVisible();
   });
 });
