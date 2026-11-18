@@ -2968,6 +2968,7 @@ mod tests {
         let mut logical_zone_change_group = crate::types::game_state::LogicalZoneChangeGroup::new(
             crate::types::identifiers::LogicalZoneChangeGroupId(1),
             Vec::new(),
+            Vec::new(),
         );
         logical_zone_change_group
             .latch_immediately_before(Vec::new(), Vec::new())
@@ -3126,7 +3127,12 @@ mod tests {
             "Surviving batch member".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -3289,7 +3295,12 @@ mod tests {
             "Surviving batch tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -3369,7 +3380,9 @@ mod tests {
             .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
             .cloned()
             .expect("the earlier member's departure is recorded");
-        let mut owner_group = state.allocate_logical_zone_change_group(&[original]);
+        let mut owner_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[original], Zone::Graveyard),
+        );
         owner_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("owner group latches");
@@ -3377,7 +3390,9 @@ mod tests {
             .append_delivery_events(std::slice::from_ref(&collected))
             .expect("owner retains its collected occurrence");
         let owner_group_id = owner_group.logical_group_id;
-        let mut child_group = state.allocate_logical_zone_change_group(&[original]);
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[original], Zone::Graveyard),
+        );
         child_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("child group latches");
@@ -3473,13 +3488,19 @@ mod tests {
             "Surviving original tail".to_string(),
             Zone::Battlefield,
         );
-        let mut parent_group =
-            state.allocate_logical_zone_change_group(&[leaving, leaving_tail, surviving]);
+        let mut parent_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, leaving_tail, surviving],
+                Zone::Graveyard,
+            ),
+        );
         parent_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parent group latches");
         let parent_group_id = parent_group.logical_group_id;
-        let mut child_group = state.allocate_logical_zone_change_group(&[leaving]);
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[leaving], Zone::Graveyard),
+        );
         child_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("child group latches");
@@ -3646,7 +3667,12 @@ mod tests {
             "Surviving change-zone tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked iteration has its pre-delivery authority");
