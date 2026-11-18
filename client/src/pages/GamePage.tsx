@@ -77,6 +77,7 @@ import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { isFocusTargetAvailable } from "../components/ui/focusTarget.ts";
 import { ActionButton } from "../components/board/ActionButton.tsx";
+import { ActionRailStatusRow } from "../components/board/ActionRailStatusRow.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
 import { MobilePhaseChip } from "../components/controls/MobilePhaseChip.tsx";
@@ -1236,7 +1237,11 @@ function GamePageContent({
     ),
     [handleKickPlayer, isOnlineMode, opponentDisplayName, isP2PHost, splitBoardActive],
   );
-  const playerHud = useMemo(() => <PlayerHud />, []);
+  // The action rail's status row keeps clear of the HUD on short landscape
+  // screens, so it needs the HUD's node. A callback ref into state (the setter
+  // is stable, so the memo holds) hands over each node the HUD mounts with.
+  const [playerHudElement, setPlayerHudElement] = useState<HTMLDivElement | null>(null);
+  const playerHud = useMemo(() => <PlayerHud ref={setPlayerHudElement} />, []);
 
   useAudioContext("battlefield");
 
@@ -1845,21 +1850,7 @@ function GamePageContent({
               <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
                 <TurnStatusLine />
               </div>
-              <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
-                {/* <lg only: desktop conveys phase via the PhaseDot strips in
-                    PlayerHud, which are hidden on mobile. */}
-                <MobilePhaseChip className="lg:hidden" />
-                <TurnStatusLine />
-                <HandBadge />
-                <DayNightBadge />
-                {/* CR 117.3d: standing priority-yield summary chip, beside the
-                    Full Control toggle (self-hides when no yields stand). */}
-                <PriorityYieldList />
-                {/* CR 603.5: standing "don't ask again" auto-choice summary chip,
-                    beside the priority-yield chip (self-hides when none stand). */}
-                <MayTriggerAutoChoiceList />
-                <FullControlToggle />
-              </div>
+              <ActionRailStatusRow playerHud={playerHudElement} />
               <ActionButton />
             </>
           )}

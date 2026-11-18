@@ -2693,6 +2693,20 @@
     "End": "Sottofase finale",
     "Cleanup": "Ripulitura"
   },
+  "phaseShortName": {
+    "Untap": "STAP",
+    "Upkeep": "Mantenimento",
+    "Draw": "Pesca",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combattimento",
+    "DeclareAttackers": "Attaccanti",
+    "DeclareBlockers": "Bloccanti",
+    "CombatDamage": "Danno",
+    "EndCombat": "Fine combatt.",
+    "PostCombatMain": "Principale 2",
+    "End": "Finale",
+    "Cleanup": "Ripulitura"
+  },
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"

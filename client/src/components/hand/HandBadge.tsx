@@ -4,7 +4,15 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 
-export function HandBadge({ className }: { className?: string } = {}) {
+/**
+ * Hand-size chip that opens the full hand. `compact` (short landscape screens)
+ * drops the "Hand" word so the chip reads as the icon plus the count; the
+ * accessible name still says what the button does.
+ */
+export function HandBadge({
+  className,
+  compact = false,
+}: { className?: string; compact?: boolean } = {}) {
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const handSize = useGameStore((s) => s.gameState?.players[playerId]?.hand.length ?? 0);
@@ -15,7 +23,7 @@ export function HandBadge({ className }: { className?: string } = {}) {
   return (
     <button
       aria-label={t("hand.viewFullHand", { count: handSize })}
-      className={`flex items-center justify-center gap-1.5 rounded-full border border-cyan-400/20 bg-slate-950/64 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-300 ring-1 ring-cyan-400/15 backdrop-blur-xl transition-all duration-200 hover:border-cyan-300/40 hover:text-white hover:ring-cyan-300/30 lg:px-3.5 lg:py-1.5 lg:text-[11px] ${className ?? ""}`}
+      className={`flex items-center justify-center gap-1.5 rounded-full border border-cyan-400/20 bg-slate-950/64 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-300 ring-1 ring-cyan-400/15 backdrop-blur-xl transition-all duration-200 hover:border-cyan-300/40 hover:text-white hover:ring-cyan-300/30 lg:px-3.5 lg:py-1.5 lg:text-[11px] ${compact ? "px-2" : "px-3"} ${className ?? ""}`}
       onClick={() => setMobileHandOpen(true)}
     >
       <svg
@@ -31,7 +39,7 @@ export function HandBadge({ className }: { className?: string } = {}) {
         <rect x="4" y="3" width="11" height="16" rx="2" />
         <path d="M9 7l11 3-3 11-7-2" />
       </svg>
-      {t("hand.handLabel", { count: handSize })}
+      {compact ? handSize : t("hand.handLabel", { count: handSize })}
     </button>
   );
 }

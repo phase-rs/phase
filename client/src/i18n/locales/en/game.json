@@ -2731,6 +2731,20 @@
     "End": "End Step",
     "Cleanup": "Cleanup"
   },
+  "phaseShortName": {
+    "Untap": "Untap",
+    "Upkeep": "Upkeep",
+    "Draw": "Draw",
+    "PreCombatMain": "Main 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attackers",
+    "DeclareBlockers": "Blockers",
+    "CombatDamage": "Damage",
+    "EndCombat": "End Combat",
+    "PostCombatMain": "Main 2",
+    "End": "End",
+    "Cleanup": "Cleanup"
+  },
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
