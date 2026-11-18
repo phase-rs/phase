@@ -29,7 +29,7 @@ use crate::types::ability_visit::{
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
-use crate::types::format::DeckCopyLimit;
+use crate::types::format::{DeckCopyLimit, DeckSizeOverride};
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
@@ -460,6 +460,100 @@ pub fn is_deck_construction_copy_limit_sentence(line: &str) -> bool {
         .parse(lower.as_str())
         .is_ok()
         || lower.trim() == "megalegendary"
+}
+
+/// CR 903.5a: Strip one leading "<Word> — " ability-word label ("Rulebreaker — ")
+/// from a deck-construction size sentence. The label carries no rules meaning
+/// (CR 207.2c); the dispatch loop reaches the size sentence with the label
+/// still attached, so this runs inside the size-sentence combinator rather than
+/// in the ability-word strip pass. Combinators only: `opt` backtracks when the
+/// dash tail is absent, leaving ordinary sentences untouched.
+fn strip_deck_size_label(input: &str) -> OracleResult<'_, ()> {
+    opt(terminated(
+        take_while(|c: char| c.is_alphanumeric()),
+        alt((tag(" \u{2014} "), tag(" - "))),
+    ))
+    .parse(input)
+    .map(|(rest, _)| (rest, ()))
+}
+
+/// CR 903.5a: Parse a deck-construction maximum-size sentence into ().
+/// Class A (Whtz, the Bibliophile): "a deck with this commander has no
+/// maximum deck size". Class B (Covert Blue Mage): "if <subject> is your
+/// commander, your starting deck can contain any number of cards beyond the
+/// maximum deck size" — the subject must be this face (card name or "~");
+/// a partner that merely shares the deck MUST NOT match (the hostile
+/// partner-neither-Rulebreaker row). Class C/D (companions, Rulebreaker
+/// keyword) never reach this shape. The leading ability-word label is
+/// stripped by [`strip_deck_size_label`].
+fn parse_deck_size_sentence<'a>(input: &'a str, card_name_lower: &str) -> OracleResult<'a, ()> {
+    let (input, _) = strip_deck_size_label(input)?;
+    alt((
+        // Class A: no-maximum marker (Whtz).
+        value(
+            (),
+            terminated(
+                tag("a deck with this commander has no maximum deck size"),
+                opt(tag(".")),
+            ),
+        ),
+        // Class B: beyond-maximum marker (Covert Blue Mage).
+        (|input: &'a str| {
+            let (input, subject) =
+                preceded(tag("if "), take_until(" is your commander, ")).parse(input)?;
+            if subject.trim() != card_name_lower && subject.trim() != "~" {
+                return Err(nom::Err::Error(OracleError::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                )));
+            }
+            let (input, _) = tag(" is your commander, ").parse(input)?;
+            let (input, _) = tag(
+                "your starting deck can contain any number of cards beyond the maximum deck size",
+            )
+            .parse(input)?;
+            let (input, _) = opt(tag(".")).parse(input)?;
+            Ok((input, ()))
+        }),
+    ))
+    .parse(input)
+}
+
+/// CR 903.5a: Recognize a deck-construction maximum-size sentence so the line
+/// is consumed as [`DeckSizeOverride`] metadata (see
+/// `compute_no_maximum_deck_size_from_text`, read by deck validation) instead
+/// of falling through to an unimplemented gap (see `Effect::unimplemented`).
+pub fn is_deck_construction_size_sentence(line: &str, card_name: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let card_name_lower = card_name.trim().to_ascii_lowercase();
+    let mut recognize = all_consuming(|input| parse_deck_size_sentence(input, &card_name_lower));
+    recognize.parse(lower.as_str()).is_ok()
+}
+
+/// CR 903.5a: Extract the deck-construction no-maximum marker from a card's
+/// full Oracle text, scanning each line. The marker sentence is its own
+/// printed line ("Rulebreaker — A deck with this commander has no maximum
+/// deck size."), so unlike the copy-limit tail sentences no per-sentence
+/// split is needed; the same combinator both extracts the marker (for deck
+/// validation) and recognizes the line. The first match wins. Reminder text
+/// is stripped per line before matching: the Class B sentence carries its
+/// 120-card example as a parenthetical on the same printed line, which would
+/// otherwise defeat the all-consuming recognizer. Reminder-text bodies carry
+/// no size sentence of their own, so they are stripped, never scanned.
+pub fn compute_no_maximum_deck_size_from_text(
+    text: &str,
+    card_name: &str,
+) -> Option<DeckSizeOverride> {
+    for line in text.lines() {
+        let stripped = strip_reminder_text(line);
+        if stripped.is_empty() {
+            continue;
+        }
+        if is_deck_construction_size_sentence(&stripped, card_name) {
+            return Some(DeckSizeOverride::NoMaximum);
+        }
+    }
+    None
 }
 
 /// Recognizer for draft-time procedural sentences on Conspiracy / "draft
@@ -1963,7 +2057,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
             target_filter_uses_filter_prop(filter, pred)
         }
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
@@ -2003,6 +2097,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2031,7 +2126,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
@@ -2053,7 +2148,6 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
@@ -3988,6 +4082,7 @@ fn is_spell_resolution_instruction_line(
     ctx.diagnostics.truncate(loyalty_snap);
     if is_commander_permission_sentence(line)
         || is_deck_construction_copy_limit_sentence(line)
+        || is_deck_construction_size_sentence(line, card_name)
         || is_draft_matters_sentence(line)
         || is_loyalty
     {
@@ -4557,13 +4652,15 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // The match stays EXHAUSTIVE over `OracleNodeIr` (no `_` arm): it is now the
     // single place a new node variant must declare whether it consumes a printed
     // slot, an obligation `finish()` used to carry.
-    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for a lone "enchanted/
-    // equipped X" instruction that names its host without targeting it. Only the
-    // card's own spell/activated items and parsed effect-chain triggers are
-    // candidates; each records its printed-clause evidence here, and the
-    // conversion itself runs after every document relation has composed the
-    // final abilities (`convert_terminal_attachment_host_references` below), so a
-    // candidate that composition gives a follower, or folds into another
+    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for an "enchanted/
+    // equipped X" instruction that names its host without targeting it, alone
+    // or followed only by instructions on that host ("it", "that land's
+    // controller"). Only the card's own spell/activated items and parsed
+    // effect-chain triggers are candidates; each records its printed-clause
+    // evidence here, and the conversion itself runs after every document
+    // relation has composed the final abilities
+    // (`convert_terminal_attachment_host_references` below), so a candidate
+    // that composition gives any other follower, or folds into another
     // ability, keeps its target.
     //
     // CR 700.2: conservatively, a document that carries a modal choice
@@ -4907,7 +5004,7 @@ struct HostReferenceCandidates {
 /// resolved through its own category's id track only: one that a relation
 /// folded into another ability (a CR 614.15 self-replacement override) or moved
 /// elsewhere is no longer there and keeps its target, and one that composition
-/// gave a follower is refused by the converter.
+/// gave a follower other than a host anaphor is refused by the converter.
 fn convert_terminal_attachment_host_references(
     result: &mut ParsedAbilities,
     candidates: &HostReferenceCandidates,
@@ -6930,7 +7027,9 @@ fn parse_normalized_oracle_ir(
             continue;
         }
 
-        if is_deck_construction_copy_limit_sentence(&line) {
+        if is_deck_construction_copy_limit_sentence(&line)
+            || is_deck_construction_size_sentence(&line, card_name)
+        {
             i += 1;
             continue;
         }
@@ -10104,6 +10203,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -11196,6 +11296,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -11778,8 +11879,8 @@ fn render_ability_descriptions(def: &mut AbilityDefinition, card_name: &str) {
 /// not about `description`.)
 ///
 /// WILDCARD-FREE on purpose, for the same reason
-/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has ten
-/// variants, so the non-descending arm costs eight leaf names — not the ~206
+/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has eleven
+/// variants, so the non-descending arm costs nine leaf names — not the ~206
 /// that justify the wildcard in [`render_effect_descriptions`]. A new variant
 /// carrying a `TriggerDefinition` must be a COMPILE ERROR here, not a silent
 /// pass-through.
@@ -11800,11 +11901,12 @@ fn render_delayed_condition_descriptions(
                 render_trigger_descriptions(other, card_name);
             }
         }
-        // The remaining eight conditions are phase gates or object/filter
+        // The remaining nine conditions are phase gates or object/filter
         // matchers with no nested `TriggerDefinition`, hence no description.
         D::AtNextPhase { .. }
         | D::AtNextPhaseForPlayer { .. }
         | D::AtBeginningOfAddedPhase { .. }
+        | D::AtBeginningOfGrantedTurn { .. }
         | D::WhenLeavesPlay { .. }
         | D::WhenDies { .. }
         | D::WhenLeavesPlayFiltered { .. }

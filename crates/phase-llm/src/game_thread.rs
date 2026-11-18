@@ -17,7 +17,10 @@
 //! - **Continue.** Each later decision sends one user message —
 //!   [`GameDecisionRequest::thread_update`]: what was logged since the seat's
 //!   last answered decision, the live position, and the options — and
-//!   continues from the id of the seat's last accepted reply.
+//!   continues from the id of the seat's last accepted reply. When more was
+//!   logged than the seat's history window shows, the newest entries go entry
+//!   by entry and the older ones as one line of key events per turn, so a
+//!   busy round at a multiplayer table does not start the thread over.
 //! - **Commit on accept only.** A request is remembered as pending under its
 //!   own turn id ([`ThreadTurnId`]), and becomes the thread's new turn only
 //!   when its own reply is accepted ([`LlmThreadMemory::record_reply`]), so a
@@ -36,10 +39,9 @@
 //!   when the system prompt changes (difficulty, format, or the table itself),
 //!   when the last reply reported more context than
 //!   [`THREAD_CONTEXT_BUDGET_TOKENS`] or no usage at all, when the log was
-//!   rewound under the thread, and when a continue cannot carry everything
-//!   since the seat's last answer: more was logged than its history window
-//!   shows, or the log handed over no longer reaches back that far (the full
-//!   request summarizes older turns, which a continue cannot).
+//!   rewound under the thread, and when the log handed over no longer reaches
+//!   back to the seat's last answer, so a continue cannot carry everything
+//!   since it.
 //! - **No thread at all.** The two lowest difficulties never use one: they
 //!   deliberately reason from a near-term window, which a thread would undo.
 //!   Neither does a decision between games (the play/draw choice), which
@@ -700,6 +702,7 @@ mod tests {
     use crate::provider::{DecisionContext, LlmProvider};
     use engine::ai_support::{ActionMetadata, AiDecisionContract, CandidateAction, TacticalClass};
     use engine::types::actions::GameAction;
+    use engine::types::format::FormatConfig;
     use engine::types::game_state::GameState;
     use engine::types::log::{LogCategory, LogImportance, LogPresentation, LogSegment};
     use engine::types::phase::Phase;
@@ -767,9 +770,14 @@ mod tests {
 
     /// The seat's own two-option contract at `revision`.
     fn decision_contract(revision: u64) -> AiDecisionContract {
+        seat_contract(SEAT, revision)
+    }
+
+    /// [`decision_contract`] for `seat`.
+    fn seat_contract(seat: PlayerId, revision: u64) -> AiDecisionContract {
         AiDecisionContract {
-            semantic_owner: SEAT,
-            authorized_actor: SEAT,
+            semantic_owner: seat,
+            authorized_actor: seat,
             state_revision: revision,
             candidates: [
                 GameAction::PassPriority,
@@ -778,7 +786,7 @@ mod tests {
             .into_iter()
             .map(|action| CandidateAction {
                 action,
-                metadata: ActionMetadata::for_actor(Some(SEAT), TacticalClass::Utility),
+                metadata: ActionMetadata::for_actor(Some(seat), TacticalClass::Utility),
             })
             .collect(),
         }
@@ -799,6 +807,19 @@ mod tests {
                     importance: LogImportance::Essential,
                     ..LogPresentation::default()
                 },
+            })
+            .collect()
+    }
+
+    /// [`log`] over `turns` turns of `per_turn` events each, `turn T event I`.
+    fn turns_log(turns: u32, per_turn: u32) -> Vec<GameLogEntry> {
+        log(turns * per_turn)
+            .into_iter()
+            .map(|mut entry| {
+                let (turn, event) = (entry.seq / per_turn + 1, entry.seq % per_turn);
+                entry.turn = turn;
+                entry.segments = vec![LogSegment::Text(format!("turn {turn} event {event}"))];
+                entry
             })
             .collect()
     }
@@ -825,22 +846,37 @@ mod tests {
 
     /// The seat's pending request, as the transport would hand it back.
     fn pending_turn(memory: &LlmThreadMemory) -> Option<ThreadTurnId> {
+        pending_turn_of(memory, SEAT)
+    }
+
+    /// [`pending_turn`] for `seat`.
+    fn pending_turn_of(memory: &LlmThreadMemory, seat: PlayerId) -> Option<ThreadTurnId> {
         memory
             .seats
-            .get(&SEAT)
+            .get(&seat)
             .and_then(|thread| thread.pending.as_ref())
             .map(|pending| pending.turn)
     }
 
     /// The engine accepted `body`, a 2xx reply to the seat's pending request.
     fn accept_reply(memory: &mut LlmThreadMemory, provider: LlmProvider, body: &str) {
-        let turn = pending_turn(memory);
+        accept_reply_for(memory, SEAT, provider, body);
+    }
+
+    /// [`accept_reply`] for `seat`.
+    fn accept_reply_for(
+        memory: &mut LlmThreadMemory,
+        seat: PlayerId,
+        provider: LlmProvider,
+        body: &str,
+    ) {
+        let turn = pending_turn_of(memory, seat);
         let reply = LlmReply {
             provider,
             status: 200,
             body,
         };
-        memory.record_reply(SEAT, turn, reply, Ok(()), CLOCKS);
+        memory.record_reply(seat, turn, reply, Ok(()), CLOCKS);
     }
 
     /// The API refused to continue the thread the seat's pending request was
@@ -869,11 +905,23 @@ mod tests {
         history: &[GameLogEntry],
         id: &str,
     ) -> HttpRequestSpec {
+        answer_for(memory, SEAT, config, decision, history, id)
+    }
+
+    /// [`answer`] for `seat`.
+    fn answer_for(
+        memory: &mut LlmThreadMemory,
+        seat: PlayerId,
+        config: &LlmEndpointConfig,
+        decision: &GameDecisionRequest,
+        history: &[GameLogEntry],
+        id: &str,
+    ) -> HttpRequestSpec {
         let spec = memory
-            .decision_request(SEAT, config, decision, history, CLOCKS)
+            .decision_request(seat, config, decision, history, CLOCKS)
             .unwrap()
             .request;
-        accept_reply(memory, LlmProvider::Anthropic, &reply(id, 900));
+        accept_reply_for(memory, seat, LlmProvider::Anthropic, &reply(id, 900));
         spec
     }
 
@@ -1338,7 +1386,7 @@ mod tests {
             assert!(is_create(&next), "a new {change} must start a new thread");
         }
         // The system prompt alone decides that case: a continue could carry
-        // what Hard's history window shows since the last answer.
+        // what was logged since the last answer.
         let hard = decision(2, AiDifficulty::Hard);
         assert_ne!(
             hard.prompt.system,
@@ -1391,35 +1439,201 @@ mod tests {
         }
     }
 
-    /// When more was logged since the last answer than the seat's window
-    /// shows, a continue would drop the oldest of it; the full request, which
-    /// summarizes earlier turns, goes out as a new thread instead.
+    /// More was logged since the last answer than the seat's window shows,
+    /// at every difficulty that keeps a thread: the decision still continues
+    /// the thread. Exactly the window goes entry by entry; one entry more
+    /// moves exactly the oldest into its turn's line of key events.
     #[test]
-    fn a_continue_that_cannot_carry_everything_since_the_last_answer_is_a_create() {
+    fn a_continue_past_the_history_window_keeps_the_thread() {
+        for difficulty in [
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
+        ] {
+            let window = crate::prompt::history_budget(difficulty).current_cycle_entries as u32;
+            let after = |unseen: u32| {
+                let mut memory = LlmThreadMemory::new();
+                answer(
+                    &mut memory,
+                    &threaded(),
+                    &decision(1, difficulty),
+                    &log(4),
+                    "msg_1",
+                );
+                memory
+                    .decision_request(
+                        SEAT,
+                        &threaded(),
+                        &decision(2, difficulty),
+                        &log(4 + unseen),
+                        CLOCKS,
+                    )
+                    .unwrap()
+                    .request
+            };
+            // Entries 4 onward were logged after the answer.
+            let newest = format!("T1 PreCombatMain: event {}\n", 3 + window);
+
+            let at_window = after(window);
+            assert_eq!(
+                continued_from(&at_window),
+                Some("msg_1".to_string()),
+                "{difficulty:?}"
+            );
+            let message = user_message(&at_window);
+            assert!(message.contains("T1 PreCombatMain: event 4\n"), "{message}");
+            assert!(message.contains(&newest), "{message}");
+            assert!(
+                !message.contains("SINCE YOUR LAST DECISION, EARLIER"),
+                "{message}"
+            );
+
+            let past_window = after(window + 1);
+            assert_eq!(
+                continued_from(&past_window),
+                Some("msg_1".to_string()),
+                "{difficulty:?}"
+            );
+            let message = user_message(&past_window);
+            assert!(
+                message.contains(
+                    "--- SINCE YOUR LAST DECISION, EARLIER (key events, one line per turn) ---\n\
+                     T1 (Turn 1, continued below): event 4\n\
+                     --- SINCE YOUR LAST DECISION (oldest first) ---\n\
+                     T1 PreCombatMain: event 5\n"
+                ),
+                "{message}"
+            );
+            let newest = format!("T1 PreCombatMain: event {}\n", 4 + window);
+            assert!(message.contains(&newest), "{message}");
+        }
+    }
+
+    /// A four-seat table with two LLM seats. Each turn logs a whole history
+    /// window of events, so a round of the other seats' turns logs several
+    /// windows between two of one seat's decisions. Each LLM seat still
+    /// continues its own thread at every decision, across the other seat's
+    /// accepted replies, and each continue starts after that seat's own last
+    /// answer.
+    #[test]
+    fn two_seats_at_a_busy_table_each_continue_their_own_thread() {
         let window =
             crate::prompt::history_budget(AiDifficulty::Medium).current_cycle_entries as u32;
-        let after = |unseen: u32| {
-            let mut memory = LlmThreadMemory::new();
-            answer(
-                &mut memory,
-                &threaded(),
-                &decision(1, AiDifficulty::Medium),
-                &log(4),
-                "msg_1",
-            );
-            memory
-                .decision_request(
-                    SEAT,
-                    &threaded(),
-                    &decision(2, AiDifficulty::Medium),
-                    &log(4 + unseen),
-                    CLOCKS,
-                )
-                .unwrap()
-                .request
+        let table = GameState::new(FormatConfig::commander(), 4, 1);
+        let decide = |seat: PlayerId, revision: u64| {
+            build_game_decision_prompt(
+                &table,
+                &seat_contract(seat, revision),
+                AiDifficulty::Medium,
+                None,
+                &[],
+            )
+            .unwrap()
         };
-        assert_eq!(continued_from(&after(window)), Some("msg_1".to_string()));
-        assert!(is_create(&after(window + 1)));
+        let history = turns_log(9, window);
+        let through_turn = |turn: u32| &history[..(turn * window) as usize];
+        let last_event_of =
+            |turn: u32| format!("T{turn} PreCombatMain: turn {turn} event {}\n", window - 1);
+        let (first, second) = (PlayerId(1), PlayerId(3));
+        let mut memory = LlmThreadMemory::new();
+        answer_for(
+            &mut memory,
+            first,
+            &threaded(),
+            &decide(first, 1),
+            through_turn(1),
+            "msg_first_1",
+        );
+        answer_for(
+            &mut memory,
+            second,
+            &threaded(),
+            &decide(second, 2),
+            through_turn(1),
+            "msg_second_1",
+        );
+
+        // The first seat, four turns after its answer.
+        let sent = memory
+            .decision_request(
+                first,
+                &threaded(),
+                &decide(first, 3),
+                through_turn(5),
+                CLOCKS,
+            )
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&sent), Some("msg_first_1".to_string()));
+        let message = user_message(&sent);
+        assert!(
+            message.contains("T2 (Turn 2): turn 2 event 0; turn 2 event 1;"),
+            "{message}"
+        );
+        assert!(
+            message.contains("T4 (Turn 4): turn 4 event 0;"),
+            "{message}"
+        );
+        assert!(
+            message.contains("T5 PreCombatMain: turn 5 event 0\n"),
+            "{message}"
+        );
+        assert!(message.contains(&last_event_of(5)), "{message}");
+        assert!(!message.contains("turn 1 event"), "answered: {message}");
+        accept_reply_for(
+            &mut memory,
+            first,
+            LlmProvider::Anthropic,
+            &reply("msg_first_2", 900),
+        );
+
+        // The second seat, five turns after its answer: its thread is where
+        // its own reply left it.
+        let sent = memory
+            .decision_request(
+                second,
+                &threaded(),
+                &decide(second, 4),
+                through_turn(6),
+                CLOCKS,
+            )
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&sent), Some("msg_second_1".to_string()));
+        let message = user_message(&sent);
+        assert!(
+            message.contains("T2 (Turn 2): turn 2 event 0;"),
+            "{message}"
+        );
+        assert!(message.contains(&last_event_of(6)), "{message}");
+        accept_reply_for(
+            &mut memory,
+            second,
+            LlmProvider::Anthropic,
+            &reply("msg_second_2", 900),
+        );
+
+        // The first seat again: from its own last answer, at the end of turn
+        // 5, not from the second seat's, at the end of turn 6.
+        let sent = memory
+            .decision_request(
+                first,
+                &threaded(),
+                &decide(first, 5),
+                through_turn(9),
+                CLOCKS,
+            )
+            .unwrap()
+            .request;
+        assert_eq!(continued_from(&sent), Some("msg_first_2".to_string()));
+        let message = user_message(&sent);
+        assert!(
+            message.contains("T6 (Turn 6): turn 6 event 0;"),
+            "{message}"
+        );
+        assert!(message.contains(&last_event_of(9)), "{message}");
+        assert!(!message.contains("turn 5 event"), "answered: {message}");
     }
 
     /// The next game of a match replaces the game in place; its first

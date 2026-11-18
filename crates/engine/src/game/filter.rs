@@ -34,8 +34,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    AttackDeclarationRecord, CounterAddedRecord, DamageEventKey, DamageRecord, GameState,
+    LKISnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -3445,7 +3445,7 @@ fn quantity_ref_contains_input(
             slot_context,
         ),
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref().is_some_and(|inner| {
@@ -3504,6 +3504,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3532,7 +3533,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
@@ -3554,7 +3555,6 @@ fn quantity_ref_contains_input(
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
@@ -6815,6 +6815,35 @@ pub fn matches_target_filter_on_attack_declaration_record(
     )
 }
 
+/// CR 120.1 + CR 400.7: The `DamageRecord` written for one damage event — the
+/// same source incarnation, recipient, amount, and combat class. The newest
+/// matching row wins, so a repeated identical event (a double-strike source
+/// hitting the same player twice) reads its own row. `None` when no row was
+/// written (zero damage dealt, CR 120.3) or the event did not come from the
+/// damage pipeline. The join is `DamageEventKey`, the same five-field identity
+/// `DamageRecord::matches_damage_event` uses.
+pub fn damage_record_for_event<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    target: &TargetRef,
+    amount: u32,
+    is_combat: bool,
+) -> Option<&'a DamageRecord> {
+    let key = DamageEventKey {
+        source_id,
+        source_incarnation,
+        target: target.clone(),
+        amount,
+        is_combat,
+    };
+    state
+        .damage_dealt_this_turn
+        .iter()
+        .rev()
+        .find(|record| record.event_key() == key)
+}
+
 /// CR 120.9 + CR 608.2i + CR 608.2h: Check whether a per-turn combat-damage
 /// snapshot's *source* matches a target filter using the source's event-time
 /// characteristics. Look-back queries ("opponents who were dealt combat damage
@@ -7085,6 +7114,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         block_pairs: Vec::new(),
         co_departed: Vec::new(),
         co_entered: Vec::new(),
+        instruction_lead: None,
         attached_to: None,
         entered_incarnation,
         turn_zone_change_index: 0,
@@ -7467,9 +7497,8 @@ fn filter_inner_for_object(
         TargetFilter::SelfRef => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime, so this arm is defense-in-depth and
-        // mirrors SelfRef's source-identity semantics.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             object_matches_trigger_source(state, object_id, source_id, trigger_source)
         }
@@ -8333,8 +8362,8 @@ fn zone_change_filter_inner(
                     record_source.identity.reference == source.identity.reference
                 })
         }),
-        // CR 608.2c: the original (pre-rebind) source object; concretized to
-        // SpecificObject before runtime — mirrors SelfRef's source identity.
+        // CR 608.2c: the original (pre-rebind) source object — the live arm for an
+        // `Attach` attachment; mirrors SelfRef's source identity.
         TargetFilter::OriginalSource => {
             trigger_source.map_or(record.object_id == source_id, |source| {
                 record
@@ -9491,7 +9520,7 @@ fn spell_object_matches_property(
         // check is identity-only (`object_id != source_id`); two distinct
         // copies of the same card are NOT "the same" object. Live cost-modifier
         // callers pass `Some(spell.id)`. The turn-history "another" path now
-        // lives in `game::quantity` (the `SpellsCastThisTurn` own-cast
+        // lives in `game::quantity` (the `SpellsCast` own-cast
         // exclusion arm), which reads `SpellCastRecord.spell_object_id`
         // provenance directly; snapshot-record callers that reach THIS helper
         // still pass `spell_object_id: None` and fail-closed here.
@@ -10188,6 +10217,12 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// copy's copied name reverts once it leaves the battlefield, so the live read
 /// would report the printed name instead.
 ///
+/// CR 400.7 + CR 608.2h: an intervening instruction that yields a single referent
+/// overwrites that snapshot (Legion's End's mass exile or reveal), and the target
+/// has still left as the object it was. When the target occurrence's pinned
+/// incarnation is no longer current, its exit last-known information answers. An
+/// unpinned target or one with no exit record falls through to the live read.
+///
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
@@ -10200,6 +10235,16 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
         .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
     {
         return Some(snapshot.lki.name.clone());
+    }
+    if let Some(lki) = ability
+        .targets
+        .iter()
+        .position(|target| *target == TargetRef::Object(id))
+        .and_then(|index| ability.target_pin_at(index))
+        .filter(|pin| !pin.is_current(state))
+        .and_then(|pin| exit_lki_for_incarnation(state, id, pin.incarnation))
+    {
+        return Some(lki.name.clone());
     }
     if let Some(obj) = state.objects.get(&id) {
         return Some(obj.name.clone());
@@ -13759,6 +13804,7 @@ fn player_matches_target_filter_with(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         filter_contains_filter_prop, filter_prop_contains, player_filter_contains,
         retarget_chosen_card_type_to_creature_type, AbilityDefinition, AbilityKind,
@@ -22560,6 +22606,7 @@ mod tests {
                     kind: DamageKindFilter::Any,
                     source: Some(Box::new(TargetFilter::LastCreated)),
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             }],
         ] {
@@ -23070,6 +23117,7 @@ mod tests {
                                     kind: DamageKindFilter::Any,
                                     source: Some(Box::new(owned())),
                                     min_sources: 1,
+                                    relation: crate::types::ability::PlayerRelation::Opponent,
                                 }),
                             },
                         ]),
@@ -23352,6 +23400,7 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: Some(Box::new(chosen())),
                         min_sources: 1,
+                        relation: crate::types::ability::PlayerRelation::Opponent,
                     }),
                 },
             ])),
@@ -23933,10 +23982,11 @@ mod tests {
                     FilterProp::Cmc {
                         comparator: Comparator::LE,
                         value: QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn {
+                            qty: QuantityRef::LifeLost {
                                 player: PlayerScope::Opponent {
                                     aggregate: AggregateFunction::Sum,
                                 },
+                                window: TurnWindow::ThisTurn,
                             },
                         },
                     },
@@ -26563,6 +26613,7 @@ mod tests {
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
             co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
@@ -27112,6 +27163,7 @@ mod tests {
                         ),
                     ))),
                     min_sources: 3,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             },
         ]))
@@ -29809,6 +29861,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed,
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -29817,7 +29870,6 @@ mod entry_projection_tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: Default::default(),

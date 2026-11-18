@@ -65,7 +65,7 @@ describe("turn checkpoints", () => {
     const [submit] = submitAction.mock.invocationCallOrder;
     expect(undoCapture).toBeLessThan(submit);
     expect(submit).toBeLessThan(turnCapture);
-    expect(useGameStore.getState().stateHistory).toEqual([undoEnvelope]);
+    expect(useGameStore.getState().stateHistory).toEqual([{ state: undoEnvelope, logSeq: 0 }]);
     expect(useGameStore.getState().turnCheckpoints).toEqual([turnEnvelope]);
   });
 

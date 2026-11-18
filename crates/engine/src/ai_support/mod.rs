@@ -7,7 +7,6 @@ pub mod filter;
 mod payment_continuation;
 mod payment_surplus;
 mod prospective_mana;
-mod shortcut_efficacy;
 mod swarm;
 mod targeted_exchange;
 
@@ -17,10 +16,9 @@ use serde::Serialize;
 
 use crate::game::ability_utils::{choose_target_for_ability, TargetSelectionAdvance};
 use crate::game::casting;
-use crate::game::casting_costs;
 use crate::game::layers;
 use crate::game::mana_abilities;
-use crate::game::mana_payment;
+use crate::game::mana_abilities::ManaActivationPurpose;
 use crate::game::mana_sources;
 use crate::game::priority::{standing_priority_pass, StandingPriorityPass};
 use crate::game::restrictions;
@@ -31,7 +29,6 @@ use crate::types::ability::{
 };
 use crate::types::actions::{GameAction, MulliganChoice};
 use crate::types::card_type::CoreType;
-use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, NamedChoiceSourceBinding,
     PayCostKind, PendingMulliganAction, PriorityPassingMode, WaitingFor,
@@ -258,7 +255,12 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             state.is_delve_selectable(*player, *object_id) && *mana_type == ManaType::Colorless
         }
         ConvokeMode::Convoke => {
-            if !obj.is_convoke_eligible(*player) {
+            if !crate::game::casting::tap_payment_eligible(
+                state,
+                obj,
+                *player,
+                ConvokeMode::Convoke,
+            ) {
                 return false;
             }
             if let Some(color) = mana_sources::mana_type_to_color(*mana_type) {
@@ -280,12 +282,13 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             // CR 701.67a: a waterbend tap pays one generic mana of the cost, so
             // it pays colorless only and is legal only while generic mana is
             // left for a tap to pay.
-            obj.is_waterbend_eligible(*player)
+            crate::game::casting::tap_payment_eligible(state, obj, *player, ConvokeMode::Waterbend)
                 && *mana_type == ManaType::Colorless
                 && crate::game::casting::waterbend_taps_remaining(state, *player) > 0
         }
         ConvokeMode::Improvise => {
-            obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
+            crate::game::casting::tap_payment_eligible(state, obj, *player, ConvokeMode::Improvise)
+                && *mana_type == ManaType::Colorless
         }
     }
 }
@@ -368,10 +371,10 @@ pub(crate) fn structurally_valid_named_choice_answer(
     }
 }
 
-/// CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: Whether the pending prompt's
+/// CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2a + CR 732.2b: Whether the pending prompt's
 /// submission guard admits `action`, decided without mutating the game, for a library
 /// search selection ([`structurally_valid_search_selection`]), a named choice from the
-/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]), or an answer
+/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]), or a declaration or answer
 /// to a loop-shortcut offer ([`structurally_valid_shortcut_response`]).
 /// `true` means the guard admits the answer; `false` means it rejects it or the
 /// shape is not modeled here.
@@ -398,11 +401,10 @@ pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) 
         || structurally_valid_shortcut_response(state, action)
 }
 
-/// CR 732.2b/c: whether the pending loop-shortcut offer admits `action` as a responder's answer,
-/// decided without mutating the game. The reducer refuses three shapes, all of them `Shorten` —
-/// a place its counted take refuses, a place outside [`crate::analysis::loop_check::ShortcutProposal::shortening_places`], and a
-/// place the drive will not take the sequence to — and `Accept` names no place, so it passes every
-/// pre-take guard.
+/// CR 732.2a–c: whether the pending loop-shortcut window admits `action` as the proposer's
+/// declaration or a responder's answer, decided without mutating the game; a declaration handed
+/// back is not admitted. Every refusal of a responder's answer is a `Shorten`; `Accept` names no
+/// place, so it passes every pre-take guard.
 ///
 /// PRE-TAKE GUARDS ARE THE WHOLE CLAIM. An admitted answer can still fail when applied: a
 /// `Shorten` at place 0 elides the rest of the poll and takes it at once, the last responder's
@@ -417,37 +419,27 @@ pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) 
 /// `public_recorded_period_replay_rejects_later_life_counter_overflow_atomically`, whose hostile
 /// overflowing gain makes a public `Accept` return that error and restore its entry state.
 ///
-/// MIRRORS THE REDUCER'S ADMITTED SET BY CALLING ITS AUTHORITY, not by restating it.
-/// `handle_respond_to_shortcut` refuses three `Shorten` shapes: a place its counted take refuses,
-/// a place outside [`crate::analysis::loop_check::ShortcutProposal::shortening_places`], and a place
-/// the drive will not take the sequence to
-/// ([`crate::game::engine::shortcut_count_is_drivable`], called here as-is). The first of those is
-/// not repeated because it cannot fire alone: `shortening_places` narrows a refusing take's range to
-/// place 0, and place 0 drives nothing, so `CountedTake::refusal` is `None` on every place the range
-/// admits. Reusing the two remaining authorities is what keeps the `cheap ⊆ sim` invariant true for
-/// the shapes this arm admits; a copied derivation would be free to drift, and this hatch's whole
-/// value is that it decides the SAME question the probe would — without paying for the take. That
-/// price is why it exists: the probe APPLIES the answer, so for the last responder an `Accept`
-/// materializes the entire shortcut, which then materializes again when the real answer is applied
-/// (issue #10464).
+/// CALLS THE REDUCER'S OWN STEP AUTHORITY, not a restatement of it:
+/// [`crate::game::engine::shortcut_step`], which `handle_declare_shortcut` and
+/// `handle_respond_to_shortcut` take with performed evidence, read here with measured evidence, so
+/// the hatch performs no repetition and takes nothing. That price is why the hatch exists: the
+/// probe APPLIES the answer, so for the last responder an `Accept` materializes the entire
+/// shortcut, which then materializes again when the real answer is applied (issue #10464). A
+/// `Shorten` naming no different choice (CR 732.2b) is admitted here, since only the take decides
+/// it, and refused when committed.
 ///
 /// `false` for `WaitingFor::RespondToPrecastCopyShortcut`: that window carries no proposal summary,
 /// so there is no place and no counted take here to read, and it stays on the simulation path.
 pub(crate) fn structurally_valid_shortcut_response(state: &GameState, action: &GameAction) -> bool {
-    let (
-        WaitingFor::RespondToShortcut { proposal, .. },
-        GameAction::RespondToShortcut { response },
-    ) = (&state.waiting_for, action)
-    else {
-        return false;
-    };
-    match response {
-        crate::analysis::loop_check::ShortcutResponse::Accept => true,
-        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } => {
-            proposal.shortening_places().contains(at_iteration)
-                && crate::game::engine::shortcut_count_is_drivable(state, proposal, *at_iteration)
-        }
-    }
+    matches!(
+        crate::game::engine::shortcut_step(
+            state,
+            action,
+            crate::game::engine::ShortcutEvidence::Measured
+        ),
+        Some(Ok(crate::game::engine::ShortcutStep::Polls { .. }
+            | crate::game::engine::ShortcutStep::Takes))
+    )
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
@@ -483,6 +475,22 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
     };
 
     match (&state.waiting_for, action) {
+        // CR 732.2b: the reducer's own refusal of a responder's place.
+        (
+            WaitingFor::RespondToShortcut {
+                player, proposal, ..
+            },
+            GameAction::RespondToShortcut {
+                response: crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration },
+            },
+        ) => crate::game::engine::shorten_refusal(
+            state,
+            proposal,
+            *player,
+            *at_iteration,
+            crate::game::engine::ShortcutEvidence::Measured,
+        )
+        .is_some(),
         (WaitingFor::Priority { player }, _) if *player != acting_player => true,
         (WaitingFor::Priority { .. }, GameAction::CastSpell { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::Foretell { object_id, .. })
@@ -1291,76 +1299,24 @@ fn land_mana_options_for_priority(
 }
 
 fn resolve_mana_option_for_trigger_probe(
-    state: &GameState,
+    probe: &mut GameState,
     player: PlayerId,
     option: &mana_sources::ManaSourceOption,
 ) -> bool {
-    let mut probe = state.clone();
     let deferred_before = probe.deferred_triggers.len();
     let mut events = Vec::new();
-
-    for (trigger_ref, override_value) in &option.taps_for_mana_overrides {
-        probe
-            .pending_taps_for_mana_overrides
-            .insert(trigger_ref.clone(), override_value.clone());
-    }
-
-    if let Some(ability_index) = option.ability_index {
-        let Some(ability_def) = probe
-            .objects
-            .get(&option.object_id)
-            .and_then(|obj| obj.abilities.get(ability_index))
-            .cloned()
-        else {
-            return false;
-        };
-        let override_value = casting_costs::production_override_for_option(&ability_def, option);
-        if mana_abilities::resolve_mana_ability(
-            &mut probe,
-            option.object_id,
-            player,
-            &ability_def,
-            &mut events,
-            override_value,
-        )
-        .is_err()
-        {
-            return false;
-        }
-    } else {
-        if let Some(obj) = probe.objects.get_mut(&option.object_id) {
-            if !obj.tapped {
-                obj.tapped = true;
-                events.push(GameEvent::PermanentTapped {
-                    object_id: option.object_id,
-                    caused_by: None,
-                    incarnation: Some(obj.incarnation),
-                });
-            }
-        }
-        mana_payment::produce_mana(
-            &mut probe,
-            option.object_id,
-            option.mana_type,
-            player,
-            true,
-            &mut events,
-        );
-        events.push(GameEvent::TappedForMana {
-            player_id: player,
-            source_id: option.object_id,
-            produced: vec![option.mana_type],
-            tap_state: ManaTapState::FromTap,
-        });
-        events.push(GameEvent::ManaAbilityProduced {
-            player_id: player,
-            source_id: option.object_id,
-            produced: vec![option.mana_type],
-            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
-        });
-    }
-
-    triggers::simulated_action_would_queue_non_mana_trigger(&mut probe, deferred_before, &events)
+    let Ok(waiting) = mana_sources::activate_mana_source_option_with_output_and_settle(
+        probe,
+        player,
+        option,
+        crate::types::mana::ManaSourceOutput::Concrete(option.mana_type),
+        &mut events,
+        crate::types::game_state::ManaAbilityResume::Priority,
+    ) else {
+        return false;
+    };
+    probe.waiting_for = waiting;
+    triggers::simulated_action_would_queue_non_mana_trigger(probe, deferred_before, &events)
 }
 
 fn activate_mana_action_would_queue_non_mana_trigger(
@@ -1388,9 +1344,10 @@ fn activate_mana_action_would_queue_non_mana_trigger(
             .filter(|option| option.ability_index == Some(ability_index))
             .collect::<Vec<_>>();
         if !matching_options.is_empty() {
-            return matching_options
-                .iter()
-                .any(|option| resolve_mana_option_for_trigger_probe(state, player, option));
+            return matching_options.iter().any(|option| {
+                let mut probe = state.clone();
+                resolve_mana_option_for_trigger_probe(&mut probe, player, option)
+            });
         }
     }
 
@@ -1431,16 +1388,19 @@ fn tap_land_action_would_queue_non_mana_trigger(
     )
     .iter()
     .any(|option| {
-        option.penalty.is_meaningful_priority_activation()
-            || resolve_mana_option_for_trigger_probe(state, player, option)
+        option.penalty.is_meaningful_priority_activation() || {
+            let mut probe = state.clone();
+            resolve_mana_option_for_trigger_probe(&mut probe, player, option)
+        }
     })
 }
 
 fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
+    let mana_activation_gates =
+        mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit);
 
-    mana_sources::activatable_mana_actions_for_player(state, player)
+    mana_sources::mana_actions_for_player(state, player, ManaActivationPurpose::Explicit)
         .iter()
         .any(|action| match action {
             GameAction::TapLandForMana { selection } => {
@@ -1716,13 +1676,8 @@ fn has_activatable_sacrifice_for_mana(state: &GameState) -> bool {
 /// The mana activations [`has_activatable_sacrifice_for_mana`] counts, as
 /// items rather than as a yes/no.
 ///
-/// SINGLE AUTHORITY for the predicate. `smart_shortcut_response`'s stage 2 has
-/// to classify exactly the actions stage 1 counted, and stage 1 counts these —
-/// which the flat `legal_actions` list structurally cannot contain (they live
-/// in `legal_actions_by_object` only). Re-testing the same shape at that call
-/// site would be a parallel copy free to drift, so the call site consumes this
-/// iterator and `mana_actions_include_meaningful_sacrifice` is defined as its
-/// emptiness.
+/// SINGLE AUTHORITY for the predicate; `mana_actions_include_meaningful_sacrifice`
+/// is defined as its emptiness.
 fn meaningful_sacrifice_mana_actions<'a>(
     state: &'a GameState,
     object_mana_actions: &'a [GameAction],
@@ -1771,18 +1726,10 @@ pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction])
         || has_activatable_sacrifice_for_mana(state)
 }
 
-/// The probe [`smart_shortcut_response`] folds over: `state` re-parked at
-/// `polled_player`'s priority with auto-pass cleared and layers flushed, plus
-/// that state's flat priority actions. Mirrors
+/// `state` re-parked at `polled_player`'s priority with auto-pass cleared and
+/// layers flushed, plus that state's flat priority actions. Mirrors
 /// `game::engine`'s `no_living_player_has_meaningful_priority_action` recipe,
 /// scoped to the single polled player.
-///
-/// Public because the shortcut tests' reach-guards must assert on THIS list and
-/// THIS state. A private copy of the recipe in a test silently starts measuring
-/// a different action set — and a different `has_meaningful_priority_action`
-/// answer, since that predicate's sacrifice-for-mana rung only fires while
-/// `waiting_for` is `Priority`, which is true of the probe state and false of
-/// the `RespondToShortcut` state the caller holds.
 pub fn shortcut_probe(
     state: &GameState,
     polled_player: PlayerId,
@@ -1799,189 +1746,43 @@ pub fn shortcut_probe(
     (probe, actions)
 }
 
-/// The actions [`smart_shortcut_response`]'s stage 2 classifies, given a probe
-/// state and the flat priority list stage 1 read.
-///
-/// COVERAGE INVARIANT — stage 2 must classify every action stage 1 counted as
-/// meaningful. The flat list does not satisfy that on its own:
-/// [`has_meaningful_priority_action`] is a disjunction, and its second rung
-/// ([`has_activatable_sacrifice_for_mana`]) reads `state`, not `actions`, so it
-/// counts sacrifice-for-mana activations that `legal_actions` structurally omits
-/// (they live in `legal_actions_by_object` only — see issue #544). Folding stage
-/// 2 over the flat list alone therefore lets a seat whose ONLY meaningful action
-/// is such an activation Accept BY OMISSION: an action stage 2 never sees
-/// reaches no arm, so `shortcut_efficacy`'s fail-closed `_ => MayInterfere`
-/// default cannot protect it, and a false Accept is the direction the module doc
-/// says can lose a game.
-///
-/// `activatable_object_mana_actions` is gated on `waiting_for` — the probe state
-/// is re-parked at `Priority`, which is the same gate
-/// `has_activatable_sacrifice_for_mana` passes there, so the two stages read the
-/// SAME sweep. The added items come from
-/// [`meaningful_sacrifice_mana_actions`], the single authority stage 1's rung is
-/// also defined in terms of; re-testing the shape here would be a parallel copy
-/// free to drift.
-///
-/// Deliberately does NOT add the whole mana sweep, only the subset stage 1
-/// counts: a plain land tap is not a meaningful priority action to stage 1, and
-/// widening past that would buy `Shorten`s stage 1 never asked for.
-///
-/// Public for the same reason [`shortcut_probe`] is: the shortcut tests'
-/// coverage row must assert on THIS set, and a private copy of the recipe would
-/// silently start measuring a different one.
-pub fn stage_two_action_set(
-    probe_state: &GameState,
-    flat_actions: &[GameAction],
-) -> Vec<GameAction> {
-    let mana_actions = activatable_object_mana_actions(probe_state);
-    flat_actions
-        .iter()
-        .chain(meaningful_sacrifice_mana_actions(
-            probe_state,
-            &mana_actions,
-        ))
-        .cloned()
-        .collect()
-}
-
-/// PR-7 Phase 4c (LOW-2): CR 732.2b/c + CR 104.4b — an AI opponent polled on an
-/// OPTIONAL or bounded loop shortcut. The win is a loss condition for every
-/// polled opponent (single-faller: see `interactive_loop_bridge`'s Path A gate,
-/// CR 104.2a).
-///
-/// SINGLE AUTHORITY, and what it does NOT cover. MEASURED — production (i.e.
-/// non-`#[cfg(test)]`) code under `crates/*/src/` builds a
-/// `GameAction::RespondToShortcut` value at exactly four places:
-///   * `ai_support::candidates::candidate_actions_broad_with_probe`,
-///   * `phase_ai::projection::resolve_choice`,
-///   * `phase_ai::search::fallback_action` — these three are AI seats and all
-///     route here, so the heuristic cannot drift between them; and
-///   * `game::interaction::materialize_shortcut_reply_response`, which turns a
-///     HUMAN player's submitted `InteractionShortcutReply` into the action. That
-///     one is deliberately NOT covered: running a stated human choice through an
-///     AI heuristic would overwrite it. It is also the only site that can emit a
-///     non-zero `at_iteration` — every AI site emits `Shorten { at_iteration: 0 }`.
-///
-/// `candidate_actions_broad_with_probe` additionally routes
-/// `WaitingFor::RespondToPrecastCopyShortcut` here and maps the answer onto
-/// `PrecastCopyShortcutResponse`, so this function answers BOTH accept-or-shorten
-/// windows. That is intended: both windows ask the identical question — is a real
-/// priority window worth taking here — so a seat whose only action cannot touch
-/// the loop should decline both. `shorten_efficacy.rs`'s
-/// `v8_precast_window_takes_the_same_efficacy_answer` measures that window rather
-/// than assuming it.
-///
-/// TWO STAGES.
-///
-/// **Stage 1 — POSSIBILITY, byte-identical to the shipped predicate.** Reuses
-/// the exact `no_living_player_has_meaningful_priority_action` probe recipe
-/// (`game::engine`), scoped to the single polled player. No meaningful priority
-/// action ⇒ Accept, exactly as before. `has_meaningful_priority_action` is
-/// wired into the CR 732.5 NON-COMPULSION rule —
-/// "No player can be forced to perform an action that would end a loop other
-/// than actions called for by objects involved in the loop" — and is untouched
-/// here.
-///
-/// **Stage 2 — EFFICACY (AI POLICY, no CR licence claimed).** CR 732.2b grants
-/// an unconditioned accept-or-shorten option and CR 732.2c requires only that a
-/// shortening player's next choice be
-/// *different*, which a fetchland activation already satisfies; nothing in the
-/// Comprehensive Rules states an efficacy criterion. This stage is therefore
-/// policy, and it declines to burn a real priority window on a response that
-/// cannot change the outcome:
-///   - arm (A): the offer's own predicted result already crowns this seat, so
-///     shortening moves the game away from a win it already holds;
-///   - arm (B): every action stage 1 counted as meaningful is confined to this
-///     seat's own resources (`shortcut_efficacy::any_action_may_interfere`), so
-///     no available choice touches the loop. Scoped to what stage 1 counted, not
-///     to "every action this seat could take": the stage-2 set is a SUPERSET of,
-///     and never smaller than, what stage 1 counted — the flat list enters
-///     whole, so it also carries actions the stage-1 fold
-///     (`flat_actions_have_meaningful_priority`) does not count as meaningful,
-///     `PassPriority` and mana-ability activations among them, and extra items
-///     can only push toward `MayInterfere`. See the coverage invariant at the
-///     call below; the wider phrasing would claim coverage of shapes neither
-///     stage enumerates.
-///
-/// Otherwise the seat still Shortens and gets its window — at the place 0 every AI site emits,
-/// the shortened proposal admits no place, so the shortcut is taken at once and CR 732.2b's new
-/// ending point IS that window, held by this seat.
-///
-/// READ-ORDER: the proposal is read off the ORIGINAL `state`, before
-/// [`shortcut_probe`] re-parks its clone at `Priority` — the probe state carries
-/// no offer at all, so reading the crown from it would make arm (A) dead code.
-/// That same read supplies the CR 732.2b precondition ahead of both stages: a
-/// proposal admitting no place cannot be answered by naming one, so the seat
-/// Accepts rather than emitting a verdict `apply()` refuses.
-pub fn smart_shortcut_response(
+/// CR 732.2c: the priority state `seat` reaches when the reducer takes `shorten` and every later
+/// responder accepts, with the divergence latch cleared so a pass stays answerable there; `None`
+/// unless the take latches `seat` at its own priority.
+pub fn shortened_priority_state(
     state: &GameState,
-    polled_player: PlayerId,
-) -> crate::analysis::loop_check::ShortcutResponse {
-    // Both accept-or-shorten windows are named, so neither is answered by
-    // accident. The wildcard is not removable — `WaitingFor` has 128 variants and
-    // enumerating 126 `=> None` arms here would be noise, not a guard — and this
-    // two-named-arms + `_` shape is the module's existing idiom for the same
-    // question (`game::precast_copy_shortcut::normalize_untrusted_restore`,
-    // `::rekey_after_trusted_restore`).
-    let (crowned_winner, shortening_places) = match &state.waiting_for {
-        WaitingFor::RespondToShortcut { proposal, .. } => (
-            proposal.predicted_winner,
-            Some(proposal.shortening_places()),
-        ),
-        // STRUCTURAL, not an oversight: `RespondToPrecastCopyShortcut` carries no
-        // proposal summary and therefore neither a `predicted_winner` field nor a
-        // range, so the pre-cast route has no crown to read and arm (A) is
-        // inapplicable rather than skipped, and the precondition below is inert
-        // there. Stage 1 and arm (B) do apply, and both run below.
-        WaitingFor::RespondToPrecastCopyShortcut { .. } => (None, None),
-        _ => (None, None),
-    };
-
-    // CR 732.2b: a shortening responder names "a place where they will make a game
-    // choice that's different than what's been proposed", so the place must be one
-    // the proposal admits. A proposal of zero repetitions proposes no choice, its
-    // range holds no place, and `apply()` refuses every `Shorten` against it, place
-    // 0 included. Accept is then the only answer this seat can give that the reducer
-    // will take: `ai_support::candidates` builds exactly one candidate here and
-    // validates it against the reducer, so a verdict naming an excluded place is
-    // dropped rather than refused on submit, leaving the polled seat no legal action
-    // at all. Reading the range here answers for every ingress that reaches the
-    // window — the declare path's own mint and a restored `WaitingFor` alike.
-    if shortening_places.is_some_and(|places| places.is_empty()) {
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
+    seat: PlayerId,
+    shorten: &GameAction,
+) -> Option<GameState> {
+    let _probe = crate::game::engine::SimulationProbeGuard::enter();
+    let mut scratch = state.clone();
+    let mut answer = shorten.clone();
+    loop {
+        crate::game::engine::apply_as_current(&mut scratch, answer).ok()?;
+        answer = match &scratch.waiting_for {
+            WaitingFor::RespondToShortcut { .. } => GameAction::RespondToShortcut {
+                response: crate::analysis::loop_check::ShortcutResponse::Accept,
+            },
+            WaitingFor::RespondToPrecastCopyShortcut { epoch, .. } => {
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response: crate::types::actions::PrecastCopyShortcutResponse::Accept,
+                }
+            }
+            _ => break,
+        };
     }
-
-    let (probe, actions) = shortcut_probe(state, polled_player);
-    if !has_meaningful_priority_action(probe.state(), &actions) {
-        // CR 732.2c: nothing to do — agree to take the shortcut.
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
-    }
-
-    // Arm (A). Keyed on `predicted_winner`, never `proposer`: CR 732.2a lets a
-    // player propose a shortcut whose outcome crowns someone else, and the
-    // proposer is excluded from the APNAP response queue anyway.
-    if crowned_winner == Some(polled_player) {
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
-    }
-
-    // Arm (B). No bounded/unbounded exemption: an `IterationCount::Fixed(n)`
-    // offer ends the game just as surely as an `UntilLethal` one, so both
-    // classes take the identical rule.
-    //
-    // The fold reads [`stage_two_action_set`], never the bare flat `actions` —
-    // see that function for the coverage invariant and what folding over the
-    // flat list alone would silently Accept.
-    if shortcut_efficacy::any_action_may_interfere(
-        probe.state(),
-        polled_player,
-        &stage_two_action_set(probe.state(), &actions),
-    ) {
-        // CR 732.2b: name an earlier stopping point — take my window instead of losing.
-        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration: 0 }
-    } else {
-        crate::analysis::loop_check::ShortcutResponse::Accept
-    }
+    (scratch.precast_shortcut_runtime.must_diverge == Some(seat)
+        && scratch.waiting_for == WaitingFor::Priority { player: seat })
+    .then(|| {
+        scratch.precast_shortcut_runtime.must_diverge = None;
+        scratch
+    })
 }
+
+/// The place an AI responder shortens at: one repetition, so the proposer sees their loop land
+/// before the AI answers it (a play-style choice, not a rule).
+pub const AI_SHORTEN_PLACE: u32 = 1;
 
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
     state.stack.is_empty() && matches!(state.phase, Phase::Upkeep | Phase::Draw)
@@ -3254,7 +3055,8 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
-    mana_sources::activatable_mana_actions_for_player(state, player)
+    // The grouped map is what the frontend offers the player (CR 605.3a).
+    mana_sources::mana_actions_for_player(state, player, ManaActivationPurpose::Explicit)
 }
 
 #[cfg(test)]
@@ -3304,6 +3106,442 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    const PROBE_FERTILE: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.";
+    const PROBE_NYKTHOS: &str = "{T}: Add {C}.\n{2}, {T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)";
+
+    fn selected_probe_option(
+        state: &GameState,
+        land: ObjectId,
+        aura: ObjectId,
+        base: ManaType,
+        extra: ManaType,
+    ) -> mana_sources::ManaSourceOption {
+        let option =
+            mana_sources::activatable_land_mana_options(state, land, PlayerId(0))
+                .into_iter()
+                .find(|option| {
+                    option.mana_type == base
+                && option.taps_for_mana_overrides.iter().any(|(reference, value)|
+                    reference.source.object_id == aura
+                    && *value == crate::types::game_state::ProductionOverride::SingleColor(extra))
+                })
+                .expect("the real producer exposes an exact selected Aura color");
+        assert_eq!(option.taps_for_mana_overrides.len(), 1);
+        let refs: Vec<_> = crate::game::functioning_abilities::active_trigger_definitions(
+            state,
+            &state.objects[&aura],
+        )
+        .map(|active| active.definition_ref)
+        .collect();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(option.taps_for_mana_overrides[0].0, refs[0]);
+        option
+    }
+
+    fn forest_probe_board(
+        intrinsic: bool,
+        observer: bool,
+    ) -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::parse_mtgjson_mana_cost;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Empty Oracle here is explicitly the existing helper-domain subtype
+        // fallback, not a claim that an ordinary printed Forest is unindexed.
+        let forest = scenario
+            .add_land_from_oracle(P0, "Forest", if intrinsic { "" } else { "({T}: Add {G}.)" })
+            .with_subtypes(vec!["Forest"])
+            .id();
+        let aura = scenario
+            .add_enchantment_from_oracle(P0, "Fertile Ground", PROBE_FERTILE)
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+            .id();
+        if observer {
+            scenario.add_enchantment_from_oracle(P0, "Manabarbs",
+                "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.")
+                .with_mana_cost(parse_mtgjson_mana_cost("{3}{R}"));
+        }
+        let mut runner = scenario.build();
+        crate::game::effects::attach::attach_to(runner.state_mut(), aura, forest);
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        if intrinsic {
+            let land = runner.state_mut().objects.get_mut(&forest).unwrap();
+            land.abilities = Arc::new(Vec::new());
+            land.base_abilities = Arc::new(Vec::new());
+        }
+        (runner, forest, aura)
+    }
+
+    /// CR 106.3 + CR 608.2d + CR 605.4a: the actual candidate-clone handoff
+    /// retains selected G (GG), while the independent W choice gives GW.
+    #[test]
+    fn mana_option_trigger_probe_keeps_selected_aura_color() {
+        let (mut runner, forest, aura) = forest_probe_board(false, false);
+        let original = serde_json::to_value(runner.state()).unwrap();
+        for extra in [ManaType::Green, ManaType::White] {
+            let option =
+                selected_probe_option(runner.state(), forest, aura, ManaType::Green, extra);
+            assert!(option.ability_index.is_some());
+            let mut probe = runner.state().clone();
+            assert!(!super::resolve_mana_option_for_trigger_probe(
+                &mut probe,
+                PlayerId(0),
+                &option
+            ));
+            assert!(probe.objects[&forest].tapped);
+            let units: Vec<_> = probe.players[0].mana_pool.units().collect();
+            assert_eq!(units.len(), 2);
+            assert_eq!(
+                units
+                    .iter()
+                    .filter(|unit| unit.source_id == forest && unit.color == ManaType::Green)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                units.iter().filter(|unit| unit.source_id == aura).count(),
+                1
+            );
+            assert_eq!(
+                probe.players[0].mana_pool.count_color(ManaType::Green),
+                if extra == ManaType::Green { 2 } else { 1 },
+                "the selected handoff must produce GG rather than the default GW: {units:?}"
+            );
+            assert_eq!(
+                units
+                    .iter()
+                    .filter(|unit| unit.source_id == aura && unit.color == extra)
+                    .count(),
+                1
+            );
+            assert!(probe.pending_taps_for_mana_overrides.is_empty());
+            assert!(matches!(
+                probe.waiting_for,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            ));
+            assert!(probe.stack.is_empty());
+        }
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), original);
+        let (_, _, grouped) = legal_actions_full(runner.state());
+        let action = grouped[&forest].iter().find(|action| matches!(action,
+            GameAction::TapLandForMana { selection }
+                if selection.taps_for_mana.iter().any(|selected|
+                    selected.source.object_id == aura
+                    && selected.production_override == crate::types::game_state::ProductionOverride::SingleColor(ManaType::Green))))
+            .expect("the public counterpart offers the selected G action").clone();
+        let events = runner.act(action).unwrap().events;
+        assert_eq!(
+            runner.state().players[0]
+                .mana_pool
+                .count_color(ManaType::Green),
+            2
+        );
+        for source in [forest, aura] {
+            assert_eq!(events.iter().filter(|event| matches!(event,
+                crate::types::events::GameEvent::ManaAdded { source_id, mana_type: ManaType::Green, .. }
+                    if *source_id == source)).count(), 1);
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    /// CR 305.6 + CR 605.4a: the legacy subtype-only route uses the same
+    /// real activation/event authority and settles its nondefault Aura once.
+    #[test]
+    fn mana_option_trigger_probe_settles_intrinsic_selected_aura() {
+        let (runner, forest, aura) = forest_probe_board(true, false);
+        let option = selected_probe_option(
+            runner.state(),
+            forest,
+            aura,
+            ManaType::Green,
+            ManaType::Green,
+        );
+        assert_eq!(option.ability_index, None);
+        let mut probe = runner.state().clone();
+        assert!(!super::resolve_mana_option_for_trigger_probe(
+            &mut probe,
+            PlayerId(0),
+            &option
+        ));
+        assert!(probe.objects[&forest].tapped);
+        assert_eq!(probe.players[0].mana_pool.total(), 2);
+        assert_eq!(probe.players[0].mana_pool.count_color(ManaType::Green), 2);
+        assert_eq!(
+            probe.players[0]
+                .mana_pool
+                .units()
+                .filter(|unit| unit.source_id == aura)
+                .count(),
+            1
+        );
+        assert!(probe.pending_taps_for_mana_overrides.is_empty());
+        assert!(matches!(probe.waiting_for, WaitingFor::Priority { .. }));
+        assert!(probe.stack.is_empty());
+        assert!(!runner.state().objects[&forest].tapped);
+        assert!(runner.state().players[0].mana_pool.is_empty());
+    }
+
+    /// CR 118.3 + CR 700.5 + CR 605.4a: independently paid C/C precedes
+    /// Nykthos's live devotion and selected U. Real observers and pauses keep
+    /// their own outcome; choosing a different color is not an observer.
+    #[test]
+    fn mana_option_trigger_probe_uses_cost_and_observer_boundaries() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::events::GameEvent;
+        use crate::types::mana::parse_mtgjson_mana_cost;
+        for observer in [false, true] {
+            let (mut runner, forest, aura) = forest_probe_board(false, observer);
+            let sources = mana_sources::taps_for_mana_trigger_sources(runner.state());
+            let gates = crate::game::mana_abilities::ManaActivationGates::compute(runner.state());
+            let option = selected_probe_option(
+                runner.state(),
+                forest,
+                aura,
+                ManaType::Green,
+                ManaType::Green,
+            );
+            assert_eq!(
+                super::activate_mana_action_would_queue_non_mana_trigger(
+                    runner.state(),
+                    P0,
+                    forest,
+                    option.ability_index.unwrap(),
+                    &sources,
+                    &gates
+                ),
+                observer
+            );
+            assert_eq!(
+                super::tap_land_action_would_queue_non_mana_trigger(
+                    runner.state(),
+                    P0,
+                    forest,
+                    &sources,
+                    &gates
+                ),
+                observer
+            );
+            assert_eq!(
+                super::grouped_mana_requires_priority(runner.state(), P0),
+                observer
+            );
+            let mut probe = runner.state().clone();
+            assert_eq!(
+                super::resolve_mana_option_for_trigger_probe(&mut probe, P0, &option),
+                observer
+            );
+            assert_eq!(probe.players[0].mana_pool.count_color(ManaType::Green), 2);
+            let (_, _, grouped) = legal_actions_full(runner.state());
+            let action = grouped[&forest].iter().find(|action| matches!(action,
+                GameAction::TapLandForMana { selection }
+                    if selection.taps_for_mana.iter().any(|selected|
+                        selected.production_override == crate::types::game_state::ProductionOverride::SingleColor(ManaType::Green))))
+                .unwrap().clone();
+            runner.act(action).unwrap();
+            if observer {
+                assert!(!runner.state().stack.is_empty());
+                runner.advance_until_stack_empty();
+                // CR 120.3a: the real Manabarbs observer deals one damage.
+                assert_eq!(runner.state().players[0].life, 19);
+            } else {
+                assert_eq!(runner.state().players[0].life, 20);
+            }
+            assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+            assert!(runner.state().stack.is_empty());
+        }
+        for aura_controller in [P0, P1] {
+            for paused in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let nykthos = scenario
+                    .add_land_from_oracle(P0, "Nykthos, Shrine to Nyx", PROBE_NYKTHOS)
+                    .as_legendary()
+                    .id();
+                scenario
+                    .add_creature_from_oracle(P0, "Leatherback Baloth", 4, 5, "")
+                    .with_subtypes(vec!["Beast"])
+                    .with_mana_cost(parse_mtgjson_mana_cost("{G}{G}{G}"));
+                let aura = scenario
+                    .add_enchantment_from_oracle(aura_controller, "Fertile Ground", PROBE_FERTILE)
+                    .with_subtypes(vec!["Aura"])
+                    .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+                    .id();
+                let funders = if paused {
+                    scenario.add_enchantment_from_oracle(P1, "Rest in Peace",
+                        "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.")
+                        .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"));
+                    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void",
+                        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.")
+                        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}{B}"));
+                    vec![scenario
+                        .add_creature_from_oracle(
+                            P0,
+                            "Basal Thrull",
+                            1,
+                            2,
+                            "{T}, Sacrifice this creature: Add {B}{B}.",
+                        )
+                        .with_subtypes(vec!["Thrull"])
+                        .with_mana_cost(parse_mtgjson_mana_cost("{B}{B}"))
+                        .id()]
+                } else {
+                    (0..2)
+                        .map(|_| {
+                            scenario
+                                .add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.")
+                                .id()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let mut runner = scenario.build();
+                crate::game::effects::attach::attach_to(runner.state_mut(), aura, nykthos);
+                crate::game::layers::evaluate_layers(runner.state_mut());
+                let green = if aura_controller == P0 { 4 } else { 3 };
+                assert_eq!(
+                    crate::game::devotion::count_devotion(runner.state(), P0, &[ManaColor::Green]),
+                    green
+                );
+                let option = selected_probe_option(
+                    runner.state(),
+                    nykthos,
+                    aura,
+                    ManaType::Green,
+                    ManaType::Blue,
+                );
+                assert_eq!(option.ability_index, Some(1));
+                let original = serde_json::to_value(runner.state()).unwrap();
+                let mut probe = runner.state().clone();
+                assert!(!super::resolve_mana_option_for_trigger_probe(
+                    &mut probe, P0, &option
+                ));
+                assert_eq!(serde_json::to_value(runner.state()).unwrap(), original);
+                if paused {
+                    assert!(matches!(
+                        probe.waiting_for,
+                        WaitingFor::ReplacementChoice {
+                            player: P0,
+                            candidate_count: 2,
+                            ..
+                        }
+                    ));
+                    assert!(!probe.objects[&nykthos].tapped);
+                    assert!(probe.players[0].mana_pool.is_empty());
+                    let Some(crate::types::game_state::PendingCostMoveResume::ManaAbilityPayment {
+                        cursor,
+                        ..
+                    }) = &probe.pending_cost_move_resume
+                    else {
+                        panic!("the real replacement pause retains the activation cursor");
+                    };
+                    let parent = cursor
+                        .parent
+                        .as_ref()
+                        .expect("the cost-paying child retains Nykthos");
+                    assert_eq!(parent.pending.source_id, nykthos);
+                    assert_eq!(
+                        parent.pending.selected_taps_for_mana,
+                        option
+                            .semantic_selection(runner.state())
+                            .unwrap()
+                            .taps_for_mana
+                    );
+                } else {
+                    assert!(probe.objects[&nykthos].tapped);
+                    assert!(funders.iter().all(|source| probe.objects[source].tapped));
+                    assert_eq!(
+                        probe.players[0].mana_pool.count_color(ManaType::Green),
+                        green as usize
+                    );
+                    assert_eq!(probe.players[0].mana_pool.count_color(ManaType::Blue), 1);
+                    assert!(matches!(probe.waiting_for, WaitingFor::Priority { .. }));
+                }
+                let (_, _, grouped) = legal_actions_full(runner.state());
+                let action = grouped[&nykthos].iter().find(|action| matches!(action,
+                    GameAction::TapLandForMana { selection }
+                        if selection.mana_type == ManaType::Green
+                        && selection.taps_for_mana.iter().any(|selected|
+                            selected.source.object_id == aura
+                            && selected.production_override == crate::types::game_state::ProductionOverride::SingleColor(ManaType::Blue))))
+                    .expect("public independently funded G/U capability").clone();
+                let mut events = runner.act(action).unwrap().events;
+                if paused {
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice {
+                            player: P0,
+                            candidate_count: 2,
+                            ..
+                        }
+                    ));
+                    let restored =
+                        serde_json::from_slice(&serde_json::to_vec(runner.state()).unwrap())
+                            .unwrap();
+                    runner = crate::game::scenario::GameRunner::from_state(restored);
+                    events.extend(
+                        runner
+                            .act(GameAction::ChooseReplacement { index: 1 })
+                            .unwrap()
+                            .events,
+                    );
+                }
+                assert_eq!(
+                    runner.state().players[0]
+                        .mana_pool
+                        .count_color(ManaType::Green),
+                    green as usize
+                );
+                assert_eq!(
+                    runner.state().players[0]
+                        .mana_pool
+                        .count_color(ManaType::Blue),
+                    1
+                );
+                assert!(runner.state().players[1].mana_pool.is_empty());
+                for source in &funders {
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| matches!(event,
+                        GameEvent::ManaAdded { source_id, .. } if source_id == source))
+                            .count(),
+                        if paused { 2 } else { 1 }
+                    );
+                }
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(runner.state().pending_taps_for_mana_overrides.is_empty());
+                if !paused {
+                    for malformed in [0, 1, 2] {
+                        let mut bad = option.clone();
+                        let mut state: GameState =
+                            serde_json::from_value(original.clone()).unwrap();
+                        match malformed {
+                            0 => bad.ability_index = Some(usize::MAX),
+                            1 => bad.object_id = ObjectId(u64::MAX),
+                            2 => state.objects.get_mut(&nykthos).unwrap().controller = P1,
+                            _ => unreachable!(),
+                        }
+                        assert!(!super::resolve_mana_option_for_trigger_probe(
+                            &mut state, P0, &bad
+                        ));
+                        assert!(state.players[0].mana_pool.is_empty());
+                        assert!(funders.iter().all(|source| !state.objects[source].tapped));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -4421,6 +4659,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                     repeat: None,
                 },
                 false,
@@ -4451,8 +4690,9 @@ mod tests {
             player: PlayerId(0),
         };
 
+        // CR 723.5: the builder issues no pass the reducer's submitter guard refuses.
         let raw_candidates = candidate_actions(&state);
-        assert!(raw_candidates
+        assert!(!raw_candidates
             .iter()
             .any(|candidate| { matches!(candidate.action, GameAction::PassPriority) }));
 
@@ -6583,6 +6823,7 @@ mod tests {
             trigger_event: None,
             effect_description: Some("counter target spell".to_string()),
             remaining: vec![],
+            affected_object: None,
             repeat: None,
         };
 

@@ -5634,6 +5634,51 @@ mod tests {
         }
     }
 
+    /// C1 (LEGACY_SPELLS_CAST_LAST_TURN_2026Q4), the three `StaticMode` carriers: the pre-window
+    /// unit tag `SpellsCastLastTurn` in `dynamic_count` loads as the table-wide
+    /// `SpellsCast { All, None, LastTurn }` through `ModifyCost`, `ReduceAbilityCost` and the
+    /// legacy `ReduceCost` payload.
+    #[test]
+    fn legacy_spells_cast_last_turn_tag_loads_through_the_static_mode_carriers() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+        let legacy = r#"{"type":"SpellsCastLastTurn"}"#;
+        let current_modify = format!(
+            r#"{{"ModifyCost":{{"mode":"Reduce","amount":{{"type":"Cost","shards":[],"generic":1}},"spell_filter":null,"dynamic_count":{legacy}}}}}"#
+        );
+        let current_ability = format!(
+            r#"{{"ReduceAbilityCost":{{"keyword":"activated","amount":2,"dynamic_count":{legacy}}}}}"#
+        );
+        let legacy_reduce = format!(
+            r#"{{"mode":{{"ReduceCost":{{"amount":{{"type":"Cost","shards":[],"generic":3}},"spell_filter":null,"dynamic_count":{legacy}}}}}}}"#
+        );
+        let modes = [
+            serde_json::from_str::<StaticMode>(&current_modify).unwrap(),
+            serde_json::from_str::<StaticMode>(&current_ability).unwrap(),
+            serde_json::from_str::<Wrapper>(&legacy_reduce)
+                .unwrap()
+                .mode,
+        ];
+        for mode in modes {
+            let dynamic_count = match &mode {
+                StaticMode::ModifyCost { dynamic_count, .. }
+                | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count,
+                other => panic!("expected a cost modifier, got {other:?}"),
+            };
+            assert_eq!(
+                dynamic_count,
+                &Some(QuantityRef::SpellsCast {
+                    scope: crate::types::ability::CountScope::All,
+                    filter: None,
+                    window: crate::types::ability::TurnWindow::LastTurn,
+                })
+            );
+        }
+    }
+
     #[test]
     fn fwd_compat_legacy_cost_modify_strings_map_to_modify_cost() {
         #[derive(serde::Deserialize, PartialEq, Debug)]

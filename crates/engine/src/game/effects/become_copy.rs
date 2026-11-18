@@ -15,6 +15,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
 pub fn resolve(
@@ -264,6 +265,9 @@ pub(crate) fn apply_precomputed_copy_values(
             object_id: recipient_id,
             counter_type,
             count,
+            // CR 614.16: copy-entry exceptions are entering-with-counters
+            // placements (replacement-driven entry modification).
+            cause: CounterCause::ReplacementOrPrevention,
         })
         .collect();
         for (index, addition) in additions.iter().cloned().enumerate() {
@@ -272,6 +276,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 object_id,
                 counter_type,
                 count,
+                cause,
             } = addition
             else {
                 continue;
@@ -282,6 +287,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 object_id,
                 counter_type,
                 count,
+                cause,
                 events,
             ) {
                 super::counters::stash_pending_counter_additions(
@@ -643,16 +649,12 @@ impl FoldableCopyException<'_> {
             Self::SetPower { value } => values.power = Some(*value),
             Self::SetToughness { value } => values.toughness = Some(*value),
             Self::AddKeyword { keyword } => {
-                if keyword.instances_must_coexist() {
-                    values.keywords.push(keyword.clone());
-                } else if keyword.overrides_same_kind_on_grant() {
-                    values.keywords.retain(|existing| {
-                        std::mem::discriminant(existing) != std::mem::discriminant(keyword)
-                    });
-                    values.keywords.push(keyword.clone());
-                } else if !values.keywords.contains(keyword) {
-                    values.keywords.push(keyword.clone());
-                }
+                crate::game::keywords::grant_keyword_instance_into(
+                    &mut values.keywords,
+                    keyword.clone(),
+                    |keyword| keyword,
+                    crate::game::keywords::RedundantGrant::KeepEarlier,
+                );
             }
             Self::GrantAbility { definition } => {
                 let abilities = std::sync::Arc::make_mut(&mut values.abilities);

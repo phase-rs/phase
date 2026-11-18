@@ -42,7 +42,7 @@ fn shortcut_allocation_submission_fixture_matches_curated_client_contract() {
             .iter()
             .map(|id| id.0.as_str())
             .collect::<Vec<_>>(),
-        ["i-1.0.1.k4", "i-1.0.1.k5", "i-1.0.1.k6"]
+        ["i-1.0.1.k0", "i-1.0.1.k1", "i-1.0.1.k2"]
     );
     assert_eq!(
         allocation
@@ -50,7 +50,7 @@ fn shortcut_allocation_submission_fixture_matches_curated_client_contract() {
             .iter()
             .map(|assignment| (assignment.choice_id.0.as_str(), assignment.amount))
             .collect::<Vec<_>>(),
-        [("i-1.0.1.k4", 6), ("i-1.0.1.k5", 6), ("i-1.0.1.k6", 6)]
+        [("i-1.0.1.k0", 6), ("i-1.0.1.k1", 6), ("i-1.0.1.k2", 6)]
     );
 
     let (mut state, proposer) = crate::interaction_contract::f4_offer_board();

@@ -986,6 +986,27 @@ pub(crate) fn object_cant_tap(state: &crate::types::game_state::GameState, id: O
     active_static_definitions(state, obj).any(|sd| matches!(sd.mode, StaticMode::CantTap))
 }
 
+/// CR 601.2b + CR 601.2h: whether `id` is held for the in-flight spell's
+/// deferred tap cost (conspire or teamwork selected before targets). Until the
+/// payment commit taps it, a held permanent can't pay another part of that cost
+/// (convoke, Harmonize, another tap cost), and automatic payment won't tap it
+/// for mana; the player may still tap it for mana (CR 601.2g,
+/// `ManaActivationPurpose::Explicit`) if it is untapped again by the commit.
+/// This is a payment reservation, not CR 701.26a "can't become
+/// tapped", so effect taps and `object_cant_tap` don't read it. The single
+/// authority read at every payment-eligibility chokepoint; the in-flight root is
+/// `state.pending_cast` (published through `with_payment_root` during payment
+/// preparation).
+pub(crate) fn payment_tap_reserved(
+    state: &crate::types::game_state::GameState,
+    id: ObjectId,
+) -> bool {
+    state
+        .pending_cast
+        .as_deref()
+        .is_some_and(|pending| pending.holds_tap_reservation(id))
+}
+
 /// CR 701.26a: Tap `id` to pay a cost, honoring any `StaticMode::CantTap`
 /// ("can't become tapped") restriction. Single authority for every cost-driven
 /// creature/permanent tap ({T} activation costs, convoke, crew, station, saddle,
@@ -1558,16 +1579,13 @@ fn casting_restriction_applies(
         // Under shared team turns a turn where a teammate holds `active_player`
         // still belongs to the caster's own team, so `active_player != player`
         // over-permits. Same authority as `ParsedCondition::IsOpponentsTurn`.
-        CastingRestriction::DuringOpponentsTurn => {
-            super::players::is_opponent(state, player, state.active_player)
-        }
+        CastingRestriction::DuringOpponentsTurn => super::players::is_opponents_turn(state, player),
         CastingRestriction::DuringYourTurn => state.active_player == player,
         CastingRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringOpponentsUpkeep => {
-            super::players::is_opponent(state, player, state.active_player)
-                && state.phase == Phase::Upkeep
+            super::players::is_opponents_turn(state, player) && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringAnyUpkeep => state.phase == Phase::Upkeep,
         CastingRestriction::DuringYourEndStep => {
@@ -2216,9 +2234,7 @@ fn evaluate_condition_for_granter(
         // where a TEAMMATE holds `active_player` (CR 805.4 shared team turns —
         // the active team is still `player`'s own team) is NOT reported as an
         // opponent's turn, which `active_player != player` would do.
-        ParsedCondition::IsOpponentsTurn => {
-            super::players::is_opponent(state, player, state.active_player)
-        }
+        ParsedCondition::IsOpponentsTurn => super::players::is_opponents_turn(state, player),
         // CR 500.1 + CR 602.5: the game is in one of the named steps; player
         // scope, if any, is composed by the caller via `And`.
         ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),

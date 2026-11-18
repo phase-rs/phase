@@ -28,10 +28,10 @@ use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
     Comparator, ControllerRef, DamageChannel, DigRestOrder, DigRestRemainder, DigSource, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, LibraryPosition, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality,
-    SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    Effect, EffectOutcomeSignal, EffectScope, FilterProp, InstructionJoin, LibraryPosition,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
+    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -3189,6 +3189,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
         def.sibling_condition = clause_ir.sibling_condition;
+        // CR 608.2c: a chunk the chunk loop stamped as a further target slot
+        // keeps that identity; a clause parse's own list marker (a splitter
+        // product on the clause head) is never `ListSlot`, so this only adds.
+        if clause_ir.instruction_join == InstructionJoin::ListSlot {
+            def.instruction_join = InstructionJoin::ListSlot;
+        }
         // CR 608.2c + CR 614.1a: carry the clause seam's deferred guard verdict onto the
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
@@ -3434,6 +3440,11 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
+            // CR 118.12 + CR 115.10a: the shell's subject is the responder, so
+            // bind an offered payment's possessive to them here, where that is
+            // known, rather than leaving the runtime to infer it from a target
+            // slot the triggering event can also populate.
+            super::super::clause_shell::bind_offered_payment_possessive(&mut def);
         }
         // CR 608.2c + CR 608.2d: Propagate a clause-local "may" modal, and the player
         // it NAMES.
@@ -4774,6 +4785,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     rewrite_that_type_mana_instead(&mut result);
 
     fold_token_it_has_grants_into_token_statics(&mut result);
+    // CR 608.2c + CR 111.3: an else branch that creates "one of those tokens"
+    // received the same trailing grant; the creating effect defines the token's
+    // characteristics, including its ability text, so fold it into that token too.
+    if let Some(else_def) = result.else_ability.as_deref_mut() {
+        fold_token_it_has_grants_into_token_statics(else_def);
+    }
     fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a

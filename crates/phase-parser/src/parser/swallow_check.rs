@@ -38,6 +38,7 @@ use super::oracle_target::{
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
     CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
@@ -5870,9 +5871,15 @@ fn detect_duration_this_turn(
     if evidence.any_quantity_ref(|x| {
         matches!(
             x,
-            QuantityRef::LifeLostThisTurn { .. }
-                | QuantityRef::SpellsCastThisTurn { .. }
-                | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            // CR 500: only the this-turn window reads "this turn"; a last-turn
+            // payload (`window: LastTurn`) is not evidence of a this-turn duration.
+            QuantityRef::LifeLost {
+                window: TurnWindow::ThisTurn,
+                ..
+            } | QuantityRef::SpellsCast {
+                window: TurnWindow::ThisTurn,
+                ..
+            } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
                 | QuantityRef::EnteredThisTurn { .. }
                 | QuantityRef::SacrificedThisTurn { .. }
                 | QuantityRef::CrimesCommittedThisTurn
@@ -10739,7 +10746,7 @@ For              each kind of counter on Blue, Loyal Raptor, each other Dinosaur
     /// CR 305.2a + CR 603.4: Spider-Man 2099's end-step trigger has "this turn"
     /// in its intervening-if condition ("if you've played a land or cast a spell
     /// this turn from anywhere other than your hand"). Both arms of the disjunction
-    /// are turn-history quantities (`LandsPlayedThisTurn` / `SpellsCastThisTurn`)
+    /// are turn-history quantities (`LandsPlayedThisTurn` / `SpellsCast`)
     /// — not forward-looking durations — so `detect_duration_this_turn` must not
     /// fire even after the casting restriction parses cleanly (no Unimplemented
     /// shield).
@@ -17550,35 +17557,23 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 509.1g + CR 509.1h: a pairing clause whose bare "it" has no `SelfRef`
     /// antecedent (Vortex Elemental's compound "this creature and each creature
-    /// blocking or blocked by it"; Steadfast Armasaur's activated "target
-    /// creature blocking or blocked by it") is left unconsumed and REPORTED. The
-    /// detector firing proves the unit was not skipped as unimplemented; the
-    /// negative (no pairing filter) is paired with it.
+    /// blocking or blocked by it") is left unconsumed and REPORTED. The detector
+    /// firing proves the unit was not skipped as unimplemented; the negative (no
+    /// pairing filter) is paired with it.
     #[test]
     fn combat_pairing_relation_detector_reports_an_unbound_clause() {
-        for (name, keywords, text) in [
-            (
-                "Vortex Elemental",
-                &[][..],
-                "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.",
-            ),
-            (
-                "Steadfast Armasaur",
-                &["Vigilance"][..],
-                "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.",
-            ),
-        ] {
-            let parsed = parse_card(name, keywords, &["Creature"], text);
-            assert!(
-                has_swallowed_detector(&parsed, "CombatPairingRelation"),
-                "{name}: the unbound clause must be reported; warnings = {:?}",
-                parsed.parse_warnings
-            );
-            assert!(
-                !parse_has_pairing_filter(&parsed),
-                "{name}: an unbound pronoun must not produce a pairing filter"
-            );
-        }
+        let name = "Vortex Elemental";
+        let text = "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.";
+        let parsed = parse_card(name, &[], &["Creature"], text);
+        assert!(
+            has_swallowed_detector(&parsed, "CombatPairingRelation"),
+            "{name}: the unbound clause must be reported; warnings = {:?}",
+            parsed.parse_warnings
+        );
+        assert!(
+            !parse_has_pairing_filter(&parsed),
+            "{name}: an unbound pronoun must not produce a pairing filter"
+        );
     }
 
     /// The detector is silent when the clause is represented — the newly parsed
@@ -17608,6 +17603,12 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 &["Defender", "Reach"][..],
                 &["Creature"][..],
                 "Defender; reach (This creature can block creatures with flying.)\nYou may choose not to untap this creature during your untap step.\n{T}: Tap target creature with flying blocked by this creature. That creature doesn't untap during its controller's untap step for as long as this creature remains tapped.",
+            ),
+            (
+                "Steadfast Armasaur",
+                &["Vigilance"][..],
+                &["Creature"][..],
+                "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.",
             ),
             (
                 "Kjeldoran Frostbeast",

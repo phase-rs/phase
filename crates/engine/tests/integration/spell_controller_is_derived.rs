@@ -1535,7 +1535,12 @@ fn cr800_4a_thief_leaving_reverts_the_stolen_spell_and_leaves_it_on_the_stack() 
     assert_eq!(state.stack.len(), 1);
 
     let mut events = Vec::new();
-    eliminate_player(&mut state, thief, &mut events);
+    eliminate_player(
+        &mut state,
+        thief,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     // Leg 2 (REVERT-FAILING): the spell reverts to its by-default caster and
     // stays on the stack.
@@ -1580,7 +1585,12 @@ fn cr800_4a_caster_leaving_removes_the_stolen_spell() {
     assert_eq!(stack_object_controller(&state, &entry), thief);
 
     let mut events = Vec::new();
-    eliminate_player(&mut state, caster, &mut events);
+    eliminate_player(
+        &mut state,
+        caster,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         !state.stack.iter().any(|e| e.id == spell),
@@ -1619,7 +1629,12 @@ fn cr800_4a_thief_leaving_reverts_a_stolen_permanent_to_its_by_default_controlle
     assert_eq!(state.objects[&permanent].controller, thief);
 
     let mut events = Vec::new();
-    eliminate_player(&mut state, thief, &mut events);
+    eliminate_player(
+        &mut state,
+        thief,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     assert_eq!(
         state.objects[&permanent].zone,
         Zone::Battlefield,
@@ -1672,7 +1687,12 @@ fn cr800_4a_caster_leaving_leaves_a_stolen_spell_under_its_surviving_thief() {
     assert_eq!(stack_object_controller(state, &entry), thief);
 
     let mut events = Vec::new();
-    eliminate_player(state, caster, &mut events);
+    eliminate_player(
+        state,
+        caster,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         state.stack.iter().any(|e| e.id == spell),
@@ -1717,7 +1737,12 @@ fn cr800_4a_a_leavers_spell_on_a_survivors_card_is_exiled() {
     assert_eq!(stack_object_controller(state, &entry), caster);
 
     let mut events = Vec::new();
-    eliminate_player(state, caster, &mut events);
+    eliminate_player(
+        state,
+        caster,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         !state.stack.iter().any(|e| e.id == spell),
@@ -1757,7 +1782,12 @@ fn cr800_4a_simultaneous_leavers_journal_their_own_stack_removals() {
     assert_eq!(state.stack.len(), 2);
 
     let mut events = Vec::new();
-    engine::game::elimination::eliminate_players_simultaneously(&mut state, &[P0, P1], &mut events);
+    engine::game::elimination::eliminate_players_simultaneously(
+        &mut state,
+        &[P0, P1],
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         state.stack.is_empty(),

@@ -790,6 +790,50 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     (filter, rest)
 }
 
+/// CR 201.2 + CR 115.1: "target <type> not named <card name>" restricts the
+/// target slot by name ("target nonland permanent not named Detention Sphere",
+/// "target permanent not named Clever Conjurer"). It names a card, not the
+/// source object, so every object with that name is excluded — CR 201.5 binds
+/// only a self-reference. The shared combinator ends the name at the named-filter
+/// clause boundary and leaves any trailing conjunct ("and all other permanents
+/// …", "from a graveyard") in the remainder for the caller. Scoped to the target
+/// keyword: search filters keep their own `SharesQuality` lowering, which their
+/// "different names" suffix reads.
+fn parse_target_not_named_suffix(filter: TargetFilter, rest: &str) -> (TargetFilter, &str) {
+    // A coordinated "creature or planeswalker not named X" restricts every
+    // alternative, so the restriction distributes over each typed branch.
+    let restrictable = match &filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(|f| matches!(f, TargetFilter::Typed(_)))
+        }
+        _ => false,
+    };
+    if !restrictable {
+        return (filter, rest);
+    }
+    let lower = rest.to_lowercase();
+    let Some((prop, after)) = nom_on_lower(rest, &lower, |input| {
+        preceded(multispace0, nom_filter::parse_not_named_suffix).parse(input)
+    }) else {
+        return (filter, rest);
+    };
+    let restrict = |f: TargetFilter| match f {
+        TargetFilter::Typed(mut typed) => {
+            typed.properties.push(prop.clone());
+            TargetFilter::Typed(typed)
+        }
+        other => other,
+    };
+    let restricted = match filter {
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(restrict).collect(),
+        },
+        other => restrict(other),
+    };
+    (restricted, after)
+}
+
 /// CR 115.10a + CR 608.2h: Bind an untargeted "each other" population to the
 /// immediate instruction's sole object target, never to a target-selection slot.
 pub(crate) fn parse_parent_target_controller_population<'a>(
@@ -1576,21 +1620,28 @@ pub fn parse_target_with_syntax<'a>(
         // is recognized as a typed-phrase prefix inside `parse_type_phrase_folding_with_ctx`
         // — it pushes `IsCommander` and composes uniformly with the existing
         // suffix machinery (ownership, control, counters, "with X", etc.).
-        let (filter, rest) = parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
-        // CR 115.1: an object-headed coordinated list whose later leg is a
-        // player ("creature token, player, or planeswalker") is still one
-        // target slot. Extend only when a player leg actually appears, so
+        let (filter, rest_after_type_phrase) =
+            parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
+        let type_phrase_end = lower.len() - rest_after_type_phrase.len();
+        let (filter, rest) = parse_target_not_named_suffix(filter, rest_after_type_phrase);
+        // CR 109.2b: a "spell" reference targets a spell on the stack. An
+        // object-headed coordinated list whose later leg is a player
+        // ("creature token, player, or planeswalker") is still one target
+        // slot. Extend only when a player leg actually appears, so
         // player-free lists keep their ordinary type-phrase semantics.
         let mut tentative_ctx = ctx.clone();
         let (combined, extended_rest, saw_player) =
             parse_coordinated_target_tail(filter.clone(), rest, &mut tentative_ctx);
         if saw_player || continues_suffixed_type_list(&filter, rest) {
             *ctx = tentative_ctx;
-            return (combined, extended_rest, syntax);
+            return (
+                scope_target_spell_phrase(combined, &lower[target_offset..type_phrase_end]),
+                extended_rest,
+                syntax,
+            );
         }
-        let consumed_end = lower.len() - rest.len();
         return (
-            scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
+            scope_target_spell_phrase(filter, &lower[target_offset..type_phrase_end]),
             rest,
             syntax,
         );
@@ -2713,6 +2764,11 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" that ")),
         value((), tag(" with ")),
         value((), tag(" without ")),
+        // CR 608.2c: a coordinated mass conjunct opens a new noun phrase
+        // after the name ("not named Detention Sphere and all other
+        // permanents with the same name as that permanent"). Bare " and " stays
+        // inside the name ("Gisa and Geralf").
+        value((), tag(" and all other ")),
         // CR 201.2 + CR 400.1: origin-zone suffixes are outside the literal
         // card name ("card named X from your graveyard"). Require a real zone
         // suffix after "from" so names like "Extract from Darkness" stay whole.
@@ -4447,6 +4503,15 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
+    // CR 109.4 + CR 608.2i: "whose controller <look-back> this turn"
+    // possessive-relative controller predicate (Steel Hellkite #3248). Sibling to the
+    // "that …" relative clause below; disjoint prefixes, so the order is grouping-only.
+    // Refuses (leaving the tail unconsumed) for predicates outside the shared leaf set.
+    if let Some((prop, consumed)) = parse_whose_controller_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
     if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..], Some(ctx)) {
         properties.extend(that_props);
@@ -5487,9 +5552,10 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
 /// This is deliberately the sole authority for the source-target grammar used
 /// by damage replacements.  It proves the `target` keyword with the shared nom
 /// target-prefix combinator, delegates the noun phrase to `parse_target`, and
-/// then scopes a consumed `spell` phrase to the stack.  The returned remainder
-/// is sliced from `text`, not its lowercase working copy, so callers that parse
-/// a mixed-case Oracle fragment retain the original spelling.
+/// uses the already-scoped filter from `parse_target` (which applies spell
+/// scoping at the correct grammar boundary, excluding name restrictions).
+/// The returned remainder is sliced from `text`, not its lowercase working copy,
+/// so callers that parse a mixed-case Oracle fragment retain the original spelling.
 pub(crate) fn parse_declared_damage_source_target<'a>(
     text: &'a str,
 ) -> OracleResult<'a, TargetFilter> {
@@ -5498,8 +5564,6 @@ pub(crate) fn parse_declared_damage_source_target<'a>(
         return Err(super::oracle_nom::error::oracle_err(text));
     }
     let (filter, rest) = parse_target(text);
-    let consumed = text.len() - rest.len();
-    let filter = scope_target_spell_phrase(filter, &lower[..consumed]);
     if !target_filter_has_meaningful_content(&filter) {
         return Err(super::oracle_nom::error::oracle_err(rest));
     }
@@ -9471,9 +9535,8 @@ fn parse_ownership_or_controller_suffix(
     // PlayerFilter rather than setting *controller. Object-side bridge into the
     // PlayerFilter enum. Longest-match-first in the verb alt (mirrors the
     // duration guard in oracle_effect/lower.rs).
-    // NOTE: the numeric "three or more" is a DEFERRED coverage gap — the bridge
-    // carries the combat-damage-by-a-Pirate semantics (≥1); the count threshold
-    // is intentionally not enforced yet. Do NOT silently over-narrow.
+    // NOTE: the numeric "three or more" threshold is carried as `min_sources`
+    // and enforced as a distinct-source count at runtime.
     if let Ok((rest, pf)) = parse_controller_predicate_clause(own_ctrl) {
         properties.push(FilterProp::ControllerMatches {
             player: Box::new(pf),
@@ -9493,19 +9556,43 @@ fn parse_ownership_or_controller_suffix(
 /// <look-back> this turn" into a `PlayerFilter`. This is the object-axis analogue
 /// of the whole `PlayerFilter` enum: it recognizes a controller predicate and
 /// hands it to `FilterProp::ControllerMatches`, so ANY player look-back can scope
-/// a target's controller. Longest-match-first in the verb `alt`. The trailing
-/// " this turn" is required so the whole relative clause is consumed.
-///
-/// Supported predicates (each a leaf of the `alt`, composed — not enumerated):
-///   - "was dealt combat damage by [<N> or more ]<subtype>" →
-///     `OpponentDealtDamage { CombatOnly, Some(Typed(subtype)), min_sources: N }`
-///     (Admiral Beckett Brass: "by three or more Pirates" → `min_sources = 3`).
-///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
-///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
-///     CombatOnly, None, min_sources: 1 }`.
-///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+/// a target's controller. The predicate leaves are shared with the
+/// possessive-relative entry (`parse_whose_controller_predicate_clause`).
 fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = tag("controlled by a player who ").parse(input)?;
+    parse_controller_predicate_leaves(input)
+}
+
+/// CR 109.4 + CR 608.2i: possessive-relative entry to the controller-predicate
+/// bridge — "whose controller <look-back> this turn" (Steel Hellkite: "each nonland
+/// permanent with mana value X whose controller was dealt combat damage by this
+/// creature this turn"). Same shared leaves and trailing-" this turn" requirement as
+/// `parse_controller_predicate_clause`; predicates outside the leaf set refuse.
+fn parse_whose_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, _) = tag("whose controller ").parse(input)?;
+    parse_controller_predicate_leaves(input)
+}
+
+/// Shared controller-predicate leaves for both subject forms ("controlled by a player
+/// who …" and "whose controller …"). Longest-match-first in the verb `alt`. The
+/// trailing " this turn" is required so the whole relative clause is consumed.
+///
+/// Supported predicates (each a leaf of the `alt`, composed — not enumerated):
+///   - "was dealt combat damage by [<N> or more ]<source>" →
+///     `OpponentDealtDamage { CombatOnly, Some(source), min_sources: N, All }`
+///     (Admiral Beckett Brass: "by three or more Pirates" → `min_sources = 3`;
+///     Steel Hellkite: "by this creature" → `Some(SelfRef)`, `min_sources = 1`).
+///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
+///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
+///     CombatOnly, None, min_sources: 1, All }`.
+///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+///
+/// CR 608.2c: neither subject form ("a player who …", "whose controller …")
+/// names an opponent, so the damage leaves emit `relation: All` — the damaged
+/// player qualifies even if it later controls the source (Steel Hellkite +
+/// Ray of Command). Explicit "opponent … dealt damage" grammar routes through
+/// `oracle_quantity` and keeps `Opponent`.
+pub(crate) fn parse_controller_predicate_leaves(input: &str) -> OracleResult<'_, PlayerFilter> {
     // Each leaf leaves the remainder positioned just before the trailing
     // " this turn" (leading space intact), which the outer combinator consumes
     // uniformly so the whole relative clause is required.
@@ -9517,6 +9604,7 @@ fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilt
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                relation: PlayerRelation::All,
             },
             terminated(tag("was dealt combat damage"), peek(tag(" this turn"))),
         ),
@@ -9568,6 +9656,8 @@ fn parse_controller_dealt_combat_damage_by(input: &str) -> OracleResult<'_, Play
             kind: DamageKindFilter::CombatOnly,
             source: Some(Box::new(source)),
             min_sources,
+            // CR 608.2c: no opponent word in this grammar (see the leaves doc).
+            relation: PlayerRelation::All,
         },
     ))
 }
@@ -10158,6 +10248,35 @@ pub(crate) fn parse_bare_was_dealt_damage_suffix(text: &str) -> Option<(FilterPr
     }
     Some((
         FilterProp::WasDealtDamageThisTurn,
+        leading_ws + (trimmed.len() - rest.len()),
+    ))
+}
+
+/// CR 109.4 + CR 608.2i: "whose controller <look-back> this turn" possessive-relative
+/// controller predicate on a target noun phrase (Steel Hellkite: "each nonland
+/// permanent with mana value X whose controller was dealt combat damage by this
+/// creature this turn"). Delegates the predicate to the shared controller-predicate
+/// leaves, so every leaf the "controlled by a player who" bridge supports is accepted
+/// here; any other predicate (Dwarven Sea Clan / Seasinger "controls an Island",
+/// Lullmage's Domination graveyard count) refuses with `None` and the cascade leaves
+/// the tail unconsumed, preserving those cards' current behavior.
+pub(crate) fn parse_whose_controller_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (rest, pf) = parse_whose_controller_predicate_clause(trimmed).ok()?;
+    // Word-boundary check: accept end-of-string or any non-alphanumeric terminator
+    // so a longer continuation cannot misfire (mirrors the bare-damage suffix above).
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+    Some((
+        FilterProp::ControllerMatches {
+            player: Box::new(pf),
+        },
         leading_ws + (trimmed.len() - rest.len()),
     ))
 }
@@ -12219,6 +12338,72 @@ mod tests {
                 format!("{ctx:?}"),
                 before,
                 "a refusal must not mutate context"
+            );
+        }
+    }
+
+    /// Steel Hellkite (#3248) probe: the by-leaf's `parse_target` delegation must
+    /// yield a `SelfRef` source for the normalized "~" ("by this creature").
+    #[test]
+    fn dealt_combat_damage_by_self_reference_yields_self_ref_source() {
+        let (rest, pf) =
+            parse_controller_dealt_combat_damage_by("was dealt combat damage by ~ this turn")
+                .expect("by-~ must parse");
+        assert_eq!(rest, " this turn");
+        assert!(
+            matches!(
+                &pf,
+                PlayerFilter::OpponentDealtDamage {
+                    source: Some(src),
+                    min_sources: 1,
+                    ..
+                } if matches!(&**src, TargetFilter::SelfRef)
+            ),
+            "expected a SelfRef damage source, got {pf:?}"
+        );
+    }
+
+    /// Steel Hellkite (#3248): the "whose controller" arm consumes the damage
+    /// look-back (positive control for the refusal test below).
+    #[test]
+    fn whose_controller_suffix_consumes_damage_lookback() {
+        let text = " whose controller was dealt combat damage by ~ this turn";
+        let (prop, consumed) =
+            parse_whose_controller_suffix(text).expect("damage look-back must parse");
+        assert_eq!(consumed, text.len());
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::ControllerMatches { player }
+                    if matches!(
+                        &**player,
+                        PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
+                            source: Some(src),
+                            min_sources: 1,
+                            // CR 608.2c: "whose controller …" names no opponent.
+                            relation: PlayerRelation::All,
+                        } if matches!(&**src, TargetFilter::SelfRef)
+                    )
+            ),
+            "expected ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), 1, All}}}}, got {prop:?}"
+        );
+    }
+
+    /// Steel Hellkite (#3248): the "whose controller" arm refuses predicates outside
+    /// the shared leaf set without consuming input — Dwarven Sea Clan / Seasinger
+    /// ("controls an Island") and Lullmage's Domination (graveyard count) keep their
+    /// current behavior, and non-controller "whose" forms never reach this arm.
+    #[test]
+    fn whose_controller_suffix_refuses_non_lookback_predicates() {
+        for text in [
+            " whose controller controls an island",
+            " whose controller has eight or more cards in their graveyard",
+            " whose power is 5",
+        ] {
+            assert!(
+                parse_whose_controller_suffix(text).is_none(),
+                "{text:?} must be refused"
             );
         }
     }
@@ -26230,6 +26415,101 @@ mod tests {
             ParseContext::default().chosen_color_qualifier,
             ChosenColorQualifierScope::Unbound,
             "a freshly defaulted context leaves the gate closed"
+        );
+    }
+
+    /// Regression test for issue #10125: "not named" suffix with a name containing
+    /// "spell" (e.g. "Spell Queller") must not trigger stack scoping. CR 109.2
+    /// defines the type description as a permanent on the battlefield; the name
+    /// restriction is a predicate, not a head type noun.
+    #[test]
+    fn not_named_suffix_with_spell_in_name_does_not_scope_to_stack() {
+        // "target nonland permanent not named Spell Queller" — "Spell Queller" is a
+        // creature name. The word "Spell" in the name must not cause the target to
+        // be scoped to the stack (TargetFilter::StackSpell).
+        let text = "target nonland permanent not named Spell Queller";
+        let mut ctx = ParseContext::default();
+        let (filter, _rest, _syntax) = parse_target_with_syntax(text, &mut ctx);
+
+        // The filter should be a Typed filter with Not(Named("spell queller"))
+        // and should NOT contain StackSpell.
+        fn has_stack_spell(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::StackSpell => true,
+                TargetFilter::And { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Or { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Not { filter } => has_stack_spell(filter),
+                _ => false,
+            }
+        }
+        assert!(
+            !has_stack_spell(&filter),
+            "Filter should not contain StackSpell, got: {:?}",
+            filter
+        );
+
+        // Verify it's a Typed filter with the correct properties
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("Expected Typed filter, got: {:?}", filter);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        let has_not_named = typed.properties.iter().any(|p| {
+            matches!(p, FilterProp::Not { prop } if matches!(&**prop, FilterProp::Named { name } if name == "spell queller"))
+        });
+        assert!(
+            has_not_named,
+            "Should have Not(Named(spell queller)) property"
+        );
+    }
+
+    /// Regression test: declared damage source with "not named" suffix containing
+    /// "spell" must not be scoped to stack. The scoping is done by `parse_target`
+    /// at the correct grammar boundary (excluding the name restriction).
+    #[test]
+    fn declared_damage_source_not_named_spell_queller_does_not_scope_to_stack() {
+        // "target creature not named Spell Queller" as a damage source
+        // Should not be scoped to StackSpell because "Spell Queller" is a name.
+        let text = "target creature not named Spell Queller";
+        let (_rest, filter) =
+            parse_declared_damage_source_target(text).expect("should parse as damage source");
+
+        fn has_stack_spell(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::StackSpell => true,
+                TargetFilter::And { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Or { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Not { filter } => has_stack_spell(filter),
+                _ => false,
+            }
+        }
+        assert!(
+            !has_stack_spell(&filter),
+            "Damage source filter should not contain StackSpell, got: {:?}",
+            filter
+        );
+
+        // Should be And(ParentTargetSlot, Typed(Creature, Not(Named("spell queller"))))
+        let TargetFilter::And { filters } = &filter else {
+            panic!("Expected And filter, got: {:?}", filter);
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(matches!(
+            filters[0],
+            TargetFilter::ParentTargetSlot { index: 0 }
+        ));
+        let TargetFilter::Typed(typed) = &filters[1] else {
+            panic!("Expected Typed filter, got: {:?}", filters[1]);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        let has_not_named = typed.properties.iter().any(|p| {
+            matches!(p, FilterProp::Not { prop } if matches!(&**prop, FilterProp::Named { name } if name == "spell queller"))
+        });
+        assert!(
+            has_not_named,
+            "Should have Not(Named(spell queller)) property"
         );
     }
 }

@@ -71,7 +71,12 @@ fn gift_board(
         );
     }
     if let Some(seat) = eliminate {
-        engine::game::elimination::eliminate_player(runner.state_mut(), seat, &mut events);
+        engine::game::elimination::eliminate_player(
+            runner.state_mut(),
+            seat,
+            engine::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             runner.state().players[seat.0 as usize].is_eliminated,
             "{seat:?} must read as eliminated"
