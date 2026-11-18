@@ -9170,11 +9170,11 @@ fn parse_graveyard_redirect_replacement(
                 ),
             ))
             .parse(i)?;
-            // CR 400.1 + CR 700.4: the optional stated origin. `Some(None)` is
-            // "from anywhere" (no narrowing); `Some(Some(zone))` narrows the
-            // affected-object filter to that zone below.
+            // CR 400.1 + CR 700.4: the optional stated origin. `None` = no "from"
+            // clause; `Some(None)` = "from anywhere" (explicit, no narrowing, but
+            // sets active_zones to all zones per CR 113.6b); `Some(Some(zone))`
+            // = specific zone (narrows filter AND sets active_zones to that zone).
             let (i, origin) = opt(parse_graveyard_move_origin).parse(i)?;
-            let origin = origin.flatten();
             // CR 614.1a + CR 611.2a + CR 514.2: a stated window may sit INSIDE
             // the antecedent — "if a card would be put into your graveyard from
             // anywhere THIS TURN, exile that card instead" (Yawgmoth's Will /
@@ -9291,8 +9291,10 @@ fn parse_graveyard_redirect_replacement(
         }
     };
     // CR 400.1 + CR 700.4: fold the stated origin in last, so it applies to
-    // whichever shape the subject/ownership axes produced.
-    let valid_card = match origin {
+    // whichever shape the subject/ownership axes produced. `origin.flatten()`
+    // converts `Some(None)` ("from anywhere") to `None` (no filter narrowing),
+    // while preserving `Some(Some(zone))` as `Some(zone)`.
+    let valid_card = match origin.flatten() {
         Some(zone) => Some(constrain_filter_to_origin_zone(valid_card, zone)),
         None => valid_card,
     };
@@ -9394,6 +9396,28 @@ fn parse_graveyard_redirect_replacement(
         .description(original_text.to_string());
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
+    }
+
+    // CR 113.6b: "An ability that states which zones it functions in functions
+    // only from those zones." When the antecedent explicitly states a "from"
+    // clause, the replacement functions only from the stated zone(s).
+    // - `origin == Some(None)` = explicit "from anywhere" → all zones except Graveyard
+    // - `origin == Some(Some(zone))` = explicit "from <zone>" → only that zone
+    // - `origin == None` = no "from" clause → default (battlefield/command)
+    if let Some(inner) = origin {
+        match inner {
+            None => {
+                // "from anywhere" — functions from all zones except Graveyard
+                def = def.active_zones(crate::types::zones::Zone::ALL.iter()
+                    .copied()
+                    .filter(|z| *z != crate::types::zones::Zone::Graveyard)
+                    .collect());
+            }
+            Some(zone) => {
+                // "from <specific zone>" — functions only from that zone
+                def = def.active_zones(vec![zone]);
+            }
+        }
     }
 
     // CR 514.2 + CR 611.2a + CR 604.2: stamp the stated antecedent window onto
@@ -21682,6 +21706,65 @@ mod tests {
             def.valid_card,
             Some(TargetFilter::SelfRef),
             "tilde subject must be self-scoped for stack resolution"
+        );
+    }
+
+    /// CR 113.6b: "An ability that states which zones it functions in functions
+    /// only from those zones." When the antecedent explicitly says "from
+    /// anywhere", the replacement's `active_zones` must include all zones (except
+    /// Graveyard) so it functions from Library (mill), Hand (discard), Stack
+    /// (counter), Exile, Command, and Battlefield.
+    #[test]
+    fn replacement_from_anywhere_sets_active_zones() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from anywhere, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-anywhere shuffle-back must parse");
+
+        // Verify active_zones is set to all zones except Graveyard
+        let expected_zones: Vec<Zone> = Zone::ALL.iter()
+            .copied()
+            .filter(|z| *z != Zone::Graveyard)
+            .collect();
+        assert_eq!(
+            def.active_zones, expected_zones,
+            "from anywhere must set active_zones to all zones except Graveyard"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_battlefield_sets_active_zones_to_battlefield() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from the battlefield, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-battlefield shuffle-back must parse");
+
+        // Verify active_zones is set to only Battlefield
+        assert_eq!(
+            def.active_zones, vec![Zone::Battlefield],
+            "from the battlefield must set active_zones to only Battlefield"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_library_sets_active_zones_to_library() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from a library, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-library shuffle-back must parse");
+
+        // Verify active_zones is set to only Library
+        assert_eq!(
+            def.active_zones, vec![Zone::Library],
+            "from a library must set active_zones to only Library"
         );
     }
 
