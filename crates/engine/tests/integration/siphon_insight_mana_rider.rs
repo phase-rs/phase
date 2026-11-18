@@ -620,6 +620,17 @@ fn colorless_requirement_case(
             runner.state().waiting_for,
             WaitingFor::ManaPayment { .. }
         ));
+        if grant == "Siphon Insight" && creature && vizier_controller == Some(P0) {
+            assert_eq!(
+                engine::game::casting::cast_payment_mana_spend_permission(
+                    runner.state(),
+                    P0,
+                    colorless,
+                ),
+                Some(ManaSpendPermission::AnyTypeOrColor),
+                "the pending Siphon creature cast combines the any-color and any-type concessions"
+            );
+        }
         let pips_to_pin = if creature { 3 } else { 1 };
         for (index, land) in lands.iter().take(pips_to_pin).enumerate() {
             runner
