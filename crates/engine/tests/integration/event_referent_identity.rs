@@ -782,8 +782,16 @@ fn resonator(blink: bool) -> Zone {
     let t1 = triggers_of(&r, hunter)[0];
     pay(&mut r, P0, &[ManaType::Colorless, ManaType::Colorless]);
     activate(&mut r, reso, 0, &[t1]);
-    drive(&mut r, |r| r.state().stack.len() == 2 && priority(r, P1));
-    assert_eq!(r.state().stack.len(), 2, "reach: T1 and its copy");
+    // CR 117.4: the Resonator's ability resolves first and puts the copy on the stack.
+    drive(&mut r, |r| {
+        triggers_of(r, hunter).len() == 2 && priority(r, P1)
+    });
+    let pending = triggers_of(&r, hunter);
+    assert_eq!(r.state().stack.len(), 2, "reach: only T1 and its copy");
+    assert!(
+        pending.contains(&t1) && pending[0] != pending[1],
+        "reach: T1 and a distinct copy"
+    );
     if blink {
         let before = incarnation(&r, dino);
         cast_and_resolve(&mut r, P1, extra[0], &[ManaType::White], &[dino]);

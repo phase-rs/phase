@@ -7484,18 +7484,6 @@ mod legacy_event_referent_restore_tests {
 
     const RECTOR: &str = "When this creature dies, you may exile it. If you do, search your library for an enchantment card, put that card onto the battlefield, then shuffle.";
 
-    fn holds_pin(value: &serde_json::Value, pin: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(map) => map.iter().any(|(key, inner)| {
-                (key == "target_incarnations"
-                    && inner.as_array().is_some_and(|pins| pins.contains(pin)))
-                    || holds_pin(inner, pin)
-            }),
-            serde_json::Value::Array(items) => items.iter().any(|inner| holds_pin(inner, pin)),
-            _ => false,
-        }
-    }
-
     /// CR 603.10a + CR 608.2c: Academy Rector's trigger parks at "you may exile it"; the save
     /// taken there restores through the decoder with the dead Rector's event pin, and accepting
     /// exiles that Rector and fetches the enchantment.
@@ -7538,10 +7526,10 @@ mod legacy_event_referent_restore_tests {
             runner.state().waiting_for
         );
         assert_eq!(runner.state().objects[&rector].zone, Zone::Graveyard);
-        let pin = serde_json::json!({
-            "object_id": rector.0,
-            "incarnation": runner.state().objects[&rector].incarnation,
-        });
+        let pin = engine::types::identifiers::ObjectIncarnationRef::of(
+            rector,
+            runner.state().objects[&rector].incarnation,
+        );
 
         let mut state = runner.state().clone();
         state.capture_rng_word_pos();
@@ -7552,7 +7540,12 @@ mod legacy_event_referent_restore_tests {
             .expect("the save restores")
             .state;
         assert!(
-            holds_pin(&serde_json::to_value(&restored).unwrap(), &pin),
+            restored
+                .active_optional_effect_frame()
+                .expect("the parked optional frame restores")
+                .ability
+                .target_incarnations
+                .contains(&pin),
             "the parked ability keeps the Rector's event pin after reload"
         );
         assert!(matches!(
