@@ -157,7 +157,8 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
 
     stableCountRef.current = 0;
     prevRectsRef.current = new Map();
-    let rafId: number;
+    // The pending frame, or null once polling has stopped.
+    let rafId: number | null = null;
 
     function poll() {
       const currentRects = new Map<string, DOMRect>();
@@ -214,11 +215,30 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
       // Stop polling after 10 stable frames
       if (stableCountRef.current < 10) {
         rafId = requestAnimationFrame(poll);
+      } else {
+        rafId = null;
+      }
+    }
+
+    // A scroll moves an arc's ends without changing the arcs: the stack panel
+    // scrolls its pile when it is too short for the whole pile (#11119). Any
+    // scroll restarts the polling, which stops again once the ends hold still.
+    // Scroll events do not bubble, so the listener captures them instead.
+    function handleScroll() {
+      stableCountRef.current = 0;
+      if (rafId === null) {
+        rafId = requestAnimationFrame(poll);
       }
     }
 
     rafId = requestAnimationFrame(poll);
-    return () => cancelAnimationFrame(rafId);
+    document.addEventListener("scroll", handleScroll, { capture: true, passive: true });
+    return () => {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
+      document.removeEventListener("scroll", handleScroll, { capture: true });
+    };
   }, [arcs]);
 
   return positions;
