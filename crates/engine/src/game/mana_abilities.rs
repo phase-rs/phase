@@ -787,6 +787,18 @@ pub(super) fn instruction_outcomes(
     head.else_ability = None;
     head.condition = None;
     head.optional = false;
+    // CR 608.2d: a "you may" projected here is the world in which the player
+    // answered by performing it. That answer clears the resolution's
+    // payment-failure signal before the instruction runs
+    // (`engine_payment_choices::handle_optional_effect_choice_inner`, and
+    // `handle_opponent_may_choice_inner` for an opponent's answer), so a
+    // signal an earlier resolution left set cannot make this world's "if they
+    // do" read false (`evaluate_condition` reads `optional_effect_performed &&
+    // !cost_payment_failed_flag`). Cleared before the head resolves, so a
+    // failure of the head itself still sets it.
+    if instruction.optional {
+        scratch.cost_payment_failed_flag = false;
+    }
     let mut events = Vec::new();
     // Depth 1: the instruction is performed mid-resolution, so the depth-0
     // prelude must not run again. It would count the resolution a second
@@ -18704,18 +18716,23 @@ mod tests {
 
     /// P3-U2 (CR 616.1 + CR 608.2c): a display-time read can run while a player
     /// orders replacements. Here P1 orders Hardened Scales and Doubling Season
-    /// for a +1/+1 counter on P1's Grizzly Bears, a choice CR 616.1 gives to P1.
-    /// Projecting Cheering Crowd's "that player may put a +1/+1 counter on this
-    /// creature." leaves that prompt unanswered: the Bears have no counter in
-    /// any state the projection returns. Paired positive: answering the prompt
-    /// puts 3 or 4 counters on them, by the order P1 chooses.
+    /// for Battlegrowth's +1/+1 counter on P1's Grizzly Bears, a choice CR 616.1
+    /// gives to P1. Projecting Cheering Crowd's "that player may put a +1/+1
+    /// counter on this creature." leaves that prompt unanswered: the Bears have
+    /// no counter in any state the projection returns. Paired positive:
+    /// answering the prompt puts 3 or 4 counters on them, by the order P1
+    /// chooses.
     #[test]
     fn instruction_outcomes_leaves_a_parked_replacement_prompt_unanswered() {
-        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::ability_utils::{
+            build_resolved_from_def, build_resolved_from_def_with_targets,
+        };
         use crate::game::scenario::P1;
-        use crate::types::ability::TargetRef;
+        use crate::types::ability::{AbilityKind, TargetRef};
 
-        // Verbatim Oracle text (MTGJSON). Grizzly Bears has no rules text.
+        // Verbatim Oracle text (MTGJSON). Grizzly Bears, the creature
+        // Battlegrowth targets, has no rules text.
+        const BATTLEGROWTH: &str = "Put a +1/+1 counter on target creature.";
         const CHEERING_CROWD: &str = "At the beginning of each player's first main phase, that \
              player may put a +1/+1 counter on this creature. If they do, they add {C} for each \
              counter on it.";
@@ -18734,18 +18751,33 @@ mod tests {
         scenario.add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES);
         scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
         let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let battlegrowth = scenario
+            .add_spell_to_hand_from_oracle(P1, "Battlegrowth", true, BATTLEGROWTH)
+            .id();
         let mut runner = scenario.build();
-        // A +1/+1 counter instruction on the Bears parks P1's CR 616.1 ordering
-        // prompt.
-        let put_counter = ResolvedAbility::new(
-            Effect::PutCounter {
-                counter_type: CounterType::Plus1Plus1,
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Any,
-            },
-            vec![TargetRef::Object(bears)],
-            bears,
+        // Battlegrowth's +1/+1 counter on the Bears parks P1's CR 616.1
+        // ordering prompt.
+        let spell = runner.state().objects[&battlegrowth]
+            .abilities
+            .iter()
+            .find(|ability| ability.kind == AbilityKind::Spell)
+            .expect("reach-guard: Battlegrowth has its spell ability");
+        assert!(
+            matches!(
+                *spell.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "reach-guard: Battlegrowth puts one +1/+1 counter"
+        );
+        let put_counter = build_resolved_from_def_with_targets(
+            spell,
+            battlegrowth,
             P1,
+            vec![TargetRef::Object(bears)],
         );
         crate::game::effects::resolve_ability_chain(
             runner.state_mut(),

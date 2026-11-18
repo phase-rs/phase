@@ -1340,6 +1340,7 @@ const MOLTEN_CORE_MAESTRO: &str = "Menace\nOpus — Whenever you cast an instant
      spell, put a +1/+1 counter on this creature. If five or more mana was spent to cast that \
      spell, add an amount of {R} equal to this creature's power.";
 const WEAKNESS: &str = "Enchant creature\nEnchanted creature gets -2/-1.";
+const DIABOLIC_EDICT: &str = "Target player sacrifices a creature of their choice.";
 
 /// An Empowered Autogenerator board's runner and the objects its rows read.
 struct AutogeneratorBoard {
@@ -1419,9 +1420,9 @@ struct CheeringCrowdBoard {
 
 /// Squandered Resources and Ashaya, Soul of the Wild beside P0's Cheering
 /// Crowd with no counters, which Ashaya makes a Forest land, plus Solemnity
-/// when `solemnity`.
-fn cheering_crowd_board(solemnity: bool) -> CheeringCrowdBoard {
-    let mut scenario = new_scenario();
+/// when `solemnity`, added to `scenario` (which may already hold a card a row
+/// casts first).
+fn cheering_crowd_board(mut scenario: GameScenario, solemnity: bool) -> CheeringCrowdBoard {
     let squandered = scenario
         .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
         .id();
@@ -1627,7 +1628,7 @@ fn tapping_a_forest_autogenerator_places_its_counter_before_offering_every_color
 /// Forest land, so its Forest ability adds {G} too.
 #[test]
 fn sacrificed_cheering_crowd_offers_the_colorless_its_trigger_would_add() {
-    let board = cheering_crowd_board(false);
+    let board = cheering_crowd_board(new_scenario(), false);
     let mut reading = squandered_reading(board.runner.state(), board.squandered, board.crowd);
     reading.sort();
     assert_eq!(reading, vec![ManaType::Green, ManaType::Colorless]);
@@ -1641,7 +1642,7 @@ fn sacrificed_cheering_crowd_offers_the_colorless_its_trigger_would_add() {
 /// positive: the same board without Solemnity reads {C} too.
 #[test]
 fn solemnity_keeps_cheering_crowds_trigger_from_adding_colorless() {
-    let board = cheering_crowd_board(false);
+    let board = cheering_crowd_board(new_scenario(), false);
     let mut reading = squandered_reading(board.runner.state(), board.squandered, board.crowd);
     reading.sort();
     assert_eq!(
@@ -1650,7 +1651,7 @@ fn solemnity_keeps_cheering_crowds_trigger_from_adding_colorless() {
         "reach-guard: without Solemnity the projected counter adds {{C}}"
     );
 
-    let board = cheering_crowd_board(true);
+    let board = cheering_crowd_board(new_scenario(), true);
     assert_eq!(
         squandered_reading(board.runner.state(), board.squandered, board.crowd),
         vec![ManaType::Green]
@@ -1719,4 +1720,49 @@ fn sacrificed_weakened_molten_core_maestro_offers_the_red_its_trigger_would_add(
     let mut reading = squandered_reading(runner.state(), squandered, maestro);
     reading.sort();
     assert_eq!(reading, vec![ManaType::Red, ManaType::Green]);
+}
+
+/// F1-9 (CR 608.2c + CR 608.2d): answering Cheering Crowd's "you may" clears a
+/// payment failure an earlier resolution left set, so in the world where that
+/// player puts the counter, "If they do" reads true and the Crowd could still
+/// produce {C}. On F1-6's board, P0 first resolves Diabolic Edict at P1, who
+/// controls no creature, so its sacrifice fails and leaves that failure set.
+#[test]
+fn sacrificed_cheering_crowd_offers_colorless_after_an_earlier_failed_sacrifice() {
+    let mut scenario = new_scenario();
+    // The Edict's payment is not under test: a zero cost keeps the cast from
+    // tapping one of the board's Forest creatures for mana.
+    let edict = scenario
+        .add_spell_to_hand_from_oracle(P0, "Diabolic Edict", true, DIABOLIC_EDICT)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut board = cheering_crowd_board(scenario, false);
+    let outcome = board.runner.cast(edict).target_player(P1).resolve();
+    assert!(
+        outcome.zone_of(edict) == Zone::Graveyard
+            && outcome.state().stack.is_empty()
+            && matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "reach-guard: Diabolic Edict resolved and priority returned"
+    );
+    let state = board.runner.state();
+    assert!(
+        !state.battlefield.iter().any(|id| {
+            let object = &state.objects[id];
+            object.controller == P1 && object.card_types.core_types.contains(&CoreType::Creature)
+        }),
+        "reach-guard: P1 controls no creature to sacrifice"
+    );
+    assert!(
+        state.cost_payment_failed_flag,
+        "reach-guard: the sacrifice found nothing eligible and left the resolution's failure \
+         signal set"
+    );
+    let mut reading = squandered_reading(state, board.squandered, board.crowd);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![ManaType::Green, ManaType::Colorless],
+        "CR 608.2d: answering the \"you may\" clears the earlier failure, so \"If they do\" \
+         reads true"
+    );
 }
