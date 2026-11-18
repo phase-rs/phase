@@ -2445,7 +2445,10 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     // CR 400.2: deck composition includes hidden library and hand information.
-    // Derive only from authority, and disclose only to the actual submitter.
+    // Derive only from authority, and disclose only to the prompt owner while
+    // they submit their own choice. CR 723.4: under turn control, information
+    // about cards outside the game stays visible only to the controlled
+    // player, so a controller submitting for them gets no pool suggestions.
     views.named_choice_suggestions = match (&authoritative_state.waiting_for, viewer) {
         (
             WaitingFor::NamedChoice {
@@ -2456,6 +2459,7 @@ pub fn derive_filtered_views(
             },
             Some(viewer),
         ) if options.is_empty()
+            && *player == viewer
             && crate::game::interaction::interaction_submitter_for_owner(
                 authoritative_state,
                 *player,

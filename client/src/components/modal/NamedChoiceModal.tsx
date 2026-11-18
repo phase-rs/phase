@@ -11,7 +11,6 @@ import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { getCardNames } from "../../services/cardNames.ts";
-import { useGameStore } from "../../stores/gameStore.ts";
 import {
   getPlayerDisplayName,
   useMultiplayerStore,

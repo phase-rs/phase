@@ -243,10 +243,21 @@ fn viewer_envelopes_disclose_suggestions_only_to_the_prompt_submitter() {
         .is_empty());
     let legacy: DerivedViews = serde_json::from_str("{}").unwrap();
     assert!(legacy.named_choice_suggestions.is_empty());
-    // Use the same authority as public action submission under turn control.
+    // CR 723.4: under turn control the controller submits for P0, but the
+    // registered pool is information about cards outside the game, so
+    // neither seat receives pool-derived suggestions.
     runner.state_mut().turn_decision_controller = Some(P1);
     assert!(suggestions(runner.state(), Some(P0)).is_empty());
-    assert_eq!(suggestions(runner.state(), Some(P1)), expected());
+    assert!(suggestions(runner.state(), Some(P1)).is_empty());
+    // The controller still sees, and can submit, every legal creature type.
+    let full_options = match &runner.state().waiting_for {
+        WaitingFor::NamedChoice { options, .. } => options.clone(),
+        other => panic!("expected the creature type choice, got {other:?}"),
+    };
+    match &filter_state_for_viewer(runner.state(), P1).waiting_for {
+        WaitingFor::NamedChoice { options, .. } => assert_eq!(options, &full_options),
+        other => panic!("expected the creature type choice, got {other:?}"),
+    }
 }
 
 #[test]

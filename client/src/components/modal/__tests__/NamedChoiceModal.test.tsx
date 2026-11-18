@@ -8,7 +8,6 @@ import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { NamedChoiceModal, SecretAgendaModal } from "../NamedChoiceModal.tsx";
 import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
-import { useGameStore } from "../../../stores/gameStore.ts";
 
 const dispatchMock = vi.fn();
 
