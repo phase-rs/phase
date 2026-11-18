@@ -194,6 +194,25 @@ export function seatSource(mode: GameMode | null): SeatSource {
   return mode === null ? "seat-zero" : GAME_MODE_TRAITS[mode].seat;
 }
 
+/**
+ * One step of the undo ring: a trusted pre-action checkpoint, and where the game
+ * log stood when the action it precedes was committed.
+ *
+ * The log lives in this store, not in the engine state a restore puts back, so
+ * undo rewinds it itself. Without the position, the log would keep the plays an
+ * undo took back, and so would the history an LLM seat's prompt is built from.
+ */
+export interface UndoCheckpoint {
+  /** The engine-authored trusted envelope `undo` restores. */
+  state: PersistedGameState;
+  /**
+   * The `seq` the action it precedes gave its first log entry when it was
+   * committed (the next seq, if it logged none). Undo keeps only the entries
+   * below it.
+   */
+  logSeq: number;
+}
+
 interface GameStoreState {
   gameId: string | null;
   gameMode: GameMode | null;
@@ -244,7 +263,7 @@ interface GameStoreState {
   /** Viewer-scoped interaction projection from the same engine snapshot. */
   viewerInteraction: ViewerInteraction | null;
   /** Undo ring: engine-authored trusted checkpoints, never screen projections. */
-  stateHistory: PersistedGameState[];
+  stateHistory: UndoCheckpoint[];
   /** Debug rewind targets: trusted envelopes for the same reason. */
   turnCheckpoints: PersistedGameState[];
   /**
@@ -393,8 +412,13 @@ interface GameStoreActions {
       events?: GameEvent[];
       /** Seq-stamped and appended to `logHistory`. Applied even when the pair is dropped. */
       logEntries?: GameLogEntry[];
-      /** Undo checkpoints. Applied even when the pair is dropped. */
-      stateHistory?: PersistedGameState[];
+      /**
+       * The trusted pre-action checkpoint this commit's action can be undone
+       * to. Pushed onto the undo ring (capped at `MAX_UNDO_HISTORY`) with the
+       * log position this commit's own entries start at. Applied even when the
+       * pair is dropped.
+       */
+      undoCheckpoint?: PersistedGameState;
       /**
        * Site-specific fields applied in the SAME `set()` — but only when the
        * pair commit is accepted, and after the base commit + history handling,
@@ -537,7 +561,17 @@ export const useGameStore = create<GameStore>()(
                 nextLogSeq,
               }
             : {}),
-          ...(opts?.stateHistory ? { stateHistory: opts.stateHistory } : {}),
+          ...(opts?.undoCheckpoint
+            ? {
+                // The position is read in the same update that stamps this
+                // commit's entries, so it is exactly where they begin: undoing
+                // the action takes back its own lines and every later one.
+                stateHistory: [
+                  ...prev.stateHistory,
+                  { state: opts.undoCheckpoint, logSeq: prev.nextLogSeq },
+                ].slice(-MAX_UNDO_HISTORY),
+              }
+            : {}),
           // 3. Site-specific fields last, so an init/resume/restore reset wins
           //    over the history append above.
           ...(accepted ? opts?.extraState : undefined),
@@ -721,13 +755,13 @@ export const useGameStore = create<GameStore>()(
       // replacement game's history.
       const sessionUnchanged =
         current.adapter === adapter && current.gameSessionGeneration === gameSessionGeneration;
-      const stateHistory = checkpoint && sessionUnchanged
-        ? [...current.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
+      const undoCheckpoint = checkpoint && sessionUnchanged
+        ? checkpoint
         : undefined;
       get().commitEngineSnapshot(snapshot, {
         events: result.events,
         logEntries: result.log_entries ?? [],
-        stateHistory,
+        undoCheckpoint,
         extraState: { restoredStackAutomation: null },
       });
 
@@ -744,15 +778,25 @@ export const useGameStore = create<GameStore>()(
       const previous = stateHistory[stateHistory.length - 1];
 
       // Sync engine state with the restored trusted checkpoint
-      await adapter.restoreState(previous);
+      await adapter.restoreState(previous.state);
       // Commit the snapshot's OWN state, not `previous`: post-restore the engine
       // is the source of truth, and taking both halves from one snapshot is what
       // keeps the pair coherent. Newest-by-construction, so it passes the gate.
       const snapshot = await adapter.getSnapshot();
 
+      // The restore rewound the engine, not this store's log: drop every entry
+      // from the undone action on, a line logged during the restore included.
+      // The commit replaces the whole log, so it is read after the last await,
+      // as it stands now. `nextLogSeq` keeps counting, so a seq still names one
+      // entry only, for anything that remembers one (the log panel keys its
+      // rows by seq). Not covered: a play still animating when Undo is pressed
+      // commits its lines after this rewind, because undo does not abandon
+      // in-flight dispatches as `restoreGameState` does (#11014).
+      const logHistory = get().logHistory.filter((entry) => entry.seq < previous.logSeq);
       get().commitEngineSnapshot(snapshot, {
         extraState: {
           events: [],
+          logHistory,
           stateHistory: stateHistory.slice(0, -1),
           restoredStackAutomation: null,
         },

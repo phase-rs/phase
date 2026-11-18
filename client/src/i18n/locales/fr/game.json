@@ -161,6 +161,7 @@
     "flip": "Pivoter",
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
+    "reportNotSent": "Non envoyé",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -2555,7 +2556,7 @@
     "appliedLast": "Appliqué en dernier — celui-ci l'emporte",
     "resultLabel": "Résultat : {{outcome}}",
     "confirmOrder": "Confirmer l'ordre",
-    "dragHint": "Faites glisser pour réordonner, ou utilisez les flèches.",
+    "dragHint": "Faites glisser la poignée <grip>⠿</grip> pour réordonner, ou utilisez les flèches.",
     "chooseSubtitle": "Choisissez quel effet de remplacement appliquer.",
     "candidateFallback": "Effet de remplacement {{number}}",
     "orderSubtitleComposing": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : chacun s'applique, donc l'ordre change le résultat (CR 616.1).",
@@ -2564,6 +2565,7 @@
     "composesNote": "Chaque effet s'applique — l'ordre change leur combinaison.",
     "moveUpNamed": "Déplacer {{name}} plus tôt",
     "moveDownNamed": "Déplacer {{name}} plus tard",
+    "dragHandleNamed": "Faites glisser {{name}} pour réordonner",
     "positionAnnounce": "Position {{position}} sur {{total}}"
   },
   "retargetChoice": {

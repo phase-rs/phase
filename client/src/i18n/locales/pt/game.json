@@ -161,6 +161,7 @@
     "flip": "Virar",
     "report": "Relatar um problema",
     "reported": "Relatado ✓",
+    "reportNotSent": "Não enviado",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -2555,7 +2556,7 @@
     "appliedLast": "Aplicado por último — este prevalece",
     "resultLabel": "Resultado: {{outcome}}",
     "confirmOrder": "Confirmar ordem",
-    "dragHint": "Arraste para reordenar, ou use as setas.",
+    "dragHint": "Arraste pela alça <grip>⠿</grip> para reordenar, ou use as setas.",
     "chooseSubtitle": "Escolha qual efeito de substituição aplicar.",
     "candidateFallback": "Efeito de Substituição {{number}}",
     "orderSubtitleComposing": "Todos esses efeitos mudam como este evento acontece. Arraste para definir a ordem em que se aplicam: todos se aplicam, então a ordem muda o resultado (CR 616.1).",
@@ -2564,6 +2565,7 @@
     "composesNote": "Todos os efeitos se aplicam — a ordem muda como se combinam.",
     "moveUpNamed": "Mover {{name}} antes",
     "moveDownNamed": "Mover {{name}} depois",
+    "dragHandleNamed": "Arraste {{name}} para reordenar",
     "positionAnnounce": "Posição {{position}} de {{total}}"
   },
   "retargetChoice": {

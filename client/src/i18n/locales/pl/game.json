@@ -161,6 +161,7 @@
     "flip": "Odwróć",
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
+    "reportNotSent": "Nie wysłano",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -2555,7 +2556,7 @@
     "appliedLast": "Zastosowany ostatni — ten zadziała",
     "resultLabel": "Wynik: {{outcome}}",
     "confirmOrder": "Potwierdź kolejność",
-    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "dragHint": "Przeciągnij uchwyt <grip>⠿</grip>, aby zmienić kolejność, lub użyj strzałek.",
     "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
     "candidateFallback": "Efekt zastępujący {{number}}",
     "orderSubtitleComposing": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustawić kolejność ich zastosowania — każdy zostanie zastosowany, więc kolejność zmienia wynik (CR 616.1).",
@@ -2564,6 +2565,7 @@
     "composesNote": "Każdy efekt zostaje zastosowany — kolejność zmienia sposób ich połączenia.",
     "moveUpNamed": "Przenieś {{name}} wcześniej",
     "moveDownNamed": "Przenieś {{name}} później",
+    "dragHandleNamed": "Przeciągnij {{name}}, aby zmienić kolejność",
     "positionAnnounce": "Pozycja {{position}} z {{total}}"
   },
   "retargetChoice": {

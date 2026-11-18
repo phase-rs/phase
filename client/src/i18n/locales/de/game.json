@@ -161,6 +161,7 @@
     "flip": "Umdrehen",
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
+    "reportNotSent": "Nicht gesendet",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -2555,7 +2556,7 @@
     "appliedLast": "Zuletzt angewendet — dieser gilt",
     "resultLabel": "Ergebnis: {{outcome}}",
     "confirmOrder": "Reihenfolge bestätigen",
-    "dragHint": "Zum Umsortieren ziehen oder die Pfeile benutzen.",
+    "dragHint": "Zum Umsortieren am Griff <grip>⠿</grip> ziehen oder die Pfeile benutzen.",
     "chooseSubtitle": "Wähle, welcher Ersatzeffekt angewendet wird.",
     "candidateFallback": "Ersatzeffekt {{number}}",
     "orderSubtitleComposing": "Diese Effekte ändern alle, wie dieses Ereignis geschieht. Ziehe, um die Reihenfolge festzulegen — jeder wird angewendet, die Reihenfolge ändert das Ergebnis (CR 616.1).",
@@ -2564,6 +2565,7 @@
     "composesNote": "Jeder Effekt wird angewendet — die Reihenfolge ändert ihre Kombination.",
     "moveUpNamed": "{{name}} nach vorne verschieben",
     "moveDownNamed": "{{name}} nach hinten verschieben",
+    "dragHandleNamed": "{{name}} zum Umsortieren ziehen",
     "positionAnnounce": "Position {{position}} von {{total}}"
   },
   "retargetChoice": {
