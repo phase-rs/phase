@@ -36,6 +36,7 @@ use crate::parser::oracle_target::{
     TargetSyntax,
 };
 use crate::parser::oracle_util::parse_subtype;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AggregateFunction, AttachmentReferent, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, Comparator, ControllerRef, CountBinding, CountScope, DamageChannel,
@@ -1143,6 +1144,18 @@ pub(crate) fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, Qu
     value(
         QuantityRef::EventContextAmount,
         preceded(opt(tag("the ")), tag("amount of {e} paid this way")),
+    )
+    .parse(input)
+}
+
+/// CR 706.2 + CR 706.4 + CR 706.6: a die roll's result read by the instruction
+/// that rolled it: "the result" of one die, or "the total of those results" of
+/// several (the surviving dice's aggregate). Both read the event-context amount,
+/// which `die_result_this_resolution` carries.
+pub(crate) fn parse_die_result_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::EventContextAmount,
+        alt((tag("the total of those results"), tag("the result"))),
     )
     .parse(input)
 }
@@ -3732,7 +3745,7 @@ pub fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
 ///
 /// The noun phrase is located by its VERB phrase (a typed separator, not a
 /// verbatim whole-clause match), then the qualifier is read by the shared
-/// spell-history filter grammar, so this arm and `QuantityRef::SpellsCastThisTurn`
+/// spell-history filter grammar, so this arm and `QuantityRef::SpellsCast`
 /// name the same population by the same rules rather than by two drifting
 /// readings. A qualifier that grammar rejects makes the arm DECLINE, which is
 /// what stops "permanents you control and spells" from being swallowed as a
@@ -4249,7 +4262,7 @@ enum LifeChangeDirection {
 /// historical representation, byte-identical card data), while the
 /// all-players spelling composes the general per-candidate attribute
 /// predicate `PlayerFilter::PlayerAttribute` with
-/// `QuantityRef::LifeLostThisTurn` / `LifeGainedThisTurn` compared `GE 1`
+/// `QuantityRef::LifeLost` / `LifeGainedThisTurn` compared `GE 1`
 /// ("lost/gained life this turn" is `> 0`). That is the same
 /// `PlayerRelation::All` census `parse_for_each_graveyard_size_clause` uses,
 /// and it correctly includes the ability's controller — "each player" is not
@@ -4283,8 +4296,9 @@ fn parse_for_each_life_change_players(input: &str) -> OracleResult<'_, QuantityR
         (PlayerRelation::All, direction) => PlayerFilter::PlayerAttribute {
             relation,
             attr: Box::new(match direction {
-                LifeChangeDirection::Lost => QuantityRef::LifeLostThisTurn {
+                LifeChangeDirection::Lost => QuantityRef::LifeLost {
                     player: PlayerScope::ScopedPlayer,
+                    window: TurnWindow::ThisTurn,
                 },
                 LifeChangeDirection::Gained => QuantityRef::LifeGainedThisTurn {
                     player: PlayerScope::ScopedPlayer,
@@ -4324,8 +4338,9 @@ fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, Qu
     .parse(rest)?;
     alt((
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: player.clone(),
+                window: TurnWindow::ThisTurn,
             },
             tag("lost this turn"),
         ),
@@ -4343,7 +4358,7 @@ fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, Qu
 /// carries the gained/lost magnitude, which `EventContextAmount` resolves via
 /// `extract_amount_from_event` (`game/targeting.rs`: `LifeChanged` => `amount.abs()`).
 /// The leading "1 "/"one " disambiguates from the duration class "life you
-/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`), whose
+/// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLost`), whose
 /// "for each 1 life ... this turn" form `parse_for_each_one_life_changed_this_turn`
 /// claims first, and from Blood Tyrant's "1 life lost or gained this way" (no
 /// "you"; handled by the `TrackedSetSize` "this way" block). The subject is
@@ -4759,102 +4774,117 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     if let Ok((rest, ())) = parse_third_person_life_change(input, "lost") {
         return Ok((
             rest,
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
         ));
     }
     alt((
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Opponent {
                     aggregate: AggregateFunction::Sum,
                 },
+                window: TurnWindow::ThisTurn,
             },
             tag("the total amount of life your opponents have lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Opponent {
                     aggregate: AggregateFunction::Sum,
                 },
+                window: TurnWindow::ThisTurn,
             },
             tag("total amount of life your opponents have lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Opponent {
                     aggregate: AggregateFunction::Sum,
                 },
+                window: TurnWindow::ThisTurn,
             },
             tag("the total life lost by your opponents this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Opponent {
                     aggregate: AggregateFunction::Sum,
                 },
+                window: TurnWindow::ThisTurn,
             },
             tag("total life lost by your opponents this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("total life you lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("total life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life you lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("life you lost this turn"),
         ),
         // Duration-stripped forms (after strip_trailing_duration removes "this turn")
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life you've lost"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life you lost"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("life you've lost"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             },
             tag("life you lost"),
         ),
@@ -4875,32 +4905,37 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // turn. (`LifeGainedThisTurn` has no third-person printing today; this is
         // its symmetric extension point should one appear.)
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life that player lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life they lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
             tag("the amount of life they lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life that player lost"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
             tag("the life they lost"),
         ),
@@ -8889,7 +8924,7 @@ mod tests {
     /// Row 1/6 (parse shape). First Family: "the number of colors among
     /// permanents you control and spells you've cast this turn" must be a set
     /// UNION over a live census and the cast journal — the exact misparse this
-    /// change fixes (both slots used to bind `SpellsCastThisTurn`, a count of
+    /// change fixes (both slots used to bind `SpellsCast`, a count of
     /// SPELLS, dropping the colour aggregation and the permanent population).
     #[test]
     fn first_family_colors_among_permanents_and_cast_journal_is_a_union() {
@@ -9496,8 +9531,9 @@ mod tests {
     }
 
     fn life_lost_this_turn_attr() -> QuantityRef {
-        QuantityRef::LifeLostThisTurn {
+        QuantityRef::LifeLost {
             player: PlayerScope::ScopedPlayer,
+            window: TurnWindow::ThisTurn,
         }
     }
 
@@ -10886,8 +10922,9 @@ mod tests {
         let (rest, q) = parse_quantity_ref("life you lost this turn").unwrap();
         assert_eq!(
             q,
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             }
         );
         assert_eq!(rest, "");
@@ -10904,8 +10941,9 @@ mod tests {
             for (tail, expected) in [
                 (
                     "life your opponents have lost this turn",
-                    QuantityRef::LifeLostThisTurn {
+                    QuantityRef::LifeLost {
                         player: opponents.clone(),
+                        window: TurnWindow::ThisTurn,
                     },
                 ),
                 (
@@ -10916,8 +10954,9 @@ mod tests {
                 ),
                 (
                     "life you lost this turn",
-                    QuantityRef::LifeLostThisTurn {
+                    QuantityRef::LifeLost {
                         player: PlayerScope::Controller,
+                        window: TurnWindow::ThisTurn,
                     },
                 ),
                 (
@@ -12151,8 +12190,9 @@ mod tests {
             parse_quantity_ref("the total life lost by your opponents this turn").unwrap();
         assert!(matches!(
             q,
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Opponent { .. }
+            QuantityRef::LifeLost {
+                player: PlayerScope::Opponent { .. },
+                ..
             }
         ));
         assert_eq!(rest, "");
@@ -12826,10 +12866,11 @@ mod tests {
                 .unwrap();
         assert_eq!(
             q,
-            QuantityRef::LifeLostThisTurn {
+            QuantityRef::LifeLost {
                 player: PlayerScope::Opponent {
                     aggregate: AggregateFunction::Sum,
                 },
+                window: TurnWindow::ThisTurn,
             }
         );
         assert_eq!(rest, "");
@@ -13029,8 +13070,9 @@ mod tests {
         let (rest, q) = parse_quantity_ref("the life you've lost this turn").unwrap();
         assert_eq!(
             q,
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Controller
+            QuantityRef::LifeLost {
+                player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             }
         );
         assert_eq!(rest, "");
@@ -13054,8 +13096,9 @@ mod tests {
         let (rest, q) = parse_quantity_ref("the amount of life you lost this turn").unwrap();
         assert_eq!(
             q,
-            QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Controller
+            QuantityRef::LifeLost {
+                player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             }
         );
         assert_eq!(rest, "");
@@ -13082,8 +13125,9 @@ mod tests {
             let (rest, q) = parse_quantity_ref(phrase).unwrap();
             assert_eq!(
                 q,
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Target
+                QuantityRef::LifeLost {
+                    player: PlayerScope::Target,
+                    window: TurnWindow::ThisTurn,
                 },
                 "{phrase:?} must be Target-scoped, got {q:?}"
             );
@@ -13103,8 +13147,9 @@ mod tests {
             let (rest, q) = parse_quantity_ref(phrase).unwrap();
             assert_eq!(
                 q,
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
                 "{phrase:?} must stay Controller-scoped, got {q:?}"
             );
@@ -13121,26 +13166,30 @@ mod tests {
         for (phrase, expected) in [
             (
                 "the amount of life they lost this turn",
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: PlayerScope::Target,
+                    window: TurnWindow::ThisTurn,
                 },
             ),
             (
                 "the amount of life that player lost this turn",
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: PlayerScope::Target,
+                    window: TurnWindow::ThisTurn,
                 },
             ),
             (
                 "the amount of life they lost",
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: PlayerScope::Target,
+                    window: TurnWindow::ThisTurn,
                 },
             ),
             (
                 "the amount of life that player lost",
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: PlayerScope::Target,
+                    window: TurnWindow::ThisTurn,
                 },
             ),
             (
@@ -13169,8 +13218,9 @@ mod tests {
             ),
             (
                 "the amount of life you lost this turn",
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             ),
         ] {
@@ -16356,6 +16406,30 @@ mod tests {
                 .is_err(),
             "no superlative means no aggregate axis — must not match"
         );
+    }
+
+    /// P-1. CR 706.2 + CR 706.4: the die-result leaf reads one die's result and
+    /// the surviving dice's total, and leaves any suffix for its caller, which
+    /// takes the whole phrase only. The quantity-ref authority does not include
+    /// it, so the CDA authority stays blind to a bare die result.
+    #[test]
+    fn die_result_ref_reads_one_die_and_the_total() {
+        for phrase in ["the result", "the total of those results"] {
+            assert_eq!(
+                parse_die_result_ref(phrase).expect("binds"),
+                ("", QuantityRef::EventContextAmount),
+                "{phrase}"
+            );
+        }
+        assert_eq!(
+            parse_die_result_ref("the total of those results plus one").expect("binds"),
+            (" plus one", QuantityRef::EventContextAmount)
+        );
+        assert!(parse_die_result_ref("the number of results").is_err());
+        assert!(!matches!(
+            parse_quantity_ref("the total of those results"),
+            Ok(("", _))
+        ));
     }
 
     // ── Counter census over a population: `parse_counters_on_population`

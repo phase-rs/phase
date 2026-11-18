@@ -1714,9 +1714,9 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // CR 405.3 + CR 707.10: the next copy of a batch may be of any spell
-        // that still has copies to make; every offered spell is a legal pick.
-        WaitingFor::SpellCopyOrderChoice {
+        // CR 608.2f + CR 405.3: the next member of an ordered loop may be any
+        // member still awaiting an iteration; every offered member is legal.
+        WaitingFor::MemberOrderChoice {
             player, choices, ..
         } => choices
             .iter()
@@ -2514,8 +2514,20 @@ pub fn candidate_actions_broad_with_probe(
             choices,
             count,
             min_count,
-            ..
-        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+            resume,
+        } => {
+            // CR 601.2g + CR 601.2h: the AI plans its mana-ability payments, so
+            // it doesn't spend a creature held for the spell's deferred tap cost.
+            let choices: Vec<ObjectId> = choices
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    !matches!(resume, CostResume::ManaAbility { .. })
+                        || !crate::game::restrictions::payment_tap_reserved(state, id)
+                })
+                .collect();
+            bounded_select_card_candidates(*player, &choices, *min_count..=*count)
+        }
         // CR 117.1 + CR 601.2b: Aggregate-threshold "exile any number" cost
         // (Baron Helmut Zemo's Boast). The threshold is satisfied by ANY chosen
         // subset whose summed `property` meets the comparator, so enumerate
@@ -3764,14 +3776,11 @@ pub fn candidate_actions_broad_with_probe(
         // sole candidate is rejected by the reducer's `amount > max` guard and the AI has no
         // legal action at this prompt.
         //
-        // AI-reachable since the bounded fast-forward landed, which is what stales the older
-        // "the arm below only ever proposes `UntilLethal`" note this replaces: the
-        // `WaitingFor::LoopShortcut` arm below also proposes a capacity-valued `Fixed` against
-        // a bounded offer that publishes no pins, and only a `Fixed` count routes through
-        // `materialize_fixed_shortcut` — the single path that registers the stash `turns.rs`
-        // turns into this prompt. `UntilLethal` still routes to `apply_until_lethal_shortcut`
-        // and never gets here; it is now also not offered against a bounded offer at all. A
-        // human-declared shortcut in a mixed game reaches this prompt too.
+        // AI-reachable: the `WaitingFor::LoopShortcut` arm below proposes a capacity-valued
+        // `Fixed` against a bounded offer that publishes no pins, and only a `Fixed` count routes
+        // through `materialize_fixed_shortcut` — the single path that registers the stash
+        // `turns.rs` turns into this prompt. A human-declared shortcut in a mixed game reaches
+        // this prompt too.
         WaitingFor::PayAmountChoice {
             player,
             resource: PayableResource::LoopCollapse { .. },
@@ -3967,22 +3976,11 @@ pub fn candidate_actions_broad_with_probe(
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
             proposer,
-            predicted_winner,
             schema,
             declaration,
             period,
             ..
         } => {
-            // CR 732.2a: `UntilLethal` names no count, so it is legal ONLY against an offer
-            // that narrowed no bound. `handle_declare_shortcut` rejects it outright against
-            // a bounded one (`IterationCount::UntilLethal if offer.schema.is_bounded()` =>
-            // `reject_shortcut_declaration`), and that reject is a SUCCESSFUL, fail-closed
-            // handback to priority — `Ok(result)`, not an `Err`. So an unconditional
-            // `UntilLethal` candidate did not merely waste a search node: it handed the
-            // simulation layer an action the engine ACCEPTS and then silently discards,
-            // i.e. an illegal quantity choice wearing the shape of a legal one, which the
-            // policy layer then has to know to score away.
-            //
             // Emit only the quantity choices the offer can actually take. A bounded offer gets
             // `Fixed` at the published capacity below when its pin set permits a
             // `template: None` declaration; where neither applies, `DeclineShortcut` really is
@@ -3993,12 +3991,7 @@ pub fn candidate_actions_broad_with_probe(
                 crate::analysis::decision_template::IterationCount::WithoutEnd => {
                     Some(crate::analysis::decision_template::IterationCount::WithoutEnd)
                 }
-                // CR 732.2a: until lethal ends only where the offer's named winner wins.
-                crate::analysis::decision_template::IterationCount::Fixed(_)
-                | crate::analysis::decision_template::IterationCount::UntilLethal => {
-                    (!schema.is_bounded() && predicted_winner.is_some())
-                        .then_some(crate::analysis::decision_template::IterationCount::UntilLethal)
-                }
+                crate::analysis::decision_template::IterationCount::Fixed(_) => None,
             };
             if let Some(count) = unbounded {
                 v.push(candidate(
@@ -4010,10 +4003,8 @@ pub fn candidate_actions_broad_with_probe(
                     Some(*proposer),
                 ));
             }
-            // CR 732.2a: a BOUNDED offer states a legal repetition count, and the declare
-            // handler rejects `UntilLethal` against one outright — so without this candidate
-            // the AI's only non-declining option at such a node is an answer the engine
-            // refuses. `ShortcutDecisionSchema::is_bounded()` is the engine's single
+            // CR 732.2a: a BOUNDED offer states a legal repetition count.
+            // `ShortcutDecisionSchema::is_bounded()` is the engine's single
             // authority for "this producer narrowed the bound"; do NOT re-spell it as a
             // comparison against `MAX_SHORTCUT_CYCLES`.
             //
@@ -4038,13 +4029,11 @@ pub fn candidate_actions_broad_with_probe(
             // its own candidate. Reading `iteration_count` rather than re-deriving anything keeps
             // one authority for that count, the producer's.
             //
-            // WILDCARD-FREE over `IterationCount`: a bounded offer publishes `Fixed`, and the
-            // `UntilLethal` arm above already covers the unbounded case, so an `UntilLethal`
-            // suggestion here has no count to name and emits nothing rather than guessing one.
+            // WILDCARD-FREE over `IterationCount`: a `WithoutEnd` suggestion has no count to name
+            // and emits nothing rather than guessing one.
             let suggested = match schema.iteration_count {
                 crate::analysis::decision_template::IterationCount::Fixed(n) => Some(n),
-                crate::analysis::decision_template::IterationCount::UntilLethal
-                | crate::analysis::decision_template::IterationCount::WithoutEnd => None,
+                crate::analysis::decision_template::IterationCount::WithoutEnd => None,
             };
             if let Some(n) = suggested.filter(|_| {
                 schema.is_bounded()
@@ -4066,18 +4055,27 @@ pub fn candidate_actions_broad_with_probe(
             ));
             v
         }
-        // CR 732.2b/c: an opponent answers a loop-shortcut offer. PR-7 Phase 4c (LOW-2):
-        // self-preservation via the single-authority `smart_shortcut_response` — Shorten
-        // when the polled player has a meaningful way to break the loop, else Accept.
-        WaitingFor::RespondToShortcut { player, .. } => {
-            vec![candidate(
+        // CR 732.2b: "Each other player ... may either accept the proposed sequence, or shorten
+        // it"; the legality filter keeps the answers the proposal admits, and `apply()` still
+        // refuses a `Shorten` whose place names no different choice.
+        WaitingFor::RespondToShortcut { player, .. } => vec![
+            candidate(
                 GameAction::RespondToShortcut {
-                    response: crate::ai_support::smart_shortcut_response(state, *player),
+                    response: crate::analysis::loop_check::ShortcutResponse::Accept,
+                },
+                TacticalClass::Pass,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::RespondToShortcut {
+                    response: crate::analysis::loop_check::ShortcutResponse::Shorten {
+                        at_iteration: crate::ai_support::AI_SHORTEN_PLACE,
+                    },
                 },
                 TacticalClass::Utility,
                 Some(*player),
-            )]
-        }
+            ),
+        ],
         WaitingFor::PrecastCopyShortcutOffer {
             proposer, epoch, ..
         } => vec![
@@ -4100,36 +4098,36 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*proposer),
             ),
         ],
+        // CR 732.2b: the pre-cast route is accepted, or shortened at a breakpoint issued to this
+        // responder.
         WaitingFor::RespondToPrecastCopyShortcut {
             player,
             epoch,
             breakpoint_ids,
             ..
-        } => {
-            let response = match crate::ai_support::smart_shortcut_response(state, *player) {
-                crate::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-                    breakpoint_ids.first().map_or(
-                        crate::types::actions::PrecastCopyShortcutResponse::Accept,
-                        |breakpoint_id| {
-                            crate::types::actions::PrecastCopyShortcutResponse::Shorten {
-                                breakpoint_id: *breakpoint_id,
-                            }
-                        },
-                    )
-                }
-                crate::analysis::loop_check::ShortcutResponse::Accept => {
-                    crate::types::actions::PrecastCopyShortcutResponse::Accept
-                }
-            };
-            vec![candidate(
+        } => std::iter::once((
+            crate::types::actions::PrecastCopyShortcutResponse::Accept,
+            TacticalClass::Pass,
+        ))
+        .chain(breakpoint_ids.iter().map(|breakpoint_id| {
+            (
+                crate::types::actions::PrecastCopyShortcutResponse::Shorten {
+                    breakpoint_id: *breakpoint_id,
+                },
+                TacticalClass::Utility,
+            )
+        }))
+        .map(|(response, class)| {
+            candidate(
                 GameAction::PrecastCopyShortcut {
                     epoch: *epoch,
                     response,
                 },
-                TacticalClass::Utility,
+                class,
                 Some(*player),
-            )]
-        }
+            )
+        })
+        .collect(),
     };
 
     actions
@@ -4626,11 +4624,15 @@ pub(crate) fn priority_actions_with_probe(
     player: PlayerId,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
-    let mut actions = vec![candidate(
-        GameAction::PassPriority,
-        TacticalClass::Pass,
-        Some(player),
-    )];
+    let mut actions = Vec::new();
+    // CR 732.2c + CR 723.5: the pass is issued only where the reducer's own pass guard admits it.
+    if crate::game::priority::pass_priority_legality(state, player).is_ok() {
+        actions.push(candidate(
+            GameAction::PassPriority,
+            TacticalClass::Pass,
+            Some(player),
+        ));
+    }
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
     // players can't cast spells or activate non-mana abilities. Special actions
@@ -6216,7 +6218,12 @@ fn mana_payment_actions(
             match mode {
                 // CR 701.67a: no tap past the waterbend cost's generic count.
                 ConvokeMode::Waterbend
-                    if obj.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Waterbend,
+                    ) && waterbend_taps_remaining > 0 =>
                 {
                     // Waterbend: always colorless
                     actions.push(candidate(
@@ -6228,7 +6235,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                ConvokeMode::Improvise
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Improvise,
+                    ) =>
+                {
                     // CR 702.126a: Improvise pays generic mana — always colorless.
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -6239,7 +6253,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                ConvokeMode::Convoke
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Convoke,
+                    ) =>
+                {
                     // CR 702.51a: Colorless (for generic) always available
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -7907,9 +7928,9 @@ mod tests {
         )));
     }
 
-    /// CR 732.2a: an AI-controlled priority holder receives both legal shortcut choices.
+    /// CR 732.2a: an AI-controlled priority holder may decline the offered shortcut.
     /// The `legal_actions` assertion reaches the simulation-filtered surface used by AI search;
-    /// reverting the DeclineShortcut candidate leaves that surface declaration-only.
+    /// reverting the DeclineShortcut candidate leaves that surface without it.
     #[test]
     fn loop_shortcut_candidates_include_decline() {
         let mut state = GameState::new_two_player(42);
@@ -7927,7 +7948,6 @@ mod tests {
             },
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -7940,10 +7960,6 @@ mod tests {
             }),
             "the priority holder's DeclineShortcut must be an AI candidate"
         );
-        assert!(candidates.iter().any(|candidate| {
-            matches!(candidate.action, GameAction::DeclareShortcut { .. })
-                && candidate.metadata.actor == Some(PlayerId(1))
-        }));
 
         assert!(
             crate::ai_support::legal_actions(&state)
@@ -10904,7 +10920,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(5),
-                measured_repetition_bound: Some(5),
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: 5,
                 points: vec![DecisionPoint {
                     slot: DecisionSlot::first(d6n_source(), ChoicePoint::AnnouncedTarget),
@@ -10918,7 +10934,6 @@ mod tests {
                 convoke_tappable_count: 0,
             },
             declaration,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -10937,7 +10952,7 @@ mod tests {
     /// `DeclineShortcut`.**
     ///
     /// CR 732.2a. The declare candidate carries the ENGINE's own published declaration, so an
-    /// offer that has none (a seat that never answered, or a `LoopAnswer::Conflicted` latch) must
+    /// offer that has none (a point with no recorded answer) must
     /// fail closed rather than hand the search layer a fabricated pin set — which
     /// `handle_declare_shortcut` would then refuse, i.e. an action that looks legal and is not.
     ///

@@ -78,7 +78,8 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     render(<CardImage cardName="Haywire Mite" />);
 
-    expect(screen.getByRole("img", { name: "機能不全ダニ" })).toHaveTextContent("日本語の印刷本文");
+    expect(screen.getByRole("img", { name: "機能不全ダニ" })).toBeInTheDocument();
+    expect(screen.getByText("日本語の印刷本文")).toBeInTheDocument();
     expect(mockUseEngineCardData).toHaveBeenCalledWith("Haywire Mite");
   });
 
@@ -98,10 +99,11 @@ describe("CardImage art fallback (issue #6156)", () => {
       />,
     );
 
-    const tile = screen.getByRole("img", { name: "Banana" });
+    // The rules text sits beside the tile's image role, readable as text.
     // Use textContent so the assertion is robust to how RichLabel segments the
     // text around mana symbols (the "{T}" renders as a symbol, not text).
-    expect(tile.textContent).toContain("You gain 1 life.");
+    const rules = screen.getByRole("img", { name: "Banana" }).nextElementSibling;
+    expect(rules?.textContent).toContain("You gain 1 life.");
   });
 
   it("falls back to the name text tile when a resolved image fails to load", () => {
@@ -153,6 +155,23 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     expect(screen.queryByRole("img", { name: "Lightning Bolt" })).toBeNull();
     expect(screen.getByLabelText("Loading Lightning Bolt")).toBeInTheDocument();
+  });
+
+  // #11008: a reload of the same card elsewhere re-resolves this surface too.
+  // The hook hands back the card's last good image while it does, and the
+  // surface keeps showing it instead of flashing the pulse.
+  it("keeps showing the card's art while it re-resolves", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/reveillark.png",
+      isLoading: true,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Reveillark" />);
+
+    expect(document.querySelector("img")).toHaveAttribute("src", "https://example.invalid/reveillark.png");
+    expect(screen.queryByLabelText("Loading Reveillark")).toBeNull();
   });
 
   it("keeps the unimplemented-mechanics badge visible on the fallback tile", () => {

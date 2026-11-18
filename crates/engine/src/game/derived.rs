@@ -82,7 +82,11 @@ pub fn derive_display_state(state: &mut GameState) {
         // the per-source readiness checks. Without this, each of the (up to N)
         // mana sources re-scans the whole battlefield for City-of-Solitude-class
         // statics, making this sweep O(N^2) on go-wide mana boards.
-        let activation_gates = mana_abilities::ManaActivationGates::compute(state);
+        // CR 605.3a: the display shows what the player may activate.
+        let activation_gates = mana_abilities::ManaActivationGates::compute_for(
+            state,
+            mana_abilities::ManaActivationPurpose::Explicit,
+        );
         let mana_availability: Vec<(crate::types::identifiers::ObjectId, Option<usize>, _)> =
             battlefield_ids
                 .into_iter()

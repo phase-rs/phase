@@ -88,11 +88,13 @@ pub enum TriggerEventKey {
     /// CR 613.1b: a permanent's controller changed — the `ControllerChanged`
     /// event published by the control-changing instruction handlers
     /// (`GainControl`, `ExchangeControl`, the cleanup reversion of an "until end
-    /// of turn" control effect).
-    /// NOTE: Control changes that publish no `ControllerChanged` event
-    /// (static / Aura control, a lapsed `ForAsLongAs` duration, CR 800.4a
-    /// elimination) do NOT flow through this bucket — they are not caught by
-    /// `TriggerMode::ChangesController` either (see `match_changes_controller`).
+    /// of turn" control effect) and by a full layer evaluation's controller diff
+    /// for control it derives without an instruction (static / Aura control, a
+    /// lapsed `ForAsLongAs` duration).
+    /// NOTE: this publishes every control change actually derived by a full
+    /// layer evaluation, without duplicating existing instruction publication.
+    /// It does not guarantee that every rules-required control transition is
+    /// derived; phase-rs/phase#10947 remains.
     ChangesController,
     /// CR 701.9: A player discarded a card.
     Discarded,
@@ -148,6 +150,9 @@ pub enum TriggerEventKey {
     /// CR 602.1 (activated abilities) + CR 603.1 (triggered abilities):
     /// keyword-activated, ability-copy, and ninjutsu activation events.
     AbilityOrCopyActivated,
+    /// CR 603.2 + CR 603.3b: a triggered ability triggered (another ability's
+    /// trigger condition is that triggering).
+    AbilityTriggered,
     /// CR 702.112: A creature became renowned.
     Renowned,
     /// CR 701.37: A creature became monstrous.
@@ -176,6 +181,84 @@ pub enum TriggerEventKey {
     PhaseIn,
     /// CR 702.26b: A permanent phased out.
     PhaseOut,
+}
+
+impl TriggerEventKey {
+    /// CR 603.10: whether an ability that triggers on an event with this key
+    /// "looks back in time", so a permanent that left the battlefield in the
+    /// same event (or the same instruction) as the event still sees it.
+    /// Every other trigger checks the objects that exist immediately after the
+    /// event.
+    pub fn is_look_back(&self) -> bool {
+        match self {
+            // CR 603.10a: leaves-the-battlefield abilities (dying included) and
+            // abilities that trigger when a player sacrifices a permanent.
+            Self::LeaveBattlefield(_) | Self::Dies(_) | Self::Sacrificed => true,
+            // CR 603.10b: abilities that trigger when a permanent phases out.
+            Self::PhaseOut => true,
+            // CR 603.10c: abilities that trigger when an object becomes
+            // unattached. The key is coarse (attach and unattach share it), so
+            // this over-approximates toward observation.
+            Self::AttachmentChanged => true,
+            // CR 603.10d: abilities that trigger when a player loses control of
+            // an object.
+            Self::ChangesController => true,
+            // CR 603.10f: abilities that trigger when a player loses the game.
+            Self::PlayerLost => true,
+            Self::EnterBattlefield(_)
+            | Self::SpellCast(_)
+            | Self::BecomesTarget
+            | Self::Attacks
+            | Self::Blocks
+            | Self::DealsDamage
+            | Self::DamagePrevented
+            | Self::CardsDrawn
+            | Self::LifeChanged
+            | Self::ManaProduced
+            | Self::ManaSpent
+            | Self::CounterAdded
+            | Self::CounterRemoved
+            | Self::BeginningOfPhase(_)
+            | Self::Taps
+            | Self::TapsForMana
+            | Self::Untaps
+            | Self::Destroyed
+            | Self::Discarded
+            | Self::Milled
+            | Self::TokenCreated
+            | Self::FaceOrTransform
+            | Self::PlayerCounterChanged
+            | Self::DieOrCoin
+            | Self::MonarchOrInitiative
+            | Self::VisitAttraction
+            | Self::Specializes
+            | Self::Clashed
+            | Self::Voted
+            | Self::DayNightChanged
+            | Self::DungeonOrClassOrCase
+            | Self::PlayerActionPerformed
+            | Self::Bending
+            | Self::TurnStarted
+            | Self::Exiled
+            | Self::Revealed
+            | Self::AbilityOrCopyActivated
+            | Self::Renowned
+            | Self::BecomesMonstrous
+            | Self::ManifestDreadResolved
+            | Self::Explored
+            | Self::DiscoverResolved
+            | Self::AdaptResolved
+            | Self::ConniveResolved
+            | Self::Exerted
+            | Self::Enlisted
+            | Self::Foretold
+            | Self::Fight
+            // CR 603.10: not among the CR 603.10a-g look-back events, so it sees the
+            // objects that exist immediately after the event.
+            | Self::AbilityTriggered
+            | Self::PhaseIn => false,
+        }
+    }
 }
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
@@ -348,6 +431,19 @@ pub enum AbilityLifecyclePoint {
     Resolved,
 }
 
+/// CR 603.2 + CR 603.3b: whose triggered ability an
+/// `AbilityTriggered { cause, source }` observer watches, relative to the
+/// cause subjects its `valid_card` admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CausedAbilitySource {
+    /// "causes a triggered ability **of that creature** to trigger": the
+    /// observed ability's source is one of the admitted cause subjects.
+    CausingObject,
+    /// "causes a triggered ability to trigger": any triggered ability whose
+    /// cause has an admitted subject.
+    Any,
+}
+
 /// All trigger modes from Forge's TriggerType enum (CR 603).
 ///
 /// Triggered abilities have a trigger condition and an effect, written as
@@ -403,7 +499,14 @@ pub enum TriggerMode {
     SpellCastOrCopy,
     AbilityCast,
     AbilityResolves,
-    AbilityTriggered,
+    /// CR 603.2 + CR 603.3b: "Whenever [cause] causes a triggered ability
+    /// [of that creature] to trigger". `cause` reuses the CR 603.2d doubler
+    /// axis; the ordinary `valid_card` filters the cause subject, not the
+    /// ability's source.
+    AbilityTriggered {
+        cause: crate::types::statics::TriggerCause,
+        source: CausedAbilitySource,
+    },
     SpellAbilityCast,
     SpellAbilityCopy,
     /// CR 603.2g: Triggers when a spell or ability is countered (event must actually occur).
@@ -842,7 +945,6 @@ impl FromStr for TriggerMode {
             "AbilityActivated" => TriggerMode::AbilityActivated,
             "AbilityCast" => TriggerMode::AbilityCast,
             "AbilityResolves" => TriggerMode::AbilityResolves,
-            "AbilityTriggered" => TriggerMode::AbilityTriggered,
             "Adapt" => TriggerMode::Adapt,
             "Airbend" => TriggerMode::Airbend,
             "Always" => TriggerMode::Always,
@@ -1288,6 +1390,41 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
+    /// CR 603.2 + CR 603.3b: the three printed observer shapes (Firebender
+    /// Ascension, Aboleth Spawn, Strict Proctor) survive a serde round trip
+    /// through the normalizing `Deserialize`.
+    #[test]
+    fn ability_triggered_printed_shapes_round_trip() {
+        use crate::types::statics::TriggerCause;
+        let modes = vec![
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::CreatureAttacking,
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield { core_types: vec![] },
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield { core_types: vec![] },
+                source: CausedAbilitySource::Any,
+            },
+        ];
+        let json = serde_json::to_string(&modes).unwrap();
+        let decoded: Vec<TriggerMode> = serde_json::from_str(&json).unwrap();
+        assert_eq!(modes, decoded);
+    }
+
+    /// The bare Forge string carries no cause or source, so it cannot name a
+    /// D1 shape: it falls to `Unknown` instead of a parameterless observer.
+    #[test]
+    fn ability_triggered_forge_string_is_unknown() {
+        assert_eq!(
+            TriggerMode::from_str("AbilityTriggered").unwrap(),
+            TriggerMode::Unknown("AbilityTriggered".to_string())
+        );
+    }
+
     #[test]
     fn trigger_mode_count_at_least_141() {
         let modes = [
@@ -1295,7 +1432,6 @@ mod tests {
             "AbilityActivated",
             "AbilityCast",
             "AbilityResolves",
-            "AbilityTriggered",
             "Adapt",
             "Airbend",
             "Always",

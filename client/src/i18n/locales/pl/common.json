@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Wykrywacz combosów (eksperymentalne)",
-    "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle i pokazuj zasoby ∞ (domyślnie wyłączone)",
+    "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle, proponuj skróty dla pętli kontrolowanych przez gracza i pokazuj zasoby ∞ (domyślnie wyłączone)",
     "off": "Wył.",
     "interactive": "Interaktywny"
   },

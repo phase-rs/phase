@@ -20,7 +20,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_target::{parse_target_with_ctx, parse_zone_suffix};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, MultiTargetSpec, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, InstructionJoin, MultiTargetSpec, TargetFilter,
 };
 
 use super::{parse_effect_clause_inner, ParseContext};
@@ -216,6 +216,9 @@ pub(super) fn try_split_multi_target_list(
             let mut def = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
             def.multi_target = clause.multi_target;
             def.target_chooser = chooser;
+            // CR 608.2c: each later slot is part of the one instruction the
+            // list's verb names, not an instruction of its own.
+            def.instruction_join = InstructionJoin::ListSlot;
             def.sub_ability = chain;
             Some(Box::new(def))
         });
@@ -278,4 +281,154 @@ pub(super) fn is_free_cast_slot_list(clause: &ParsedEffectClause) -> bool {
 pub(super) fn fail_closed_optional_list(clause: &mut ParsedEffectClause, text: &str) {
     clause.effect = Effect::unimplemented("multi_slot_list_optional", text);
     clause.sub_ability = None;
+}
+
+#[cfg(test)]
+mod instruction_join_tests {
+    use crate::types::ability::{AbilityDefinition, AbilityKind, EffectKind, InstructionJoin};
+
+    use super::super::parse_effect_chain;
+
+    /// The chain's nodes in resolution order: (effect kind, instruction join).
+    fn chain_shape(text: &str) -> Vec<(EffectKind, InstructionJoin)> {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let mut shape = Vec::new();
+        let mut node: Option<&AbilityDefinition> = Some(&def);
+        while let Some(current) = node {
+            shape.push((EffectKind::from(&*current.effect), current.instruction_join));
+            node = current.sub_ability.as_deref();
+        }
+        shape
+    }
+
+    /// CR 608.2c: one verb over a list of target slots is one instruction.
+    /// Every list form (comma list, "up to one" list, bare "and", a "~" slot)
+    /// lowers to one node per slot of the same verb, and every node after the
+    /// first is a `ListSlot`. Effect text verbatim from the printed cards (self
+    /// references as `~`): Decimate, Boom, Boom Box, Convert to Slime,
+    /// Fumarole / Spiteful Blow / Goblin Grenadiers, Hull Breach / Stomp and
+    /// Howl, Loyal Sentry, Plague Spores, Reign of Chaos, Relic Crush, Sword of
+    /// Sinew and Steel, Urgent Necropsy, Volcanic Offering, Wall of Vipers, All
+    /// Shall Smolder in My Wake, Fight to the Death, In Garruk's Wake.
+    #[test]
+    fn every_later_slot_of_a_target_list_is_a_list_slot() {
+        let lists: &[(&str, EffectKind, usize)] = &[
+            (
+                "Destroy target artifact, target creature, target enchantment, and target land.",
+                EffectKind::Destroy,
+                4,
+            ),
+            (
+                "Destroy target land you control and target land you don't control.",
+                EffectKind::Destroy,
+                2,
+            ),
+            (
+                "Destroy up to one target artifact, up to one target creature, and up to one target land.",
+                EffectKind::Destroy,
+                3,
+            ),
+            (
+                "Destroy up to one target artifact, up to one target creature, and up to one target enchantment.",
+                EffectKind::Destroy,
+                3,
+            ),
+            ("Destroy target creature and target land.", EffectKind::Destroy, 2),
+            ("Destroy target artifact and target enchantment.", EffectKind::Destroy, 2),
+            ("Destroy that creature and ~.", EffectKind::Destroy, 2),
+            (
+                "Destroy target nonblack creature and target land. They can't be regenerated.",
+                EffectKind::Destroy,
+                2,
+            ),
+            ("Destroy target Plains and target white creature.", EffectKind::Destroy, 2),
+            (
+                "Destroy target artifact or enchantment and up to one other target artifact or enchantment.",
+                EffectKind::Destroy,
+                2,
+            ),
+            (
+                "Destroy up to one target planeswalker and up to one target artifact.",
+                EffectKind::Destroy,
+                2,
+            ),
+            (
+                "Destroy up to one target artifact, up to one target creature, up to one target enchantment, and up to one target planeswalker.",
+                EffectKind::Destroy,
+                4,
+            ),
+            (
+                "Destroy target nonbasic land you don't control and target nonbasic land of an opponent's choice you don't control.",
+                EffectKind::Destroy,
+                2,
+            ),
+            ("Destroy ~ and target creature it's blocking.", EffectKind::Destroy, 2),
+            (
+                "Destroy up to one target artifact, up to one target enchantment, and up to one target nonbasic land.",
+                EffectKind::Destroy,
+                3,
+            ),
+            (
+                "Destroy all blocking creatures and all blocked creatures.",
+                EffectKind::DestroyAll,
+                2,
+            ),
+            (
+                "Destroy all creatures you don't control and all planeswalkers you don't control.",
+                EffectKind::DestroyAll,
+                2,
+            ),
+            (
+                "Return up to one target creature card and up to one target land card from your graveyard to your hand.",
+                EffectKind::ChangeZone,
+                2,
+            ),
+        ];
+        for &(text, kind, slots) in lists {
+            let shape = chain_shape(text);
+            assert_eq!(
+                shape.len(),
+                slots,
+                "reach: {text:?} lowers one node per slot: {shape:?}"
+            );
+            assert_eq!(
+                shape[0],
+                (kind, InstructionJoin::Own),
+                "{text:?}: the head is Own"
+            );
+            for node in &shape[1..] {
+                assert_eq!(
+                    *node,
+                    (kind, InstructionJoin::ListSlot),
+                    "{text:?}: {shape:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2c: "then" joins separate instructions in order, and a conjunct
+    /// with its own verb is its own instruction: no node is a `ListSlot`.
+    /// Effect text verbatim: Diaochan, Artful Beauty; Death Cloud; Smallpox;
+    /// Pox; Vile Mutilator; Din of the Fireherd; and a "tap ... and put a
+    /// counter on it" compound.
+    #[test]
+    fn then_chains_and_own_verb_conjuncts_are_separate_instructions() {
+        let separate = [
+            "Destroy target creature of your choice, then destroy target creature of an opponent's choice.",
+            "Each player loses X life, discards X cards, sacrifices X creatures of their choice, then sacrifices X lands of their choice.",
+            "Each player loses 1 life, discards a card, sacrifices a creature of their choice, then sacrifices a land of their choice.",
+            "Each player loses a third of their life, then discards a third of the cards in their hand, then sacrifices a third of the creatures they control of their choice, then sacrifices a third of the lands they control of their choice. Round up each time.",
+            "Each opponent sacrifices a nontoken enchantment of their choice, then sacrifices a nontoken creature of their choice.",
+            "Target opponent sacrifices a creature of their choice for each black creature you control, then sacrifices a land of their choice for each red creature you control.",
+            "Tap target creature and put a stun counter on it.",
+        ];
+        for text in separate {
+            let shape = chain_shape(text);
+            assert!(shape.len() >= 2, "reach: {text:?} is a chain: {shape:?}");
+            assert!(
+                shape.iter().all(|(_, join)| *join == InstructionJoin::Own),
+                "{text:?}: {shape:?}"
+            );
+        }
+    }
 }

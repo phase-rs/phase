@@ -818,7 +818,12 @@ mod tests {
 
         // CR 115.10a: an eliminated player can't be chosen.
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut three, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut three,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert_eq!(
             chosen_one(&three, PlayerId(0), src),
             LifeGainCostRecipients::All(vec![PlayerId(1)])

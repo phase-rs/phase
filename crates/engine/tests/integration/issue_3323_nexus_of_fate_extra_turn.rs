@@ -74,7 +74,8 @@ fn nexus_of_fate_grants_caster_extra_turn_on_own_turn() {
         runner.state().extra_turns,
         vec![engine::types::game_state::ExtraTurn {
             player: P0,
-            anchor: P0
+            anchor: P0,
+            id: engine::types::identifiers::ExtraTurnId(1),
         }],
         "Nexus caster must receive an extra turn on their own turn"
     );

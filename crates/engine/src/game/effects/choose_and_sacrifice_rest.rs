@@ -720,6 +720,9 @@ fn sacrifice_unchosen(
                 kept,
                 counter_type,
                 *count,
+                // CR 614.16 (compiler-forced site): the printed keeper
+                // counters are placed by a resolving effect.
+                crate::types::proposed_event::CounterCause::ResolvingEffect,
                 EffectKind::ChooseAndSacrificeRest,
                 source_id,
                 tail,

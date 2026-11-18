@@ -1129,11 +1129,13 @@ mod tests {
         // legitimately suspended; an exposed ready chain at Priority is not a save.
         for parked in [&mut state, &mut unbound] {
             parked.push_optional_effect_frame(OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), fighter, P1)),
                 trigger_event: event.clone(),
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             });
             parked.waiting_for = WaitingFor::OptionalEffectChoice {
                 player: P1,

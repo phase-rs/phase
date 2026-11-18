@@ -53,6 +53,7 @@ fn test_attraction_face(name: &str, oracle: &str, lights: Vec<u8>) -> CardFace {
         is_commander: false,
         is_oathbreaker: false,
         deck_copy_limit: None,
+        deck_size_override: None,
         parse_warnings: vec![],
         metadata: Default::default(),
         rarities: Default::default(),
@@ -201,6 +202,7 @@ fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
             player_id: P0,
             sides: 6,
             result,
+            ..
         } if *result == Some(roll)
     )));
     assert!(events.iter().any(|e| matches!(
