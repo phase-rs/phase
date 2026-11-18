@@ -5,7 +5,8 @@ use std::process::ExitCode;
 use engine::database::card_data_provenance::CardDataProvenance;
 use engine::database::CardDatabase;
 use engine::game::coverage::{
-    analyze_coverage, audit_resolver_features, audit_silent_drops, build_warning_drilldown,
+    analyze_coverage, analyze_token_coverage, audit_resolver_features, audit_silent_drops,
+    build_warning_drilldown,
 };
 use engine::parser::oracle_ir::trace::sha256_bytes;
 
@@ -189,6 +190,7 @@ fn run(args: impl Iterator<Item = String>, mut output: impl Write) -> Result<(),
         return Ok(());
     }
 
+    summary.token_coverage = Some(analyze_token_coverage());
     // Print JSON to stdout
     writeln!(
         output,
@@ -531,6 +533,10 @@ mod tests {
         let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert!(report["total_cards"].as_u64().unwrap() > 0);
         assert_eq!(report["source_corpus_hash"], source_corpus_sha256());
+        assert_eq!(
+            report["token_coverage"]["total_tokens"].as_u64(),
+            Some(engine::game::token_presets::known_token_presets().len() as u64)
+        );
         assert!(!output.is_empty());
     }
 
