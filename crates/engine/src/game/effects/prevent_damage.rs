@@ -599,9 +599,9 @@ pub fn resolve(
     // resolves context refs to their controller, which would mis-scope an
     // object-shield as a player-shield. Skip the player-filter inference in those cases.
     let event_context_target = if matches!(target, TargetFilter::EventTarget) {
-        crate::game::targeting::resolve_event_referent_permanents(state, &target, ability.source_id)
+        crate::game::targeting::resolve_event_referent_permanents_for(state, ability, &target)
             .into_iter()
-            .find(|&id| ability.target_pin_is_current(id, state))
+            .next()
             .map(TargetRef::Object)
     } else {
         None

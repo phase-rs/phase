@@ -607,6 +607,35 @@ fn flicker_while_matsu_pending(runner: &mut GameRunner, response: ObjectId, blin
     ));
 }
 
+/// CR 400.7: the pending trigger's own collection-time recipient pin is the
+/// recipient relation the runtime reads (the ledger is the legacy fallback), so
+/// a controlled relation mutation sets it too. `None` removes it (a legacy save).
+fn set_pending_recipient_pin(state: &mut GameState, crow: ObjectId, incarnation: Option<u64>) {
+    fn visit(node: &mut engine::types::ability::ResolvedAbility, crow: ObjectId, inc: Option<u64>) {
+        node.target_incarnations.retain(|pin| pin.object_id != crow);
+        if let Some(inc) = inc {
+            node.target_incarnations
+                .push(engine::types::identifiers::ObjectIncarnationRef::of(
+                    crow, inc,
+                ));
+        }
+        for child in [
+            node.sub_ability.as_deref_mut(),
+            node.else_ability.as_deref_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit(child, crow, inc);
+        }
+    }
+    for entry in state.stack.iter_mut() {
+        if let Some(ability) = entry.ability_mut() {
+            visit(ability, crow, incarnation);
+        }
+    }
+}
+
 fn resolve_matsu_future(state: GameState, crow: ObjectId, freezes: bool) {
     // Only raw captured gameplay states are resumed, never normalized comparands.
     let mut future = GameRunner::from_state(state);
@@ -692,6 +721,8 @@ fn loop_relational_matsu_pending_recipient_relation_survives_resource_projection
     let mut live = stale.clone();
     live.damage_dealt_this_turn[record_index].target_incarnation =
         Some(live.objects[&crow].incarnation);
+    let live_incarnation = live.objects[&crow].incarnation;
+    set_pending_recipient_pin(&mut live, crow, Some(live_incarnation));
 
     // Positive future first, before the refusal: a lost/unsupported trigger
     // cannot make the subsequent negative or comparator assertion vacuous.
@@ -712,10 +743,13 @@ fn loop_relational_matsu_legacy_unknown_and_live_pin_diverge_after_another_paid_
     let mut pinned = runner.state().clone();
     pinned.damage_dealt_this_turn[record_index].target_incarnation =
         Some(pinned.objects[&crow].incarnation);
+    let pinned_incarnation = pinned.objects[&crow].incarnation;
+    set_pending_recipient_pin(&mut pinned, crow, Some(pinned_incarnation));
     // Labelled compatibility control: None is genuinely unknown legacy history,
     // not another spelling of a pin on today's live recipient.
     let mut unknown = pinned.clone();
     unknown.damage_dealt_this_turn[record_index].target_incarnation = None;
+    set_pending_recipient_pin(&mut unknown, crow, None);
     resolve_matsu_future(pinned.clone(), crow, true);
     resolve_matsu_future(unknown.clone(), crow, true);
 

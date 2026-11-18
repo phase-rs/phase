@@ -7410,6 +7410,188 @@ mod combat_prompt_restore_tests {
     }
 }
 
+/// CR 400.7 + CR 603.7c: released v0.128.0 saves whose triggered ability names its damage
+/// recipient by event context, saved before event-referent identity pins existed.
+#[cfg(test)]
+mod legacy_event_referent_restore_tests {
+    use std::io::Read;
+
+    use super::*;
+    use engine::types::actions::GameAction;
+    use engine::types::zones::Zone;
+
+    /// A save written by the released v0.128.0 engine; see `v0_128_0.provenance`.
+    macro_rules! v128 {
+        ($name:literal) => {{
+            let mut json = String::new();
+            flate2::read::GzDecoder::new(
+                &include_bytes!(concat!(
+                    "../../engine/tests/fixtures/legacy_saves/v0_128_0/",
+                    $name,
+                    ".json.gz"
+                ))[..],
+            )
+            .read_to_string(&mut json)
+            .expect("the fixture inflates");
+            json
+        }};
+    }
+
+    /// Restores through the production decoder and resolves the pending Hunter trigger.
+    fn resolve_saved_trigger(json: &str) -> Zone {
+        assert!(
+            !json.contains("target_incarnations"),
+            "reach: the released save carries no event-referent pin"
+        );
+        load_minimal_test_card_database();
+        let mut state = decode_and_rehydrate_restored_game_state(json, |_| Ok(()))
+            .expect("the released save restores")
+            .state;
+        let dino = state
+            .objects
+            .iter()
+            .find(|(_, o)| o.name == "Colossal Dreadmaw")
+            .map(|(id, _)| *id)
+            .expect("the Dreadmaw is in the save");
+        assert_eq!(state.stack.len(), 1, "reach: Hunter's trigger is pending");
+        while !state.stack.is_empty() {
+            let actor = state
+                .waiting_for
+                .acting_player()
+                .expect("a player holds priority");
+            engine::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("pass priority");
+        }
+        state.objects[&dino].zone
+    }
+
+    #[test]
+    fn released_save_hunter_trigger_still_destroys() {
+        assert_eq!(
+            resolve_saved_trigger(&v128!("hunter_trigger_pending")),
+            Zone::Graveyard
+        );
+    }
+
+    /// CR 400.7: the blinked Dreadmaw is a new object; the saved trigger can't find it.
+    #[test]
+    fn released_save_hunter_trigger_spares_blinked_dreadmaw() {
+        assert_eq!(
+            resolve_saved_trigger(&v128!("hunter_trigger_pending_after_blink")),
+            Zone::Battlefield
+        );
+    }
+
+    const RECTOR: &str = "When this creature dies, you may exile it. If you do, search your library for an enchantment card, put that card onto the battlefield, then shuffle.";
+
+    fn holds_pin(value: &serde_json::Value, pin: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => map.iter().any(|(key, inner)| {
+                (key == "target_incarnations"
+                    && inner.as_array().is_some_and(|pins| pins.contains(pin)))
+                    || holds_pin(inner, pin)
+            }),
+            serde_json::Value::Array(items) => items.iter().any(|inner| holds_pin(inner, pin)),
+            _ => false,
+        }
+    }
+
+    /// CR 603.10a + CR 608.2c: Academy Rector's trigger parks at "you may exile it"; the save
+    /// taken there restores through the decoder with the dead Rector's event pin, and accepting
+    /// exiles that Rector and fetches the enchantment.
+    #[test]
+    fn parked_optional_rector_survives_save_and_resume() {
+        use engine::game::scenario::{GameRunner, GameScenario, P0};
+        use engine::types::card_type::CoreType;
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let rector = scenario
+            .add_creature_from_oracle(P0, "Academy Rector", 1, 2, RECTOR)
+            .id();
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+            .id();
+        let anthem = scenario.add_card_to_library_top(P0, "Glorious Anthem");
+        let mut runner = scenario.build();
+        let card = runner.state_mut().objects.get_mut(&anthem).unwrap();
+        card.card_types.core_types.push(CoreType::Enchantment);
+        card.base_card_types = card.card_types.clone();
+        runner
+            .state_mut()
+            .add_mana_to_pool(P0, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+        runner.cast(shock).target_objects(&[rector]).commit();
+        for _ in 0..8 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "reach: the Rector prompt is parked: {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(runner.state().objects[&rector].zone, Zone::Graveyard);
+        let pin = serde_json::json!({
+            "object_id": rector.0,
+            "incarnation": runner.state().objects[&rector].incarnation,
+        });
+
+        let mut state = runner.state().clone();
+        state.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+            .expect("the host exports its state");
+        load_minimal_test_card_database();
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the save restores")
+            .state;
+        assert!(
+            holds_pin(&serde_json::to_value(&restored).unwrap(), &pin),
+            "the parked ability keeps the Rector's event pin after reload"
+        );
+        assert!(matches!(
+            restored.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("P0 accepts");
+        for _ in 0..8 {
+            if let WaitingFor::SearchChoice { cards, .. } = &runner.state().waiting_for {
+                assert_eq!(cards, &vec![anthem], "reach: the enchantment is offered");
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![anthem],
+                    })
+                    .expect("P0 fetches the enchantment");
+                continue;
+            }
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                || runner.state().stack.is_empty()
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert_eq!(runner.state().objects[&rector].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&anthem].zone, Zone::Battlefield);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod legacy_pending_cast_timing_restore_tests {
     use std::io::Read;

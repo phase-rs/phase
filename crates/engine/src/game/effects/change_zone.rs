@@ -81,6 +81,18 @@ fn resolve_forward_result_search_attach_host(
         {
             None
         }
+        // CR 400.7: an event-subject host that became a new object names no host;
+        // the source's prior host must not stand in for it (CR 301.5e).
+        TargetFilter::ParentTarget
+            if targets.is_empty()
+                && crate::game::targeting::resolve_event_referent(
+                    state,
+                    ability,
+                    &TargetFilter::ParentTarget,
+                ) == crate::game::targeting::EventReferentBinding::Unfindable =>
+        {
+            None
+        }
         TargetFilter::ParentTarget => targets
             .first()
             .map(|target| match target {
@@ -92,10 +104,10 @@ fn resolve_forward_result_search_attach_host(
                 // ("return this … attached to that creature" — Dragon Breath,
                 // Smoke Shroud) bind ParentTarget to the trigger-event referent
                 // (entering creature), not the Aura's prior host.
-                crate::game::targeting::resolve_event_context_target(
+                crate::game::targeting::affected_event_context_target(
                     state,
+                    ability,
                     &TargetFilter::ParentTarget,
-                    ability.source_id,
                 )
                 .map(|target| match target {
                     TargetRef::Object(id) => AttachTarget::Object(id),
@@ -130,11 +142,12 @@ fn resolve_forward_result_search_attach_host(
             }
         }
         TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
-            crate::game::targeting::resolve_event_context_target(state, target, ability.source_id)
-                .map(|target| match target {
+            crate::game::targeting::affected_event_context_target(state, ability, target).map(
+                |target| match target {
                     TargetRef::Object(id) => AttachTarget::Object(id),
                     TargetRef::Player(id) => AttachTarget::Player(id),
-                })
+                },
+            )
         }
         TargetFilter::Player => targets
             .iter()
@@ -970,20 +983,37 @@ pub(crate) fn optional_self_move_is_infeasible(
 /// explicit origin), ceased to exist (CR 111.7), or is an emblem (CR 114.5).
 /// Declining keeps an "If you do" rider (Academy Rector's search) from running:
 /// that clause checks whether the player chose the move (CR 118.12), and an
-/// impossible move can't be chosen (CR 608.2d). An empty binding stays feasible:
-/// `resolve` then reaches its untargeted zone-scan path, which this predicate
-/// does not model.
+/// impossible move can't be chosen (CR 608.2d). So is a referent that became a
+/// new object (CR 400.7). Any other empty binding stays feasible: `resolve` then
+/// reaches its untargeted zone-scan path, which this predicate does not model.
 pub(crate) fn optional_triggering_source_move_is_infeasible(
     state: &GameState,
     ability: &ResolvedAbility,
     origin: Option<Zone>,
 ) -> bool {
+    if event_referent_unfindable(state, ability, &TargetFilter::TriggeringSource) {
+        return true;
+    }
     let (members, expected_origin) =
         referent_move_members(state, ability, origin, &TargetFilter::TriggeringSource);
     !members.is_empty()
         && members
             .into_iter()
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
+}
+
+/// CR 400.7: the event names an object for this event-subject filter, and it has
+/// since become a new object (or phased out).
+fn event_referent_unfindable(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget
+    ) && crate::game::targeting::resolve_event_referent(state, ability, filter)
+        == crate::game::targeting::EventReferentBinding::Unfindable
 }
 
 /// The zones an untargeted resolution-time move chooses from, and its eligible
@@ -1480,6 +1510,18 @@ pub fn resolve(
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
         if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+
+        // CR 400.7: an event referent that became a new object names nothing; the
+        // zone scan below must not rediscover it by raw id.
+        if event_referent_unfindable(state, ability, target_filter) {
             state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),

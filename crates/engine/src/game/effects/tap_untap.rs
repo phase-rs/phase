@@ -77,11 +77,7 @@ pub(super) fn tap_untap_target_ids(
         // delayed trigger whose referents were pinned into `targets`
         // (CR 603.7c) keeps the pinned-target arm below.
         filter if ability.targets.is_empty() && super::EVENT_SUBJECT_ANAPHORS.contains(filter) => {
-            crate::game::targeting::resolve_event_referent_permanents(
-                state,
-                filter,
-                ability.source_id,
-            )
+            crate::game::targeting::resolve_event_referent_permanents_for(state, ability, filter)
         }
         // CR 400.7 + CR 603.7c: a delayed tap/untap whose pinned referent became
         // a new object taps nothing. This arm is a RAW read that never reaches
