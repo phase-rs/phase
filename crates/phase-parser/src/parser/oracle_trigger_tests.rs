@@ -44851,30 +44851,46 @@ fn where_x_its_characteristic_binds_trigger_event_object() {
 /// #7851 preservation, CR 113.7 + CR 608.2k: an explicit self-reference
 /// ("Ratatwotwo's power", "this creature's power") names the ability's source
 /// even when the trigger's "it" names another object; the rung never touches
-/// it and no clamp is added. Verbatim Oracle text. Neither card's trigger
-/// condition currently yields a typed creature subject (Ratatwotwo's
-/// "enchanted by a Chef Role attacks or blocks" stays `TriggerMode::Unknown`;
-/// Esper Sentinel's subject is a player), so these rows guard the faces; the
-/// rung-active self-reference case is pinned at the building block by
-/// `where_x_pump_clause_marks_signed_adjustment_under_event_subject`.
+/// it and no clamp is added. Verbatim Oracle text. Ratatwotwo's trigger mode
+/// stays `TriggerMode::Unknown`, but its body's "it" is still the trigger
+/// event's object (its Pump target is `TriggeringSource`, asserted below), so
+/// the characteristic rung is active and the explicit "Ratatwotwo's power" must
+/// still read `Source`. Esper Sentinel's "unless that player pays {X}, where X
+/// is this creature's power" is hoisted by the context-free
+/// `extract_unless_pay_modifier`, so that row guards the face only.
 #[test]
 fn where_x_explicit_self_reference_keeps_source_under_event_subject() {
     let source = serde_json::to_value(ObjectScope::Source).unwrap();
-    for (name, text, types, subtypes) in [
+    for (name, text, types, subtypes, event_object_body) in [
         (
             "Ratatwotwo",
             "When Ratatwotwo enters the battlefield, create a Chef Role token attached to up to one other target creature you control. (Enchanted creature gets +1/+1 and has \"Whenever this creature attacks, create a Food token.\")\nWhenever a creature you control enchanted by a Chef Role attacks or blocks, it gets +X/+X until end of turn, where X is Ratatwotwo's power.",
             &["Creature"][..],
             &["Rat"][..],
+            true,
         ),
         (
             "Esper Sentinel",
             "Whenever an opponent casts their first noncreature spell each turn, draw a card unless that player pays {X}, where X is this creature's power.",
             &["Artifact", "Creature"][..],
             &["Human", "Soldier"][..],
+            false,
         ),
     ] {
         let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        if event_object_body {
+            assert!(
+                parsed.triggers.iter().any(|trigger| matches!(
+                    trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+                    Some(Effect::Pump {
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    })
+                )),
+                "{name}: {:#?}",
+                parsed.triggers
+            );
+        }
         let (scopes, types) = serialized_characteristic_scopes_and_types(&parsed);
         // Reach guard: the self-reference was read at all.
         assert!(!scopes.is_empty(), "{name}: no power reference parsed");
