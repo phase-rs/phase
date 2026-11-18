@@ -379,7 +379,11 @@ fn conceded_mountain_after_first_sacrifice_settles_with_spend_standing() {
         .act(GameAction::Concede { player_id: P2 })
         .expect("P2 concedes");
     assert!(
-        !fixture.runner.state().battlefield.contains(&fixture.mountain),
+        !fixture
+            .runner
+            .state()
+            .battlefield
+            .contains(&fixture.mountain),
         "reach-guard: the P2-owned Mountain must leave with P2 (CR 800.4a)"
     );
 

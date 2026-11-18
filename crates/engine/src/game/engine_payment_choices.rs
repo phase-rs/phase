@@ -8434,12 +8434,7 @@ mod tests {
         );
     }
 
-    fn ward_rock_powered(
-        state: &mut GameState,
-        name: &str,
-        card: u64,
-        power: i32,
-    ) -> ObjectId {
+    fn ward_rock_powered(state: &mut GameState, name: &str, card: u64, power: i32) -> ObjectId {
         let id = ward_rock(state, name, card);
         state.objects.get_mut(&id).unwrap().power = Some(power);
         id
