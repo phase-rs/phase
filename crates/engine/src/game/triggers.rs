@@ -11734,6 +11734,7 @@ fn as_enters_roller(roll: &GameEvent) -> Option<ObjectId> {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
