@@ -18,12 +18,13 @@ interface GameplayTooltipProps {
  * transformed / overflow-clipped stacking contexts of its trigger — most
  * importantly a battlefield card's rotating `motion.div`, which otherwise traps
  * the tooltip beneath the `z-[100]` hover card preview no matter how high its
- * own z-index. Visibility mirrors the closest `.group` ancestor's hover/focus
- * (the same trigger the previous CSS `group-hover` implementation used, so call
- * sites need no changes), and the fixed position is measured from that trigger
- * and clamped into the viewport with an 8px margin. Non-positional `className`
- * overrides (width, padding, text) still apply; positional ones are superseded
- * by the automatic viewport-aware placement.
+ * own z-index. Visibility follows hover over, and keyboard focus within, the
+ * closest `.group` ancestor (the same trigger the previous CSS `group-hover`
+ * implementation used, so call sites need no changes), and the fixed position
+ * is measured from that trigger and clamped into the viewport with an 8px
+ * margin. Non-positional `className` overrides (width, padding, text) still
+ * apply; positional ones are superseded by the automatic viewport-aware
+ * placement.
  */
 export function GameplayTooltip({
   id,
@@ -36,19 +37,38 @@ export function GameplayTooltip({
   const [visible, setVisible] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
+  // Open only when the player is pointing at the trigger or tabbing to it.
+  //
+  // Hover means a pointer other than touch moving over the trigger.
+  // `pointerenter` alone is not hover: the browser also sends it when the
+  // trigger appears under a pointer that has not moved, so a button mounting
+  // under a resting pointer would open its tooltip with no one pointing at it.
+  // A touch move is excluded too: a finger on the screen is a tap, not a hover.
+  //
+  // Focus opens it only when the browser marks that focus `:focus-visible`,
+  // as it does for keyboard focus and not for the focus a tap or a click gives
+  // a button. That focus outlives the gesture, so it would hold the tooltip
+  // open after the finger lifts.
   useEffect(() => {
-    const trigger = anchorRef.current?.closest(".group") ?? null;
+    const trigger = anchorRef.current?.closest<HTMLElement>(".group") ?? null;
     triggerRef.current = trigger;
     if (!trigger) return;
-    const show = () => setVisible(true);
+    const showOnHover = (event: PointerEvent) => {
+      if (event.pointerType !== "touch") setVisible(true);
+    };
+    const showOnKeyboardFocus = (event: FocusEvent) => {
+      if (event.target instanceof Element && event.target.matches(":focus-visible")) {
+        setVisible(true);
+      }
+    };
     const hide = () => setVisible(false);
-    trigger.addEventListener("pointerenter", show);
-    trigger.addEventListener("focusin", show);
+    trigger.addEventListener("pointermove", showOnHover);
+    trigger.addEventListener("focusin", showOnKeyboardFocus);
     trigger.addEventListener("pointerleave", hide);
     trigger.addEventListener("focusout", hide);
     return () => {
-      trigger.removeEventListener("pointerenter", show);
-      trigger.removeEventListener("focusin", show);
+      trigger.removeEventListener("pointermove", showOnHover);
+      trigger.removeEventListener("focusin", showOnKeyboardFocus);
       trigger.removeEventListener("pointerleave", hide);
       trigger.removeEventListener("focusout", hide);
     };
