@@ -18,6 +18,20 @@ const INVOKE_THE_WINDS: &str = "Gain control of target artifact or creature. Unt
 
 const CITYSCAPE_LEVELER: &str = "Trample\nWhen you cast this spell and whenever this creature attacks, destroy up to one target nonland permanent. Its controller creates a tapped Powerstone token.\nUnearth {8}";
 
+/// The trigger has finished resolving: P0 has priority again and `stack` is what remains.
+fn assert_trigger_done(runner: &GameRunner, stack: &[ObjectId]) {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the trigger has finished and P0 has priority again, got {:?}",
+        runner.state().waiting_for
+    );
+    let remaining: Vec<ObjectId> = runner.state().stack.iter().map(|entry| entry.id).collect();
+    assert_eq!(remaining, stack, "only the expected stack entries remain");
+}
+
 fn powerstones(runner: &GameRunner) -> Vec<(PlayerId, bool)> {
     runner
         .state()
@@ -58,11 +72,7 @@ fn cast_trigger_gives_the_destroyed_permanents_controller_a_tapped_powerstone_at
     runner.resolve_top();
 
     assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
-    assert_eq!(
-        runner.state().objects[&leveler].zone,
-        Zone::Stack,
-        "reach: the Leveler hasn't resolved yet"
-    );
+    assert_trigger_done(&runner, &[leveler]);
     assert_eq!(
         powerstones(&runner),
         vec![(P1, true)],
@@ -105,6 +115,7 @@ fn attack_trigger_gives_the_destroyed_permanents_controller_a_tapped_powerstone(
     runner.resolve_top();
 
     assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    assert_trigger_done(&runner, &[]);
     assert_eq!(powerstones(&runner), vec![(P1, true)]);
 }
 
@@ -136,6 +147,7 @@ fn powerstone_goes_to_the_destroyed_permanents_controller_not_its_owner() {
     runner.resolve_top();
 
     assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+    assert_trigger_done(&runner, &[leveler]);
     assert_eq!(
         powerstones(&runner),
         vec![(P0, true)],
