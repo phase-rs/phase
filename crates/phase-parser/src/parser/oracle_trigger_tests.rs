@@ -44974,6 +44974,17 @@ fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
         ),
     ] {
         let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        assert!(
+            parsed.triggers.iter().any(|trigger| matches!(
+                trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+                Some(Effect::Pump {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                })
+            )),
+            "{name}: {:#?}",
+            parsed.triggers
+        );
         let mut slots = Vec::new();
         for trigger in &parsed.triggers {
             if let Some(execute) = trigger.execute.as_deref() {
