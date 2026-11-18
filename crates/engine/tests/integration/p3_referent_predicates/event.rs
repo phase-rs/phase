@@ -5,7 +5,9 @@
 use super::fixture::*;
 use super::oracle::*;
 use engine::game::scenario::{GameRunner, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -234,6 +236,51 @@ fn p3s2a_prismari_mv4_cast_is_unblockable_with_no_counter() {
         "reach guard: the unblockable sentence is unconditional"
     );
     assert_eq!(plus_counters(r.state(), p), 0, "MV 4 < 5: no counter");
+}
+
+/// CR 715.3b + CR 608.2h: both readers see Fertile Footsteps (MV 3) after
+/// Reject Imperfection counters it, not the Beanstalk Giant (MV 7) in the graveyard.
+#[test]
+fn countered_adventure_keeps_its_spell_face_for_both_mana_value_gates() {
+    let db = crate::support::shared_card_db().expect("integration card database");
+    let mut sc = scenario();
+    sc.with_mana_pool(P0, mana_for(&["{2}{G}"], 0));
+    sc.with_mana_pool(P1, mana_for(&[REJECT_IMPERFECTION.cost], 0));
+    let apprentice = add_prismari(&mut sc);
+    add_counter_holder(&mut sc);
+    let giant = sc.add_real_card(P0, "Beanstalk Giant", Zone::Hand, db);
+    let reject = add_spell(&mut sc, P1, &REJECT_IMPERFECTION);
+    let mut r = sc.build();
+
+    r.cast(giant).adventure_face(false).commit();
+    assert_eq!(r.state().stack.len(), 2, "Adventure and magecraft trigger");
+    let spell = &r.state().objects[&giant];
+    assert_eq!(spell.name, "Fertile Footsteps");
+    assert_eq!(spell.card_types.core_types, [CoreType::Sorcery]);
+    assert_eq!(spell.card_types.subtypes, ["Adventure"]);
+    assert_eq!(spell.effective_mana_value(), 3);
+
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    r.cast(reject).target_object(giant).commit();
+    let offered = is_proliferate(&drain(&mut r));
+    if offered {
+        r.act(GameAction::SelectTargets { targets: vec![] })
+            .expect("proliferate zero objects");
+        drain(&mut r);
+    }
+    let card = &r.state().objects[&giant];
+    assert_eq!(card.zone, Zone::Graveyard, "Adventure was countered");
+    assert_eq!(card.name, "Beanstalk Giant");
+    assert_eq!(card.card_types.core_types, [CoreType::Creature]);
+    assert_eq!(card.card_types.subtypes, ["Giant"]);
+    assert_eq!(card.effective_mana_value(), 7);
+    assert!(r.state().stack.is_empty(), "magecraft resolved");
+    assert!(cant_be_blocked(r.state(), apprentice), "magecraft applied");
+    assert_eq!(
+        (offered, plus_counters(r.state(), apprentice)),
+        (true, 0),
+        "MV 3 offers proliferate but earns no magecraft counter"
+    );
 }
 
 /// P0 casts Overrun (sorcery, MV 5), then Twincast (instant, MV 2) targeting it. Triggers of the magecraft ability:

@@ -1130,6 +1130,19 @@ pub(crate) fn effective_stack_ability<'a>(
     }
 }
 
+/// CR 608.2b + CR 608.2h: countered or fizzled spells restore their normal
+/// face before zone delivery. Preserve their stack face first, before the
+/// replacement pipeline can park the move. Successful resolutions capture
+/// at exit, then restore the face in `finish_spell_stack_exit`.
+pub(super) fn restore_alternative_spell_face_before_zone_delivery(
+    state: &mut GameState,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) {
+    super::zones::capture_exit_lki(state, object_id, Vec::new());
+    restore_alternative_spell_normal_face(state, object_id, casting_variant);
+}
+
 pub(crate) fn restore_alternative_spell_normal_face(
     state: &mut GameState,
     object_id: ObjectId,
@@ -2860,7 +2873,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                         Zone::Graveyard
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        restore_alternative_spell_normal_face(state, entry.id, casting_variant);
+                        restore_alternative_spell_face_before_zone_delivery(
+                            state,
+                            entry.id,
+                            casting_variant,
+                        );
                     }
                     // CR 608.2n + CR 614.6: route the stack → graveyard/exile
                     // move through the pipeline so self-scoped `Moved` redirects

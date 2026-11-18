@@ -37036,8 +37036,8 @@ fn ltb_return_promotion_keeps_the_actor() {
 /// the clause means — the announced target in a resolving spell ("that spell" after "Counter target
 /// spell"; "that permanent" after "Destroy/Exile target ..."), the trigger event's spell in a
 /// triggered ability ("Whenever you cast a creature spell, ... that spell has mana value 5 or
-/// greater") — and whose tense decides the basis (past "was" reads last known information). The
-/// gate sits on the instruction the printed text conditions and on nothing else.
+/// greater"). Grammatical tense sets the `use_lki` hint; CR 608.2h governs the runtime
+/// read. The gate sits on the instruction the printed text conditions and on nothing else.
 #[test]
 fn mana_value_referent_gate_binds_the_object_the_clause_names() {
     use crate::types::ability::{Comparator, ObjectScope};

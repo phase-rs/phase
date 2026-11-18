@@ -57,9 +57,9 @@ use crate::types::zones::Zone;
 /// CR 608.2c + CR 400.7 + CR 603.2: THE writer of a referent predicate — the only place in
 /// the parser that constructs `AbilityCondition::TargetMatchesFilter`. Every recognizer
 /// (leading router arm, suffix stripper, trigger-condition bridge) decides which referent
-/// the clause names (`subject`), which tense it was written in (`use_lki`: past tense reads
-/// last known information) and which characteristic it tests (`filter`), then lowers
-/// through here, so two surfaces for the same words can never build different conditions.
+/// the clause names (`subject`), whether its wording supplies the `use_lki` hint,
+/// and which characteristic it tests (`filter`). The runtime uses the target
+/// or event incarnation to choose live versus exit information (CR 608.2h).
 /// `subject_slot` selects a specific declared chain slot (`None` = the node's own referent).
 /// `negated` forms wrap the result with [`maybe_negate`].
 pub(super) fn referent_condition(
@@ -2377,12 +2377,11 @@ fn parse_its_a_type_condition(
 /// gating condition of an "instead" override. Composes three orthogonal axes:
 ///
 ///   - subject: `it`, `that creature`, `that permanent`, `that card`
-///   - tense: present (`is`/`'s`) → current state, past (`was`) → LKI
+///   - tense: present (`is`/`'s`) vs. past (`was`, sets `use_lki`)
 ///   - polarity: positive (`is`/`was`) vs. negative (`isn't`/`wasn't`/`is not`/`was not`)
 ///
-/// Past-tense forms set `use_lki: true` per CR 400.7 so the runtime evaluates
-/// the LKI snapshot rather than the current object state (matters when the
-/// parent sub_ability already moved the target before the check runs).
+/// The past-tense flag is a hint for event-record and legacy lookup paths;
+/// a pinned referent reads live or exit data by incarnation (CR 608.2h).
 fn parse_target_color_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
@@ -2582,8 +2581,7 @@ fn parse_target_type_membership_condition<'a>(
             // 1. A declared object target is present.
             // 2. The target slot is an object, not a player (CR 601.2c).
             // 3. The target slot is a battlefield permanent (CR 109.2).
-            // 4. The copula is present-tense because active resolution
-            //    tests the permanent's current characteristics.
+            // 4. The copula is present-tense; the past form is not routed here.
             // 5. The condition text does not contain "card" or "cards" (CR 109.2 —
             //    descriptions that include the word "card" refer to non-battlefield
             //    objects, whereas descriptions without "card", "spell", etc. mean a
@@ -2810,8 +2808,8 @@ enum ReferentTense {
 ///   - `was` → past, positive
 ///   - `was not` / `wasn't` → past, negated
 ///
-/// Past-tense forms (CR 400.7) require LKI evaluation. Listed longest-first
-/// so `is not` wins over `is`.
+/// Past-tense forms set the AST's LKI hint. Listed longest-first so
+/// `is not` wins over `is`.
 fn parse_target_anaphoric_tense_polarity(
     input: &str,
 ) -> OracleResult<'_, (ReferentPolarity, ReferentTense)> {
@@ -2826,10 +2824,8 @@ fn parse_target_anaphoric_tense_polarity(
             (ReferentPolarity::Affirmative, ReferentTense::Past),
             tag(" was "),
         ),
-        // CR 400.7: past-tense possession ("it had mana value 3 or less", "that
-        // creature had power 2 or less") → LKI snapshot. None of the recognized
-        // reflexive predicates use a negated " hadn't "/" didn't have " form, so
-        // only the positive arm is supplied.
+        // Past-tense possession ("it had mana value 3 or less", "that creature
+        // had power 2 or less"). This vocabulary has no negated form.
         value(
             (ReferentPolarity::Affirmative, ReferentTense::Past),
             tag(" had "),
@@ -3008,20 +3004,13 @@ fn parse_reflexive_object_property(input: &str) -> OracleResult<'_, FilterProp> 
             tag("dealt damage this turn"),
         ),
         // CR 110.5: tap status is a permanent's status (Brackish Blunder "if it
-        // was tapped"). The past-tense ("was tapped") form sets use_lki, reading
-        // the LKI snapshot's captured exit-time tap state — the antecedent (a
-        // bounced/destroyed permanent) has left the battlefield before the rider
-        // resolves (CR 110.5d: cards not on the battlefield are neither tapped nor
-        // untapped, so the live object cannot answer). The present-tense ("is
-        // tapped") form reads live state. Must precede `attacking`/`blocking`:
-        // distinct word, no shared prefix, but kept adjacent to the status leaves.
+        // was tapped"). An off-battlefield incarnation has no live tap status
+        // (CR 110.5d), so the resolving rider needs its exit snapshot (CR 608.2h).
         value(FilterProp::Tapped, tag("tapped")),
         // CR 110.5: untapped is the symmetric tap-status sibling ("if it was
         // untapped"). "untapped" is a distinct lexeme, not "not tapped" — it
         // shares no prefix with "tapped" (begins with "un"), so leaf order vs
-        // `tapped` is immaterial. Tense/polarity compose for free: past-tense
-        // "was untapped" sets use_lki (reads the snapshot), present-tense "is
-        // untapped" reads live state, and "isn't untapped" wraps in `Not`.
+        // `tapped` is immaterial. The verb parser supplies tense and polarity.
         value(FilterProp::Untapped, tag("untapped")),
         // CR 508.1b: combat status (Wisecrack "is attacking").
         value(FilterProp::Attacking { defender: None }, tag("attacking")),
@@ -3183,8 +3172,7 @@ fn parse_referent_predicate(
                 // "that creature's power is N…" (existing possessive form).
                 delimited(tag("'s "), parse_reflexive_pt_stat, tag("is ")),
                 // CR 208.1 + CR 608.2c + CR 608.2h: present-tense possession "that
-                // creature has power N or greater" — the earlier instruction's target,
-                // read live at resolution.
+                // creature has power N or greater" — the earlier instruction's target.
                 preceded(tag(" has "), parse_reflexive_pt_stat),
             ))
             .parse(rest)?;
@@ -3204,8 +3192,6 @@ fn parse_referent_predicate(
             ))
         }
         ReferentSurface::ManaValueFixed => {
-            // CR 400.7: past tense reads last known information; present tense reads the
-            // object as it is.
             let (rest, (tense, (comparator, threshold))) = (
                 alt((
                     value(ReferentTense::Past, tag("its mana value was ")),
@@ -3245,8 +3231,8 @@ fn parse_referent_predicate(
                 )),
             )
             .parse(input)?;
-            // CR 400.7 + CR 608.2h: "was" reads last known information, "has" reads
-            // the object as it is.
+            // Preserve "was"/"has" in the AST hint. CR 608.2h chooses the
+            // actual read by the pinned object's presence in its expected zone.
             let (rest, (tense, (comparator, threshold))) = (
                 alt((
                     value(ReferentTense::Past, tag("'s mana value was ")),
@@ -3611,9 +3597,8 @@ fn parse_referent_noun_mana_value_condition_text(
 ///
 ///   - subject: `it` / `that creature` / `that permanent` / `that card`
 ///     (`parse_target_anaphoric_subject`)
-///   - tense + polarity: `parse_target_anaphoric_tense_polarity` — past tense
-///     (`was`/`had`) reads LKI per CR 400.7 / CR 608.2h; present tense (`is`)
-///     reads live state.
+///   - tense + polarity: `parse_target_anaphoric_tense_polarity` — past forms
+///     (`was`/`had`) set the LKI hint; a pin determines the actual read (CR 608.2h).
 ///   - predicate: a parameterized `FilterProp` axis
 ///     (`parse_reflexive_object_property`).
 ///
