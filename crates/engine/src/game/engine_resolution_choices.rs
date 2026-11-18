@@ -469,11 +469,12 @@ pub(crate) fn settle_simultaneous_unless_after_departure(
             // resume runs only under a priority wait; this names the seat the
             // completed resolution's own grant gives priority to.
             set_priority(state, super::engine::living_priority_seat(state));
-            let base = events.len();
-            let mut delivered = Vec::new();
-            let outcome = effects::simultaneous_unless::deliver(state, *carrier, &mut delivered, 0)
+            // The delivery appends straight into the action's buffer: a pause
+            // inside it claims occurrences against that full buffer
+            // (`claim_trigger_event_occurrences`), and nothing in the delivery
+            // takes the buffer it is handed.
+            let outcome = effects::simultaneous_unless::deliver(state, *carrier, events, 0)
                 .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
-            events.extend(delivered);
             match outcome {
                 DeliveryOutcome::Delivered { span } => {
                     // CR 603.2 + CR 603.2c: the delivery's triggered abilities are
@@ -481,10 +482,7 @@ pub(crate) fn settle_simultaneous_unless_after_departure(
                     // the caller's pipeline places them without collecting them
                     // again (CR 603.3b).
                     super::triggers::collect_departure_triggers_into_deferred(
-                        state,
-                        events,
-                        base + span.start,
-                        None,
+                        state, events, span.start, None,
                     );
                     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                         // CR 117.2e + CR 608.2c: the resolution is still under

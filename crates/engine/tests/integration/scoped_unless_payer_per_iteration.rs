@@ -41,7 +41,7 @@ use engine::types::game_state::{
     SimultaneousUnlessAnswer, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaSourceSelection, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaSourceSelection};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -2077,17 +2077,38 @@ fn viper_controller_conceding_on_another_turn_gives_priority_to_the_active_playe
     };
     let (mut scenario, viper) = viper_board(3, 0);
     let ephemerate = scenario.add_real_card(P0, "Ephemerate", Zone::Hand, db);
-    scenario.with_mana_pool(
-        P0,
-        vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])],
-    );
-    let mut runner = scenario.build();
-    {
-        let state = runner.state_mut();
-        state.active_player = P2;
-        state.priority_player = P0;
-        state.waiting_for = WaitingFor::Priority { player: P0 };
+    scenario.add_basic_land(P0, ManaColor::White);
+    // Every seat draws through the turns passed below.
+    for seat in 0..3 {
+        scenario.with_library_top(PlayerId(seat), &["Library A", "Library B", "Library C"]);
     }
+    let mut runner = scenario.build();
+    // Real turn structure: pass priority (declaring no attackers on P0's own
+    // turn) until P2 is the active player and P0 holds priority on it.
+    for _ in 0..64 {
+        let state = runner.state();
+        if state.active_player == P2
+            && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+        {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => {
+                runner.declare_attackers(&[]).expect("no attackers");
+            }
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the pass is accepted");
+            }
+        }
+    }
+    assert_eq!(runner.state().active_player, P2, "P2's turn was reached");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "P0 holds priority on P2's turn: {:?}",
+        runner.state().waiting_for
+    );
 
     let outcome = runner.cast(ephemerate).target_object(viper).resolve();
     drop(outcome);
