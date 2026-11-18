@@ -728,6 +728,49 @@ fn colorless_requirement_case(
                     "after pin {}, expected one of {expected_alternatives:?}, got {remaining:?}",
                     index + 1,
                 );
+            } else if grant == "Siphon Insight" && creature && vizier_controller != Some(P0) {
+                assert_eq!(
+                    remaining,
+                    Some(ManaCost::Cost {
+                        shards: vec![ManaCostShard::Colorless],
+                        generic: 0,
+                    }),
+                    "the any-color-only control leaves {{C}} unpaid after the generic pips are covered"
+                );
+                if vizier_controller == Some(P1) {
+                    assert_eq!(
+                        engine::game::casting::cast_payment_mana_spend_permission(
+                            runner.state(),
+                            P0,
+                            colorless,
+                        ),
+                        Some(ManaSpendPermission::AnyColor),
+                        "P1's Vizier does not grant P0 an any-type concession"
+                    );
+                }
+                assert!(
+                    !offered,
+                    "Siphon's any-color permission cannot make this creature castable"
+                );
+                assert!(
+                    runner.act(GameAction::PassPriority).is_err(),
+                    "the manual any-color-only payment cannot finish while {{C}} is unpaid"
+                );
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ManaPayment { player: P0, .. }
+                ));
+                assert_eq!(
+                    runner
+                        .state()
+                        .pending_cast
+                        .as_ref()
+                        .map(|pending| pending.object_id),
+                    Some(colorless),
+                    "failed payment retains the pending cast"
+                );
+                assert_eq!(runner.state().objects[&colorless].zone, Zone::Exile);
+                return false;
             } else {
                 assert_eq!(
                     remaining,
