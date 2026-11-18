@@ -268,6 +268,23 @@ describe("ArtCropCard", () => {
     expect(screen.queryByRole("img")).toBeNull();
   });
 
+  // #11008: a reload of the same card elsewhere re-resolves this tile too. The
+  // hook hands back the card's last good image while it does, and the tile
+  // keeps showing it instead of flashing the pulse.
+  it("keeps showing the card's art while it re-resolves", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/kuruk.png",
+      isLoading: true,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    const { container } = render(<ArtCropCard objectId={101} />);
+
+    expect(document.querySelector("img")).toHaveAttribute("src", "https://example.invalid/kuruk.png");
+    expect(container.querySelector(".animate-pulse")).toBeNull();
+  });
+
   it("renders the card back for face-down permanents", () => {
     const permanent = {
       ...transformedPermanent(),

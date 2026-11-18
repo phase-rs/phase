@@ -152,7 +152,8 @@
     "loading": "Chargement de {{name}}",
     "unimplemented": "Non implémenté : {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Engagé"
+    "tapped": "Engagé",
+    "reloadArt": "Toucher pour recharger l'illustration"
   },
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
@@ -162,6 +163,7 @@
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
     "reportNotSent": "Non envoyé",
+    "reloadArt": "Recharger l'illustration",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -1857,6 +1859,13 @@
       "titleExact_one": "Défaussez-vous d'une carte",
       "titleExact_other": "Défaussez-vous de {{count}} cartes",
       "titleWard": "Garde — Défaussez-vous d'une carte",
+      "instructionWithReason": "{{reason}} : {{instruction}}",
+      "reason": {
+        "ward": "Garde",
+        "connive": "Combine",
+        "additionalCost": "Coût supplémentaire",
+        "manaAbility": "Capacité de mana"
+      },
       "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte à défausser",
       "subtitleUpTo_other": "Choisissez jusqu'à {{count}} cartes à défausser",
       "subtitleUnless": "Choisissez {{count}} cartes ou 1 carte correspondante à défausser",
@@ -2691,6 +2700,20 @@
     "EndCombat": "Fin de combat",
     "PostCombatMain": "Phase principale 2",
     "End": "Étape de fin",
+    "Cleanup": "Nettoyage"
+  },
+  "phaseShortName": {
+    "Untap": "Dégagement",
+    "Upkeep": "Entretien",
+    "Draw": "Pioche",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attaquants",
+    "DeclareBlockers": "Bloqueurs",
+    "CombatDamage": "Blessures",
+    "EndCombat": "Fin combat",
+    "PostCombatMain": "Principale 2",
+    "End": "Fin",
     "Cleanup": "Nettoyage"
   },
   "counterMoveDistribution": {

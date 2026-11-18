@@ -7,6 +7,7 @@ use crate::parser::oracle_ir::doc::{
 };
 use crate::parser::oracle_ir::static_ir::StaticIr;
 use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, BlockPairDirection, ChooseOneOfKind,
     CoinFlipRun, CombatRelation, CombatRelationSubject, CountScope, CounterAdjustment,
@@ -7203,10 +7204,9 @@ fn sift_through_sands_condition_requires_both_named_spells() {
                 condition,
                 AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                        },
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -12571,7 +12571,7 @@ fn parses_activate_only_if_condition_and_only_once_each_turn() {
             ActivationRestriction::RequiresCondition {
                 condition: Some(ParsedCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn { .. }
+                        qty: QuantityRef::LifeLost { .. }
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -12740,7 +12740,7 @@ fn parses_activate_only_timing_and_only_if_condition() {
         ActivationRestriction::RequiresCondition {
             condition: Some(ParsedCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn { .. }
+                    qty: QuantityRef::LifeLost { .. }
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -12889,9 +12889,10 @@ fn parses_activate_only_filtered_spell_count_condition() {
         ActivationRestriction::RequiresCondition {
             condition: Some(ParsedCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(TargetFilter::Or { .. }),
+                        window: TurnWindow::ThisTurn
                     },
                 },
                 comparator: Comparator::GE,
@@ -14702,8 +14703,9 @@ fn astarion_end_step_modal_target_relative_life_modes() {
             assert_eq!(
                 *amount,
                 QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Target,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
             );
@@ -27056,9 +27058,9 @@ fn instant_or_sorcery_cast_activation_restriction_does_not_emit_condition_warnin
             ActivationRestriction::RequiresCondition {
                 condition: Some(ParsedCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             filter: Some(TargetFilter::Or { filters }),
-                            ..
+                            window: TurnWindow::ThisTurn, ..
                         }
                     },
                     comparator: Comparator::GE,

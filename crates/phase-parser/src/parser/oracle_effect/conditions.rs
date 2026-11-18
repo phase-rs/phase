@@ -15457,9 +15457,10 @@ mod tests {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
+                            window: crate::types::ability::TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::GE,

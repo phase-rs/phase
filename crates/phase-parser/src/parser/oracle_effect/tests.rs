@@ -8127,7 +8127,7 @@ fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
         } => {
             // The amount must lower to "1 + the number of spells cast from any
             // non-hand cast-capable zone this turn", i.e. an `Offset` wrapping
-            // a `SpellsCastThisTurn` ref whose filter excludes the hand — NOT a
+            // a `SpellsCast` ref whose filter excludes the hand — NOT a
             // verbatim-English `Variable` that resolves to 0 at runtime. A
             // mere "not bare Variable(\"X\")" check would pass for the garbage
             // `Variable { name: "1 plus the number of spells…" }` shape.
@@ -8136,10 +8136,15 @@ fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
             };
             assert_eq!(*offset, 1, "where-X \"1 plus …\" must offset by 1");
             let QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } = inner.as_ref()
             else {
-                panic!("Offset inner must be a SpellsCastThisTurn ref, got: {inner:?}");
+                panic!("Offset inner must be a SpellsCast ref, got: {inner:?}");
             };
             assert_eq!(
                 *scope,
@@ -34858,8 +34863,9 @@ fn each_opponent_loses_life_equal_to_life_they_lost_uses_scoped_player() {
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::ScopedPlayer,
+                window: TurnWindow::ThisTurn,
             },
         },
         "per-opponent 'they lost' must rebind to ScopedPlayer, got {amount:?}",
@@ -34882,8 +34888,9 @@ fn each_opponent_loses_life_equal_to_life_that_player_lost_uses_scoped_player() 
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::ScopedPlayer,
+                window: TurnWindow::ThisTurn,
             },
         },
         "per-opponent 'that player lost' must rebind to ScopedPlayer, got {amount:?}",
@@ -34917,8 +34924,9 @@ fn target_opponent_loses_life_equal_to_life_that_player_lost_uses_target() {
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
         },
         "targeted 'that player lost' must stay Target-scoped, got {amount:?}",
@@ -36770,8 +36778,9 @@ fn seek_with_opponent_cast_mana_value_condition_keeps_filter_clean() {
         def.condition,
         Some(AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Opponents,
+                    window: TurnWindow::ThisTurn,
                     ..
                 }
             },
@@ -43140,13 +43149,15 @@ fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
             cast.condition.as_ref(),
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: crate::types::ability::CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
+                ..
             })
         ),
         "cast condition got {:?}",
@@ -55964,8 +55975,9 @@ fn assert_life_lost_villainous_chooser(chooser: &PlayerFilter, expected_relation
             assert_eq!(*comparator, Comparator::GE);
             assert!(matches!(
                 attr.as_ref(),
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::ScopedPlayer
+                QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window: TurnWindow::ThisTurn,
                 }
             ));
             assert_eq!(value.as_ref(), &QuantityExpr::Fixed { value: 3 });
@@ -59842,8 +59854,9 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
         def.condition,
         Some(AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Opponents,
+                    window: TurnWindow::ThisTurn,
                     ..
                 }
             },
@@ -97396,8 +97409,9 @@ fn life_count_slot_cells() {
             "LoseLife",
             "amount",
             &QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
+                qty: QuantityRef::LifeLost {
                     player: PlayerScope::Target,
+                    window: TurnWindow::ThisTurn,
                 },
             },
         ),
@@ -104178,6 +104192,45 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
         alternative_amount, primary_amount,
         "the alternative's amount must share the primary damage quantity"
     );
+}
+
+/// CR 500: the player-scope rebind of "the life they lost" (`Target` -> `ScopedPlayer`) rebuilds
+/// the quantity, and the rebuilt value must carry the window across; a literal `ThisTurn` would
+/// silently reset a last-turn payload to this turn. The this-turn row is the paired control that
+/// the rebind itself ran.
+#[test]
+fn player_scope_rebind_of_life_lost_preserves_the_window() {
+    for window in [TurnWindow::ThisTurn, TurnWindow::LastTurn] {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLost {
+                        player: PlayerScope::Target,
+                        window,
+                    },
+                },
+                target: None,
+            },
+        );
+        def.player_scope = Some(PlayerFilter::Opponent);
+
+        apply_player_scope_rewrites(&mut def);
+
+        let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
+            panic!("expected life loss");
+        };
+        assert_eq!(
+            amount,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window,
+                },
+            },
+            "{window:?}"
+        );
+    }
 }
 
 /// CR 608.2c + CR 614.1a: each printed mass-damage face of "[noun] dealt damage

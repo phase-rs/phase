@@ -1,5 +1,6 @@
 use crate::database::legality::LegalityFormat;
 use crate::database::CardDatabase;
+use crate::game::effects::candidate_scalar_reads_spell_attr;
 use crate::game::effects::token::{
     materialize_token_ability_payload, TokenAbilityMaterialization, TokenAbilitySource,
 };
@@ -20,6 +21,7 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
@@ -2061,17 +2063,30 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("filtered tracked set ({})", fmt_target(filter))
         }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
-        QuantityRef::LifeLostThisTurn { player } => {
-            format!("life lost this turn ({})", fmt_player_scope(player))
+        QuantityRef::LifeLost { player, window } => {
+            format!(
+                "life lost {} ({})",
+                fmt_turn_window(*window),
+                fmt_player_scope(player)
+            )
         }
         QuantityRef::EventContextAmount => "event amount".into(),
-        QuantityRef::SpellsCastThisTurn { scope, filter } => match filter {
+        QuantityRef::SpellsCast {
+            scope,
+            filter,
+            window,
+        } => match filter {
             Some(filter) => format!(
-                "{} spells cast this turn ({})",
+                "{} spells cast {} ({})",
                 fmt_target(filter),
+                fmt_turn_window(*window),
                 fmt_count_scope(scope)
             ),
-            None => format!("spells cast this turn ({})", fmt_count_scope(scope)),
+            None => format!(
+                "spells cast {} ({})",
+                fmt_turn_window(*window),
+                fmt_count_scope(scope)
+            ),
         },
         QuantityRef::SpellsCastBeforeTriggeringSpell { scope, filter } => match filter {
             Some(filter) => format!(
@@ -2187,7 +2202,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             format!("loyalty abilities activated this turn ({player:?})")
         }
-        QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
             (CountScope::Controller, None) => "spells you've cast this game".into(),
             (scope, None) => format!("spells cast this game ({scope:?})"),
@@ -2923,6 +2937,13 @@ fn fmt_characteristic_population_bounded(source: &CardTypeSetSource) -> String {
         parts.push(fmt_characteristic_population(leaf))
     });
     parts.join(" and ")
+}
+
+fn fmt_turn_window(window: TurnWindow) -> &'static str {
+    match window {
+        TurnWindow::ThisTurn => "this turn",
+        TurnWindow::LastTurn => "last turn",
+    }
 }
 
 fn fmt_count_scope(scope: &CountScope) -> &'static str {
@@ -11249,6 +11270,22 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
                 ResolverFeatureFamily::QuantityRef.key(name),
                 support,
             );
+            // The per-candidate attr nested in `PlayerCount { PlayerAttribute }` is read
+            // by `effects::candidate_player_scalar`, not by `resolve_quantity`, and is
+            // invisible to the outer-ref classification above. Record its support under
+            // the same `PlayerCount` key (`record_feature` merges, `Unhandled` winning),
+            // so an attr the per-candidate reader fails closed on cannot be advertised
+            // as supported. No new published feature key.
+            if let QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute { attr, .. },
+            } = qref
+            {
+                record_feature(
+                    features,
+                    ResolverFeatureFamily::QuantityRef.key("PlayerCount"),
+                    window_attr_support(attr),
+                );
+            }
         }
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -11267,6 +11304,136 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
             extract_quantity_features(left, features);
             extract_quantity_features(right, features);
         }
+    }
+}
+
+/// Whether the per-candidate reader behind `PlayerFilter::PlayerAttribute`
+/// (`effects::candidate_player_scalar`) answers `attr`, for the two
+/// window-parameterized history families. `Unhandled` exactly for a spell attr
+/// the reader returns `None` for (a this-turn count, or a last-turn count with a
+/// filter: the candidate predicate would fail closed and the guard never fire)
+/// and for a `LifeLost` attr in the last-turn window (no producer yet). Every
+/// other attr is `Handled`: their classification is deliberately unchanged.
+fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
+    use FeatureSupport::*;
+    match attr {
+        QuantityRef::SpellsCast {
+            scope: _,
+            filter: _,
+            window: _,
+        } if !candidate_scalar_reads_spell_attr(attr) => Unhandled,
+        QuantityRef::LifeLost {
+            player: _,
+            window: TurnWindow::LastTurn,
+        } => Unhandled,
+        QuantityRef::SpellsCast {
+            scope: _,
+            filter: _,
+            window: _,
+        }
+        | QuantityRef::LifeLost {
+            player: _,
+            window: TurnWindow::ThisTurn,
+        } => Handled,
+        // Every other ref is `Handled` here (their classification is unchanged),
+        // enumerated so a new `QuantityRef` variant must be classified at this
+        // support boundary instead of inheriting `Handled`.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::ObjectCount { .. }
+        | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. }
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::PropertyAggregate(..)
+        | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::SharedCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::DistinctColorsAmong { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::VoteCount { .. } => Handled,
     }
 }
 
@@ -11748,9 +11915,38 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
-        QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
+        // CR 119.3 + CR 500: only the this-turn window has a producer. A deserialized
+        // `LastTurn` payload is read by the resolver but no parser path emits it until
+        // the life last-turn grammar lands, so it is classified unsupported (never
+        // advertised as supported), at this top-level position and, through
+        // `window_attr_support`, in a nested `PlayerAttribute`.
+        QuantityRef::LifeLost {
+            window: TurnWindow::ThisTurn,
+            ..
+        } => ("LifeLostThisTurn", Handled),
+        QuantityRef::LifeLost {
+            window: TurnWindow::LastTurn,
+            ..
+        } => ("LifeLostLastTurn", Unhandled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
-        QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
+        QuantityRef::SpellsCast {
+            window: TurnWindow::ThisTurn,
+            ..
+        } => ("SpellsCastThisTurn", Handled),
+        // CR 601.2i + CR 603.4: the per-player snapshot latched at the turn boundary
+        // (`turns::begin_next_turn`) answers an unfiltered last-turn count, table-wide
+        // ('no spells were cast last turn', 'two or more spells were cast last turn')
+        // or per player ('a player cast N or more spells last turn', read per
+        // candidate by `effects::candidate_player_scalar`). No per-spell data survives
+        // the boundary, so a filtered last-turn count has no reader and is unsupported.
+        QuantityRef::SpellsCast {
+            filter,
+            window: TurnWindow::LastTurn,
+            ..
+        } => (
+            "SpellsCastLastTurn",
+            if filter.is_none() { Handled } else { Unhandled },
+        ),
         QuantityRef::SpellsCastBeforeTriggeringSpell { .. } => {
             ("SpellsCastBeforeTriggeringSpell", Handled)
         }
@@ -11810,12 +12006,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
             ("LoyaltyAbilitiesActivatedThisTurn", Handled)
         }
-        // CR 601.2i: the table-wide count of spells that became cast during the previous turn
-        // (`turns::start_next_turn`'s snapshot). Only table-wide guards ('no spells were cast
-        // last turn', 'two or more spells were cast last turn') lower to it. The per-player
-        // 'a player cast N or more spells last turn' is declined by the condition parser and
-        // fails closed as an `unparsed_condition` gap, so those faces never reach this arm.
-        QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Handled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),
         QuantityRef::CardsDiscardedThisTurn { .. } => ("CardsDiscardedThisTurn", Handled),
@@ -11906,7 +12096,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // `speed_effects::players_for_filter`.
         PlayerFilter::TargetPlayer => ("TargetPlayer", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
-        PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
+        PlayerFilter::PlayerAttribute { attr, .. } => {
+            ("PlayerAttribute", window_attr_support(attr))
+        }
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
         // via both `resolve_player_count` and `matches_player_scope`.
         PlayerFilter::TrackedSetPossessor { .. } => ("TrackedSetPossessor", Handled),
@@ -24019,7 +24211,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
-    /// V10. D4.4: `game/quantity.rs` resolves `SpellsCastLastTurn` and
+    /// V10. D4.4: `game/quantity.rs` resolves `SpellsCast { window: LastTurn }` and
     /// `DescendedThisTurn` (runtime proofs in `triggers::tests`), so the newly
     /// walked werewolf and descend intervening-ifs stay supported.
     /// REVERT-PROBE: classify either arm `Unhandled` → that card goes red.
@@ -24033,7 +24225,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     &["Intimidate", "Transform"],
                     &["Creature"],
                 ),
-                QuantityRef::SpellsCastLastTurn,
+                QuantityRef::SpellsCast {
+                    scope: CountScope::All,
+                    filter: None,
+                    window: TurnWindow::LastTurn,
+                },
             ),
             (
                 counter_rider_face(
@@ -24072,42 +24268,63 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
     }
 
-    /// CR 603.4: Gatstaf Howler's per-player "a player cast two or more spells
-    /// last turn" guard is not expressible by the table-wide
-    /// `SpellsCastLastTurn` count, so the face must be an honest unsupported
-    /// gap through production `analyze_coverage` — never a supported upkeep
-    /// transform with the guard dropped. Gatstaf Shepherd's table-wide "no
-    /// spells" face (the same card's other side) stays supported.
-    /// REVERT-PROBE: restore the per-player arm in `parse_spells_cast_last_turn`
-    /// → Howler hoists `SpellsCastLastTurn >= 2` and reports supported.
-    #[test]
-    fn per_player_spells_cast_last_turn_face_is_unsupported() {
-        const GATSTAF_HOWLER_ORACLE: &str = "Intimidate (This creature can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nAt the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.";
-        let howler = counter_rider_face(
+    const GATSTAF_HOWLER_ORACLE: &str = "Intimidate (This creature can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nAt the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.";
+
+    fn gatstaf_howler_face() -> CardFace {
+        counter_rider_face(
             "Gatstaf Howler",
             GATSTAF_HOWLER_ORACLE,
             &["Intimidate", "Transform"],
             &["Creature"],
-        );
-        // Reach guard: the upkeep trigger itself parsed (the face is not red
-        // merely because the line was dropped), with no hoisted condition.
+        )
+    }
+
+    /// `PlayerCount { PlayerAttribute { All, attr, GE 2 } } >= 1`, the shape the
+    /// per-player existential lowers to.
+    fn existential_over_attr(attr: QuantityRef) -> TriggerCondition {
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(attr),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Fixed { value: 2 }),
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// CR 603.4 + CR 601.2i: Gatstaf Howler's per-player "a player cast two or
+    /// more spells last turn" guard lowers to the existential over per-player
+    /// last-turn snapshots, which `effects::candidate_player_scalar` reads, so
+    /// the face is supported through production `analyze_coverage` with the
+    /// guard intact. Gatstaf Shepherd's table-wide "no spells" face (the same
+    /// card's other side) stays supported.
+    /// REVERT-PROBE: lower the guard to the table-wide count and the whole
+    /// condition assertion flips (W2 in `werewolf_last_turn_spells` is the
+    /// runtime counterpart).
+    #[test]
+    fn per_player_spells_cast_last_turn_face_is_supported() {
+        let howler = gatstaf_howler_face();
+        // Reach guard: the upkeep trigger parsed with the guard as its condition.
         assert_eq!(howler.triggers.len(), 1, "{:?}", howler.triggers);
         assert_eq!(howler.triggers[0].phase, Some(Phase::Upkeep));
-        let condition = howler.triggers[0].condition.clone();
+        assert_eq!(
+            howler.triggers[0].condition,
+            Some(existential_over_attr(QuantityRef::SpellsCast {
+                scope: CountScope::ScopedPlayer,
+                filter: None,
+                window: TurnWindow::LastTurn,
+            }))
+        );
         let result = coverage_result_for_face(howler);
         assert!(
-            !result.supported,
-            "the per-player guard must leave the face unsupported (condition: {condition:?})"
-        );
-        assert_eq!(
-            condition, None,
-            "nothing may hoist from the per-player guard"
-        );
-        assert!(
-            gap_handlers(&result)
-                .iter()
-                .any(|handler| handler.contains("unparsed_condition")),
-            "the gap must be the dropped condition: {:?}",
+            result.supported,
+            "Gatstaf Howler: {:?}",
             gap_handlers(&result)
         );
 
@@ -24123,6 +24340,72 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             "Gatstaf Shepherd: {:?}",
             gap_handlers(&result)
         );
+    }
+
+    /// C5 (D3 + Change 1). The attr nested in `PlayerCount { PlayerAttribute }`
+    /// is read by `effects::candidate_player_scalar`, which fails closed on
+    /// every spell attr except the unfiltered last-turn count and has no
+    /// last-turn life producer yet. Coverage must classify each such nested
+    /// payload unsupported (at the nested position) and a top-level
+    /// `LifeLost { LastTurn }` unsupported too, while Howler's real attr and the
+    /// this-turn life attr stay supported. Each row is a real Howler face with
+    /// only the condition's attr swapped, so a classifier that stops at the
+    /// outer `PlayerCount` (the pre-D3 blindness) flips every unsupported row.
+    #[test]
+    fn nested_window_attrs_the_reader_fails_closed_on_are_unsupported() {
+        let supported_with = |condition: TriggerCondition| {
+            let mut face = gatstaf_howler_face();
+            face.triggers[0].condition = Some(condition);
+            coverage_result_for_face(face).supported
+        };
+        let spell_attr = |filter: Option<TargetFilter>, window: TurnWindow| {
+            existential_over_attr(QuantityRef::SpellsCast {
+                scope: CountScope::ScopedPlayer,
+                filter,
+                window,
+            })
+        };
+        let life_attr = |window: TurnWindow| {
+            existential_over_attr(QuantityRef::LifeLost {
+                player: PlayerScope::ScopedPlayer,
+                window,
+            })
+        };
+        // Reach: the unmodified attr is supported, so every red row below is
+        // red because of its attr and not because the swapped face is broken.
+        assert!(supported_with(spell_attr(None, TurnWindow::LastTurn)));
+        assert!(supported_with(life_attr(TurnWindow::ThisTurn)));
+        // Nested attrs the per-candidate reader fails closed on.
+        assert!(!supported_with(spell_attr(
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            TurnWindow::LastTurn
+        )));
+        assert!(!supported_with(spell_attr(None, TurnWindow::ThisTurn)));
+        assert!(!supported_with(life_attr(TurnWindow::LastTurn)));
+        // Top-level last-turn life: classified unsupported until the life
+        // last-turn grammar lands.
+        assert!(!supported_with(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::LastTurn,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }));
+        // Top-level filtered last-turn spell count: no per-spell data survives.
+        assert!(!supported_with(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCast {
+                    scope: CountScope::All,
+                    filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    window: TurnWindow::LastTurn,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        }));
     }
 
     // -----------------------------------------------------------------------

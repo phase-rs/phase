@@ -3582,6 +3582,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }

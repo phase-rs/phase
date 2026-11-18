@@ -62,6 +62,8 @@ type CardPreviewArt =
       isFlip: boolean;
       rungs?: ImageRungs;
       advanceFailedSource?(failedSrc: string): void;
+      reload?(): void;
+      cardArtFailed?: boolean;
     };
 
 let lastPointerPosition: { x: number; y: number } | null = null;
@@ -470,6 +472,8 @@ function CardPreviewInner({
         isFlip: activeImage.isFlip,
         rungs: activeImage.rungs,
         advanceFailedSource: activeImage.advanceFailedSource,
+        reload: activeImage.reload,
+        cardArtFailed: activeImage.cardArtFailed,
       };
   const activeRotated = activeArt.kind === "face" && activeArt.isRotated;
   const activeImageSrc = activeArt.kind === "face" ? activeArt.src : null;
@@ -477,6 +481,43 @@ function CardPreviewInner({
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const handPreview = handOrigin != null && !position && !dockSide;
+  // The face's art lookup settled with no art: the one answer every surface
+  // below reads. `isLoading` is load-bearing, not decoration: `useCardImage`
+  // assigns `src` in a post-render effect, so `src` is null on EVERY first
+  // paint, and deriving this from `!src` alone would flash the artless tile
+  // before every normal card's art. A hidden face's art is the card back, so
+  // it never gets here.
+  const missingArt = activeArt.kind === "face" && !activeArt.isLoading && !activeArt.src
+    ? activeArt
+    : null;
+  // The mobile preview's artless tile shows the card's rules text, so the card
+  // stays readable while its art is missing, and names the card in the same
+  // language. As in `CardImage`, the lookup waits until the tile shows. Without
+  // a game object the front face is already looked up, and a token carries its
+  // own rules text. The preview that follows a finger held on the hand takes no
+  // taps and closes when the finger lifts, so it keeps its name-only
+  // placeholder; the hand drawer's modal preview carries the text and reload.
+  const showsMobileArtFallback = missingArt != null && isMobile && !handPreview && !suppressArtLookup;
+  const objectFallbackFace = useEngineCardData(
+    showsMobileArtFallback && obj && !isToken ? cardName : null,
+  );
+  const fallbackFace = obj ? objectFallbackFace : engineFrontFace;
+  const artFallback = missingArt && {
+    name: fallbackFace?.name ?? cardName,
+    rulesText: isToken ? obj?.token_rules_text : fallbackFace?.oracle_text ?? undefined,
+    reload: missingArt.reload,
+  };
+  // This preview's own art is on screen, but another surface of the card shows
+  // none because its image failed: a battlefield tile asks for a smaller
+  // image, so its failure never reaches this request. The preview offers that
+  // surface's reload too. A hidden face never asks for the card's art, so its
+  // image result carries no failure.
+  const reloadOtherSurfaces = !suppressArtLookup
+    && activeArt.kind === "face"
+    && activeArt.src
+    && activeArt.cardArtFailed
+    ? activeArt.reload
+    : undefined;
   const infoPanelHeight = showCardPreviewFooter && showInfoPanel ? 120 : 0;
   const portraitPreviewWidth =
     typeof window === "undefined"
@@ -785,6 +826,8 @@ function CardPreviewInner({
       <MobilePreviewOverlay
         cardName={cardName}
         art={activeArt}
+        fallback={artFallback}
+        reloadOtherSurfaces={reloadOtherSurfaces}
         onDismiss={onDismiss ?? dismissPreview}
         layout={mobileLayout ?? "modal"}
         report={reportContext}
@@ -855,6 +898,7 @@ function CardPreviewInner({
             parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
             maxHeight={viewportHeight - margin * 2}
             report={reportContext}
+            onReloadArt={missingArt?.reload ?? reloadOtherSurfaces}
           />
         ) : (
           <CardImagePreview
@@ -928,12 +972,15 @@ const MOBILE_ACTION_PILL_CLASS = [
 
 /**
  * Mobile/tablet: card anchored right (landscape) or center (portrait), whole
- * card visible. Its actions (Flip, Report) sit in a strip beside the card, left
- * of it in landscape and below it in portrait, so they never cover the card.
+ * card visible. Its actions (Flip, Reload art, Report) sit in a strip beside the
+ * card, left of it in landscape and below it in portrait, so they never cover
+ * the card.
  */
 function MobilePreviewOverlay({
   cardName,
   art,
+  fallback,
+  reloadOtherSurfaces,
   onDismiss,
   layout = "modal",
   report,
@@ -944,6 +991,13 @@ function MobilePreviewOverlay({
    *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
    *  hidden-information bypass the PR 7551 review flagged. */
   art: CardPreviewArt;
+  /** The artless tile's name, rules text and reload, or null while the face
+   *  has art or is still resolving it. Resolved by the parent for the same
+   *  reason: the overlay never looks a card up itself. */
+  fallback: { name: string; rulesText?: string; reload?: () => void } | null;
+  /** Reloads the card's art for another surface that failed while this
+   *  preview's own art loaded; the full modal layout shows it as a pill. */
+  reloadOtherSurfaces?: () => void;
   onDismiss: () => void;
   layout?: "modal" | "compact";
   /** In-game report context; absent in the deck builder. Only the full modal
@@ -952,15 +1006,8 @@ function MobilePreviewOverlay({
 }) {
   const { t } = useTranslation("game");
   const src = art.kind === "face" ? art.src : null;
-  const isLoading = art.kind === "face" && art.isLoading;
   const isRotated = art.kind === "face" && art.isRotated;
   const isFlip = art.kind === "face" && art.isFlip;
-  // `isLoading` is load-bearing, not decoration: `useCardImage` assigns `src`
-  // in a post-render effect, so `src` is null on EVERY first paint. Deriving
-  // the fallback from `!src` alone would flash the "no art" tile before every
-  // normal card's art — the same conflation this PR fixed on the board
-  // renderers. Only a settled lookup with no art gets the tile.
-  const showArtFallback = art.kind === "face" && !isLoading && !src;
 
   // Mobile has no Ctrl key, so a Kamigawa flip card's 180° spin is a tap toggle
   // (desktop holds Ctrl). Only the full-screen modal layout can host the button —
@@ -999,9 +1046,11 @@ function MobilePreviewOverlay({
       >
         {art.kind === "back" ? (
           <CardBackFallback className="pointer-events-auto max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl" />
-        ) : showArtFallback ? (
+        ) : fallback ? (
           <CardArtFallback
-            name={cardName}
+            name={fallback.name}
+            oracleText={fallback.rulesText}
+            variant="peek"
             className="pointer-events-auto aspect-[5/7] max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl"
           />
         ) : !src ? (
@@ -1027,7 +1076,7 @@ function MobilePreviewOverlay({
     );
   }
 
-  const hasActions = isFlip || report != null;
+  const hasActions = isFlip || report != null || reloadOtherSurfaces != null;
 
   // pointerdown (not click): the touch-release that opened this overlay fires
   // pointerup, not pointerdown, so a fresh tap is required to dismiss. Only the
@@ -1055,8 +1104,16 @@ function MobilePreviewOverlay({
         >
           {art.kind === "back" ? (
             <CardBackFallback className="absolute inset-0 h-full w-full" />
-          ) : showArtFallback ? (
-            <CardArtFallback name={cardName} className="absolute inset-0 h-full w-full" />
+          ) : fallback ? (
+            // The reload lives here, not on the compact peek: that layout
+            // dismisses on the pointerdown before a button's click lands.
+            <CardArtFallback
+              name={fallback.name}
+              oracleText={fallback.rulesText}
+              variant="preview"
+              className="absolute inset-0 h-full w-full"
+              onReload={fallback.reload}
+            />
           ) : !src ? (
             // Still resolving: a skeleton, not the artless tile.
             <div className="absolute inset-0 animate-pulse bg-gray-700" />
@@ -1087,6 +1144,15 @@ function MobilePreviewOverlay({
                 className={`${MOBILE_ACTION_PILL_CLASS} text-white`}
               >
                 ⟳ {t("preview.flip")}
+              </button>
+            )}
+            {reloadOtherSurfaces && (
+              <button
+                type="button"
+                onClick={reloadOtherSurfaces}
+                className={`${MOBILE_ACTION_PILL_CLASS} text-white`}
+              >
+                {t("preview.reloadArt")}
               </button>
             )}
             {report && (
@@ -1408,9 +1474,23 @@ interface ParsedAbilitiesPanelProps {
   /** In-game report context for the displayed face; absent in the deck builder
    *  (no live game), where the report button is not shown. */
   report?: CardReportContext;
+  /** Reloads the card's art; present when the displayed face's art failed, or
+   *  another surface of the card failed while this one loaded. The pinned panel
+   *  is the desktop preview's one surface that takes clicks, so the reload sits
+   *  beside Report. */
+  onReloadArt?: () => void;
 }
 
-function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight, report }: ParsedAbilitiesPanelProps) {
+function ParsedAbilitiesPanel({
+  name,
+  cardTypes,
+  keywords,
+  localizedTypeLine,
+  parseDetails,
+  maxHeight,
+  report,
+  onReloadArt,
+}: ParsedAbilitiesPanelProps) {
   const { t } = useTranslation("game");
   const items = parseDetails ?? [];
   const rulings = useCardRulings(name);
@@ -1431,13 +1511,25 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
           <div className="text-[10px] text-gray-500 mt-0.5">{typeLine}</div>
         )}
         <SupportSummary items={items} />
-        {report && (
-          <div className="mt-1 flex justify-end">
-            <ReportCardButton
-              key={report.oracleId || report.name}
-              className="text-[11px]"
-              {...report}
-            />
+        {(report || onReloadArt) && (
+          <div className="mt-1 flex items-center justify-end gap-3">
+            {onReloadArt && (
+              // `min-h-11` keeps the target at least 44px tall.
+              <button
+                type="button"
+                onClick={onReloadArt}
+                className="min-h-11 px-1 text-[11px] text-indigo-300 hover:text-indigo-200"
+              >
+                {t("preview.reloadArt")}
+              </button>
+            )}
+            {report && (
+              <ReportCardButton
+                key={report.oracleId || report.name}
+                className="text-[11px]"
+                {...report}
+              />
+            )}
           </div>
         )}
       </div>

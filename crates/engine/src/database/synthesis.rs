@@ -21320,6 +21320,9 @@ mod modular_runtime_tests {
                 object_id,
                 counter_type.clone(),
                 *count,
+                // CR 614.16: the mirrored ETB entry pipeline places
+                // entering-with-counters (replacement-driven).
+                crate::types::proposed_event::CounterCause::ReplacementOrPrevention,
                 &mut events,
             );
         }
@@ -22335,6 +22338,9 @@ mod graft_runtime_tests {
                 object_id,
                 counter_type.clone(),
                 *count,
+                // CR 614.16: Graft's entering-with-counters are
+                // replacement-driven entry modifications.
+                crate::types::proposed_event::CounterCause::ReplacementOrPrevention,
                 &mut events,
             );
         }
@@ -23380,6 +23386,9 @@ mod bloodthirst_runtime_tests {
                 object_id,
                 counter_type.clone(),
                 *count,
+                // CR 614.16: Bloodthirst's entering-with-counters are
+                // replacement-driven entry modifications.
+                crate::types::proposed_event::CounterCause::ReplacementOrPrevention,
                 &mut events,
             );
         }
