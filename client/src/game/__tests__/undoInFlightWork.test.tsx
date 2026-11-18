@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AiActionProposal,
+  GameAction,
   GameEvent,
   GameLogEntry,
   GameState,
@@ -21,6 +22,7 @@ import { gameStateFactory } from "../../test/factories/gameStateFactory";
 import {
   abandonPendingDispatches,
   dispatchAction,
+  dispatchActionForGameSession,
   dispatchAiActionProposal,
   dispatchInteraction,
   isDispatchIdle,
@@ -47,6 +49,8 @@ function humanToAct(turn: number): GameState {
 const BEFORE_FIRST_PASS = humanToAct(3);
 const AFTER_FIRST_PASS = humanToAct(4);
 const AFTER_SECOND_PASS = humanToAct(5);
+/** A game a standing preference has changed; the turn number marks it. */
+const WITH_NEW_STOPS = humanToAct(6);
 
 function logEntry(text: string): GameLogEntry {
   return {
@@ -70,6 +74,8 @@ const AI_PROPOSAL: AiActionProposal = {
   actor: AI_SEAT,
   action: { type: "CastSpell", data: { object_id: 40, card_id: 7, targets: [] } },
 };
+type SetPhaseStops = Extract<GameAction, { type: "SetPhaseStops" }>;
+
 /** An engine-authored prompt's answer, opaque to the client. */
 const INTERACTION: InteractionSubmission = {
   interactionId: "interaction-1" as InteractionSubmission["interactionId"],
@@ -117,6 +123,15 @@ async function startGame() {
       inOrder(() => {
         live = next;
         return { events, log_entries: [entry] };
+      }),
+    );
+  };
+  /** The engine applies a standing preference, which logs nothing, and moves the game to `next`. */
+  const appliesPreference = (next: GameState) => {
+    adapter.submitAction.mockImplementationOnce(() =>
+      inOrder(() => {
+        live = next;
+        return { events: [] };
       }),
     );
   };
@@ -178,7 +193,7 @@ async function startGame() {
   useGameStore.getState().commitEngineSnapshot(await adapter.getSnapshot(), {
     logEntries: EARLIER_PLAYS,
   });
-  return { adapter, applies, appliesSlowly, aiPlays, restoresSlowly, restoreFails };
+  return { adapter, applies, appliesPreference, appliesSlowly, aiPlays, restoresSlowly, restoreFails };
 }
 
 function KeyboardHarness() {
@@ -328,7 +343,7 @@ describe("work in flight when Undo is pressed", () => {
     // game, and the re-sync after the failed read below would show it with
     // no line in the log and no checkpoint on the ring.
     applies(AFTER_SECOND_PASS, SECOND_PASS);
-    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    const refusedPass = dispatchAction({ type: "PassPriority" }, HUMAN);
     expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore);
 
     const read = adapter.getSnapshot.getMockImplementation()!;
@@ -338,6 +353,8 @@ describe("work in flight when Undo is pressed", () => {
     });
     restore.finish();
     await undoing;
+    await refusedPass;
+    expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore);
 
     // The board, the log and the ring agree on the restored game.
     expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
@@ -365,13 +382,17 @@ describe("work in flight when Undo is pressed", () => {
 
     // The Pass button, mana payment and most modals submit through the
     // store's own dispatch; engine-authored prompts answer as interactions.
-    await expect(useGameStore.getState().dispatch({ type: "PassPriority" })).resolves.toEqual([]);
-    await expect(dispatchInteraction(INTERACTION, HUMAN)).resolves.toEqual({ status: "stale" });
+    const refusedDispatch = useGameStore.getState().dispatch({ type: "PassPriority" });
+    const refusedInteraction = dispatchInteraction(INTERACTION, HUMAN);
     expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore);
     expect(submitInteraction).not.toHaveBeenCalled();
 
     restore.finish();
     await undoing;
+    await expect(refusedDispatch).resolves.toEqual([]);
+    await expect(refusedInteraction).resolves.toEqual({ status: "stale" });
+    expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore);
+    expect(submitInteraction).not.toHaveBeenCalled();
     expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
 
     // Reach guard: once the undo is over, both go through.
@@ -380,6 +401,40 @@ describe("work in flight when Undo is pressed", () => {
     await dispatchInteraction(INTERACTION, HUMAN);
     expect(adapter.submitAction).toHaveBeenCalledTimes(submitsBefore + 1);
     expect(submitInteraction).toHaveBeenCalledOnce();
+  });
+
+  it("lets a standing preference through while the undo restores, onto the restored game", async () => {
+    const { adapter, applies, appliesPreference, restoresSlowly } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+
+    const restore = restoresSlowly();
+    const undoing = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The gameplay preferences sync sends a standing preference whenever it
+    // changes, the undo's own commit included, and records it as sent once
+    // the send resolves. It is not chosen on the board being undone, so it
+    // goes through, and the engine answers it after the restore.
+    appliesPreference(WITH_NEW_STOPS);
+    const stops: SetPhaseStops["data"]["stops"] = [];
+    const preference: SetPhaseStops = { type: "SetPhaseStops", data: { stops } };
+    const sent = dispatchActionForGameSession(
+      preference,
+      adapter,
+      useGameStore.getState().gameSessionGeneration,
+      HUMAN,
+    );
+    expect(adapter.submitAction).toHaveBeenLastCalledWith(preference, HUMAN);
+
+    restore.finish();
+    await undoing;
+    await sent;
+    // Answered after the restore, the preference stays in the engine: the
+    // board read after both is the restored game with the new preference.
+    // Answered before it, the restore would have wiped it.
+    expect(useGameStore.getState().gameState).toEqual(WITH_NEW_STOPS);
+    expect(useGameStore.getState().stateHistory).toEqual([]);
   });
 
   it("ignores a second Undo pressed while the first is restoring", async () => {

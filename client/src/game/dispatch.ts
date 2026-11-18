@@ -892,7 +892,11 @@ async function dispatchActionInternal(
   }
   // An action chosen on the board an undo is taking back must not reach the
   // engine, which may already hold the restored game (see `undoLastAction`).
-  if (pendingUndoId !== null) {
+  // A standing preference bound to the game session is let through: it is not
+  // chosen on the board, takes no checkpoint, and belongs on the restored game.
+  // Its sender records it as sent once this resolves, so refusing it would
+  // lose it for the rest of the game.
+  if (pendingUndoId !== null && session === null) {
     debugLog(`dispatch refused during an undo: ${action.type}`, "info");
     return;
   }
@@ -1323,12 +1327,14 @@ let latestUndoId = 0;
  * answer in call order, so it commits before the undo does, and the undo's
  * commit takes its log lines and checkpoint back.
  *
- * While `pendingUndoId` is set, nothing else reaches the engine: the store
- * still shows the board being undone, so an action chosen on it could land on
- * the restored game, and a failed read after the restore would then re-sync a
- * board holding that action while dropping its log line and checkpoint. The
- * pipeline, the store's `dispatch` and `dispatchInteraction` refuse every
- * submit, and the AI controller drops its decision and starts none.
+ * While `pendingUndoId` is set, no choice made on the board reaches the
+ * engine: the store still shows the board being undone, so an action chosen
+ * on it could land on the restored game, and a failed read after the restore
+ * would then re-sync a board holding that action while dropping its log line
+ * and checkpoint. The pipeline, the store's `dispatch` and
+ * `dispatchInteraction` refuse every such submit, and the AI controller drops
+ * its decision and starts none. A standing preference sent through
+ * `dispatchActionForGameSession` still goes through, onto the restored game.
  *
  * Nothing is abandoned when there is nothing to undo, or during an undo, so
  * such a press leaves the work in flight alone. Nothing is rethrown: the Undo

@@ -268,9 +268,10 @@ interface GameStoreState {
    * The undo in flight, from the moment `undoLastAction` begins it, before its
    * first await, until its board is committed or its failure handled; `null`
    * otherwise. Meanwhile the store still shows the state being undone while
-   * the engine may already hold the restored one, so no submit reaches the
-   * engine, and the AI controller drops the decision under way and starts
-   * none. Transient: `reset` clears it.
+   * the engine may already hold the restored one, so no choice made on that
+   * board reaches the engine (standing preferences still go through), and
+   * the AI controller drops the decision under way and starts none.
+   * Transient: `reset` clears it.
    */
   pendingUndoId: number | null;
   /** Debug rewind targets: trusted envelopes for the same reason. */
