@@ -15,6 +15,7 @@ import type {
   Phase,
   Player,
   PlayerId,
+  ReplacementCandidateSummary,
   ShortcutDecisionSchema,
   ShortcutProposal,
   StackEntry,
@@ -36,6 +37,7 @@ type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
 type ManaSourceSelectionWaitingFor = Extract<WaitingFor, { type: "ManaSourceSelection" }>;
 type UntapChoiceWaitingFor = Extract<WaitingFor, { type: "UntapChoice" }>;
+type ReplacementChoiceWaitingFor = Extract<WaitingFor, { type: "ReplacementChoice" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
 type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
@@ -300,6 +302,27 @@ export const buildUntapChoiceWaitingFor = (
 ): UntapChoiceWaitingFor => {
   return untapChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
 };
+
+export class ReplacementChoiceWaitingForFactory extends PlayerWaitingForFactory<ReplacementChoiceWaitingFor> {
+  /** Sets the candidates together with the `candidate_count` the engine sends beside them. */
+  withCandidates(candidates: ReplacementCandidateSummary[]) {
+    return this.withData({ candidates, candidate_count: candidates.length });
+  }
+}
+
+export const replacementChoiceWaitingForFactory =
+  ReplacementChoiceWaitingForFactory.define((): ReplacementChoiceWaitingFor => ({
+    type: "ReplacementChoice",
+    data: {
+      player: 0,
+      candidate_count: 2,
+      candidates: [
+        { source_id: 1, source_name: "First source", description: "First effect" },
+        { source_id: 2, source_name: "Second source", description: "Second effect" },
+      ],
+      kind: { type: "Order" },
+    },
+  }));
 
 export const pendingCastFactory = Factory.define<PendingCast>(() => ({
   object_id: 1,
@@ -755,6 +778,14 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(untapChoiceWaitingForFactory.withData(data).build());
   }
 
+  replacementChoice(data: Partial<ReplacementChoiceWaitingFor["data"]> = {}) {
+    // `candidate_count` follows the candidates unless `data` sets it as well.
+    const prompt = data.candidates
+      ? replacementChoiceWaitingForFactory.withCandidates(data.candidates)
+      : replacementChoiceWaitingForFactory;
+    return this.variant(prompt.withData(data).build());
+  }
+
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
     return this.variant(targetSelectionWaitingForFactory.withData(data).build());
   }
@@ -1046,6 +1077,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   untapChoice(data: Partial<UntapChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.untapChoice(data).build());
+  }
+
+  replacementChoice(data: Partial<ReplacementChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.replacementChoice(data).build());
   }
 
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {

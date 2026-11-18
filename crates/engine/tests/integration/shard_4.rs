@@ -571,6 +571,7 @@ mod purged_source_matches_filter_lki;
 mod put_sticker_class;
 mod put_target_count_entry_counters;
 mod pyromancy_random_discard_cost;
+mod pyromatics_replicate_offered_once;
 mod queen_velocity_skip_turns;
 mod queen_velocity_upkeep;
 mod quest_counter_sacrifice_it_cost;

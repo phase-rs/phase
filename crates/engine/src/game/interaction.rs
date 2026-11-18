@@ -79,6 +79,9 @@ use super::{mana_sources, turn_control, visibility};
 
 pub const MAX_INTERACTION_STRING_LEN: usize = 256;
 const MAX_INTERACTION_SESSION_ID_LEN: usize = 128;
+/// CR 601.2g + CR 605.3a: the player's own mana offers.
+const EXPLICIT_MANA: super::mana_abilities::ManaActivationPurpose =
+    super::mana_abilities::ManaActivationPurpose::Explicit;
 const MAX_INTERACTION_SERIAL_LEN: usize = 32;
 
 fn action_rejection_for_interaction_reason(reason: InteractionReasonCode) -> ActionRejection {
@@ -2217,7 +2220,7 @@ fn mana_payment_direct_actions(
     if activation_upper_bound.is_none_or(|count| count > MAX_INTERACTION_LIST_LEN) {
         return Err(InteractionReasonCode::PayloadTooLarge);
     }
-    let mut actions = super::mana_sources::activatable_mana_actions_for_player(state, player);
+    let mut actions = super::mana_sources::mana_actions_for_player(state, player, EXPLICIT_MANA);
     let tapped_for_mana = state
         .lands_tapped_for_mana
         .get(&player)
@@ -2242,11 +2245,36 @@ fn mana_payment_direct_actions(
             .filter_map(|object_id| state.objects.get(object_id))
             .filter(|object| !crate::game::restrictions::object_cant_tap(state, object.id))
             .map(|object| match mode {
-                ConvokeMode::Convoke if object.is_convoke_eligible(player) => {
+                ConvokeMode::Convoke
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        object,
+                        player,
+                        ConvokeMode::Convoke,
+                    ) =>
+                {
                     1usize.saturating_add(object.color.len())
                 }
-                ConvokeMode::Waterbend if object.is_waterbend_eligible(player) => 1,
-                ConvokeMode::Improvise if object.is_improvise_eligible(player) => 1,
+                ConvokeMode::Waterbend
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        object,
+                        player,
+                        ConvokeMode::Waterbend,
+                    ) =>
+                {
+                    1
+                }
+                ConvokeMode::Improvise
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        object,
+                        player,
+                        ConvokeMode::Improvise,
+                    ) =>
+                {
+                    1
+                }
                 ConvokeMode::Convoke | ConvokeMode::Waterbend | ConvokeMode::Improvise => 0,
                 ConvokeMode::Delve => unreachable!("delve counted from all zone objects"),
             })
@@ -2319,7 +2347,14 @@ fn mana_payment_direct_actions(
                     continue;
                 }
                 match mode {
-                    ConvokeMode::Convoke if object.is_convoke_eligible(player) => {
+                    ConvokeMode::Convoke
+                        if crate::game::casting::tap_payment_eligible(
+                            state,
+                            object,
+                            player,
+                            ConvokeMode::Convoke,
+                        ) =>
+                    {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,
@@ -2339,14 +2374,26 @@ fn mana_payment_direct_actions(
                     }
                     // CR 701.67a: no tap past the waterbend cost's generic count.
                     ConvokeMode::Waterbend
-                        if object.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                        if crate::game::casting::tap_payment_eligible(
+                            state,
+                            object,
+                            player,
+                            ConvokeMode::Waterbend,
+                        ) && waterbend_taps_remaining > 0 =>
                     {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,
                         });
                     }
-                    ConvokeMode::Improvise if object.is_improvise_eligible(player) => {
+                    ConvokeMode::Improvise
+                        if crate::game::casting::tap_payment_eligible(
+                            state,
+                            object,
+                            player,
+                            ConvokeMode::Improvise,
+                        ) =>
+                    {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,
@@ -2420,7 +2467,7 @@ fn direct_choice_projection(
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
             let mut actions =
-                super::mana_sources::activatable_mana_actions_for_player(state, *player);
+                super::mana_sources::mana_actions_for_player(state, *player, EXPLICIT_MANA);
             // CR 601.2g-h + CR 118.3a: a manual window adds confirming and
             // directing pool units.
             if super::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode) {
@@ -7139,7 +7186,7 @@ fn actor_candidates(
     }
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let mana_actions =
-            super::mana_sources::activatable_mana_actions_for_player(state, semantic_owner);
+            super::mana_sources::mana_actions_for_player(state, semantic_owner, EXPLICIT_MANA);
         let undo_actions = state
             .lands_tapped_for_mana
             .get(&semantic_owner)

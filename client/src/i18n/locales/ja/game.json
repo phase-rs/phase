@@ -2594,7 +2594,7 @@
     "appliedLast": "最後に適用 — これが有効",
     "resultLabel": "結果：{{outcome}}",
     "confirmOrder": "順序を確認",
-    "dragHint": "ドラッグして並べ替えるか、矢印を使用。",
+    "dragHint": "<grip>⠿</grip> ハンドルをドラッグして並べ替えるか、矢印を使用。",
     "chooseSubtitle": "適用する置換効果を選択",
     "candidateFallback": "置換効果{{number}}",
     "orderSubtitleComposing": "これらの効果はすべてこのイベントの起こり方を変更します。適用順をドラッグで設定してください — すべて適用されるため順序で結果が変わります（CR 616.1）。",
@@ -2603,6 +2603,7 @@
     "composesNote": "すべての効果が適用され、順序によって組み合わせ方が変わります。",
     "moveUpNamed": "{{name}}を前へ移動",
     "moveDownNamed": "{{name}}を後へ移動",
+    "dragHandleNamed": "{{name}}をドラッグして並べ替え",
     "positionAnnounce": "{{total}}個中{{position}}番目"
   },
   "retargetChoice": {
@@ -2708,6 +2709,20 @@
     "EndCombat": "戦闘終了",
     "PostCombatMain": "メイン・フェイズ2",
     "End": "終了ステップ",
+    "Cleanup": "クリンナップ"
+  },
+  "phaseShortName": {
+    "Untap": "アンタップ",
+    "Upkeep": "アップキープ",
+    "Draw": "ドロー",
+    "PreCombatMain": "メイン1",
+    "BeginCombat": "戦闘開始",
+    "DeclareAttackers": "攻撃",
+    "DeclareBlockers": "ブロック",
+    "CombatDamage": "ダメージ",
+    "EndCombat": "戦闘終了",
+    "PostCombatMain": "メイン2",
+    "End": "終了",
     "Cleanup": "クリンナップ"
   },
   "counterMoveDistribution": {
