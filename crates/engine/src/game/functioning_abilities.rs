@@ -16,7 +16,9 @@
 //! # Zone scope asymmetry
 //!
 //! - **Statics**: the full CR 113.6 zone-of-function gate lives in the shared
-//!   `static_functions_in_zone` predicate, which is a three-way split: a
+//!   `static_functions_in_zone` predicate, which first applies CR 113.6g's
+//!   stack exception for self-referential `CantBeCountered`/`CantBeCopied` and
+//!   is otherwise a three-way split: a
 //!   characteristic-defining ability (`characteristic_defining`) functions in
 //!   all zones unconditionally per CR 604.3, independent of `active_zones`;
 //!   otherwise a non-empty `active_zones` restricts a static to exactly the
@@ -24,9 +26,7 @@
 //!   empty `active_zones` defaults to battlefield-only. Command-zone objects
 //!   use the emblem-or-opt-in gate for the latter two cases. Six
 //!   gathers delegate to it — `active_static_definitions` (which also layers
-//!   CR 113.6g's stack exception for self-referential
-//!   `CantBeCountered`/`CantBeCopied` on top, plus the CR 604.1 / CR 613.1
-//!   condition gate), `game_functioning_statics`, `battlefield_functioning_statics`,
+//!   the CR 604.1 / CR 613.1 condition gate on top), `game_functioning_statics`, `battlefield_functioning_statics`,
 //!   `layers::active_combat_assignment_rule_effects_from_static_definitions`,
 //!   `combat::compute_combat_tax`, and (as of issue #8158)
 //!   `layers::active_continuous_effects_from_static_definitions`'s
@@ -90,11 +90,17 @@ use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 /// CR 905.4a + CR 113.6b: Face-down hidden-agenda conspiracies do not function
-/// even though synthesis stamps their definitions with `Zone::Command`. Other
-/// non-emblem command-zone objects keep the existing explicit opt-in path.
+/// even though synthesis stamps their definitions with `Zone::Command`. Turtle
+/// Team-Up Bosses take the same gate: a face-down Boss (still in the Boss deck
+/// pile) does not function until deployed face up. Other non-emblem
+/// command-zone objects keep the existing explicit opt-in path.
 fn non_emblem_command_zone_static_functions(obj: &GameObject, def: &StaticDefinition) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
+            && (def.active_zones.is_empty() || static_opts_in_to_command_zone(def));
+    }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
             && static_opts_in_to_command_zone(def);
     }
     static_opts_in_to_command_zone(def)
@@ -108,6 +114,10 @@ pub(crate) fn non_emblem_command_zone_trigger_functions(
 ) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
+            && trigger_opts_in_to_command_zone(def);
+    }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
             && trigger_opts_in_to_command_zone(def);
     }
     trigger_opts_in_to_command_zone(def)
@@ -180,6 +190,10 @@ pub(crate) fn non_emblem_command_zone_replacement_functions(
         return crate::game::conspiracy::functions_from_command_zone(obj)
             && replacement_opts_in_to_command_zone(def);
     }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
+            && replacement_opts_in_to_command_zone(def);
+    }
     replacement_opts_in_to_command_zone(def)
 }
 
@@ -199,6 +213,15 @@ pub(crate) fn non_emblem_command_zone_replacement_functions(
 /// route through one predicate.
 pub fn object_sources_static_from_command_zone(obj: &GameObject) -> bool {
     if obj.zone != Zone::Command {
+        return false;
+    }
+    // CR 315.5b: a face-down conspiracy card has no characteristics, so it is no
+    // continuous-effect source at all before it is turned face up — the CDA
+    // carve-out below (CR 604.3) must not outrank that blanking. The creation
+    // path already empties the face-down object's definition lists; this gate
+    // keeps the answer true even if a restore path re-applies the printed face
+    // to a still-face-down object.
+    if obj.face_down && crate::game::conspiracy::is_conspiracy(obj) {
         return false;
     }
     obj.is_emblem
@@ -224,10 +247,9 @@ pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
     ) && matches!(def.affected.as_ref(), None | Some(TargetFilter::SelfRef))
 }
 
-/// CR 113.6 + CR 113.6b + CR 114.3 / CR 114.4: Single-authority zone-of-
-/// function gate for a static definition, EXCLUDING the CR 113.6g
-/// self-referential `CantBeCountered`/`CantBeCopied` exception (the caller
-/// applies that first). This is a three-way split, not two:
+/// CR 113.6 + CR 113.6b + CR 113.6g + CR 114.3 / CR 114.4: Single-authority zone-of-
+/// function gate for a static definition. After the CR 113.6g self-referential
+/// `CantBeCountered`/`CantBeCopied` exception, this is a three-way split, not two:
 ///
 /// 1. **CDA** (`def.characteristic_defining`) — CR 604.3: "Characteristic-
 ///    defining abilities function in all zones." This is unconditional and
@@ -251,10 +273,23 @@ pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
 /// `PreFilteredBaseStatic` path remains the documented exception because its
 /// caller already pre-filtered by zone (see the module doc above).
 pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition) -> bool {
+    // CR 113.6g: an object's ability that states it can't be countered or copied functions on
+    // the stack, in place of the battlefield default below; one that grants that to other
+    // objects (Allosaurus Shepherd's "Green spells you control can't be countered") takes the
+    // default.
+    if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
+        return obj.zone == Zone::Stack;
+    }
     // CR 709.5 + CR 709.5c: on the battlefield a locked Room half doesn't
     // have its rules text — a door-stamped static functions only while its
     // half is unlocked (single authority: `room::door_text_functions`).
     if !crate::game::room::door_text_functions(obj, def.room_door) {
+        return false;
+    }
+    // CR 315.5b: a face-down conspiracy card has no characteristics until it is
+    // turned face up, so none of its definitions function — the CR 604.3 "CDA
+    // functions in all zones" carve-out below included.
+    if obj.zone == Zone::Command && obj.face_down && crate::game::conspiracy::is_conspiracy(obj) {
         return false;
     }
     // CR 604.3: a characteristic-defining ability functions in all zones,
@@ -356,8 +391,8 @@ enum PolarityDeferral {
 /// Both public entry points below are this function; there is no second gate
 /// stack.
 ///
-/// The polarity deferral sits AFTER the CR 113.6g branch and
-/// `static_functions_in_zone`, immediately BEFORE the condition evaluation.
+/// The polarity deferral sits AFTER `static_functions_in_zone`, immediately
+/// BEFORE the condition evaluation.
 /// POSITION IS LOAD-BEARING: hoisting it to the top of this function returns
 /// `Permission => Some(true)` before the zone gate is ever consulted and would
 /// offer a creature whose own permission names `active_zones = [Command]`.
@@ -370,20 +405,7 @@ fn static_def_applies(
     context: ConditionContext,
     deferral: PolarityDeferral,
 ) -> bool {
-    // CR 113.6g: An object's ability that states IT can't be countered
-    // or can't be copied functions on the stack — a self-referential
-    // exception to the CR 113.6 zone-of-function default below. A
-    // permanent's ability that instead GRANTS un-counterability /
-    // un-copyability to OTHER objects via a `TargetFilter` (Allosaurus
-    // Shepherd's "Green spells you control can't be countered") is not
-    // self-referential and must fall through to the ordinary default,
-    // so it keeps functioning from the battlefield like any other
-    // static. Fixes #1033.
-    if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
-        if obj.zone != Zone::Stack {
-            return false;
-        }
-    } else if !static_functions_in_zone(obj, def) {
+    if !static_functions_in_zone(obj, def) {
         return false;
     }
     // CR 506.2 + CR 508.1c + CR 508.5 + CR 702.3b: the INTRINSIC half of the one
@@ -550,11 +572,6 @@ pub fn game_active_statics(
 /// (Eminence), and a battlefield object contributes only statics whose
 /// `active_zones` admit the battlefield (empty defaults to battlefield-only).
 /// Phased-out objects contribute nothing per CR 702.26b.
-///
-/// The CR 113.6g self-referential `CantBeCountered`/`CantBeCopied` stack
-/// exception is not applied here (that is `active_static_definitions`'
-/// responsibility): this iterator only ever scans the battlefield and command
-/// zone, never the stack, so the exception cannot apply to any object it sees.
 pub fn game_functioning_statics(
     state: &GameState,
 ) -> impl Iterator<Item = (&GameObject, &StaticDefinition)> {
@@ -571,8 +588,8 @@ pub fn game_functioning_statics(
 /// [`game_functioning_statics`] is this function flat-mapped over
 /// `battlefield ∪ command_zone`, so a caller that has already resolved WHICH
 /// object to ask cannot end up applying a different gate stack than the sweep
-/// did. Does NOT apply the CR 113.6g stack exception or the CR 604.1 condition
-/// filter — those are [`active_static_definitions`]' additions.
+/// did. Does NOT apply the CR 604.1 condition filter — that is
+/// [`active_static_definitions`]' addition.
 pub(crate) fn object_functioning_statics(
     obj: &GameObject,
 ) -> impl Iterator<Item = &StaticDefinition> {
@@ -936,6 +953,38 @@ mod tests {
             vec![StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Command])]
                 .into();
         assert!(!object_sources_static_from_command_zone(&bf));
+    }
+
+    /// CR 315.5b + CR 604.3: No printed conspiracy in the current MTGJSON data
+    /// has a CDA. Brago's Favor is the nearest printed static-ability witness:
+    /// "Spells with the chosen name you cast cost {1} less to cast."
+    /// This synthetic gate fixture checks that face-down blanking wins over a
+    /// retained CDA definition; it is not a printed-card or restore-path regression.
+    /// The face-up checks below prove the CDA reaches both admission paths.
+    #[test]
+    fn face_down_conspiracy_cda_does_not_function_from_command_zone() {
+        let state = new_state();
+        let cda = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .cda();
+        let mut obj = make_obj(1, Zone::Command);
+        obj.is_conspiracy = true;
+        obj.face_down = true;
+        obj.static_definitions = vec![cda].into();
+        assert!(
+            !object_sources_static_from_command_zone(&obj),
+            "a face-down conspiracy is not a continuous-effect source"
+        );
+        assert_eq!(
+            active_static_definitions(&state, &obj).count(),
+            0,
+            "CR 315.5b: not even a CDA functions while the conspiracy is face down"
+        );
+
+        // Reach guard: the same object admitted once it is turned face up.
+        obj.face_down = false;
+        assert!(object_sources_static_from_command_zone(&obj));
+        assert_eq!(active_static_definitions(&state, &obj).count(), 1);
     }
 
     #[test]

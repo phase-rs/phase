@@ -67,6 +67,14 @@
 //! are already boxed, so nothing large went inline; the ceiling moved to
 //! 14,352.next_multiple_of(256) + 256 = 14,848.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 15,072 B when the Horde stack merged: ~110 B of small Horde bookkeeping
+//! (three `u32`s, three `Vec`s, a `usize`, a `u8`, an `im::Vector`, and an
+//! already-boxed `pending_hero_event`) plus upstream's accumulated small fields
+//! since the Horde base. No single large rarely-populated field went inline, so
+//! the ceiling moves by the rule to
+//! 15,072.next_multiple_of(256) + 256 = 15,360.
+//!
 //! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
 //! scheme-support branch merged main's tracked-set member origins
 //! (`tracked_set_member_origins`, an `im::HashMap`, 24 B inline) alongside
@@ -101,10 +109,59 @@
 //!
 //! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
 //! 14,896 B with the tracked-set member origins (`tracked_set_member_origins`,
-//! 24 B), the loop-detection held window and decision tally (`loop_detect_held`,
-//! 8 B, and `loop_decision_tally`, 40 B) and the loop shortcut's rising ∞ axes
+//! 24 B), the loop-detection held window (8 B) and decision tally
+//! (`loop_decision_tally`, 40 B) and the loop shortcut's rising ∞ axes
 //! (`unbounded_rising`, 24 B); none of those fields is a large rarely-populated
 //! one, so the ceiling is 14,896.next_multiple_of(256) + 256 = 15,360.
+//!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-09`) at
+//! 15,376 B when the Horde stack merged main through `bf584d6b`: the branch's
+//! Horde bookkeeping (~110 B of small fields, already counted at 15,072 here)
+//! unioned with main's new small fields since the merge base (`un_actions`,
+//! the loop-detection held window, `players_who_flipped_coins_this_turn`, minus the
+//! removed `unbounded_loop_enablers`). Each side holds under 15,360 alone —
+//! the branch at 15,072 on this builder, main green in CI where this assert
+//! runs on every 64-bit build — and the union crosses by 16 B. No single
+//! large rarely-populated field went inline, so the ceiling moves by the rule
+//! to 15,376.next_multiple_of(256) + 256 = 15,872.
+//!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 15,904 B when the layer pass's control-change working memory
+//! (`layer_control_changes`, `announced_control_changes`, two 24 B `Vec`s)
+//! met main's small fields since its base. Both lists are empty at every
+//! action boundary, so they are lazily boxed (`LazyBoxedVec`, 8 B each);
+//! `GameState` then measures 15,872 B, at the unchanged ceiling.
+//!
+//! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,904 B when the canonical library-placement branch merged main: its
+//! `ProposedEvent::ZoneChange::library_placement` held a 96 B
+//! `Option<LibraryPosition>` inline, making `ProposedEvent` 288 B (200 B with
+//! the field boxed) and widening both `GameState` fields that hold one inline
+//! (`pending_replacement`, `pending_liminal_entry_resume`). Only library moves
+//! carry a placement, so the field is boxed (`Option<Box<LibraryPosition>>`);
+//! `GameState` then measures 15,728 B, under the unchanged 15,872 ceiling.
+//!
+//! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,888 B when the counter-removal instruction-scope work (#10699) merged
+//! main through `ed6fd9ae`. Main alone measures 15,824 B; the branch adds two
+//! execution-local fields, `instruction_scopes` (`Vec<OpenInstruction>`, 24 B)
+//! and `last_closed_instruction` (`Option<ClosedInstruction>`, 32 B), and the
+//! union crosses 15,872 by 16 B. Neither field is a large rarely-populated
+//! one: `zones::within_instruction` writes both on every instruction scope,
+//! so boxing would put an allocation on that path. The ceiling moves by the
+//! rule to 15,888.next_multiple_of(256) + 256 = 16,384.
+//!
+//! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,776 B when #10699 merged main through `e453af3d`, after the canonical
+//! library-placement entry above boxed `library_placement`. That is under the
+//! 16,384 ceiling, so the ceiling is unchanged.
+//!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu while semantically porting
+//! the as-enters dice/counters branch (72ae22642) onto main through da2af2bca5,
+//! including canonical placement and component delivery (#10636), at 15,840 B.
+//! Measured with the isolated `-Zprint-type-sizes` command above. The merged
+//! parked-entry and pre-entry bookkeeping remains under the calibrated ceiling:
+//! 15,840.next_multiple_of(256) + 256 = 16,384, so the ceiling is unchanged.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
@@ -115,7 +172,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 15_360,
+        size_of::<crate::types::game_state::GameState>() <= 16_384,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

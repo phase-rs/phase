@@ -161,11 +161,15 @@ else
   fi
 fi
 
-# Comprehensive Rules — gitignored, non-fatal on failure.
-if [ ! -f docs/MagicCompRules.txt ]; then
+# Comprehensive Rules — gitignored, non-fatal on failure. The fetch is a no-op
+# when the local copy is already the edition pinned in docs/MagicCompRules.edition.
+if ! ./scripts/check-cr-edition.sh >/dev/null 2>&1; then
   echo ""
   echo "Fetching MTG Comprehensive Rules (local dev reference only)..."
-  ./scripts/fetch-comp-rules.sh || echo "  (skipped — run ./scripts/fetch-comp-rules.sh later)"
+  ./scripts/fetch-comp-rules.sh --force || {
+    echo "  (skipped — run ./scripts/fetch-comp-rules.sh later)"
+    ./scripts/check-cr-edition.sh || :
+  }
 fi
 
 # --- Frontend deps (parallel-safe with cargo work below) ---

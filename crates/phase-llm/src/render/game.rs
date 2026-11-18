@@ -10,9 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
-use engine::game::combat::AttackTarget;
-use engine::game::mana_sources;
-use engine::types::game_state::GameState;
+use engine::game::combat::{AttackTarget, AttackerInfo, CombatParticipation};
+use engine::game::game_object::GameObject;
+use engine::game::{casting, commander, mana_sources, players};
+use engine::types::game_state::{GameState, StackEntry};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaType;
@@ -21,6 +22,7 @@ use engine::types::zones::Zone;
 
 use super::action::describe_tagged;
 use super::history::{push_history, HistoryBudget, TurnCycle};
+use super::keyword::keyword_text;
 use super::text::{clamp_text, mana_cost_text, one_line, type_line_text};
 
 /// How much of the position to render. Driven by difficulty so a low-difficulty
@@ -52,9 +54,9 @@ impl Default for GameRenderOptions {
     }
 }
 
-/// Render the whole position: turn, players, stack, pending delayed triggers,
-/// battlefield, the viewer's hand and available mana, what the viewer knows of
-/// other hands, graveyards, visible exile, and the turn-cycle history.
+/// Render the whole position: turn, players, commanders, stack, pending delayed
+/// triggers, battlefield, the viewer's hand and available mana, what the viewer
+/// knows of other hands, graveyards, visible exile, and the turn-cycle history.
 ///
 /// Every section is a function of live state except the history, so the size
 /// of a prompt tracks the size of the position, not the length of the game.
@@ -68,6 +70,7 @@ pub fn render_board(
     let mut out = String::new();
     push_header(&mut out, state, viewer);
     push_players(&mut out, state, viewer);
+    push_commanders(&mut out, state, viewer, db, options);
     push_stack(&mut out, state, viewer);
     push_delayed_triggers(&mut out, state, viewer);
     push_combat(&mut out, state, viewer);
@@ -77,13 +80,20 @@ pub fn render_board(
     push_known_other_hands(&mut out, state, viewer);
     push_graveyards(&mut out, state, viewer);
     push_exile(&mut out, state, viewer);
-    push_history(&mut out, history, TurnCycle::of(state), options.history);
+    push_history(
+        &mut out,
+        history,
+        viewer,
+        TurnCycle::of(state),
+        options.history,
+    );
     out
 }
 
 /// `You` for the seat the prompt belongs to, `Player N` otherwise. One
-/// authority so the same seat never reads two ways in one prompt.
-fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
+/// authority so the same seat never reads two ways in one prompt. The option
+/// labels and the history name seats through it too.
+pub(crate) fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
     if player == viewer {
         "You".to_string()
     } else {
@@ -138,25 +148,224 @@ fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
     }
 }
 
+/// Each seat's commanders: where each one is, what casting it from the command
+/// zone costs next, and the commander damage it has dealt.
+///
+/// CR 400.2 + CR 903.3: the command zone is public, and a card keeps its
+/// commander designation in every zone, so a commander is listed wherever it
+/// is. CR 800.4a: a player who has left the game takes their cards with them,
+/// so only the seats still in the game are listed, and commander damage only
+/// to those seats.
+///
+/// A commander that is face down in the viewer-filtered state (a hidden zone,
+/// CR 400.2 + CR 401.2, or a face-down permanent, CR 708.2) is never located.
+/// The filter redacts its identity but keeps the commander designation and its
+/// object, so saying which of those places holds it would tell this seat which
+/// hidden card is the commander, or that a tutor took it from the library.
+///
+/// Every figure is read from the engine's authority for it, not rebuilt here:
+/// - the seat's color identity: `commander::defined_commander_color_identity`
+///   (CR 903.4), or the registered identity alone,
+///   `commander::registered_commander_color_identity`, while one of the seat's
+///   commanders is face down;
+/// - the commander tax: `commander::commander_tax` (CR 903.8), the live count
+///   of casts from the command zone. The object's derived `commander_tax`
+///   field is filled only by `derive_display_state` and is never deserialized;
+/// - the whole cost of the next cast: `casting::display_spell_cost`, which adds
+///   the tax and applies every cost modifier the cast would;
+/// - the damage: `GameState::commander_damage`, and how much more eliminates
+///   that player, `commander::commander_lethal_headroom` (CR 903.10a).
+fn push_commanders(
+    out: &mut String,
+    state: &GameState,
+    viewer: PlayerId,
+    db: Option<&CardDatabase>,
+    options: &GameRenderOptions,
+) {
+    // CR 408.3: only a format that starts cards in the command zone has
+    // commanders.
+    if !state.format_config.command_zone {
+        return;
+    }
+    // Grouped by owner in seat order and by id within a seat, so the same
+    // position always renders the same way: `objects` is a hash map.
+    let mut by_owner: BTreeMap<u8, Vec<&GameObject>> = BTreeMap::new();
+    for object in state.objects.values() {
+        if object.is_commander && players::is_alive(state, object.owner) {
+            by_owner.entry(object.owner.0).or_default().push(object);
+        }
+    }
+    if by_owner.is_empty() {
+        return;
+    }
+    out.push_str("\n--- COMMANDERS ---\n");
+    for (owner, mut commanders) in by_owner {
+        let owner = PlayerId(owner);
+        // CR 903.4 + CR 903.5c: the commanders' combined color identity, which
+        // every card in that seat's deck falls within. When no deck pool
+        // registers the seat's commanders, the engine reads it from the
+        // commander objects' printed colors and mana cost, which the filter
+        // redacts from a face-down one. While one is face down, only the
+        // registered identity is stated, and none when there is none.
+        let identity = if commanders.iter().any(|object| object.face_down) {
+            commander::registered_commander_color_identity(state, owner)
+        } else {
+            commander::defined_commander_color_identity(state, owner)
+        };
+        let identity = match identity {
+            Some(colors) if colors.is_empty() => " (color identity: colorless)".to_string(),
+            Some(colors) => format!(
+                " (color identity: {})",
+                mana_symbols(colors.into_iter().map(ManaType::from))
+            ),
+            None => String::new(),
+        };
+        out.push_str(&format!("{}{identity}:\n", seat_label(owner, viewer)));
+        commanders.sort_by_key(|object| object.id);
+        for object in commanders {
+            out.push_str(&format!(
+                "  - {}\n",
+                commander_line(state, viewer, object, db, options)
+            ));
+            for line in commander_damage_lines(state, viewer, object.id) {
+                out.push_str(&format!("    - {line}\n"));
+            }
+        }
+    }
+}
+
+/// A commander's line: what it is, where it is, and what its next cast from the
+/// command zone costs.
+///
+/// A commander on the battlefield is named only, since its battlefield line
+/// states its characteristics. So is a face-down one, named as the filtered
+/// state names it.
+fn commander_line(
+    state: &GameState,
+    viewer: PlayerId,
+    object: &GameObject,
+    db: Option<&CardDatabase>,
+    options: &GameRenderOptions,
+) -> String {
+    let named_only = object.zone == Zone::Battlefield || object.face_down;
+    let mut parts = if named_only {
+        vec![one_line(&object.name)]
+    } else {
+        card_facts(object)
+    };
+    parts.push(commander_place(viewer, object));
+    parts.push(next_cast_text(state, object));
+    let mut line = parts.join(" | ");
+    if named_only {
+        return line;
+    }
+    if let Some(text) = oracle_text(object.name.as_str(), db, options) {
+        line.push_str(&format!(" | \"{text}\""));
+    }
+    line
+}
+
+/// Where a commander is, in the words the rest of the position uses.
+///
+/// A face-down one is not located (see [`push_commanders`]): the words are
+/// the same in a hand, a library, or face down on the battlefield, so they
+/// stay the same as it moves between them. CR 108.4 + CR 110.2: a permanent's
+/// controller may not be its owner, so the battlefield says who controls it.
+fn commander_place(viewer: PlayerId, object: &GameObject) -> String {
+    if object.face_down {
+        return "face down or in a hidden zone".to_string();
+    }
+    match object.zone {
+        Zone::Command => "in the command zone".to_string(),
+        Zone::Battlefield => format!(
+            "on the battlefield, controlled by {}",
+            seat_label(object.controller, viewer)
+        ),
+        Zone::Stack => "on the stack".to_string(),
+        Zone::Graveyard => "in the graveyard".to_string(),
+        Zone::Exile => "in exile".to_string(),
+        Zone::Hand => "in hand".to_string(),
+        Zone::Library => "in the library".to_string(),
+    }
+}
+
+/// What casting a commander from the command zone costs next (CR 903.8).
+///
+/// In the command zone, the whole cost, priced by the engine's cost-display
+/// authority for the commander's owner, the one player who may cast it from
+/// there. Anywhere else, or when that authority prices no mana cost, the tax
+/// alone, which a cast from the command zone adds.
+fn next_cast_text(state: &GameState, object: &GameObject) -> String {
+    let tax = format!("{{{}}}", commander::commander_tax(state, object.id));
+    let cost = if object.zone == Zone::Command {
+        casting::display_spell_cost(state, object.owner, object.id)
+    } else {
+        None
+    };
+    match cost
+        .map(|cost| mana_cost_text(&cost))
+        .filter(|cost| !cost.is_empty())
+    {
+        Some(cost) => format!("next cast costs {cost}, including commander tax {tax}"),
+        None => format!("commander tax {tax} on its next cast from the command zone"),
+    }
+}
+
+/// CR 903.10a: the combat damage a commander has dealt each player, as the
+/// engine tallies it, and how much more from that commander eliminates them.
+///
+/// `commander_lethal_headroom` answers only in a format that eliminates a
+/// player by commander damage, so a format without that rule lists none, as
+/// the engine's own display omits it (`derive_views`).
+fn commander_damage_lines(
+    state: &GameState,
+    viewer: PlayerId,
+    commander_id: ObjectId,
+) -> Vec<String> {
+    state
+        .commander_damage
+        .iter()
+        .filter(|entry| entry.commander == commander_id && players::is_alive(state, entry.player))
+        .filter_map(|entry| {
+            let headroom = commander::commander_lethal_headroom(state, entry.player, commander_id)?;
+            let victim = seat_label(entry.player, viewer);
+            Some(format!(
+                "commander damage dealt to {victim}: {} ({headroom} more eliminates {victim})",
+                entry.damage
+            ))
+        })
+        .collect()
+}
+
 fn push_stack(out: &mut String, state: &GameState, viewer: PlayerId) {
     if state.stack.is_empty() {
         out.push_str("\n--- STACK ---\n(empty)\n");
         return;
     }
     out.push_str("\n--- STACK (top resolves first) ---\n");
-    // CR 405.1: the stack is last-in, first-out; render it that way rather than
-    // in storage order, so "top" in the prompt means what it means in the rules.
-    for (index, entry) in state.stack.iter().rev().enumerate() {
-        let name = object_name(state, entry.id)
-            .or_else(|| object_name(state, entry.source_id))
-            .unwrap_or_else(|| "unknown".to_string());
+    for (number, entry, name) in stack_items(state) {
         out.push_str(&format!(
-            "{}. {} (controlled by {})\n",
-            index + 1,
-            name,
+            "{number}. {name} (controlled by {})\n",
             seat_label(entry.controller, viewer)
         ));
     }
+}
+
+/// The stack section's items, each with its number in the section and the name
+/// the section gives it.
+///
+/// CR 405.2 + CR 405.5: the last object put on the stack is on top and resolves
+/// first, so the items are numbered from the top rather than in storage order,
+/// and "top" in the prompt means what it means in the rules. An ability on the
+/// stack has no card (CR 405.1) and no entry in the object table, so it is
+/// named by its source.
+fn stack_items(state: &GameState) -> impl Iterator<Item = (usize, &StackEntry, String)> {
+    state.stack.iter().rev().enumerate().map(|(index, entry)| {
+        let name = object_name(state, entry.id)
+            .or_else(|| object_name(state, entry.source_id))
+            .unwrap_or_else(|| "unknown".to_string());
+        (index + 1, entry, name)
+    })
 }
 
 /// Effects already set to happen later: CR 603.7a delayed triggered abilities
@@ -190,32 +399,43 @@ fn push_combat(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- COMBAT ---\n");
     for attacker in &combat.attackers {
         let name = object_name(state, attacker.object_id).unwrap_or_else(|| "unknown".to_string());
-        let target = match attacker.attack_target {
-            AttackTarget::Player(player) => seat_label(player, viewer),
-            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
-                object_name(state, id).unwrap_or_else(|| "unknown".to_string())
-            }
-        };
+        let target = attack_target_name(state, viewer, attacker.attack_target);
         let blockers = combat
             .blocker_assignments
             .get(&attacker.object_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| object_name(state, *id))
-                    .collect::<Vec<_>>()
-            })
+            .map(Vec::as_slice)
             .unwrap_or_default();
-        let blocked = if blockers.is_empty() {
-            if attacker.blocked {
-                // CR 509.1h: an attacker stays blocked even with no blockers left.
-                " — blocked (no blockers remain)".to_string()
-            } else {
-                " — unblocked".to_string()
-            }
-        } else {
-            format!(" — blocked by {}", blockers.join(", "))
-        };
-        out.push_str(&format!("{name} attacking {target}{blocked}\n"));
+        let blocked = blocked_status(state, attacker, blockers);
+        out.push_str(&format!("{name} attacking {target} — {blocked}\n"));
+    }
+}
+
+/// Whether an attacker is blocked, in the combat section's words: `blocked by
+/// Grizzly Bears`, `unblocked`, or `blocked (no blockers remain)`.
+fn blocked_status(state: &GameState, attacker: &AttackerInfo, blockers: &[ObjectId]) -> String {
+    let blockers: Vec<String> = blockers
+        .iter()
+        .filter_map(|id| object_name(state, *id))
+        .collect();
+    if !blockers.is_empty() {
+        return format!("blocked by {}", blockers.join(", "));
+    }
+    // CR 509.1h: an attacker stays blocked even with no blockers left.
+    if attacker.blocked {
+        "blocked (no blockers remain)".to_string()
+    } else {
+        "unblocked".to_string()
+    }
+}
+
+/// Who an attack is aimed at, in the combat section's words: a player by seat,
+/// a planeswalker or battle by name.
+fn attack_target_name(state: &GameState, viewer: PlayerId, target: AttackTarget) -> String {
+    match target {
+        AttackTarget::Player(player) => seat_label(player, viewer),
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+            object_name(state, id).unwrap_or_else(|| "unknown".to_string())
+        }
     }
 }
 
@@ -242,6 +462,15 @@ fn push_battlefield(
         out.push_str("(empty)\n");
         return;
     }
+    // CR 613.1 + CR 613.4c: an object's power and toughness are what the
+    // layers settle, its counters and every continuous effect applied, and the
+    // lines state those. CR 120.3e + CR 120.6: damage is marked on a creature
+    // and checked against its toughness rather than lowering it, so a line
+    // states it beside the toughness.
+    out.push_str(
+        "Power/toughness shown includes counters and continuous effects; \
+         damage marked is listed separately.\n",
+    );
     for (controller, ids) in by_controller {
         out.push_str(&format!("{}:\n", seat_label(PlayerId(controller), viewer)));
         let lines = ids
@@ -372,7 +601,7 @@ fn push_available_mana(out: &mut String, state: &GameState, viewer: PlayerId) {
 }
 
 /// `{W}{U}{C}` for a run of mana types, in the order given.
-fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
+pub(crate) fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
     types
         .map(|mana| match mana {
             ManaType::White => "{W}",
@@ -479,58 +708,178 @@ fn permanent_line(
         return format!("object #{}", id.0);
     };
     let mut parts = vec![one_line(&object.name)];
-
-    let type_line = type_line_text(&object.card_types);
-    if !type_line.is_empty() {
-        parts.push(type_line);
-    }
-    if let (Some(power), Some(toughness)) = (object.power, object.toughness) {
-        parts.push(format!("{power}/{toughness}"));
-    }
-    if let Some(loyalty) = object.loyalty {
-        parts.push(format!("loyalty {loyalty}"));
-    }
-    parts.push(if object.tapped { "tapped" } else { "untapped" }.to_string());
-    if object.summoning_sick {
-        // CR 302.6: only matters for attacking and {T} abilities, but it is the
-        // single most common reason a plausible play is illegal.
-        parts.push("summoning sick".to_string());
-    }
-    if object.face_down {
-        parts.push("face down".to_string());
-    }
-    if object.damage_marked > 0 {
-        parts.push(format!("{} damage marked", object.damage_marked));
-    }
-    let counters = counter_text(object);
-    if !counters.is_empty() {
-        parts.push(counters);
-    }
-    if !object.attachments.is_empty() {
-        let attached: Vec<String> = object
-            .attachments
-            .iter()
-            .filter_map(|attached| object_name(state, *attached))
-            .collect();
-        if !attached.is_empty() {
-            parts.push(format!("attached: {}", attached.join(", ")));
-        }
-    }
-    if !object.keywords.is_empty() {
-        parts.push(
-            object
-                .keywords
-                .iter()
-                .map(|keyword| format!("{keyword:?}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-    }
+    parts.extend(permanent_facts(state, object).into_iter().flatten());
     let mut line = parts.join(" | ");
     if let Some(text) = oracle_text(object.name.as_str(), db, options) {
         line.push_str(&format!(" | \"{text}\""));
     }
     line
+}
+
+/// How many facts a battlefield line can state between a permanent's name and
+/// its rules text: one slot per entry of [`permanent_facts`].
+const PERMANENT_FACT_SLOTS: usize = 10;
+
+/// What a battlefield line states about a permanent between its name and its
+/// rules text, one slot per fact in the line's order, `None` where the line
+/// states nothing.
+///
+/// Fixed slots rather than a list, so two permanents' facts can be compared
+/// fact by fact: [`object_label`] names only the facts on which same-named
+/// permanents disagree.
+fn permanent_facts(
+    state: &GameState,
+    object: &GameObject,
+) -> [Option<String>; PERMANENT_FACT_SLOTS] {
+    let type_line = type_line_text(&object.card_types);
+    let counters = counter_text(object);
+    let attached: Vec<String> = object
+        .attachments
+        .iter()
+        .filter_map(|attached| object_name(state, *attached))
+        .collect();
+    let keywords: Vec<String> = object.keywords.iter().map(keyword_text).collect();
+    [
+        (!type_line.is_empty()).then_some(type_line),
+        object
+            .power
+            .zip(object.toughness)
+            .map(|(power, toughness)| format!("{power}/{toughness}")),
+        object.loyalty.map(|loyalty| format!("loyalty {loyalty}")),
+        Some(if object.tapped { "tapped" } else { "untapped" }.to_string()),
+        // CR 302.6: only matters for attacking and {T} abilities, but it is the
+        // single most common reason a plausible play is illegal.
+        object.summoning_sick.then(|| "summoning sick".to_string()),
+        object.face_down.then(|| "face down".to_string()),
+        (object.damage_marked > 0).then(|| format!("{} damage marked", object.damage_marked)),
+        (!counters.is_empty()).then_some(counters),
+        (!attached.is_empty()).then(|| format!("attached: {}", attached.join(", "))),
+        (!keywords.is_empty()).then(|| keywords.join(", ")),
+    ]
+}
+
+/// How an option names one object: its name and whose it is, in the words
+/// this board uses, so the model can find it in the position. `None` when the
+/// state holds no such object.
+///
+/// - On the battlefield: `Name (controlled by You)`, as the battlefield lists
+///   it under its controller. When the board lists other permanents under the
+///   same name and controller, the facts on which they disagree follow, from
+///   their battlefield lines and from the combat section (`Name (controlled by
+///   Player 1, tapped)`, `Name (controlled by Player 1, blocking Hill Giant)`,
+///   `Name (controlled by You, attacking Player 1, unblocked)`). Two labels
+///   then read the same only when the permanents' battlefield lines and their
+///   places in combat are the same, so nothing the position shows tells them
+///   apart.
+/// - On the stack: its place in the stack's numbered list and its controller
+///   (`Name (stack item 1, controlled by You)`), since that list tells
+///   same-named spells apart only by place.
+/// - In any other zone: the zone and its owner (`Name (graveyard, owned by
+///   You)`), the board's words for exiled cards. Only a permanent or a spell
+///   has a controller (CR 108.4).
+///
+/// `state` is the viewer-filtered state the board is rendered from, so a label
+/// can name only what the board shows: a face-down permanent another player
+/// controls is `Hidden Card`, as on the battlefield.
+pub(crate) fn object_label(state: &GameState, viewer: PlayerId, id: ObjectId) -> Option<String> {
+    // The stack is looked up first: an ability on the stack has no entry in the
+    // object table, and is named and numbered as the stack section names it.
+    if let Some((number, entry, name)) = stack_items(state).find(|(_, entry, _)| entry.id == id) {
+        return Some(format!(
+            "{name} (stack item {number}, controlled by {})",
+            seat_label(entry.controller, viewer)
+        ));
+    }
+
+    let object = state.objects.get(&id)?;
+    let name = one_line(&object.name);
+    let owned_in = |zone: &str| format!("{zone}, owned by {}", seat_label(object.owner, viewer));
+    let whose = match object.zone {
+        Zone::Battlefield => {
+            let mut whose = vec![format!(
+                "controlled by {}",
+                seat_label(object.controller, viewer)
+            )];
+            whose.extend(distinguishing_facts(state, viewer, object, &name));
+            whose.join(", ")
+        }
+        // A spell object with no entry of its own on the stack.
+        Zone::Stack => format!(
+            "stack, controlled by {}",
+            seat_label(object.controller, viewer)
+        ),
+        Zone::Graveyard => owned_in("graveyard"),
+        Zone::Exile => owned_in("exile"),
+        Zone::Hand => owned_in("hand"),
+        Zone::Library => owned_in("library"),
+        Zone::Command => owned_in("command zone"),
+    };
+    Some(format!("{name} ({whose})"))
+}
+
+/// The facts on which the permanents the battlefield lists under `object`'s
+/// name and controller disagree, in the words the board states them: each one's
+/// battlefield line and its place in combat.
+///
+/// Rules text is left out: it is looked up by name, so it never tells
+/// same-named permanents apart.
+fn distinguishing_facts(
+    state: &GameState,
+    viewer: PlayerId,
+    object: &GameObject,
+    name: &str,
+) -> Vec<String> {
+    let label_facts = |permanent: &GameObject| {
+        let mut facts = permanent_facts(state, permanent).to_vec();
+        facts.push(combat_role(state, viewer, permanent.id));
+        facts
+    };
+    let namesakes: Vec<Vec<Option<String>>> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|other| other.controller == object.controller && one_line(&other.name) == name)
+        .map(label_facts)
+        .collect();
+    label_facts(object)
+        .into_iter()
+        .enumerate()
+        .filter(|(slot, _)| {
+            namesakes
+                .iter()
+                .any(|facts| facts[*slot] != namesakes[0][*slot])
+        })
+        .filter_map(|(_, fact)| fact)
+        .collect()
+}
+
+/// What the combat section says a permanent is doing, in its words: `attacking
+/// Player 1, unblocked`, `blocking Hill Giant`. The battlefield line does not
+/// say it, so a blocker and a creature beside it, or a blocked attacker and an
+/// unblocked one, can share that line.
+///
+/// Read through the engine's combat-role authority,
+/// [`CombatParticipation::capture`].
+fn combat_role(state: &GameState, viewer: PlayerId, id: ObjectId) -> Option<String> {
+    let participation = CombatParticipation::capture(state, id);
+    if let Some(attacker) = participation.attacking {
+        return Some(format!(
+            "attacking {}, {}",
+            attack_target_name(state, viewer, attacker.attack_target),
+            blocked_status(state, &attacker, &participation.blocked_by)
+        ));
+    }
+    // CR 509.1g: a blocking creature remains one until it is removed from
+    // combat, even once the attackers it blocked have left.
+    let blocked: Vec<String> = participation
+        .blocking?
+        .iter()
+        .map(|attacker| object_name(state, *attacker).unwrap_or_else(|| "unknown".to_string()))
+        .collect();
+    if blocked.is_empty() {
+        return Some("blocking".to_string());
+    }
+    Some(format!("blocking {}", blocked.join(", ")))
 }
 
 /// A card in hand: what it is and what it costs, which is the pair that decides
@@ -544,6 +893,16 @@ fn card_line(
     let Some(object) = state.objects.get(&id) else {
         return format!("object #{}", id.0);
     };
+    let mut line = card_facts(object).join(" | ");
+    if let Some(text) = oracle_text(object.name.as_str(), db, options) {
+        line.push_str(&format!(" | \"{text}\""));
+    }
+    line
+}
+
+/// What a card off the battlefield is: its name, and its mana cost, type line,
+/// and power and toughness where it has them.
+fn card_facts(object: &GameObject) -> Vec<String> {
     let mut parts = vec![one_line(&object.name)];
     let cost = mana_cost_text(&object.mana_cost);
     if !cost.is_empty() {
@@ -556,31 +915,31 @@ fn card_line(
     if let (Some(power), Some(toughness)) = (object.power, object.toughness) {
         parts.push(format!("{power}/{toughness}"));
     }
-    let mut line = parts.join(" | ");
-    if let Some(text) = oracle_text(object.name.as_str(), db, options) {
-        line.push_str(&format!(" | \"{text}\""));
-    }
-    line
+    parts
 }
 
-fn counter_text(object: &engine::game::game_object::GameObject) -> String {
-    if object.counters.is_empty() {
-        return String::new();
-    }
+/// A permanent's counters by the names cards give them: `1 +1/+1 counter, 8
+/// charge counters`.
+///
+/// Counted by name, since CR 122.1 makes counters with the same name
+/// interchangeable: two kinds the engine keeps apart but cards name alike (a
+/// `+1/+1` counter and a power-toughness counter of `+1/+1`) are one count.
+fn counter_text(object: &GameObject) -> String {
     // `BTreeMap` for a deterministic order: `counters` is a `HashMap`, and an
     // unordered render would make the decision fingerprint unstable.
-    let ordered: BTreeMap<String, u32> = object
-        .counters
-        .iter()
-        .filter(|(_, count)| **count > 0)
-        .map(|(kind, count)| (format!("{kind:?}"), *count))
-        .collect();
-    if ordered.is_empty() {
-        return String::new();
+    let mut by_name: BTreeMap<String, u32> = BTreeMap::new();
+    for (kind, count) in &object.counters {
+        if *count > 0 {
+            // A generic counter's name is card data and may carry a line break.
+            *by_name.entry(one_line(&kind.display_phrase())).or_default() += *count;
+        }
     }
-    ordered
+    by_name
         .into_iter()
-        .map(|(kind, count)| format!("{count} {kind} counter(s)"))
+        .map(|(name, count)| {
+            let noun = if count == 1 { "counter" } else { "counters" };
+            format!("{count} {name} {noun}")
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -804,6 +1163,347 @@ mod tests {
         );
     }
 
+    /// Issue #10939: an option names a permanent by name and controller, and
+    /// when the battlefield lists other permanents under that name and
+    /// controller, by the facts on which their lines disagree. Two labels then
+    /// read the same only when the battlefield gives the two permanents one
+    /// `×N` line.
+    #[test]
+    fn a_label_tells_same_named_permanents_apart_only_where_the_board_does() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut bears = |controller: PlayerId| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                controller,
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.power = Some(2);
+            object.toughness = Some(2);
+            id
+        };
+        let mine = bears(PlayerId(0));
+        let untapped = bears(PlayerId(1));
+        let tapped = bears(PlayerId(1));
+        let twin = bears(PlayerId(1));
+        let damaged = bears(PlayerId(1));
+        state.objects.get_mut(&tapped).unwrap().tapped = true;
+        state.objects.get_mut(&damaged).unwrap().damage_marked = 1;
+
+        let viewer = PlayerId(0);
+        let visible = filter_state_for_viewer(&state, viewer);
+        let label = |id| object_label(&visible, viewer, id).unwrap();
+        // Alone under its controller: name and controller say it all.
+        assert_eq!(label(mine), "Grizzly Bears (controlled by You)");
+        // Tapped and damage tell the opponent's apart; P/T, shared by all of
+        // them, is left out.
+        assert_eq!(
+            label(untapped),
+            "Grizzly Bears (controlled by Player 1, untapped)"
+        );
+        assert_eq!(
+            label(tapped),
+            "Grizzly Bears (controlled by Player 1, tapped)"
+        );
+        assert_eq!(
+            label(damaged),
+            "Grizzly Bears (controlled by Player 1, untapped, 1 damage marked)"
+        );
+        // Interchangeable: the board itself shows them as one line.
+        assert_eq!(label(twin), label(untapped));
+        let board = rendered(&state, viewer);
+        assert!(
+            board.contains("Grizzly Bears | 2/2 | untapped ×2"),
+            "{board}"
+        );
+        assert!(board.contains("Grizzly Bears | 2/2 | tapped\n"), "{board}");
+    }
+
+    /// The battlefield line does not say which creature blocks, so a blocker
+    /// and an untapped creature beside it share it. Their labels add their
+    /// places in combat from the combat section.
+    #[test]
+    fn a_label_tells_a_blocker_from_the_same_named_creature_beside_it() {
+        use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut creature = |controller: PlayerId, name: &str| {
+            create_object(
+                &mut state,
+                CardId(1),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let giant = creature(PlayerId(0), "Hill Giant");
+        let blocker = creature(PlayerId(1), "Grizzly Bears");
+        let bystander = creature(PlayerId(1), "Grizzly Bears");
+        // CR 508.1f + CR 509.1g: Hill Giant attacks Player 1 and one Grizzly
+        // Bears blocks it; blocking does not tap it.
+        let mut combat = CombatState::default();
+        combat.attackers.push(AttackerInfo::new(
+            giant,
+            AttackTarget::Player(PlayerId(1)),
+            PlayerId(1),
+        ));
+        combat.blocker_assignments.insert(giant, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![giant]);
+        state.combat = Some(combat);
+        state.objects.get_mut(&giant).unwrap().tapped = true;
+
+        let viewer = PlayerId(0);
+        let board = rendered(&state, viewer);
+        assert!(board.contains("Grizzly Bears | untapped ×2"), "{board}");
+        assert!(board.contains("blocked by Grizzly Bears"), "{board}");
+        let visible = filter_state_for_viewer(&state, viewer);
+        let label = |id| object_label(&visible, viewer, id).unwrap();
+        assert_eq!(
+            label(blocker),
+            "Grizzly Bears (controlled by Player 1, blocking Hill Giant)"
+        );
+        assert_eq!(label(bystander), "Grizzly Bears (controlled by Player 1)");
+        assert_eq!(
+            label(giant),
+            "Hill Giant (controlled by You)",
+            "alone under its controller, its attack needs no saying"
+        );
+    }
+
+    /// A label is read from the viewer-filtered state the board is rendered
+    /// from, so it names a face-down permanent another player controls only as
+    /// the board does.
+    #[test]
+    fn a_label_never_names_a_face_down_permanent_the_viewer_cannot_see() {
+        use engine::game::morph::apply_face_down_creature_characteristics;
+        use engine::game::printed_cards::snapshot_object_face;
+        use engine::types::ability::FaceDownProfile;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let morph = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Akroma, Angel of Fury".to_string(),
+            Zone::Battlefield,
+        );
+        // Turned face down as the engine does it: the CR 708.2a face-down
+        // 2/2, with its printed face kept in `back_face`.
+        let printed = snapshot_object_face(&state.objects[&morph]);
+        let object = state.objects.get_mut(&morph).unwrap();
+        apply_face_down_creature_characteristics(object, &FaceDownProfile::vanilla_2_2());
+        object.back_face = Some(printed);
+
+        let label =
+            |viewer| object_label(&filter_state_for_viewer(&state, viewer), viewer, morph).unwrap();
+        assert_eq!(label(PlayerId(0)), "Hidden Card (controlled by Player 1)");
+        assert!(rendered(&state, PlayerId(0)).contains("Hidden Card"));
+        // Its controller may look at it (CR 708.5), and its label says so.
+        assert_eq!(
+            label(PlayerId(1)),
+            "Akroma, Angel of Fury (controlled by You)"
+        );
+    }
+
+    /// Issue #10997: battlefield lines printed keywords as Rust debug text
+    /// (`Cycling(Mana(Cost { shards: [], generic: 3 }))`, `DoubleStrike`).
+    #[test]
+    fn battlefield_keywords_read_as_cards_print_them() {
+        use engine::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+        use engine::types::keywords::{CyclingCost, Keyword, WardCost};
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut permanent = |name: &str, keywords: Vec<Keyword>| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().keywords = keywords;
+        };
+        // Macetail Hystrodon: "First strike, haste" and "Cycling {3}".
+        permanent(
+            "Macetail Hystrodon",
+            vec![
+                Keyword::FirstStrike,
+                Keyword::Haste,
+                Keyword::Cycling(CyclingCost::Mana(ManaCost::generic(3))),
+            ],
+        );
+        // Aboleth Spawn: "Flash" and "Ward {2}".
+        permanent(
+            "Aboleth Spawn",
+            vec![
+                Keyword::Flash,
+                Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+            ],
+        );
+        permanent("Arashin Foremost", vec![Keyword::DoubleStrike]);
+        // Brink of Disaster: "Enchant creature or land".
+        permanent(
+            "Brink of Disaster",
+            vec![Keyword::Enchant(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(TypedFilter::land()),
+                ],
+            })],
+        );
+        // Aspect of Lamprey: "Enchant creature you control", which its rules
+        // text states; the keyword alone must not read "Enchant creature".
+        permanent(
+            "Aspect of Lamprey",
+            vec![Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))],
+        );
+        // Steel Seraph: a prototype {1}{W}{W} 3/3 with flying.
+        permanent(
+            "Steel Seraph",
+            vec![
+                Keyword::Prototype {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::White, ManaCostShard::White],
+                        generic: 1,
+                    },
+                    power: Some(3),
+                    toughness: Some(3),
+                },
+                Keyword::Flying,
+            ],
+        );
+        // Thought Lash's cumulative upkeep cost is "Exile the top card of your
+        // library." Detritivore has suspend X, at a cost of {X}{3}{R}. Both
+        // keywords as the card data encodes them; neither can print whole.
+        let keyword = |json: serde_json::Value| serde_json::from_value::<Keyword>(json).unwrap();
+        permanent(
+            "Thought Lash",
+            vec![keyword(serde_json::json!({
+                "CumulativeUpkeep": {
+                    "type": "Exile",
+                    "count": 1,
+                    "zone": "Library",
+                    "filter": null,
+                },
+            }))],
+        );
+        permanent(
+            "Detritivore",
+            vec![keyword(serde_json::json!({
+                "Suspend": {
+                    "count": 0,
+                    "cost": { "type": "Cost", "shards": [], "generic": 0 },
+                },
+            }))],
+        );
+
+        let board = rendered(&state, PlayerId(0));
+        for line in [
+            "- Macetail Hystrodon | untapped | First strike, Haste, Cycling {3}\n",
+            "- Aboleth Spawn | untapped | Flash, Ward {2}\n",
+            "- Arashin Foremost | untapped | Double strike\n",
+            "- Brink of Disaster | untapped | Enchant creature or land\n",
+            "- Aspect of Lamprey | untapped | Enchant\n",
+            "- Steel Seraph | untapped | Prototype {1}{W}{W} — 3/3, Flying\n",
+            "- Thought Lash | untapped | Cumulative upkeep\n",
+            "- Detritivore | untapped | Suspend\n",
+        ] {
+            assert!(board.contains(line), "missing {line:?} in\n{board}");
+        }
+        for debug_text in ["Cost {", "{ count", "Some("] {
+            assert!(!board.contains(debug_text), "{debug_text:?} in\n{board}");
+        }
+    }
+
+    /// Issue #10997: counters printed as `1 Plus1Plus1 counter(s)` and
+    /// `8 Generic("charge") counter(s)`.
+    #[test]
+    fn counters_read_by_the_names_cards_give_them() {
+        use engine::types::counter::CounterType;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut permanent = |name: &str, counters: Vec<(CounterType, u32)>| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .extend(counters);
+        };
+        permanent("Grizzly Bears", vec![(CounterType::Plus1Plus1, 1)]);
+        // Aether Vial: "At the beginning of your upkeep, you may put a charge
+        // counter on this artifact."
+        permanent(
+            "Aether Vial",
+            vec![(CounterType::Generic("charge".to_string()), 8)],
+        );
+        // CR 122.1: counters with the same name are interchangeable, so two
+        // kinds the engine keeps apart that both read "+1/+1" are one count.
+        permanent(
+            "Steel Overseer",
+            vec![
+                (CounterType::Plus1Plus1, 2),
+                (
+                    CounterType::PowerToughness {
+                        power: 1,
+                        toughness: 1,
+                    },
+                    1,
+                ),
+            ],
+        );
+
+        let board = rendered(&state, PlayerId(0));
+        for line in [
+            "- Grizzly Bears | untapped | 1 +1/+1 counter\n",
+            "- Aether Vial | untapped | 8 charge counters\n",
+            "- Steel Overseer | untapped | 3 +1/+1 counters\n",
+        ] {
+            assert!(board.contains(line), "missing {line:?} in\n{board}");
+        }
+    }
+
+    /// Issue #10997: a seat could not tell whether a creature's power and
+    /// toughness already include its counters and an anthem, so the
+    /// battlefield says it once, for every seat's permanents.
+    #[test]
+    fn the_battlefield_says_once_what_power_and_toughness_include() {
+        let note = "Power/toughness shown includes counters and continuous effects; \
+                    damage marked is listed separately.\n";
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        for controller in [PlayerId(0), PlayerId(1)] {
+            create_object(
+                &mut state,
+                CardId(1),
+                controller,
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+        }
+        let board = rendered(&state, PlayerId(0));
+        assert_eq!(board.matches(note).count(), 1, "{board}");
+        assert!(
+            board.contains(&format!("--- BATTLEFIELD ---\n{note}")),
+            "{board}"
+        );
+        // An empty battlefield has no power or toughness to explain.
+        let empty = rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(0));
+        assert!(empty.contains("--- BATTLEFIELD ---\n(empty)\n"), "{empty}");
+        assert!(!empty.contains("Power/toughness"), "{empty}");
+    }
+
     #[test]
     fn the_viewers_seat_reads_as_you_and_others_by_number() {
         assert_eq!(seat_label(PlayerId(1), PlayerId(1)), "You");
@@ -869,5 +1569,388 @@ mod tests {
                 "{viewer:?} shared={shared}: the viewer's graveyard line"
             );
         }
+    }
+
+    /// The whole COMMANDERS section, ending where the stack section begins.
+    fn commanders_section(lines: &[&str]) -> String {
+        format!("\n--- COMMANDERS ---\n{}\n\n--- STACK", lines.join("\n"))
+    }
+
+    /// Issue #10994: in Commander the position showed no commander in the
+    /// command zone, no cost or tax for its next cast, and no commander damage.
+    /// A Commander game played through the engine: Player 0 casts its commander
+    /// from the command zone, attacks Player 1 with it, then Bolts it and
+    /// returns it to the command zone, where its next cast carries {2} of tax.
+    /// Player 0's Ruby Medallion takes {1} off each cast, so the stated cost is
+    /// the engine's whole cost, not the printed cost plus the tax.
+    #[test]
+    fn the_position_shows_each_commander_its_next_cast_and_its_commander_damage() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::actions::GameAction;
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaCost, ManaCostShard, ManaUnit};
+        use engine::types::phase::Phase;
+
+        const KIKI_JIKI: &str = "Haste\n{T}: Create a token that's a copy of target \
+             nonlegendary creature you control, except it has haste. Sacrifice it at the \
+             beginning of the next end step.";
+        const GIADA: &str = "Flying, vigilance\nEach other Angel you control enters with an \
+             additional +1/+1 counter on it for each Angel you already control.\n{T}: Add \
+             {W}. Spend this mana only to cast an Angel spell.";
+        const RUBY_MEDALLION: &str = "Red spells you cast cost {1} less to cast.";
+
+        let owner = PlayerId(0);
+        let viewer = PlayerId(1);
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 10994);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_artifact_from_oracle(owner, "Ruby Medallion", RUBY_MEDALLION);
+        let kiki = scenario
+            .add_creature_to_hand(owner, "Kiki-Jiki, Mirror Breaker", 2, 2)
+            .from_oracle_text_with_keywords(&["Haste"], KIKI_JIKI)
+            .as_legendary()
+            .with_subtypes(vec!["Goblin", "Shaman"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red; 3],
+                generic: 2,
+            })
+            .id();
+        scenario.with_commander(kiki);
+        let giada = scenario
+            .add_creature_to_hand(viewer, "Giada, Font of Hope", 2, 2)
+            .from_oracle_text_with_keywords(&["Flying", "Vigilance"], GIADA)
+            .as_legendary()
+            .with_subtypes(vec!["Angel"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            })
+            .id();
+        scenario.with_commander(giada);
+        let bolt = scenario.add_bolt_to_hand(owner);
+        // {2}{R}{R}{R}, less the Medallion's {1}.
+        let red: Vec<ManaUnit> = (0..4)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()))
+            .collect();
+        scenario.with_mana_pool(owner, red);
+        let mut runner = scenario.build();
+
+        let giada_line = "  - Giada, Font of Hope | {1}{W} | Legendary Creature — Angel | 2/2 \
+                          | in the command zone | next cast costs {1}{W}, including commander \
+                          tax {0}";
+        let kiki_in_command_zone = |cost: &str, tax: &str| {
+            format!(
+                "  - Kiki-Jiki, Mirror Breaker | {{2}}{{R}}{{R}}{{R}} | Legendary Creature — \
+                 Goblin Shaman | 2/2 | in the command zone | next cast costs {cost}, including \
+                 commander tax {tax}"
+            )
+        };
+
+        // Before any cast, both commanders wait in the command zone, untaxed.
+        // CR 601.2f: the Medallion reduces Kiki-Jiki, a red spell Player 0
+        // casts, and not Giada, which Player 1 casts.
+        let kiki_line = kiki_in_command_zone("{1}{R}{R}{R}", "{0}");
+        let board = rendered(runner.state(), viewer);
+        let expected = commanders_section(&[
+            "Player 0 (color identity: {R}):",
+            &kiki_line,
+            "You (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+
+        // CR 903.8: Player 0 casts its commander from the command zone, and
+        // it attacks Player 1 the turn it arrives (CR 702.10b: haste).
+        runner
+            .cast(kiki)
+            .resolve()
+            .assert_zone(&[kiki], Zone::Battlefield);
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(kiki, AttackTarget::Player(viewer))])
+            .expect("Kiki-Jiki attacks Player 1");
+        runner.combat_damage();
+        // Reach: the engine counts the cast and the combat damage.
+        let state = runner.state();
+        assert_eq!(commander::commander_tax(state, kiki), 2);
+        let dealt: Vec<(PlayerId, ObjectId, u32)> = state
+            .commander_damage
+            .iter()
+            .map(|entry| (entry.player, entry.commander, entry.damage))
+            .collect();
+        assert_eq!(dealt, vec![(viewer, kiki, 2)]);
+
+        let damage_line = "    - commander damage dealt to You: 2 (19 more eliminates You)";
+        let board = rendered(state, viewer);
+        let expected = commanders_section(&[
+            "Player 0 (color identity: {R}):",
+            "  - Kiki-Jiki, Mirror Breaker | on the battlefield, controlled by Player 0 | \
+             commander tax {2} on its next cast from the command zone",
+            damage_line,
+            "You (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+
+        // Player 0 Bolts its own commander. It dies, and CR 903.9a lets its
+        // owner put it back into the command zone.
+        let bolted = runner.cast(bolt).target_object(kiki).resolve();
+        assert!(
+            matches!(
+                bolted.final_waiting_for(),
+                WaitingFor::CommanderZoneChoice {
+                    player,
+                    commander_id,
+                    current_zone: Zone::Graveyard,
+                } if *player == owner && *commander_id == kiki
+            ),
+            "{:?}",
+            bolted.final_waiting_for()
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("Player 0 returns its commander to the command zone");
+        assert_eq!(runner.state().objects[&kiki].zone, Zone::Command);
+
+        // Its next cast from there costs {2} more (CR 903.8), still less the
+        // Medallion's {1}, and the damage it dealt stays with it (CR 903.10a).
+        let kiki_line = kiki_in_command_zone("{3}{R}{R}{R}", "{2}");
+        let board = rendered(runner.state(), viewer);
+        let expected = commanders_section(&[
+            "Player 0 (color identity: {R}):",
+            &kiki_line,
+            damage_line,
+            "You (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+
+        // Its owner reads the same commanders under its own seat label.
+        let board = rendered(runner.state(), owner);
+        let expected = commanders_section(&[
+            "You (color identity: {R}):",
+            &kiki_line,
+            "    - commander damage dealt to Player 1: 2 (19 more eliminates Player 1)",
+            "Player 1 (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+    }
+
+    /// CR 400.2 + CR 401.2 + CR 903.3: a commander stays one in a hidden zone,
+    /// but a seat that may not look at the card is told neither its name nor
+    /// which hidden zone holds it. Its owner shuffled it into their library
+    /// rather than the command zone (CR 903.9b), then a tutor put it into their
+    /// hand: another seat's COMMANDERS section reads the same before and after.
+    #[test]
+    fn a_commander_out_of_sight_is_neither_named_nor_located() {
+        use engine::game::zones::move_to_zone;
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        let owner = PlayerId(0);
+        let other = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::commander(), 2, 3);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Kenrith, the Returned King".to_string(),
+            Zone::Library,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_commander = true;
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        };
+        object.mana_cost = cost.clone();
+        object.base_mana_cost = cost;
+
+        // No deck pool registers it, so the engine would read its identity
+        // from its printed colors and cost, which the filter redacts.
+        let hidden = commanders_section(&[
+            "Player 0:",
+            "  - Hidden Card | face down or in a hidden zone | commander tax {0} on its next \
+             cast from the command zone",
+        ]);
+        let in_library = rendered(&state, other);
+        assert!(in_library.contains(&hidden), "{in_library}");
+
+        move_to_zone(&mut state, id, Zone::Hand, &mut Vec::new());
+        assert_eq!(state.objects[&id].zone, Zone::Hand);
+        let in_hand = rendered(&state, other);
+        assert!(in_hand.contains(&hidden), "{in_hand}");
+        assert!(
+            !in_hand.contains("Kenrith"),
+            "hidden card leaked: {in_hand}"
+        );
+
+        // Its owner sees the card in their own hand.
+        let own = rendered(&state, owner);
+        let expected = commanders_section(&[
+            "You (color identity: {W}):",
+            "  - Kenrith, the Returned King | {4}{W} | in hand | commander tax {0} on its \
+             next cast from the command zone",
+        ]);
+        assert!(own.contains(&expected), "{own}");
+    }
+
+    /// CR 903.4 + CR 903.4a: a seat's color identity is the one registered for
+    /// its commanders before the game began, rules-text mana symbols included,
+    /// and it is public even while the commander is out of sight. Kenrith, the
+    /// Returned King costs {4}{W}, and its activated abilities' costs contain
+    /// {R}, {G}, {U} and {B}.
+    #[test]
+    fn a_seats_color_identity_is_the_registered_one() {
+        use engine::game::deck_loading::DeckEntry;
+        use engine::types::card::CardFace;
+        use engine::types::game_state::PlayerDeckPool;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use std::sync::Arc;
+
+        let owner = PlayerId(0);
+        let mut state = GameState::new(FormatConfig::commander(), 2, 3);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Kenrith, the Returned King".to_string(),
+            Zone::Hand,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_commander = true;
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        };
+        object.mana_cost = cost.clone();
+        object.base_mana_cost = cost;
+        state.deck_pools.push(PlayerDeckPool {
+            player: owner,
+            current_commander: Arc::new(vec![DeckEntry {
+                card: CardFace {
+                    name: "Kenrith, the Returned King".to_string(),
+                    color_identity: vec![
+                        ManaColor::Black,
+                        ManaColor::Green,
+                        ManaColor::Red,
+                        ManaColor::Blue,
+                        ManaColor::White,
+                    ],
+                    ..Default::default()
+                },
+                count: 1,
+            }]),
+            ..Default::default()
+        });
+
+        // Its owner, who sees the card, and another seat, who does not.
+        for (viewer, label, line) in [
+            (
+                owner,
+                "You",
+                "  - Kenrith, the Returned King | {4}{W} | in hand | commander tax {0} on its \
+                 next cast from the command zone",
+            ),
+            (
+                PlayerId(1),
+                "Player 0",
+                "  - Hidden Card | face down or in a hidden zone | commander tax {0} on its \
+                 next cast from the command zone",
+            ),
+        ] {
+            let board = rendered(&state, viewer);
+            let header = format!("{label} (color identity: {{W}}{{U}}{{B}}{{R}}{{G}}):");
+            let expected = commanders_section(&[&header, line]);
+            assert!(board.contains(&expected), "{board}");
+        }
+    }
+
+    /// CR 800.4a: a player who has left the game takes their cards with them,
+    /// so neither their commanders nor commander damage dealt to them is listed.
+    #[test]
+    fn a_seat_that_left_the_game_is_not_listed() {
+        use engine::game::elimination::eliminate_player;
+        use engine::types::events::LossReason;
+        use engine::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 3);
+        let mut commander = |owner: PlayerId, name: &str| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                owner,
+                name.to_string(),
+                Zone::Command,
+            );
+            state.objects.get_mut(&id).unwrap().is_commander = true;
+            id
+        };
+        let kiki = commander(PlayerId(0), "Kiki-Jiki, Mirror Breaker");
+        let giada = commander(PlayerId(2), "Giada, Font of Hope");
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(2),
+            commander: kiki,
+            damage: 2,
+        });
+        let section = |board: &str| -> String {
+            let (_, rest) = board
+                .split_once("--- COMMANDERS ---\n")
+                .expect("the position lists commanders");
+            let (section, _) = rest.split_once("\n--- STACK").expect("the stack follows");
+            section.to_string()
+        };
+
+        // Reach: while Player 2 plays, its commander and the damage dealt to
+        // it are listed.
+        let playing = section(&rendered(&state, PlayerId(1)));
+        assert!(playing.contains("Giada, Font of Hope"), "{playing}");
+        assert!(
+            playing.contains("commander damage dealt to Player 2: 2 (19 more eliminates Player 2)"),
+            "{playing}"
+        );
+
+        eliminate_player(
+            &mut state,
+            PlayerId(2),
+            LossReason::LifeTotal,
+            &mut Vec::new(),
+        );
+        assert!(!players::is_alive(&state, PlayerId(2)));
+        // Reach: its commander leaves the game with it (CR 800.4a), which the
+        // engine models as a move to exile. It stays a commander in a public
+        // zone there, so only the seat's departure keeps it off the list.
+        let departed = &state.objects[&giada];
+        assert!(departed.is_commander && departed.zone == Zone::Exile);
+        let left = section(&rendered(&state, PlayerId(1)));
+        assert!(left.contains("Kiki-Jiki, Mirror Breaker"), "{left}");
+        assert!(!left.contains("Giada"), "{left}");
+        assert!(!left.contains("Player 2"), "{left}");
+    }
+
+    /// The section is only for a format with a command zone, and only once a
+    /// commander is in the game.
+    #[test]
+    fn only_a_game_with_commanders_lists_them() {
+        for (format, listed) in [
+            (FormatConfig::commander(), true),
+            (FormatConfig::standard(), false),
+        ] {
+            let mut state = GameState::new(format, 2, 3);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Kiki-Jiki, Mirror Breaker".to_string(),
+                Zone::Command,
+            );
+            state.objects.get_mut(&id).unwrap().is_commander = true;
+            let board = rendered(&state, PlayerId(1));
+            assert_eq!(board.contains("--- COMMANDERS ---"), listed, "{board}");
+        }
+        let without = rendered(
+            &GameState::new(FormatConfig::commander(), 2, 3),
+            PlayerId(1),
+        );
+        assert!(!without.contains("--- COMMANDERS ---"), "{without}");
     }
 }

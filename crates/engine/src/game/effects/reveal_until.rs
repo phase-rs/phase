@@ -165,15 +165,21 @@ fn resolve_reveal(
     // CR 701.20a: Reveal cards one at a time until `target_match_count` matches
     // are found (or the library is exhausted). `target_match_count == 0` reveals
     // nothing (CR 701.20a — the until-condition is already satisfied).
+    // CR 701.20a: `revealed_in_order` is the visited prefix in library order —
+    // the order the cards are actually revealed — and is what the reveal
+    // publishes. The hit/miss lists drive destination handling only.
+    let mut revealed_in_order: Vec<ObjectId> = Vec::new();
     if target_match_count > 0 {
         for &card_id in &library {
             if matches_target_filter(state, card_id, filter, &ctx) {
                 hit_cards.push(card_id);
+                revealed_in_order.push(card_id);
                 if hit_cards.len() >= target_match_count {
                     break;
                 }
             } else {
                 revealed_misses.push(card_id);
+                revealed_in_order.push(card_id);
             }
         }
     }
@@ -188,28 +194,26 @@ fn resolve_reveal(
         None
     };
 
-    // Build the full list of revealed card IDs for the event.
-    let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
-    all_revealed.extend(&hit_cards);
-
     state
         .resolve_and_apply_information(
-            &all_revealed,
+            &revealed_in_order,
             ResolvedInformationAudience::Controller(ability.controller),
             ResolvedInformationLifetime::UntilActionBoundary,
             ResolvedInformationEdit::Reveal,
         )
         .expect("resolved reveal-until occurrences must be live and distinct");
 
-    // CR 701.20a + CR 400.7: Only reveal-only and paused optional dispositions
-    // retain these exact library occurrences after the resolver returns. Publish
-    // those occurrences here, before any later zone change can create a new one.
-    if matches!(matched_disposition, RevealUntilDisposition::RevealOnly)
-        || matches!((kept_optional_to, hit_cards.as_slice()), (Some(_), [_]))
-    {
+    // CR 701.20a + CR 400.7: A paused optional disposition (single hit with a
+    // controller choice) retains the exact library occurrence until the choice
+    // resolves and the card changes zones. RevealOnly has no zone change, so
+    // its public reveal lifetime is bounded by the action boundary (the
+    // Controller reveal at UntilActionBoundary already makes cards visible to
+    // all viewers via filter_state_for_scope). Do NOT publish a Public
+    // UntilZoneChange reveal for RevealOnly — it would never retire.
+    if matches!((kept_optional_to, hit_cards.as_slice()), (Some(_), [_])) {
         state
             .resolve_and_apply_information(
-                &all_revealed,
+                &revealed_in_order,
                 ResolvedInformationAudience::Public,
                 ResolvedInformationLifetime::UntilZoneChange,
                 ResolvedInformationEdit::Reveal,
@@ -218,32 +222,37 @@ fn resolve_reveal(
     }
 
     // Emit CardsRevealed for all revealed cards.
-    let card_names: Vec<String> = all_revealed
+    let card_names: Vec<String> = revealed_in_order
         .iter()
         .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: revealing_player,
-        card_ids: all_revealed.clone(),
+        occurrences: state.disclosed_occurrences(&revealed_in_order),
+        card_ids: revealed_in_order.clone(),
         card_names,
     });
 
     // Store revealed IDs for downstream reference.
-    state.last_revealed_ids = all_revealed.clone();
+    super::record_revealed_result(state, revealed_in_order.clone());
     // CR 608.2c + CR 701.20a: "[quantity] revealed this way" names the cards this
     // reveal revealed — every card looked at until the until-condition was met,
     // matching or not. Publish them as the chain's tracked set so a downstream
     // "the number of nonland cards revealed this way" reads the revealed
     // population (Goblin Charbelcher) even after the cards have been moved.
-    if all_revealed.is_empty() {
+    if revealed_in_order.is_empty() {
         super::publish_fresh_tracked_set(state, Vec::new());
     } else {
-        super::publish_tracked_set(state, all_revealed.clone());
+        super::publish_tracked_set(state, revealed_in_order.clone());
     }
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
     // Vivid draws nothing to hand before per-color exile from the library).
     if matches!(matched_disposition, RevealUntilDisposition::RevealOnly) {
+        // CR 701.20a: the cards stay revealed while later parts of the effect
+        // still need them; the transient reveal ends at the resolution's
+        // completion boundary (`stack::finish_resolving_stack_entry`), before
+        // any viewer projection is published.
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::RevealUntil,
             source_id: ability.source_id,
@@ -293,6 +302,9 @@ fn resolve_reveal(
         _ => None,
     };
     if let Some(pile_destination) = whole_pile_destination {
+        // Destination handling groups the misses ahead of the hits.
+        let mut all_revealed = revealed_misses.clone();
+        all_revealed.extend(&hit_cards);
         let clear_markers = all_revealed.clone();
         // CR 608.2d + CR 401.4: a library pile "in any order" (PlayerChoice) of
         // 2+ cards pauses for the library's owner to announce their bottom order.
@@ -328,6 +340,9 @@ fn resolve_reveal(
                         source_id: Some(ability.source_id),
                         rest_cards: Vec::new(),
                         rest_destination: pile_destination,
+                        // The printed clause named this pile's zone, so it is a
+                        // routed remainder rather than a silent one.
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                         rest_order,
                         rest_split_top_count: None,
                         clear_markers,
@@ -433,20 +448,23 @@ fn resolve_reveal(
         // newcomers are still presence-gated by segment collection and see only
         // entries at or after their own — a pipeline-wide gap outside this seam.
         match zone_pipeline::move_objects_simultaneously(state, reqs, events) {
-            zone_pipeline::BatchMoveResult::Done => {}
+            zone_pipeline::SimultaneousMoveResult::Done => {}
             // CR 303.4f / CR 614.1c / CR 616.1: the batch parked an as-enters
             // Aura-host or replacement-ordering prompt and stashed every
-            // undelivered matched card in the active `BatchDelivery` frame.
-            // Deferring the rest-pile tail onto that same frame means the drain
-            // delivers the remaining matched cards, then the misses, the
-            // reveal-marker cleanup, and `EffectResolved`, exactly once — so no
-            // card strands in the library and `EffectResolved` never lands over
-            // the parked prompt.
-            zone_pipeline::BatchMoveResult::NeedsChoice => {
+            // undelivered matched card in its `BatchDelivery` owner. Deferring
+            // the rest-pile tail onto that same owner means the drain delivers
+            // the remaining matched cards, then the misses, the reveal-marker
+            // cleanup, and `EffectResolved`, exactly once — so no card strands
+            // in the library and `EffectResolved` never lands over the parked
+            // prompt. CR 706.6 + CR 614.12a: a kept card's tied as-enters roll
+            // parks that owner beneath the card's own frames, so it is
+            // addressed where it was parked.
+            zone_pipeline::SimultaneousMoveResult::NeedsChoice(owner) => {
                 let mut clear_markers = revealed_misses.clone();
                 clear_markers.extend(&hit_cards);
-                zone_pipeline::defer_completion_on_pause(
+                zone_pipeline::defer_completion_on_paused_move(
                     state,
+                    zone_pipeline::PausedMoveOwner::Batch(owner),
                     BatchCompletion::RevealRestPile {
                         delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                         player: revealing_player,
@@ -464,6 +482,7 @@ fn resolve_reveal(
                         kept_delivery: Default::default(),
                         continuation_targets: Vec::new(),
                         rest_delivery: Default::default(),
+                        rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     },
                 );
                 return Ok(());
@@ -531,6 +550,7 @@ fn resolve_reveal(
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
                     rest_delivery: Default::default(),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 },
             );
             return Ok(());
@@ -635,10 +655,11 @@ fn resolve_choose_any_number(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: revealing_player,
+        occurrences: state.disclosed_occurrences(&revealed),
         card_ids: revealed.clone(),
         card_names,
     });
-    state.last_revealed_ids = revealed.clone();
+    super::record_revealed_result(state, revealed.clone());
 
     // CR 608.2c: nothing was revealed (count 0 or an empty library) — the
     // disposition has no cards to act on; resolve cleanly with no interaction.
@@ -666,6 +687,7 @@ fn resolve_choose_any_number(
         selectable_cards: matched,
         kept_destination: Some(kept_destination),
         rest_destination: Some(rest_destination),
+        rest_remainder: crate::types::ability::DigRestRemainder::Route,
         rest_order,
         rest_split_top_count: None,
         source_id: Some(ability.source_id),
@@ -697,6 +719,14 @@ fn resolve_revealing_player(
 ) -> Option<PlayerId> {
     match player_filter {
         TargetFilter::Controller => Some(ability.controller),
+        // CR 608.2c + CR 400.3: "This creature's owner shuffles it into their
+        // library. If that player does, they reveal …" — parser lowering binds
+        // that third-person anaphor to `Owner`, the same owner the terminal
+        // Shuffle resolves. Use the shared live-or-LKI source-owner authority so
+        // a nonowner activator never reveals from their own library.
+        TargetFilter::Owner => {
+            Some(super::source_owner(state, ability).unwrap_or(ability.controller))
+        }
         TargetFilter::ParentTargetController => Some(
             crate::game::ability_utils::parent_target_controller(ability, state)
                 .unwrap_or(ability.controller),
@@ -757,7 +787,21 @@ pub(crate) fn move_rest_then(
                     library_bottom_requests_in_preserve_order(cards)
                 }
             };
-            zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
+            // CR 701.20d: the pile is delivered one card at a time; once it has
+            // been placed, the whole pile is one reorder of the library. The
+            // delivery authority owns that reorder, so it settles before the
+            // completion's reveal cleanup — synchronously or after a CR 616.1
+            // pause — and a completion that parks a child operation cannot strand
+            // it in a batch record this caller no longer owns.
+            let library_reorder = crate::game::zones::LibraryReorderOperation::begin(state, cards);
+            zone_pipeline::move_objects_simultaneously_settling_then(
+                state,
+                reqs,
+                Some(library_reorder),
+                completion,
+                None,
+                events,
+            )
         }
         dest => {
             // CR 400.7: the rest cards move themselves to `dest`; each anchors
@@ -836,6 +880,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -1120,12 +1166,11 @@ mod tests {
         assert_eq!(revealed.unwrap().len(), 3);
     }
 
-    /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card placed back
-    /// into a library must run the `Moved` replacement consult. The old raw
-    /// `move_to_zone(..., Library)` skipped this synthetic Library→Exile
-    /// redirect and left the card in the library.
+    /// CR 701.20b + CR 400.7: a kept card put "back" into the library it is
+    /// already in is a reorder, not a zone change, so the synthetic
+    /// Library→Exile redirect has no event to replace.
     #[test]
-    fn reveal_until_kept_library_redirected_to_exile() {
+    fn reveal_until_kept_library_to_library_is_not_redirected() {
         let mut state = GameState::new_two_player(42);
         install_library_to_exile_redirect(&mut state);
 
@@ -1153,8 +1198,8 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.objects[&creature].zone, Zone::Exile);
-        assert!(!state.players[0].library.contains(&creature));
+        assert_eq!(state.objects[&creature].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&creature));
     }
 
     /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card put into a
@@ -1193,12 +1238,11 @@ mod tests {
         assert!(!state.players[0].hand.contains(&creature));
     }
 
-    /// C5 discriminating test (CR 614.6 + CR 701.20a): a reveal-until rest pile
-    /// returned to the bottom of a library must still run through the placement
-    /// pipeline. The old raw `move_to_library_position(..., bottom)` skipped
-    /// this synthetic Library→Exile redirect.
+    /// CR 701.20b + CR 400.7: a reveal-until rest pile bottomed in the library
+    /// it was revealed from is reordered in place, not moved, so the synthetic
+    /// Library→Exile redirect must not fire.
     #[test]
-    fn reveal_until_library_rest_redirected_to_exile() {
+    fn reveal_until_library_rest_reorder_is_not_redirected() {
         let mut state = GameState::new_two_player(42);
         install_library_to_exile_redirect(&mut state);
 
@@ -1242,8 +1286,8 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.players[0].hand.contains(&creature));
-        assert_eq!(state.objects[&land].zone, Zone::Exile);
-        assert!(!state.players[0].library.contains(&land));
+        assert_eq!(state.objects[&land].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&land));
     }
 
     #[test]
@@ -1409,6 +1453,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -2079,5 +2125,127 @@ mod tests {
         }
         assert_eq!(state.objects[&forest].zone, Zone::Graveyard);
         assert!(state.players[1].graveyard.contains(&forest));
+    }
+
+    /// Hammer Jammer revealed from the top of P0's library under Barbarian
+    /// Class, through Genesis Storm's optional kept-card route ("Reveal cards from
+    /// the top of your library until you reveal a nonland permanent card. You may
+    /// put that card onto the battlefield."); the runner is at the kept choice.
+    /// The ability is built by hand (creature filter, preserved rest order; neither
+    /// changes the route) because the parsed Genesis Storm carries a stray
+    /// bottom-placement sub-ability, a known parser defect.
+    fn accepted_jammer_board(seed: u64) -> (crate::game::scenario::GameRunner, ObjectId) {
+        const HAMMER_JAMMER: &str = "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.\nWhenever you roll a die, remove all +1/+1 counters from this creature, then put a number of +1/+1 counters on it equal to the result.";
+        const BARBARIAN_CLASS_L1: &str = "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.";
+        let mut scenario = crate::game::scenario::GameScenario::new_n_player(2, seed);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(
+            crate::game::scenario::P0,
+            "Barbarian Class",
+            BARBARIAN_CLASS_L1,
+        );
+        let jammer = scenario
+            .add_creature_to_hand_from_oracle(
+                crate::game::scenario::P0,
+                "Hammer Jammer",
+                0,
+                0,
+                HAMMER_JAMMER,
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.players[0].hand.retain(|card| *card != jammer);
+        state.players[0].library.insert(0, jammer);
+        state.objects.get_mut(&jammer).unwrap().zone = Zone::Library;
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::KeepEach,
+                kept_destination: Zone::Library,
+                rest_destination: Zone::Library,
+                rest_order: DigRestOrder::Preserve,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: Some(Zone::Battlefield),
+                enters_under: None,
+                kept_destination_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve(state, &ability, &mut Vec::new()).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RevealUntilKeptChoice { hit_card, .. } if hit_card == jammer
+        ));
+        (runner, jammer)
+    }
+
+    /// CR 706.6 + CR 614.12a: an accepted kept card's tied as-enters roll asks
+    /// which die to ignore before the card enters. The single move parks no
+    /// owner, so the completion carrying the reveal's rest gets a standalone
+    /// record at the boundary captured before the move, beneath the card's whole
+    /// child stack; the frame that owns the choice stays on top, and the record
+    /// drains once the entry completes.
+    #[test]
+    fn an_accepted_kept_cards_keep_choice_owns_the_top_of_the_stack() {
+        let accept = crate::types::actions::GameAction::DecideOptionalEffect { accept: true };
+        let seed = (0..600)
+            .find(|&seed| {
+                let (mut runner, _) = accepted_jammer_board(seed);
+                runner.act(accept.clone()).unwrap();
+                matches!(runner.state().waiting_for, WaitingFor::DieKeepChoice { .. })
+            })
+            .expect("a seed whose roll ties");
+        let (mut runner, jammer) = accepted_jammer_board(seed);
+        runner.act(accept).unwrap();
+        let frames: Vec<crate::types::resolution::FrameKind> = runner
+            .state()
+            .resolution_stack
+            .iter()
+            .map(crate::types::resolution::ResolutionFrame::kind)
+            .collect();
+        assert_eq!(
+            frames,
+            vec![
+                crate::types::resolution::FrameKind::BatchDelivery,
+                crate::types::resolution::FrameKind::PostReplacement,
+                crate::types::resolution::FrameKind::AbilityContinuation,
+                crate::types::resolution::FrameKind::DieRoll,
+            ]
+        );
+        let WaitingFor::DieKeepChoice {
+            ignorable_indices,
+            ignore_count,
+            results,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            unreachable!("checked by the seed search");
+        };
+        let ignore_indices = ignorable_indices.into_iter().take(ignore_count).collect();
+        runner
+            .act(crate::types::actions::GameAction::SelectDieRolls { ignore_indices })
+            .unwrap();
+        let state = runner.state();
+        let kept: u32 = results.iter().map(|&n| u32::from(n)).sum::<u32>()
+            - u32::from(*results.iter().min().expect("dice"));
+        assert!(state.battlefield.contains(&jammer));
+        assert_eq!(
+            state.objects[&jammer]
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1)
+                .copied(),
+            Some(kept)
+        );
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the record drained once the entry completed"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

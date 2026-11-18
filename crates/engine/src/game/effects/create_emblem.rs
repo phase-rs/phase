@@ -117,6 +117,7 @@ pub fn resolve(
         .map(|src| EmblemSource {
             name: src.name.clone(),
             printed_ref: src.printed_ref.clone(),
+            printing: src.printing.clone(),
         });
 
     // CR 607.1d + CR 607.5 + CR 400.7: latch the creating object's exact
@@ -198,6 +199,7 @@ mod tests {
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -365,6 +367,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Command),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,

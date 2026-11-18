@@ -404,7 +404,12 @@ pub enum ClientMessage {
         match_config: MatchConfig,
         #[serde(default)]
         ai_seats: Vec<AiSeatRequest>,
-        #[serde(default)]
+        /// Decoded as its writer recorded it for the lobby relay; Full mode re-checks it
+        /// strictly (`guard_client_message_before_dispatch`).
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         /// Optional distinct label for this room, separate from the host's
         /// player name. Routed into `LobbyGame.room_name`.
@@ -665,6 +670,13 @@ pub enum ClientMessage {
         pairing_id: PairingId,
         player_token: String,
         outcome: PodOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
+    SubmitTournamentDeck {
+        code: String,
+        player_token: String,
+        deck: DeckData,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<TournamentRequestId>,
     },
@@ -3307,6 +3319,7 @@ mod tests {
             required_pick_count: 0,
             pick_selection_mode: PickSelectionMode::Direct,
             pool,
+            submitted_companion: None,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
@@ -3330,6 +3343,8 @@ mod tests {
             next_pairing_round: 1,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
+            post_draft_play: DraftKind::Sealed.procedure().post_draft_play,
+            deck_submission_open: false,
             pairings: Vec::new(),
             match_config: DraftKind::Sealed.match_config(),
             // Sealed has no shared stack and no Winston play/draw election, so
@@ -3352,6 +3367,7 @@ mod tests {
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.pick_selection_mode, PickSelectionMode::Direct);
                 assert_eq!(v.launch_capability, DraftLaunchCapability::None);
+                assert_eq!(v.post_draft_play, PostDraftPlay::TournamentPairings);
                 assert_eq!(v.commanders_required, 0);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);
@@ -3867,8 +3883,8 @@ mod tests {
     /// serialized state. A v109 peer would leave a spell paused on its own
     /// free-cast window on the stack in no zone, so the handshake must refuse
     /// the mismatch before it receives v110 state. The same version adds
-    /// `WaitingFor::SpellCopyOrderChoice` and
-    /// `PendingRepeatIteration.copy_order_fixed` (CR 405.3).
+    /// `WaitingFor::MemberOrderChoice` and
+    /// `PendingRepeatIteration.order_fixed` (CR 405.3).
     /// The CR 201.5a granter binding adds `ObjectScope::GrantingObject` /
     /// `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
     /// `PlayerFilter::GrantingObjectCaster` and the `granting_object` stamp; v108 state

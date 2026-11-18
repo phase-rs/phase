@@ -1076,7 +1076,7 @@ fn scry_continuation_deduplicates_logically_owned_zone_observer_before_later_pro
         WaitingFor::OptionalCostChoice { .. }
     ));
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("pay printed kicker");
     if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
         runner

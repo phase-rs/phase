@@ -3,7 +3,7 @@ use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
+use crate::game::zone_pipeline::{self, SimultaneousMoveResult, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -100,7 +100,7 @@ pub fn resolve(
     // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
     if matches!(
         zone_pipeline::move_objects_simultaneously(state, reqs, events),
-        BatchMoveResult::NeedsChoice
+        SimultaneousMoveResult::NeedsChoice(_)
     ) {
         return Ok(());
     }
@@ -443,6 +443,8 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         destination: Zone::Exile,
                         origin: None,
                         target: TargetFilter::SelfRef,

@@ -17,7 +17,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{ExtraTurn, GameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ExtraTurnId, ObjectId};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -85,6 +85,7 @@ fn greatest_mana_value_takes_an_extra_turn_after_this_one() {
         vec![ExtraTurn {
             player: P1,
             anchor: P0,
+            id: ExtraTurnId(1),
         }]
     );
     // One round: only the top cards were exiled.
@@ -104,6 +105,7 @@ fn tied_players_repeat_until_the_tie_is_broken() {
         vec![ExtraTurn {
             player: P0,
             anchor: P0,
+            id: ExtraTurnId(1),
         }]
     );
     assert_eq!(p0_zones, vec![Zone::Exile; 3]);
@@ -148,6 +150,7 @@ fn each_repeated_round_is_its_own_simultaneous_exile() {
         vec![ExtraTurn {
             player: P0,
             anchor: P0,
+            id: ExtraTurnId(1),
         }]
     );
 }
@@ -159,6 +162,8 @@ fn graveyard_redirect(card: ObjectId) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::Any,
@@ -245,6 +250,7 @@ fn finish_paused_contest(mut runner: GameRunner, cards: &PausedContest) {
         vec![ExtraTurn {
             player: P1,
             anchor: P0,
+            id: ExtraTurnId(1),
         }]
     );
     // P0's card was not exiled, so P0 dropped out after round one.

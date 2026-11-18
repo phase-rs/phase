@@ -736,6 +736,7 @@ fn v15_dig_choice_reorders_the_pile_for_the_non_canonical_seat() {
         selectable_cards: looked_at.clone(),
         kept_destination: Some(Zone::Library),
         rest_destination: None,
+        rest_remainder: engine::types::ability::DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order: Default::default(),
         source_id: None,

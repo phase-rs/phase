@@ -128,6 +128,7 @@ export function MobileHeldHandCard({ gesture, object, stormCopyCount }: MobileHe
         size="normal"
         oracleId={object.printed_ref?.oracle_id}
         faceName={object.printed_ref?.face_name}
+        ownerPrinting={object.printing}
         unimplementedMechanics={object.unimplemented_mechanics}
         className="!h-full !w-full"
       />

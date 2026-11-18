@@ -76,11 +76,17 @@ describe("shared adapter contract fixtures", () => {
 
   it("drives GameStarted through the websocket adapter", async () => {
     const fixture = readFixture<{ type: "GameStarted"; data: { state: GameState } }>("game_started.json");
+    // Explicit opt-out: these fixtures pin snapshot delivery, so no decoder
+    // preparation may introduce an await before the socket is created.
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
       "join",
       { main_deck: [], sideboard: [] },
       "ABC123",
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
     const listener = vi.fn();
     adapter.onEvent(listener);
@@ -106,11 +112,17 @@ describe("shared adapter contract fixtures", () => {
       data: { state: GameState; events: unknown[] };
     }>("state_update.json");
 
+    // Explicit opt-out: these fixtures pin snapshot delivery, so no decoder
+    // preparation may introduce an await before the socket is created.
     const adapter = new WebSocketAdapter(
       "ws://localhost:9374/ws",
       "join",
       { main_deck: [], sideboard: [] },
       "ABC123",
+      undefined,
+      undefined,
+      undefined,
+      { stateCodecSessionProvider: null },
     );
     const listener = vi.fn();
     adapter.onEvent(listener);
@@ -172,19 +184,16 @@ describe("shared adapter contract fixtures", () => {
       type: "fixed",
       data: { iterations: 18 },
     });
-    // Every answerable point the offer publishes, not just the allocation: the
-    // Rust row drives this same payload through production submission, which
-    // refuses a partial pin set.
+    // Every answerable point the offer publishes: the Rust row drives this same
+    // payload through production submission, which refuses a partial pin set.
     expect(submission.response.data.pins).toEqual([
-      { group: 0, choiceIds: ["i-1.0.1.k0"], amounts: [] },
-      { group: 1, choiceIds: ["i-1.0.1.k2"], amounts: [] },
       {
         group: 2,
-        choiceIds: ["i-1.0.1.k4", "i-1.0.1.k5", "i-1.0.1.k6"],
+        choiceIds: ["i-1.0.1.k0", "i-1.0.1.k1", "i-1.0.1.k2"],
         amounts: [
-          { choiceId: "i-1.0.1.k4", amount: 6 },
-          { choiceId: "i-1.0.1.k5", amount: 6 },
-          { choiceId: "i-1.0.1.k6", amount: 6 },
+          { choiceId: "i-1.0.1.k0", amount: 6 },
+          { choiceId: "i-1.0.1.k1", amount: 6 },
+          { choiceId: "i-1.0.1.k2", amount: 6 },
         ],
       },
     ]);

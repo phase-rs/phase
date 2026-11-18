@@ -263,6 +263,8 @@ mod tests {
         let config = AiConfig::default();
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,

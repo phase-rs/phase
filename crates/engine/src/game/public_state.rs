@@ -82,6 +82,16 @@ fn step_bound_phase(waiting_for: &WaitingFor) -> Option<Phase> {
 
 pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     state.waiting_for = waiting_for.clone();
+    // CR 800.4j: the active player who left would receive priority, so the next player in turn
+    // order does; the installs naming it open a window with no pass recorded (CR 117.3a /
+    // CR 117.3b).
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if player == state.active_player && !super::players::is_alive(state, player) {
+            state.waiting_for = WaitingFor::Priority {
+                player: super::engine::living_priority_seat(state),
+            };
+        }
+    }
     // CR 703.1: a turn-based action happens automatically when its own step
     // begins or ends, so a prompt that is a player's answer to one is answerable
     // only during that step. Installing one outside that step produces a
@@ -293,6 +303,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 }
             }
             GameEvent::TokenCreated { object_id, .. }
+            | GameEvent::CardCopyCreated { object_id, .. }
             | GameEvent::ObjectConjured { object_id, .. } => {
                 // Mana-aware: a creature token (Scute storm) does NOT raise the
                 // mana signal, so the board-wide auto-tap sweep is skipped; a
@@ -503,6 +514,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // display field depends on the mill itself.
             | GameEvent::Milled { .. }
             | GameEvent::PhaseChanged { .. }
+            | GameEvent::PhaseChangedFor { .. }
             | GameEvent::PriorityPassed { .. }
             | GameEvent::SpellCast { .. }
             | GameEvent::SpellCopied { .. }
@@ -522,6 +534,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ShortcutRepetition { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
+            | GameEvent::Attached { .. }
             | GameEvent::Unattached { .. }
             // CR 116.2c + CR 613.1: ending a continuous effect DOES change
             // derived characteristics, but `GameState::end_continuous_effect`
@@ -531,7 +544,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
-            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlocked { .. }
             | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
             | GameEvent::CombatTaxPaid { .. }
             | GameEvent::CombatTaxDeclined { .. }
@@ -562,6 +575,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::UnTellPerformed { .. }
             | GameEvent::PhraseSaid { .. }
             | GameEvent::GotchaSaid { .. }
+            | GameEvent::ObjectTouched { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
             | GameEvent::StartingPlayerContest { .. }
@@ -852,6 +866,7 @@ mod tests {
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
         state.park_ability_continuation(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             enters_modified_if: None,
             player: PlayerId(0),
             cards: vec![ObjectId(5), ObjectId(11)],
@@ -870,10 +885,12 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             duration: None,
@@ -1238,6 +1255,7 @@ mod tests {
                 object_id: land_id,
                 counter_type: CounterType::Generic("depletion".to_string()),
                 count: 1,
+                instruction_lead: None,
             }],
         );
         // Direct observable of the fix: the marking layer raised the mana gate.
