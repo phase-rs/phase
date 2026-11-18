@@ -45014,3 +45014,109 @@ fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
         }
     }
 }
+
+/// CR 603.2 + CR 508.3d/e: the "you attack" head classifies its whole tail.
+/// Recognized tails are all-consuming; anything else is `Unrecognized`. The
+/// word-boundary guard sits outside the classification (`None`).
+#[test]
+fn you_attack_head_tail_grammar() {
+    use YouAttackTail::{AttackedPlayer, Bare, EnchantedPlayer, Unrecognized};
+    let player = Some(AttackedPlayer(AttackTargetFilter::Player));
+    let rows: &[(&str, Option<YouAttackTail>)] = &[
+        ("whenever you attack", Some(Bare)),
+        ("when you attack", Some(Bare)),
+        ("you attack", Some(Bare)), // CR 603.7b delayed form
+        ("whenever you attack,", Some(Bare)),
+        ("whenever you attack , ", Some(Bare)),
+        ("whenever you attack a player", player.clone()),
+        ("whenever you attack a player,", player),
+        (
+            "whenever you attack the monarch",
+            Some(AttackedPlayer(AttackTargetFilter::Monarch)),
+        ),
+        (
+            "whenever you attack enchanted player",
+            Some(EnchantedPlayer),
+        ),
+        (
+            "whenever you attack a player with one or more equipped creatures",
+            Some(Unrecognized),
+        ),
+        ("whenever you attack a player.", Some(Unrecognized)),
+        ("whenever you attack enchanted opponent", Some(Unrecognized)),
+        (
+            "whenever you attack the player who has the initiative",
+            Some(Unrecognized),
+        ),
+        ("whenever you attacked this turn", None),
+        ("whenever you attack.", None),
+        ("whenever you attackers", None),
+    ];
+    for (head, expected) in rows {
+        assert_eq!(&parse_you_attack_head(head), expected, "{head:?}");
+    }
+}
+
+/// CR 603.2: a printed "you attack" head with an unmodelled tail fails closed as
+/// `Unknown` with the card's casing, not a bare `YouAttack` that fires on every
+/// attack. Ainok Strike Leader's "~ and/or your commander" is modelled instead.
+#[test]
+fn you_attack_unrecognized_tail_fails_closed() {
+    for (line, name, head) in [
+        (
+            "Whenever you attack with Merry and another legendary creature, draw a card.",
+            "Merry, Esquire of Rohan",
+            "Whenever you attack with ~ and another legendary creature",
+        ),
+        (
+            "Whenever you attack the player who has the initiative, create a Treasure token.",
+            "Loot Dispute",
+            "Whenever you attack the player who has the initiative",
+        ),
+    ] {
+        let mode = parse_trigger_line(line, name).mode;
+        assert_eq!(mode, TriggerMode::Unknown(head.to_string()), "{name}");
+    }
+    let ainok = parse_trigger_line(
+        "Whenever you attack with this creature and/or your commander, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player.",
+        "Ainok Strike Leader",
+    );
+    assert_eq!(ainok.mode, TriggerMode::YouAttack);
+    assert!(
+        matches!(&ainok.valid_card, Some(TargetFilter::Or { filters })
+            if filters[0] == TargetFilter::SelfRef
+                && matches!(&filters[1], TargetFilter::Typed(tf)
+                    if tf.properties.contains(&FilterProp::IsCommander))),
+        "CR 903.3: {:?}",
+        ainok.valid_card
+    );
+}
+
+/// CR 603.2 + CR 508.1m / CR 509.1i: in "attack or block with X" the bare
+/// attack leg keeps the shared "with X". Leg-local complements are not carried.
+#[test]
+fn or_split_carries_shared_adjunct_to_bare_leg() {
+    let sol = parse_trigger_lines(
+        "Whenever you attack or block with both ~ and its partner, support 4 and investigate four times.",
+        "Sol, Advocate Eternal",
+    );
+    assert_eq!(sol.len(), 2);
+    let attack_leg = TriggerMode::Unknown("Whenever you attack with both ~ and its partner".into());
+    assert_eq!(sol[0].mode, attack_leg);
+    assert!(matches!(sol[1].mode, TriggerMode::Unknown(_)));
+    for (name, line, first_leg) in [
+        (
+            "Tomebound Lich",
+            "Whenever this creature enters or deals combat damage to a player, draw a card, then discard a card.",
+            "Whenever ~ enters, draw a card, then discard a card.",
+        ),
+        (
+            "God-Eternal Kefnet",
+            "When God-Eternal Kefnet dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.",
+            "When ~ dies, you may put it into its owner's library third from the top.",
+        ),
+    ] {
+        let legs = parse_trigger_lines(line, name);
+        assert_eq!(legs[0].description.as_deref(), Some(first_leg), "{name}");
+    }
+}

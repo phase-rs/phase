@@ -3929,6 +3929,13 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
 /// description matches the anaphor, and rewrite its effect as a clone of the
 /// previous def's effect with the parsed count.
 pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
+    // CR 608.2c: an "Otherwise, create one of those tokens" branch names the
+    // tokens of the instruction it is the alternative to.
+    for def in defs.iter_mut() {
+        if let Some(else_def) = def.else_ability.as_deref_mut() {
+            rewrite_those_tokens_from_antecedent(&mut else_def.effect, &def.effect);
+        }
+    }
     for i in 1..defs.len() {
         let (prev_rest, cur_rest) = defs.split_at_mut(i);
         let prev = &prev_rest[i - 1];
