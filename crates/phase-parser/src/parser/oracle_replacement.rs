@@ -9290,13 +9290,28 @@ fn parse_graveyard_redirect_replacement(
             (None, None) => None,
         }
     };
+    // CR 113.6b: determine if this is a self-referential replacement (subject is
+    // the object carrying the ability). This affects both active_zones and the
+    // origin-zone constraint on the affected-card filter.
+    let is_self_replacement = graveyard_replacement_subject_is_self_referential(subject);
     // CR 400.1 + CR 700.4: fold the stated origin in last, so it applies to
     // whichever shape the subject/ownership axes produced. `origin.flatten()`
     // converts `Some(None)` ("from anywhere") to `None` (no filter narrowing),
     // while preserving `Some(Some(zone))` as `Some(zone)`.
-    let valid_card = match origin.flatten() {
-        Some(zone) => Some(constrain_filter_to_origin_zone(valid_card, zone)),
-        None => valid_card,
+    //
+    // CR 113.6b + Rest in Peace ruling: for non-self replacements, "from
+    // anywhere" means the affected card comes from the zones where the host
+    // functions (default: battlefield/command), not literally all zones. The
+    // host's functioning zones are tracked separately via `active_zones`.
+    let valid_card = match (origin.flatten(), is_self_replacement) {
+        (Some(zone), _) => Some(constrain_filter_to_origin_zone(valid_card, zone)),
+        (None, true) => valid_card,
+        // Non-self replacement with "from anywhere" (origin == Some(None)):
+        // constrain to host's default functioning zones (battlefield/command).
+        (None, false) if origin == Some(None) => {
+            Some(constrain_filter_to_origin_zone(valid_card, Zone::Battlefield))
+        }
+        (None, false) => valid_card,
     };
 
     // CR 122.1: A `with N <type> counter(s) on it` rider on the exile outcome
@@ -9411,9 +9426,8 @@ fn parse_graveyard_redirect_replacement(
     // Colossus, Nexus of Fate), but NOT for printed replacements affecting other
     // objects (Rest in Peace, Leyline of the Void). For the latter, the host's
     // default functioning zones (battlefield/command) are preserved, and the named
-    // origin is applied only to the affected-card filter (done above at lines
-    // 9297-9300 via `constrain_filter_to_origin_zone`).
-    let is_self_replacement = graveyard_replacement_subject_is_self_referential(subject);
+    // origin is applied only to the affected-card filter (done above via
+    // `constrain_filter_to_origin_zone`).
     if let Some(inner) = origin {
         if is_self_replacement {
             match inner {
@@ -26634,9 +26648,17 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // The unfiltered `Any` scope includes tokens and currently also admits spell
-        // copies, which the printed "a card or token" subject excludes.
-        assert!(def.valid_card.is_none());
+        // CR 113.6b + Rest in Peace ruling: non-self replacement with "from anywhere"
+        // constrains the affected card to the host's default zones (battlefield).
+        // The subject "a card or token" admits both cards and tokens (no RepresentedByCard).
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(properties.contains(&FilterProp::InZone { zone: Zone::Battlefield }));
+                // No RepresentedByCard — "a card or token" admits both
+                assert!(!properties.contains(&FilterProp::RepresentedByCard));
+            }
+            other => panic!("Expected Typed filter with InZone Battlefield, got {other:?}"),
+        }
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -26784,9 +26806,10 @@ mod tests {
         }
     }
 
-    /// CR 108.2 + CR 108.2b: a card-only subject targeting ANY graveyard ("a
+/// CR 108.2 + CR 108.2b: a card-only subject targeting ANY graveyard ("a
     /// card would be put into a graveyard") admits only objects represented by a
-    /// card, with no controller scope — `valid_card` is `RepresentedByCard` alone.
+    /// card, with no controller scope — `valid_card` is `RepresentedByCard` plus
+    /// the host's default zone constraint (battlefield) per CR 113.6b.
     /// This is the live Leyline-class bug fix: without this axis a dying token was
     /// wrongly redirected (exiled), suppressing dies-triggers.
     #[test]
@@ -26798,18 +26821,22 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // Exact equality: the "a card" subject must admit only card-represented objects
-        // (CR 108.2 + CR 108.2b) and the any-graveyard scope must add no owner constraint —
-        // so `RepresentedByCard` alone, with no `Owned { Opponent }` and no other property.
+        // CR 113.6b: non-self replacement with "from anywhere" constrains the
+        // affected card to the host's default zones (battlefield). The "a card"
+        /// subject adds RepresentedByCard.
         assert_eq!(
             def.valid_card,
             Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::RepresentedByCard])
+                TypedFilter::default()
+                    .properties(vec![
+                        FilterProp::RepresentedByCard,
+                        FilterProp::InZone { zone: Zone::Battlefield },
+                    ])
             ))
         );
         // Regression: the exile branch stays backward-compatible after the dispatcher
         // refactor — Rest in Peace / Leyline-style wording redirects to exile with no
-        // post-redirect sub-ability.
+        // post-redirect sub_ability.
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
