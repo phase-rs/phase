@@ -2387,7 +2387,7 @@ fn parse_target_color_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
     let (rest, _) = parse_target_anaphoric_subject(input)?;
-    let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    let (rest, (polarity, tense)) = parse_target_anaphoric_tense_polarity(rest)?;
     let (rest, _) = opt(tag("a ")).parse(rest)?;
     let (rest, first_color) = nom_primitives::parse_color(rest)?;
     // CR 105.2: Disjunctive color condition — "white or blue" etc.
@@ -2415,10 +2415,7 @@ fn parse_target_color_condition(
     };
     Ok((
         rest,
-        maybe_negate(
-            referent_condition(filter, use_lki, ObjectScope::Target, None),
-            negated,
-        ),
+        lower_referent_filter(filter, polarity, tense, ObjectScope::Target),
     ))
 }
 
@@ -2548,13 +2545,13 @@ fn parse_target_type_membership_condition<'a>(
         value(TargetAnaphorSubject::PronounIt, tag("it")),
     ))
     .parse(input)?;
-    let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    let (rest, (polarity, tense)) = parse_target_anaphoric_tense_polarity(rest)?;
     match &subject {
         TargetAnaphorSubject::Demonstrative(noun, route) => {
             // CR 608.2c + CR 601.2c + CR 115.1 + CR 400.7: a DIVERGENT noun ("that
             // token", "that artifact", "that land", …) is claimed by this
-            // target-anaphor route only under a PRESENT-tense copula (`use_lki ==
-            // false`) whose enclosing effect chain declared an object target that
+            // target-anaphor route only under a PRESENT-tense copula whose
+            // enclosing effect chain declared an object target that
             // POSITIVELY names the noun. The declared target is the CR 601.2c announced
             // antecedent the CR 608.2c anaphor binds to.
             //
@@ -2568,7 +2565,7 @@ fn parse_target_type_membership_condition<'a>(
             if matches!(
                 route,
                 DemonstrativeRoute::TargetOnPresentTenseDeclaredTargetAgreement
-            ) && (use_lki
+            ) && (matches!(tense, ReferentTense::Past)
                 || !declared_object_target.is_some_and(|slot| {
                     slot_matches_anaphor(noun, AnaphorZoneClass::BattlefieldPermanent, slot)
                 }))
@@ -2585,7 +2582,7 @@ fn parse_target_type_membership_condition<'a>(
             // 1. A declared object target is present.
             // 2. The target slot is an object, not a player (CR 601.2c).
             // 3. The target slot is a battlefield permanent (CR 109.2).
-            // 4. The copula is present-tense (`!use_lki`) because active resolution
+            // 4. The copula is present-tense because active resolution
             //    tests the permanent's current characteristics.
             // 5. The condition text does not contain "card" or "cards" (CR 109.2 —
             //    descriptions that include the word "card" refer to non-battlefield
@@ -2594,7 +2591,7 @@ fn parse_target_type_membership_condition<'a>(
             let Some(slot) = declared_object_target else {
                 return Err(oracle_err(input));
             };
-            if use_lki
+            if matches!(tense, ReferentTense::Past)
                 || slot.is_player_scope()
                 || slot_zone_class(slot) != AnaphorZoneClass::BattlefieldPermanent
                 || condition_remainder_contains_card_word(rest)
@@ -2626,10 +2623,7 @@ fn parse_target_type_membership_condition<'a>(
     }
     Ok((
         remainder,
-        maybe_negate(
-            referent_condition(filter, use_lki, ObjectScope::Target, None),
-            negated,
-        ),
+        lower_referent_filter(filter, polarity, tense, ObjectScope::Target),
     ))
 }
 
@@ -2797,8 +2791,19 @@ fn parse_target_anaphoric_subject(
     .parse(input)
 }
 
-/// Consume the verb portion (tense + polarity) following a target-anaphoric
-/// subject. Returns `(negated, use_lki)`:
+#[derive(Clone, Copy)]
+enum ReferentPolarity {
+    Affirmative,
+    Negative,
+}
+
+#[derive(Clone, Copy)]
+enum ReferentTense {
+    Present,
+    Past,
+}
+
+/// Consume the verb portion (polarity + tense) following a target-anaphoric subject.
 ///
 ///   - `is` / `'s` → present, positive
 ///   - `is not` / `'s not` / `isn't` → present, negated
@@ -2809,24 +2814,36 @@ fn parse_target_anaphoric_subject(
 /// so `is not` wins over `is`.
 fn parse_target_anaphoric_tense_polarity(
     input: &str,
-) -> super::super::oracle_nom::error::OracleResult<'_, (bool, bool)> {
+) -> OracleResult<'_, (ReferentPolarity, ReferentTense)> {
     alt((
         // Negated past — must precede positive past
-        value((true, true), alt((tag(" wasn't "), tag(" was not ")))),
+        value(
+            (ReferentPolarity::Negative, ReferentTense::Past),
+            alt((tag(" wasn't "), tag(" was not "))),
+        ),
         // Positive past
-        value((false, true), tag(" was ")),
+        value(
+            (ReferentPolarity::Affirmative, ReferentTense::Past),
+            tag(" was "),
+        ),
         // CR 400.7: past-tense possession ("it had mana value 3 or less", "that
         // creature had power 2 or less") → LKI snapshot. None of the recognized
         // reflexive predicates use a negated " hadn't "/" didn't have " form, so
         // only the positive arm is supplied.
-        value((false, true), tag(" had ")),
+        value(
+            (ReferentPolarity::Affirmative, ReferentTense::Past),
+            tag(" had "),
+        ),
         // Negated present — must precede positive present
         value(
-            (true, false),
+            (ReferentPolarity::Negative, ReferentTense::Present),
             alt((tag(" isn't "), tag("'s not "), tag(" is not "))),
         ),
         // Positive present
-        value((false, false), alt((tag("'s "), tag(" is ")))),
+        value(
+            (ReferentPolarity::Affirmative, ReferentTense::Present),
+            alt((tag("'s "), tag(" is "))),
+        ),
     ))
     .parse(input)
 }
@@ -3085,21 +3102,20 @@ enum ReferentPredicate {
     },
 }
 
-/// A parsed referent clause: tense (`use_lki`: past tense reads last known information),
-/// polarity and predicate. The referent scope is the caller's decision.
+/// A parsed referent clause. The referent scope is the caller's decision.
 struct ReferentClause {
-    negated: bool,
-    use_lki: bool,
+    polarity: ReferentPolarity,
+    tense: ReferentTense,
     predicate: ReferentPredicate,
     /// The demonstrative noun, for the surfaces whose referent binding depends on it.
     noun: Option<ReferentNoun>,
 }
 
 impl ReferentClause {
-    fn filter(filter: TargetFilter, negated: bool, use_lki: bool) -> Self {
+    fn filter(filter: TargetFilter, polarity: ReferentPolarity, tense: ReferentTense) -> Self {
         Self {
-            negated,
-            use_lki,
+            polarity,
+            tense,
             predicate: ReferentPredicate::Filter(filter),
             noun: None,
         }
@@ -3150,14 +3166,14 @@ fn parse_referent_predicate(
     match surface {
         ReferentSurface::Reflexive => {
             let (rest, _) = parse_target_anaphoric_subject(input)?;
-            let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+            let (rest, (polarity, tense)) = parse_target_anaphoric_tense_polarity(rest)?;
             let (rest, prop) = parse_reflexive_object_property(rest)?;
             Ok((
                 rest,
                 ReferentClause::filter(
                     TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
-                    negated,
-                    use_lki,
+                    polarity,
+                    tense,
                 ),
             ))
         }
@@ -3176,8 +3192,8 @@ fn parse_referent_predicate(
             Ok((
                 rest,
                 ReferentClause {
-                    negated: false,
-                    use_lki: false,
+                    polarity: ReferentPolarity::Affirmative,
+                    tense: ReferentTense::Present,
                     predicate: ReferentPredicate::Stat {
                         stat,
                         comparator,
@@ -3190,23 +3206,20 @@ fn parse_referent_predicate(
         ReferentSurface::ManaValueFixed => {
             // CR 400.7: past tense reads last known information; present tense reads the
             // object as it is.
-            let (rest, (use_lki, (comparator, threshold))) = alt((
-                preceded(
-                    tag("its mana value was "),
-                    map(parse_mana_value_or_threshold, |t| (true, t)),
-                ),
-                preceded(
-                    tag("it has mana value "),
-                    map(parse_mana_value_or_threshold, |t| (false, t)),
-                ),
-            ))
-            .parse(input)?;
+            let (rest, (tense, (comparator, threshold))) = (
+                alt((
+                    value(ReferentTense::Past, tag("its mana value was ")),
+                    value(ReferentTense::Present, tag("it has mana value ")),
+                )),
+                parse_mana_value_or_threshold,
+            )
+                .parse(input)?;
             Ok((
                 rest,
                 ReferentClause::filter(
                     mana_value_filter(comparator, QuantityExpr::Fixed { value: threshold }),
-                    false,
-                    use_lki,
+                    ReferentPolarity::Affirmative,
+                    tense,
                 ),
             ))
         }
@@ -3216,7 +3229,11 @@ fn parse_referent_predicate(
                 parse_dynamic_mana_value_threshold(rest).ok_or_else(|| oracle_err(input))?;
             Ok((
                 "",
-                ReferentClause::filter(mana_value_filter(comparator, qty), false, false),
+                ReferentClause::filter(
+                    mana_value_filter(comparator, qty),
+                    ReferentPolarity::Affirmative,
+                    ReferentTense::Present,
+                ),
             ))
         }
         ReferentSurface::NounManaValue => {
@@ -3228,24 +3245,21 @@ fn parse_referent_predicate(
                 )),
             )
             .parse(input)?;
-            // CR 400.7 + CR 608.2h: past tense reads last known information; the present
-            // tense ("is", "has") reads the object as it is.
-            let (rest, (use_lki, (comparator, threshold))) = alt((
-                preceded(
-                    tag("'s mana value was "),
-                    map(parse_mana_value_or_threshold, |t| (true, t)),
-                ),
-                preceded(
-                    tag(" has mana value "),
-                    map(parse_mana_value_or_threshold, |t| (false, t)),
-                ),
-            ))
-            .parse(rest)?;
+            // CR 400.7 + CR 608.2h: "was" reads last known information, "has" reads
+            // the object as it is.
+            let (rest, (tense, (comparator, threshold))) = (
+                alt((
+                    value(ReferentTense::Past, tag("'s mana value was ")),
+                    value(ReferentTense::Present, tag(" has mana value ")),
+                )),
+                parse_mana_value_or_threshold,
+            )
+                .parse(rest)?;
             Ok((
                 rest,
                 ReferentClause {
-                    negated: false,
-                    use_lki,
+                    polarity: ReferentPolarity::Affirmative,
+                    tense,
                     predicate: ReferentPredicate::Filter(mana_value_filter(
                         comparator,
                         QuantityExpr::Fixed { value: threshold },
@@ -3258,14 +3272,17 @@ fn parse_referent_predicate(
             // CR 205.4: Subject anaphor + copula, tracking negation. "it" carries the `'s`
             // contraction; the explicit "that creature/permanent/card" anaphors (Coiling
             // Rebirth: "that creature isn't legendary") use the full copula.
-            let (rest, negated) = alt((
+            let (rest, polarity) = alt((
                 value(
-                    true,
+                    ReferentPolarity::Negative,
                     alt((tag("it is not "), tag("it's not "), tag("it isn't "))),
                 ),
-                value(false, alt((tag("it is "), tag("it's ")))),
                 value(
-                    true,
+                    ReferentPolarity::Affirmative,
+                    alt((tag("it is "), tag("it's "))),
+                ),
+                value(
+                    ReferentPolarity::Negative,
                     (
                         alt((
                             tag("that creature"),
@@ -3276,7 +3293,7 @@ fn parse_referent_predicate(
                     ),
                 ),
                 value(
-                    false,
+                    ReferentPolarity::Affirmative,
                     (
                         alt((
                             tag("that creature"),
@@ -3296,8 +3313,8 @@ fn parse_referent_predicate(
                         TypedFilter::default()
                             .properties(vec![FilterProp::HasSupertype { value: supertype }]),
                     ),
-                    negated,
-                    false,
+                    polarity,
+                    ReferentTense::Present,
                 ),
             ))
         }
@@ -3313,8 +3330,8 @@ fn parse_referent_predicate(
                             value: Supertype::Basic,
                         },
                     ])),
-                    false,
-                    true,
+                    ReferentPolarity::Affirmative,
+                    ReferentTense::Past,
                 ),
             ))
         }
@@ -3336,8 +3353,8 @@ fn parse_referent_predicate(
             Ok((
                 "",
                 ReferentClause {
-                    negated: false,
-                    use_lki: false,
+                    polarity: ReferentPolarity::Affirmative,
+                    tense: ReferentTense::Present,
                     predicate: ReferentPredicate::Stat {
                         stat,
                         comparator,
@@ -3488,8 +3505,8 @@ fn lower_referent_stat(
 /// Lower a parsed clause whose referent is the node's own (`ObjectScope::Target`).
 fn lower_referent_clause(clause: ReferentClause, subject: ObjectScope) -> AbilityCondition {
     let ReferentClause {
-        negated,
-        use_lki,
+        polarity,
+        tense,
         predicate,
         noun: _,
     } = clause;
@@ -3500,6 +3517,23 @@ fn lower_referent_clause(clause: ReferentClause, subject: ObjectScope) -> Abilit
             comparator,
             threshold,
         } => stat_threshold_filter(stat, comparator, threshold),
+    };
+    lower_referent_filter(filter, polarity, tense, subject)
+}
+
+fn lower_referent_filter(
+    filter: TargetFilter,
+    polarity: ReferentPolarity,
+    tense: ReferentTense,
+    subject: ObjectScope,
+) -> AbilityCondition {
+    let negated = match polarity {
+        ReferentPolarity::Affirmative => false,
+        ReferentPolarity::Negative => true,
+    };
+    let use_lki = match tense {
+        ReferentTense::Present => false,
+        ReferentTense::Past => true,
     };
     maybe_negate(referent_condition(filter, use_lki, subject, None), negated)
 }
@@ -3577,9 +3611,9 @@ fn parse_referent_noun_mana_value_condition_text(
 ///
 ///   - subject: `it` / `that creature` / `that permanent` / `that card`
 ///     (`parse_target_anaphoric_subject`)
-///   - tense + polarity: `parse_target_anaphoric_tense_polarity` →
-///     `(negated, use_lki)` — past tense (`was`/`had`) reads LKI per CR 400.7 /
-///     CR 608.2h; present tense (`is`) reads live state.
+///   - tense + polarity: `parse_target_anaphoric_tense_polarity` — past tense
+///     (`was`/`had`) reads LKI per CR 400.7 / CR 608.2h; present tense (`is`)
+///     reads live state.
 ///   - predicate: a parameterized `FilterProp` axis
 ///     (`parse_reflexive_object_property`).
 ///

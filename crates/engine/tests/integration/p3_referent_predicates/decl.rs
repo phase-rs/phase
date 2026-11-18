@@ -10,6 +10,7 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 /// P0 casts a textless filler creature spell of mana value `spell_mv`; P1 answers with the real counterspell
@@ -326,8 +327,8 @@ fn triumph(victim: &Printed) -> (GameRunner, ObjectId, WaitingFor) {
 }
 
 #[test]
-fn p3s2a_triumph_mv2_returns_tapped_under_casters_control() {
-    let (r, v, _w) = triumph(&ANGELIC_WALL);
+fn p3s2a_triumph_mv2_returns_tapped_then_exiles_at_next_end_step() {
+    let (mut r, v, _w) = triumph(&ANGELIC_WALL);
     let o = &r.state().objects[&v];
     assert_eq!(
         o.zone,
@@ -336,6 +337,23 @@ fn p3s2a_triumph_mv2_returns_tapped_under_casters_control() {
     );
     assert_eq!(o.controller, P0, "under the caster's control");
     assert!(o.tapped, "tapped");
+
+    let cast_turn = r.state().turn_number;
+    r.advance_to_combat();
+    r.act(GameAction::DeclareAttackers {
+        attacks: vec![],
+        bands: vec![],
+    })
+    .expect("declare no attackers");
+    // CR 603.7b + CR 603.3: the delayed ability triggers at the next end step;
+    // the Wall is still on the battlefield pending its resolution.
+    r.advance_to_end_step();
+    assert_eq!(r.state().turn_number, cast_turn);
+    assert_eq!(r.state().phase, Phase::End);
+    assert_eq!(zone(r.state(), v), Zone::Battlefield);
+    r.advance_until_stack_empty();
+    assert_eq!(r.state().phase, Phase::End);
+    assert_eq!(zone(r.state(), v), Zone::Exile);
 }
 
 #[test]
