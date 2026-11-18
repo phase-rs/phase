@@ -928,6 +928,10 @@ fn childhood_barn_single_blinked_pick_lets_the_whole_ability_do_nothing() {
                 .events,
         );
     }
+    assert!(
+        runner.state().stack.is_empty(),
+        "Cloudshift and the chaos ability must both leave the stack"
+    );
     assert_ne!(
         runner.state().objects[&pick].incarnation,
         incarnation_before,
@@ -954,10 +958,11 @@ fn childhood_barn_single_blinked_pick_lets_the_whole_ability_do_nothing() {
         runner.state().objects[&pick].is_phased_in(),
         "the blinked pick is phased in"
     );
-    assert!(
-        !runner.state().objects[&pick].tapped,
-        "the untap instruction did not run either"
-    );
+    // No tappedness assertion here on purpose: this fixture copies only the
+    // plane's triggers and statics, not its "Creatures enter tapped"
+    // `ReplacementDefinition`, so the blinked object returns untapped whether or
+    // not the untap instruction ran. Tappedness therefore cannot witness it.
+    // The fizzle's own evidence (no phase-out, no delayed clause) does.
 }
 
 /// CR 115.7a + CR 115.1: Spellskite forces "a target" of the Barn's chaos
