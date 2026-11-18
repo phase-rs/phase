@@ -4616,8 +4616,9 @@ fn parse_self_characteristic_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// The owner-threaded twin of [`parse_self_characteristic_ref`]: identical
 /// characteristic arms, but the scope comes from the parse context (set by
 /// `parse_where_x_quantity_expression_with_owner` for boon-granted "it"/"that"
-/// tails, where the pronoun names the triggering object) instead of being
-/// hardcoded to `Source`.
+/// tails, or by the where-X antecedent rung in a trigger body whose "it" names
+/// the trigger event's object; in both the pronoun names the triggering
+/// object) instead of being hardcoded to `Source`.
 ///
 /// The pronoun set is DELIBERATELY narrower than [`parse_self_possessive`]:
 /// only the four genuinely anaphoric surfaces are accepted here. Explicit

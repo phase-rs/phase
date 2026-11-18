@@ -418,6 +418,7 @@ mod wernog_riders_chaplain_investigate_count;
 mod wheel_and_deal;
 mod wheel_of_misfortune_secret_numbers;
 mod where_x_coverage_runtime;
+mod where_x_its_characteristic_trigger_object;
 mod where_x_quantity_channel_binds;
 mod where_x_totality_guard;
 mod white_suns_twilight;

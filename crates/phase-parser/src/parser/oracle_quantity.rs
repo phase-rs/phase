@@ -856,9 +856,11 @@ pub(crate) fn parse_cda_quantity_with_context(
 
     // CR 608.2k: owner-bound possessive pronouns ("its power", "2 plus its
     // power", "half its toughness"). When the context carries a
-    // `characteristic_pronoun_owner` (set only by
+    // `characteristic_pronoun_owner` (set only by the where-X interpreters:
     // `parse_where_x_quantity_expression_with_owner` for boon-granted
-    // "it"/"that" tails, where the pronoun names the triggering object), the
+    // "it"/"that" tails, and the antecedent rung for a trigger body whose "it"
+    // names the trigger event's object — in both the pronoun names that
+    // object), the
     // bare pronoun-characteristic surface binds the owner STRUCTURALLY during
     // this shared parse — every recursive arm below (fractions, multipliers,
     // offsets, sums) re-enters through this same context, so composed and

@@ -4586,12 +4586,16 @@ fn demote_becomes_target_delayed_payloads(ability: &mut AbilityDefinition) {
 /// `lift_parent_target_to_triggering_source`; this companion lifts the count's
 /// self-scoped per-object refs the same way.
 ///
-/// The `where X is its power` clause parses "its power" via
-/// `parse_self_power_ref`, which emits `ObjectScope::Source` (the ability
-/// carrier — Railway Brawler) because that combinator also serves the genuine
-/// self-read forms (`~'s power`, `this card's power`, Scavenge). On an enters
-/// trigger the anaphor is the event object, not the carrier, so the count reads
-/// the wrong creature's power (#5253). When the counter effect's `target` is
+/// A where-X "its power" in a trigger body whose "it" names the event object
+/// now binds `EventSource` structurally, through the characteristic rung of the
+/// where-X antecedents (`PlayerAntecedents::characteristic_pronoun_owner`), so
+/// this lift is redundant for Railway Brawler's shape and leaves it unchanged.
+/// It still covers counts the rung does not bind: a context-free count clause
+/// emits `ObjectScope::Source` (the ability carrier) for "its power", because
+/// that grammar also serves the genuine self-read forms (`~'s power`, `this
+/// card's power`, Scavenge). On an enters trigger the anaphor is the event
+/// object, not the carrier, so such a count reads the wrong creature's power
+/// (#5253). When the counter effect's `target` is
 /// itself the event object (`TriggeringSource`/`ParentTarget`), the "its" in
 /// the count clause is the SAME object as the "it" recipient, so its
 /// `Source`-scoped per-object refs are remapped to `EventSource` (the entering
