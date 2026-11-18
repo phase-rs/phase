@@ -351,27 +351,26 @@ fn toph_additional_qualifier_parses_second_plus_one_counter() {
 
     // Runtime control: a real +1/+1 counter addition lands exactly once through
     // the production counter resolver (the placement the parsed effect drives).
-    // NOTE: This test is disabled due to pre-existing API mismatch in the test
-    // (CounterCause not accessible from integration test context).
-    // let mut scenario = GameScenario::new();
-    // scenario.at_phase(Phase::PreCombatMain);
-    // let land = scenario.add_creature(P0, "Target Land", 0, 0).id();
-    // let mut runner = scenario.build();
-    // let mut events = Vec::new();
-    // engine::game::effects::counters::add_counter_with_replacement(
-    //     runner.state_mut(),
-    //     P0,
-    //     land,
-    //     CounterType::Plus1Plus1,
-    //     1,
-    //     engine::types::proposed_event::CounterCause::ResolvingEffect,
-    //     &mut events,
-    // );
-    // assert_eq!(
-    //     counters(&runner, land, &CounterType::Plus1Plus1),
-    //     1,
-    //     "an additional +1/+1 counter lands exactly once (CR 122.1)"
-    // );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_creature(P0, "Target Land", 0, 0).id();
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    engine::game::effects::counters::add_counter_with_replacement(
+        runner.state_mut(),
+        P0,
+        land,
+        CounterType::Plus1Plus1,
+        1,
+        // The placement the parsed effect drives: a resolving effect.
+        engine::types::proposed_event::CounterCause::ResolvingEffect,
+        &mut events,
+    );
+    assert_eq!(
+        counters(&runner, land, &CounterType::Plus1Plus1),
+        1,
+        "an additional +1/+1 counter lands exactly once (CR 122.1)"
+    );
 }
 
 /// Set an exact counter count on an object via the live state (test setup).

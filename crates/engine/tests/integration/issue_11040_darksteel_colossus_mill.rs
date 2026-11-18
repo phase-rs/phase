@@ -1,6 +1,7 @@
 //! Regression for issue #11040: Darksteel Colossus milled from a library must
 //! be revealed and shuffled into its owner's library instead of going to the
-//! graveyard.
+//! graveyard, and non-self "from anywhere" graveyard redirects (Rest in Peace)
+//! must exile milled cards while functioning only from their host zones.
 //!
 //! https://github.com/phase-rs/phase/issues/11040
 //!
@@ -9,90 +10,163 @@
 //! shuffle it into its owner's library instead."
 //!
 //! CR 113.6b: "An ability that states which zones it functions in functions
-//! only from those zones." Since the card explicitly says "from anywhere",
-//! the replacement must function from all zones (Library, Hand, Battlefield,
-//! Stack, Exile, Command).
+//! only from those zones."
 //!
 //! CR 701.17a: "For a player to mill a number of cards, that player puts that
 //! many cards from the top of their library into their graveyard."
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
-use engine::types::mana::ManaCost;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
-const DARKSTEEL_COLOSSUS: &str = "Trample\nIndestructible\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.";
+const DARKSTEEL_COLOSSUS: &str = "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nIndestructible (Damage and effects that say \"destroy\" don't destroy this creature.)\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.";
 
 const TOME_SCOUR: &str = "Target player mills five cards.";
 
-/// Darksteel Colossus in library: Tome Scour mills it, replacement must
-/// trigger, reveal it, and shuffle it into its owner's library.
+const MIND_ROT: &str = "Target player discards two cards.";
+
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+
+fn floating_mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
+    (0..n)
+        .map(|_| ManaUnit::new(ty, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn tome_scour_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    }
+}
+
+fn mind_rot_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 2,
+    }
+}
+
+fn darksteel_colossus_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![],
+        generic: 11,
+    }
+}
+
+fn rest_in_peace_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White],
+        generic: 1,
+    }
+}
+
+/// Darksteel Colossus in library: Tome Scour mills it, so its self-replacement
+/// must function from the library, reveal Darksteel Colossus, and shuffle it
+/// into its owner's library while the other four milled cards reach the graveyard.
 #[test]
 fn darksteel_colossus_milled_from_library_shuffles_back() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // P1's library: Darksteel Colossus on top, then filler cards
-    // Create on battlefield first to parse Oracle text, then move to library
-    let colossus = scenario
-        .add_creature_from_oracle(P1, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
-        .id();
-    
+    // P1's library: 10 fillers underneath, then Darksteel Colossus on top (`library[0]`).
+    let mut fillers = Vec::new();
     for i in 0..10 {
-        scenario.add_card_to_library_top(P1, &format!("Filler {i}"));
+        fillers.push(scenario.add_card_to_library_top(P1, &format!("Filler {i}")));
     }
-
-    // P0 has Tome Scour to mill P1 (zero mana cost for auto-pay)
-    let tome_scour = scenario
-        .add_spell_to_hand_from_oracle(P0, "Tome Scour", /* is_instant */ false, TOME_SCOUR)
-        .with_mana_cost(ManaCost::zero())
+    let colossus = scenario
+        .add_spell_to_library_top(P1, "Darksteel Colossus", false)
+        .as_creature()
+        .as_artifact_creature()
+        .with_mana_cost(darksteel_colossus_cost())
+        .from_oracle_text_with_keywords(&["Trample", "Indestructible"], DARKSTEEL_COLOSSUS)
         .id();
+
+    let tome_scour = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tome Scour", false, TOME_SCOUR)
+        .with_mana_cost(tome_scour_cost())
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::Blue));
 
     let mut runner = scenario.build();
 
-    // Move Darksteel Colossus from battlefield to library top
-    let mut events = Vec::new();
-    move_object_for_test(
-        runner.state_mut(),
-        ZoneMoveRequest::effect(colossus, Zone::Library, colossus),
-        &mut events,
-    );
-    // Place on top of library
-    {
-        let state = runner.state_mut();
-        let player_state = state.players.iter_mut().find(|p| p.id == P1).expect("player exists");
-        player_state.library.retain(|&oid| oid != colossus);
-        player_state.library.insert(0, colossus);
-    }
-
-    // Verify initial state
     assert_eq!(runner.state().objects[&colossus].zone, Zone::Library);
-    assert_eq!(runner.state().players[1].library.len(), 11); // Colossus + 10 fillers
+    assert_eq!(runner.state().players[1].library.len(), 11);
+    assert_eq!(runner.state().players[1].library[0], colossus);
     assert!(runner.state().players[1].graveyard.is_empty());
 
-    // Verify the replacement definition was attached
-    let colossus_obj = &runner.state().objects[&colossus];
-    let repl = colossus_obj
+    let repl = runner.state().objects[&colossus]
         .replacement_definitions
         .as_slice()
         .iter()
-        .find(|d| d.event == engine::types::replacements::ReplacementEvent::Moved)
+        .find(|d| d.event == ReplacementEvent::Moved)
         .expect("Darksteel Colossus must carry a Moved replacement");
-    assert!(!repl.active_zones.is_empty(), "active_zones must be set for 'from anywhere'");
-    assert!(repl.active_zones.contains(&Zone::Library), "active_zones must include Library");
+    assert!(
+        repl.active_zones.contains(&Zone::Library),
+        "active_zones must include Library for 'from anywhere'"
+    );
 
-    // Cast Tome Scour targeting P1
-    let outcome = runner
-        .cast(tome_scour)
-        .target_player(P1)
-        .resolve();
+    let outcome = runner.cast(tome_scour).target_player(P1).resolve();
 
-    // Verify Darksteel Colossus was revealed and shuffled into library
-    let colossus_obj = &runner.state().objects[&colossus];
+    // Paid real mana cost.
+    assert!(
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::ManaExpended {
+                player_id,
+                amount_spent: 1,
+                ..
+            } if *player_id == P0
+        )),
+        "Tome Scour must spend its {{U}} mana cost"
+    );
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+
+    // Reveal post-replacement step (CR 701.20) must fire for Darksteel Colossus.
+    assert!(
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::CardsRevealed { card_ids, card_names, .. }
+                if card_ids.contains(&colossus)
+                    && card_names.iter().any(|n| n == "Darksteel Colossus")
+        )),
+        "Darksteel Colossus replacement must reveal Darksteel Colossus (CR 701.20); events: {:?}",
+        outcome.events()
+    );
+
+    // Shuffle post-replacement step (CR 701.24) must shuffle its owner's (P1's) library.
+    assert!(
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } if *player_id == P1
+        )),
+        "Darksteel Colossus replacement must shuffle P1's library (CR 701.24); events: {:?}",
+        outcome.events()
+    );
+    assert!(
+        !outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } if *player_id == P0
+        )),
+        "P0's library must not be shuffled"
+    );
+
+    // Darksteel Colossus ends in its owner's library, never in the graveyard.
     assert_eq!(
-        colossus_obj.zone,
+        runner.state().objects[&colossus].zone,
         Zone::Library,
         "Darksteel Colossus must shuffle into its owner's library instead of going to the graveyard"
     );
@@ -105,130 +179,239 @@ fn darksteel_colossus_milled_from_library_shuffles_back() {
         "Darksteel Colossus must end up in its owner's library"
     );
 
-    // Verify Tome Scour itself went to graveyard (normal resolution)
+    // Reach guard: the remaining 4 milled cards (top 4 fillers) went to P1's graveyard.
     assert_eq!(
-        outcome.zone_count(P0, Zone::Graveyard),
-        1,
-        "Tome Scour must reach its owner's graveyard on resolution"
+        runner.state().players[1].graveyard.len(),
+        4,
+        "4 filler cards should reach P1's graveyard (5 milled - 1 Colossus redirected)"
     );
+    assert_eq!(
+        runner.state().players[1].library.len(),
+        7,
+        "P1's library should have 7 cards remaining (11 - 4 milled fillers)"
+    );
+    // The bottommost 6 fillers stayed in the library (now shuffled).
+    assert!(fillers.iter().take(6).all(|id| {
+        runner.state().players[1].library.contains(id)
+            && !runner.state().players[1].graveyard.contains(id)
+    }));
 
-    // Verify game ends at priority
+    // Tome Scour resolved to P0's graveyard and left stack empty at Priority.
+    assert_eq!(runner.state().objects[&tome_scour].zone, Zone::Graveyard);
+    assert_eq!(outcome.zone_count(P0, Zone::Graveyard), 1);
+    assert!(runner.state().stack.is_empty());
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
-        "resolution should end at priority, not an unexpected prompt"
-    );
-
-    // Verify exactly 4 cards were milled (5 total - 1 Colossus that redirected)
-    let p1_graveyard_count = runner.state().players[1].graveyard.len();
-    assert_eq!(
-        p1_graveyard_count, 4,
-        "Exactly 4 filler cards should reach the graveyard (5 milled - 1 redirected)"
+        "resolution should end at priority, not {:?}",
+        outcome.final_waiting_for()
     );
 }
 
-/// Rest in Peace on battlefield: its "from anywhere" replacement must NOT
-/// apply to cards milled from library (non-self replacement; host is on
-/// battlefield, so default functioning zones are battlefield/command only).
-/// Positive control: Rest in Peace DOES apply when a card on the battlefield
-/// would go to the graveyard.
+/// Sibling off-battlefield path: Darksteel Colossus discarded from hand
+/// ("from anywhere") must also be revealed and shuffled into its owner's library.
 #[test]
-fn rest_in_peace_from_anywhere_does_not_apply_from_library_but_does_from_battlefield() {
-    const REST_IN_PEACE: &str = "When Rest in Peace enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
-
+fn darksteel_colossus_discarded_from_hand_shuffles_back() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Rest in Peace on P0's battlefield
-    let rip = scenario
-        .add_creature(P0, "Rest in Peace", 0, 0)
-        .as_enchantment()
-        .from_oracle_text(REST_IN_PEACE)
-        .id();
-
-    // P1's library: a creature to mill (on top), then filler cards
-    // Note: add_card_to_library_top adds to index 0 (top), so add fillers first, then victim
-    for i in 0..10 {
-        scenario.add_card_to_library_top(P1, &format!("Filler {i}"));
+    for i in 0..5 {
+        scenario.add_card_to_library_top(P1, &format!("Library Filler {i}"));
     }
-    let victim = scenario.add_card_to_library_top(P1, "Mill Victim");
-
-    // P0 has Tome Scour to mill P1 (zero mana cost for auto-pay)
-    let tome_scour = scenario
-        .add_spell_to_hand_from_oracle(P0, "Tome Scour", /* is_instant */ false, TOME_SCOUR)
-        .with_mana_cost(ManaCost::zero())
+    let hand_filler = scenario.add_card_to_hand(P1, "Hand Filler");
+    let colossus = scenario
+        .add_creature_to_hand_from_oracle(P1, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
+        .as_artifact_creature()
+        .with_mana_cost(darksteel_colossus_cost())
         .id();
+
+    let mind_rot = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mind Rot", false, MIND_ROT)
+        .with_mana_cost(mind_rot_cost())
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(3, ManaType::Black));
 
     let mut runner = scenario.build();
 
-    // Verify Rest in Peace is on battlefield
-    assert_eq!(runner.state().objects[&rip].zone, Zone::Battlefield);
+    let outcome = runner.cast(mind_rot).target_player(P1).resolve();
 
-    // Verify Rest in Peace's replacement has empty active_zones (non-self replacement)
-    let rip_obj = &runner.state().objects[&rip];
-    let rip_repl = rip_obj
-        .replacement_definitions
-        .as_slice()
-        .iter()
-        .find(|d| d.event == engine::types::replacements::ReplacementEvent::Moved)
-        .expect("Rest in Peace must carry a Moved replacement");
-    assert!(rip_repl.active_zones.is_empty(), "Rest in Peace (non-self) must have empty active_zones, got {:?}", rip_repl.active_zones);
-
-    // Cast Tome Scour targeting P1
-    let _outcome = runner
-        .cast(tome_scour)
-        .target_player(P1)
-        .resolve();
-
-    // The milled creature should go to GRAVEYARD, not exile
-    // (Rest in Peace's replacement functions only from battlefield/command)
-    let victim_obj = &runner.state().objects[&victim];
-    assert_eq!(
-        victim_obj.zone,
-        Zone::Graveyard,
-        "Rest in Peace's replacement must NOT apply from library (non-self replacement; host on battlefield)"
+    assert!(
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&colossus)
+        )),
+        "discarded Darksteel Colossus must be revealed"
     );
     assert!(
-        runner.state().players[1].graveyard.contains(&victim),
-        "Milled card must reach the graveyard when Rest in Peace is on battlefield"
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } if *player_id == P1
+        )),
+        "discarded Darksteel Colossus must shuffle P1's library"
     );
+    assert_eq!(runner.state().objects[&colossus].zone, Zone::Library);
+    assert!(runner.state().players[1].library.contains(&colossus));
+    assert!(runner.state().players[1].hand.is_empty());
+    assert_eq!(runner.state().objects[&hand_filler].zone, Zone::Graveyard);
     assert_eq!(
-        victim_obj.zone,
-        Zone::Graveyard,
-        "Milled card must NOT be exiled by Rest in Peace from library"
+        runner.state().players[1].graveyard,
+        vec![hand_filler].into()
     );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
 
-    // POSITIVE CONTROL: Sacrifice the victim from battlefield - Rest in Peace
-    // MUST apply here (host and affected object are both on battlefield)
-    let mut scenario2 = GameScenario::new();
-    scenario2.at_phase(Phase::PreCombatMain);
+/// Rest in Peace on the battlefield: its "from anywhere" replacement affects
+/// cards moving to a graveyard from ANY zone, including milled cards from a
+/// library and resolving spells from the stack.
+#[test]
+fn rest_in_peace_on_battlefield_exiles_cards_milled_from_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
 
-    let _rip2 = scenario2
-        .add_creature(P0, "Rest in Peace", 0, 0)
-        .as_enchantment()
-        .from_oracle_text(REST_IN_PEACE)
+    let rip = scenario
+        .add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE)
+        .with_mana_cost(rest_in_peace_cost())
         .id();
 
-    let victim2 = scenario2.add_creature(P1, "Sacrifice Victim", 2, 2).id();
+    let bottom_card = scenario.add_card_to_library_top(P1, "Bottom Card");
+    let mut top_five = Vec::new();
+    for i in 0..5 {
+        top_five.push(scenario.add_card_to_library_top(P1, &format!("Milled {i}")));
+    }
 
-    let mut runner2 = scenario2.build();
+    let tome_scour = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tome Scour", false, TOME_SCOUR)
+        .with_mana_cost(tome_scour_cost())
+        .id();
+    scenario.with_mana_pool(P0, floating_mana(1, ManaType::Blue));
 
-    // Sacrifice the creature (move from battlefield to graveyard)
-    let mut events = Vec::new();
-    engine::game::zone_pipeline::move_object_for_test(
-        runner2.state_mut(),
-        engine::game::zone_pipeline::ZoneMoveRequest::effect(victim2, Zone::Graveyard, victim2),
-        &mut events,
-    );
+    let mut runner = scenario.build();
 
-    // The creature should be EXILED by Rest in Peace
-    let victim2_obj = &runner2.state().objects[&victim2];
-    assert_eq!(
-        victim2_obj.zone,
-        Zone::Exile,
-        "Rest in Peace's replacement MUST apply from battlefield (positive control)"
-    );
+    assert_eq!(runner.state().objects[&rip].zone, Zone::Battlefield);
+
+    let outcome = runner.cast(tome_scour).target_player(P1).resolve();
+
     assert!(
-        !runner2.state().players[1].graveyard.contains(&victim2),
-        "Sacrificed creature must NOT reach the graveyard when Rest in Peace is on battlefield"
+        outcome.events().iter().any(|e| matches!(
+            e,
+            GameEvent::ManaExpended {
+                player_id,
+                amount_spent: 1,
+                ..
+            } if *player_id == P0
+        )),
+        "Tome Scour must spend its {{U}} mana cost"
     );
+
+    // Every milled card must be exiled, not put into P1's graveyard.
+    for id in &top_five {
+        assert_eq!(
+            runner.state().objects[id].zone,
+            Zone::Exile,
+            "Rest in Peace on battlefield must exile milled card {}",
+            id.0
+        );
+    }
+    assert!(
+        runner.state().players[1].graveyard.is_empty(),
+        "no milled card may reach P1's graveyard while Rest in Peace is on the battlefield"
+    );
+    assert_eq!(
+        runner.state().players[1].library,
+        vec![bottom_card].into(),
+        "reach guard: exactly 5 cards were milled from P1's library"
+    );
+
+    // Resolving Tome Scour itself from the stack is also exiled instead of going to P0's graveyard.
+    assert_eq!(runner.state().objects[&tome_scour].zone, Zone::Exile);
+    assert!(runner.state().players[0].graveyard.is_empty());
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 113.6 + CR 113.6b: Rest in Peace's replacement affects cards moving from
+/// anywhere, NOT where Rest in Peace itself functions. When Rest in Peace is
+/// in its owner's hand or library (rather than the battlefield), it must have
+/// empty `active_zones` and must NOT exile milled cards.
+#[test]
+fn rest_in_peace_in_hand_or_library_does_not_exile_milled_cards() {
+    for host_zone in [Zone::Hand, Zone::Library] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let rip = match host_zone {
+            Zone::Hand => scenario
+                .add_enchantment_to_hand_from_oracle(P0, "Rest in Peace", REST_IN_PEACE)
+                .with_mana_cost(rest_in_peace_cost())
+                .id(),
+            Zone::Library => scenario
+                .add_spell_to_library_top(P0, "Rest in Peace", false)
+                .as_enchantment()
+                .with_mana_cost(rest_in_peace_cost())
+                .from_oracle_text(REST_IN_PEACE)
+                .id(),
+            other => panic!("unexpected host zone {other:?}"),
+        };
+
+        let bottom_card = scenario.add_card_to_library_top(P1, "Bottom Card");
+        let mut top_five = Vec::new();
+        for i in 0..5 {
+            top_five.push(scenario.add_card_to_library_top(P1, &format!("Milled {i}")));
+        }
+
+        let tome_scour = scenario
+            .add_spell_to_hand_from_oracle(P0, "Tome Scour", false, TOME_SCOUR)
+            .with_mana_cost(tome_scour_cost())
+            .id();
+        scenario.with_mana_pool(P0, floating_mana(1, ManaType::Blue));
+
+        let mut runner = scenario.build();
+
+        assert_eq!(runner.state().objects[&rip].zone, host_zone);
+        let rip_repl = runner.state().objects[&rip]
+            .replacement_definitions
+            .as_slice()
+            .iter()
+            .find(|d| d.event == ReplacementEvent::Moved)
+            .expect("Rest in Peace must carry a Moved replacement");
+        assert!(
+            rip_repl.active_zones.is_empty(),
+            "non-self replacement must keep empty active_zones (CR 113.6b), got {:?}",
+            rip_repl.active_zones
+        );
+
+        let outcome = runner.cast(tome_scour).target_player(P1).resolve();
+
+        // With Rest in Peace off the battlefield, all 5 milled cards reach P1's graveyard.
+        for id in &top_five {
+            assert_eq!(
+                runner.state().objects[id].zone,
+                Zone::Graveyard,
+                "milled card must reach graveyard when Rest in Peace is in {host_zone:?}"
+            );
+        }
+        assert_eq!(runner.state().players[1].graveyard.len(), 5);
+        assert_eq!(runner.state().players[1].library, vec![bottom_card].into());
+        assert!(
+            runner.state().exile.is_empty(),
+            "nothing may be exiled when Rest in Peace is in {host_zone:?}"
+        );
+        assert_eq!(runner.state().objects[&tome_scour].zone, Zone::Graveyard);
+        assert_eq!(outcome.zone_count(P0, Zone::Graveyard), 1);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+    }
 }
