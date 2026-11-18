@@ -792,7 +792,10 @@ fn render_net_effect_carrier_census() {
     // 240 = base 237 + `Effect::CreateCardCopyByName` (Garth One-Eye) + `Effect::HordePlayCard` (Turtle Team-Up; bare-`u32`
     // payload, reaches no `description`, so no RENDER_DESCEND arm) +
     // `Effect::AbandonScheme` (CR 701.33b; fieldless, reaches no `description`).
-    const EFFECT_VARIANT_PIN: usize = 240;
+    // 241: + `Effect::ResumeDamageBatch` (internal paused damage batch; its portions carry
+    // `DamageContextSnapshot`, `TargetRef`, `ObjectId` and `EffectKind`, none of which reaches a
+    // `description`, so no RENDER_DESCEND arm).
+    const EFFECT_VARIANT_PIN: usize = 241;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),

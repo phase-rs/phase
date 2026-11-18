@@ -17,6 +17,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::format::FormatConfig;
+use crate::types::game_state::PostReplacementDrainStack;
 use crate::types::game_state::{
     ActionResult, CastPaymentMode, CastingVariant, PendingCast, ProductionOverride,
     TargetSelectionProgress, WaitingFor,

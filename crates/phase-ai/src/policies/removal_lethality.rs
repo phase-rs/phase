@@ -302,7 +302,8 @@ pub(crate) fn pending_damage_to_object(
             Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::DamageAll { .. }
-            | Effect::ApplyPostReplacementDamage { .. } => return PendingDamage::Unresolved,
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. } => return PendingDamage::Unresolved,
             _ => {}
         }
     }
