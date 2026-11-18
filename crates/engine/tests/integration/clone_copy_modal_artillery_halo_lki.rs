@@ -1,14 +1,15 @@
-//! Clone-copy Marath modal-damage LKI source-name regression (F1 modal pin).
+//! Clone-copy Marath modal-damage LKI source-name regression.
 //!
-//! CR 113.7a + CR 602.2a + CR 602.2b + CR 608.2h + CR 400.7 + CR 702.16e: a
-//! modal activated ability pins its announcement-time source incarnation over
-//! the whole chained ability graph at the `engine_modes.rs` seam. A Clone
+//! CR 113.7a + CR 602.2b + CR 608.2h + CR 400.7 + CR 702.16e: the damage of a
+//! modal activated ability reads its departed source through the exit snapshot
+//! of the source incarnation the ability is pinned to
+//! (`deal_damage::damage_context_from_ability`). A Clone
 //! copying Marath, Will of the Wild IS named "Marath, Will of the Wild" on
 //! the battlefield; after it is Murdered in response to its own modal damage
 //! activation, the live graveyard object reads printed "Clone". A Runed Halo
 //! naming "Marath, Will of the Wild" must still prevent the departed copy's
-//! damage via its exit-LKI name, while the unpinned (`None` modal latch)
-//! regime reads live "Clone" and lets it through.
+//! damage via its exit-LKI name; a read with no pinned incarnation sees live
+//! "Clone" and lets it through.
 //!
 //! Oracle texts (verbatim):
 //! - Marath, Will of the Wild: "Marath enters with a number of +1/+1 counters on it equal to the amount of mana spent to cast it.\n{X}, Remove X +1/+1 counters from Marath: Choose one —\n• Put X +1/+1 counters on target creature. X can't be 0.\n• Marath deals X damage to any target. X can't be 0.\n• Create an X/X green Elemental creature token. X can't be 0."
@@ -25,9 +26,9 @@
 //! redirects the hit to themself with Jade Monolith (choosing the still
 //! alive copy as the source), and P0 Murders the copy in response. The
 //! modal resolves: redirected to the Halo-protected P0 and prevented via
-//! the exit-LKI name. (P0,P1) is (20,20) with the modal pin and (18,20)
-//! with the modal pin neutralized back to today's `None` modal state; the
-//! unprotected control (Halo naming "Grizzly Bears") takes the redirected 2.
+//! the exit-LKI name. (P0,P1) is (20,20) with the incarnation-pinned read and
+//! (18,20) when that read is given `None`; the unprotected control (Halo
+//! naming "Grizzly Bears") takes the redirected 2.
 
 use std::sync::Arc;
 
@@ -505,8 +506,8 @@ fn run_clone_marath_modal_redirect(halo_name: &str) -> (i32, i32) {
 
     // 11. The modal ability resolves: the Monolith redirect reroutes the X=2
     // from the Bears to P0, and the Halo prevents it when the departed
-    // source reads "Marath, Will of the Wild" (exit-LKI via the modal pin)
-    // but not when it reads live "Clone" (pin neutralized). Replacement
+    // source reads "Marath, Will of the Wild" (its pinned incarnation's exit
+    // snapshot) but not when it reads live "Clone". Replacement
     // candidates are always exactly the applicable ones, so answering the
     // first each time cannot mis-order: prevention is inapplicable until
     // the redirect makes P0 the recipient.
@@ -564,9 +565,15 @@ fn run_clone_marath_modal_redirect(halo_name: &str) -> (i32, i32) {
 /// CR 602.2b + CR 702.16e: with Halo naming "Marath, Will of the Wild"
 /// (established through its real as-enters prompt before anything targeted),
 /// the departed Clone-copy's modal damage — announced at the unprotected
-/// Bears, redirected to P0 — is prevented via its exit-LKI name. Fails with
-/// P0 at 18 when the modal pin is neutralized back to today's `None` modal
-/// state.
+/// Bears, redirected to P0 — is prevented via its exit-LKI name.
+///
+/// Production dependency: `deal_damage::damage_context_from_ability` hands
+/// the ability's pinned source incarnation (`announced_source_incarnation`,
+/// else `source_incarnation`) to `damage_context_for_subject`, which reads the
+/// departed copy's exit snapshot for that exact incarnation (CR 608.2h +
+/// CR 400.7). Passing `None` there instead makes this row fail with P0 at 18:
+/// the source then reads as the card now in the graveyard ("Clone"), which
+/// Halo's chosen name does not cover.
 #[test]
 fn clone_copy_marath_modal_redirect_prevents_via_exit_lki() {
     assert_eq!(

@@ -75,22 +75,6 @@ pub(super) fn handle_ability_mode_choice(
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;
     resolved.selected_mode_labels = selected_mode_labels(&modal.mode_descriptions, &indices);
-    // CR 113.7a + CR 602.2a + CR 602.2b + CR 608.2h + CR 400.7: pin the
-    // activation-time source identity (id + announcement incarnation) over the
-    // whole modal chain, mirroring the non-modal seam in `casting.rs`.
-    // Trigger modals take the `None` arm of `activated_ability_index` and
-    // never enter. The `if let Some(source)` guard keeps today's `None`
-    // degradation when the source departed mid-prompt. This runs pre-prompt;
-    // `record_activation_announcement` (below, post-mode-choice, still
-    // pre-cost) keeps this earliest capture via its never-overwrite guard,
-    // and `source_incarnation` is left for the stack push (review: modal
-    // ordering matches the non-modal two-epoch rule).
-    if activated_ability_index.is_some() {
-        if let Some(source) = state.objects.get(&source_id) {
-            let incarnation = source.incarnation;
-            resolved.set_departure_pin_recursive(source_id, incarnation);
-        }
-    }
 
     let waiting_for = if let Some(ability_index) = activated_ability_index {
         handle_activated_mode_choice(
