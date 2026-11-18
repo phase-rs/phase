@@ -242,74 +242,79 @@ fn confirmed_misparse_each_class_changes_both_coverage_authorities() {
 }
 
 /// Every face is compared; printed-name collisions cannot collapse rows.
-fn compare_population(raw: &Map<String, Value>, list: &ConfirmedMisparses, label: &str) {
+fn compare_population(raw: &Map<String, Value>, populations: &[(&ConfirmedMisparses, &str)]) {
     let baseline = database(&stamped_export(raw, &ConfirmedMisparses::empty()));
     let before = report(&baseline);
     drop(baseline);
-    let marked = database(&stamped_export(raw, list));
-    let after = report(&marked);
     assert_eq!(before.len(), raw.len());
-    assert_eq!(after.len(), before.len());
-    let mut previously_supported = 0;
-    let mut already_unsupported = 0;
-    let mut classes = BTreeMap::new();
-    for (key, original) in &before {
-        let changed = &after[key];
-        assert_eq!(
-            serde_json::to_value(&original.parse_details).unwrap(),
-            serde_json::to_value(&changed.parse_details).unwrap(),
-            "parse details: {key}"
-        );
-        if let Some(class) = list.class_of(key) {
-            *classes.entry(class).or_insert(0usize) += 1;
-            assert!(!changed.supported, "listed {key}");
-            let mut expected = handlers(original);
-            expected.push(class.handler());
-            expected.sort_unstable();
-            expected.dedup();
-            assert_eq!(handlers(changed), expected, "listed gaps: {key}");
-            assert!(
-                card_face_gaps(marked.get_face_by_name(key).unwrap())
-                    .iter()
-                    .any(|gap| gap == class.handler()),
-                "face gaps: {key}"
-            );
-            if original.supported {
-                previously_supported += 1;
-            } else {
-                already_unsupported += 1;
-            }
-        } else {
+    for &(list, label) in populations {
+        let marked = database(&stamped_export(raw, list));
+        let after = report(&marked);
+        assert_eq!(after.len(), before.len());
+        let mut previously_supported = 0;
+        let mut already_unsupported = 0;
+        let mut classes = BTreeMap::new();
+        for (key, original) in &before {
+            let changed = &after[key];
             assert_eq!(
-                serde_json::to_value(original).unwrap(),
-                serde_json::to_value(changed).unwrap(),
-                "unlisted {key}"
+                serde_json::to_value(&original.parse_details).unwrap(),
+                serde_json::to_value(&changed.parse_details).unwrap(),
+                "parse details: {key}"
             );
+            if let Some(class) = list.class_of(key) {
+                *classes.entry(class).or_insert(0usize) += 1;
+                assert!(!changed.supported, "listed {key}");
+                let mut expected = handlers(original);
+                expected.push(class.handler());
+                expected.sort_unstable();
+                expected.dedup();
+                assert_eq!(handlers(changed), expected, "listed gaps: {key}");
+                assert!(
+                    card_face_gaps(marked.get_face_by_name(key).unwrap())
+                        .iter()
+                        .any(|gap| gap == class.handler()),
+                    "face gaps: {key}"
+                );
+                if original.supported {
+                    previously_supported += 1;
+                } else {
+                    already_unsupported += 1;
+                }
+            } else {
+                assert_eq!(
+                    serde_json::to_value(original).unwrap(),
+                    serde_json::to_value(changed).unwrap(),
+                    "unlisted {key}"
+                );
+            }
         }
+        assert!(!list.is_empty(), "{label}: population must be nonempty");
+        assert!(
+            previously_supported + already_unsupported > 0,
+            "{label}: listed-present witness"
+        );
+        assert!(
+            previously_supported > 0,
+            "{label}: real false-green witness"
+        );
+        eprintln!("{label}: F={previously_supported} U={already_unsupported} per_class={classes:?} compared={}", before.len());
     }
-    assert!(!list.is_empty(), "{label}: population must be nonempty");
-    assert!(
-        previously_supported + already_unsupported > 0,
-        "{label}: listed-present witness"
-    );
-    assert!(
-        previously_supported > 0,
-        "{label}: real false-green witness"
-    );
-    eprintln!("{label}: F={previously_supported} U={already_unsupported} per_class={classes:?} compared={}", before.len());
 }
 
 #[test]
 fn confirmed_misparse_fixture_population_and_unlisted_invariance() {
     compare_population(
         fixture(),
-        &one_row("lightning bolt", MisparseClass::WrongCount),
-        "fixture constructed population",
-    );
-    compare_population(
-        fixture(),
-        ConfirmedMisparses::committed(),
-        "fixture committed population",
+        &[
+            (
+                &one_row("lightning bolt", MisparseClass::WrongCount),
+                "fixture constructed population",
+            ),
+            (
+                ConfirmedMisparses::committed(),
+                "fixture committed population",
+            ),
+        ],
     );
 }
 
@@ -320,13 +325,16 @@ fn confirmed_misparse_full_export_population_and_unlisted_invariance() {
     };
     compare_population(
         raw,
-        &one_row("lightning bolt", MisparseClass::WrongCount),
-        "full export constructed population",
-    );
-    compare_population(
-        raw,
-        ConfirmedMisparses::committed(),
-        "full export committed population",
+        &[
+            (
+                &one_row("lightning bolt", MisparseClass::WrongCount),
+                "full export constructed population",
+            ),
+            (
+                ConfirmedMisparses::committed(),
+                "full export committed population",
+            ),
+        ],
     );
 }
 

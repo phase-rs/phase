@@ -2322,6 +2322,7 @@ fn a_printed_option_through_a_blitz_only_permission_is_refused() {
         panic!("expected the casting menu, got {waiting:?}");
     };
     options.push(engine::types::game_state::CastingVariantChoiceOption {
+        alternative_cost_keyword: None,
         variant: engine::types::game_state::CastingVariant::GraveyardPermission {
             source: dog,
             frequency: CastFrequency::Unlimited,

@@ -1412,6 +1412,12 @@ export interface CastingVariantChoiceOption {
    * under. Present for every cast through a graveyard-cast permission.
    */
   authority?: CastAuthorityChoice | null;
+  /**
+   * CR 113.2c + CR 601.2b: the keyword instance whose alternative cost this
+   * option pays (Deep Analysis' printed flashback or Lier's granted one).
+   * Engine-authored; absent for options with no instance to elect.
+   */
+  alternative_cost_keyword?: Keyword | null;
 }
 
 /** CR 601.2a: one graveyard-cast permission grant: its source and the grant on it. */
@@ -2620,6 +2626,10 @@ export interface PendingCast {
   // "Option::is_none")]` — absent for spells, automatic activations and a
   // manual activation that has not reached its announcement.
   activation_phyrexian_intent?: ActivationPhyrexianIntent;
+  // CR 113.2c + CR 601.2b: the alternative-cost keyword instance elected for
+  // this cast. `#[serde(default, skip_serializing_if = "Option::is_none")]` —
+  // absent when the cast elected no instance.
+  alternative_cost_keyword?: Keyword | null;
 }
 
 /// CR 107.4f + CR 118.13a: how one Phyrexian-shaped symbol of an activation's
