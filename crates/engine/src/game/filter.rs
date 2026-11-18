@@ -34,8 +34,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
+    AttackDeclarationRecord, CounterAddedRecord, DamageEventKey, DamageRecord, GameState,
+    LKISnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -6813,6 +6813,35 @@ pub fn matches_target_filter_on_attack_declaration_record(
         ctx.ability_targets,
         HeldObject::Detached,
     )
+}
+
+/// CR 120.1 + CR 400.7: The `DamageRecord` written for one damage event — the
+/// same source incarnation, recipient, amount, and combat class. The newest
+/// matching row wins, so a repeated identical event (a double-strike source
+/// hitting the same player twice) reads its own row. `None` when no row was
+/// written (zero damage dealt, CR 120.3) or the event did not come from the
+/// damage pipeline. The join is `DamageEventKey`, the same five-field identity
+/// `DamageRecord::matches_damage_event` uses.
+pub fn damage_record_for_event<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    target: &TargetRef,
+    amount: u32,
+    is_combat: bool,
+) -> Option<&'a DamageRecord> {
+    let key = DamageEventKey {
+        source_id,
+        source_incarnation,
+        target: target.clone(),
+        amount,
+        is_combat,
+    };
+    state
+        .damage_dealt_this_turn
+        .iter()
+        .rev()
+        .find(|record| record.event_key() == key)
 }
 
 /// CR 120.9 + CR 608.2i + CR 608.2h: Check whether a per-turn combat-damage

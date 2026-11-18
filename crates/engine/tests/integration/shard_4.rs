@@ -185,6 +185,7 @@ mod issue_9282_counter_stack_referent;
 mod issue_934_ring_goes_south;
 mod issue_9377_hidden_identity_side_tables;
 mod issue_9505_exile_origin_fail_closed;
+mod issue_9637_damage_source_event_snapshot;
 mod issue_9657_enters_with_counter_type;
 mod issue_9658_enters_with_whole_line_claim;
 mod issue_9660_where_x_substitutes_count;
