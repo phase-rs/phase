@@ -70,6 +70,10 @@ split-debuginfo = "unpacked"
 [profile.dev.package.libmimalloc-sys]
 opt-level = 2
 
+# The fixture cache checksums its whole file in every test process.
+[profile.dev.package.crc32fast]
+opt-level = 3
+
 [profile.test]
 inherits = "dev"
 codegen-units = 256

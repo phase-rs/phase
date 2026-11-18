@@ -413,6 +413,7 @@ mod wedding_ring_etb_token_copy;
 mod weeping_angel_combat_prevention;
 mod welcome_the_dead;
 mod well_of_lost_dreams_may_pay_x;
+mod werewolf_last_turn_spells;
 mod wernog_riders_chaplain_investigate_count;
 mod wheel_and_deal;
 mod wheel_of_misfortune_secret_numbers;
