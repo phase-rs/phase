@@ -46,7 +46,9 @@ use crate::types::proposed_event::TokenAttackRequest;
 /// untargeted `TargetOnly` chooser, whose pick is the whole choice (CR 115.10a).
 /// A `Stack`-timed `TargetOnly` is an ordinary wrapper and keeps the forward.
 fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
-    use crate::types::ability::{Effect, TargetChoiceTiming, TargetFilter, ZoneChoiceCandidateSource};
+    use crate::types::ability::{
+        Effect, TargetChoiceTiming, TargetFilter, ZoneChoiceCandidateSource,
+    };
     let result = !matches!(
         chain.effect,
         Effect::PutCounter { .. } | Effect::ChooseCounterKind { .. }
@@ -70,7 +72,10 @@ fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
         chain.effect,
         Effect::ChangeZone { target: TargetFilter::ParentTarget, .. }
     );
-    eprintln!("DEBUG continuation_forwards_unchosen_complement: effect={:?}, result={}", chain.effect, result);
+    eprintln!(
+        "DEBUG continuation_forwards_unchosen_complement: effect={:?}, result={}",
+        chain.effect, result
+    );
     result
 }
 
@@ -6370,7 +6375,10 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            eprintln!("DEBUG ChooseFromZoneChoice: chosen={:?}, cards={:?}, count={}, up_to={}", chosen, cards, count, up_to);
+            eprintln!(
+                "DEBUG ChooseFromZoneChoice: chosen={:?}, cards={:?}, count={}, up_to={}",
+                chosen, cards, count, up_to
+            );
 
             if matches!(reciprocal_role, Some(ReciprocalZoneChoiceRole::Produce)) {
                 let first = *chosen.first().ok_or_else(|| {

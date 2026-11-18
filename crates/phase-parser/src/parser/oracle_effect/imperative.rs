@@ -4727,27 +4727,30 @@ fn parse_hand_reveal_target_and_card_filter(
             || after_quantifier.starts_with("all ")
         {
             // "any number of <filter> cards in/from" or "all <filter> cards in/from"
-            terminated(
+            let Ok((hand_phrase, descriptor)) = terminated(
                 take_until::<_, _, OracleError<'_>>(" cards"),
                 alt((
                     tag::<_, _, OracleError<'_>>(" cards in "),
                     tag(" cards from "),
                 )),
             )
-            .parse(after_quantifier)
+            .parse(after_quantifier) else {
+                return (TargetFilter::Any, TargetFilter::None, cardinality);
+            };
+            (hand_phrase, descriptor)
         } else {
             // "each <filter> card in/from"
-            terminated(
+            let Ok((hand_phrase, descriptor)) = terminated(
                 take_until::<_, _, OracleError<'_>>(" card"),
                 alt((
                     tag::<_, _, OracleError<'_>>(" card in "),
                     tag(" card from "),
                 )),
             )
-            .parse(after_quantifier)
-        };
-        let Ok((hand_phrase, descriptor)) = (hand_phrase, descriptor) else {
-            return (TargetFilter::Any, TargetFilter::None, cardinality);
+            .parse(after_quantifier) else {
+                return (TargetFilter::Any, TargetFilter::None, cardinality);
+            };
+            (hand_phrase, descriptor)
         };
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)

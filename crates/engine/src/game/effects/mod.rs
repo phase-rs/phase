@@ -15240,7 +15240,10 @@ fn resolve_legacy_effect(
         Effect::PumpAll { .. } => pump::resolve_all(state, ability, events),
         Effect::DestroyAll { .. } => destroy::resolve_all(state, ability, events),
         Effect::ChangeZone { .. } => {
-            eprintln!("DEBUG mod.rs: ChangeZone resolve, ability.source_id={:?}, effect={:?}", ability.source_id, ability.effect);
+            eprintln!(
+                "DEBUG mod.rs: ChangeZone resolve, ability.source_id={:?}, effect={:?}",
+                ability.source_id, ability.effect
+            );
             return change_zone::resolve(state, ability, events);
         }
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),

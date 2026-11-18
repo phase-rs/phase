@@ -18,7 +18,12 @@ const THOUGHT_RATTLE: &str = "Target opponent reveals each nonland card in their
 
 fn print_ability_chain(def: &engine::types::ability::AbilityDefinition, indent: usize) {
     let prefix = "  ".repeat(indent);
-    eprintln!("{}effect={:?}, sub_ability={}", prefix, def.effect, def.sub_ability.is_some());
+    eprintln!(
+        "{}effect={:?}, sub_ability={}",
+        prefix,
+        def.effect,
+        def.sub_ability.is_some()
+    );
     if let Some(sub) = &def.sub_ability {
         print_ability_chain(sub, indent + 1);
     }
@@ -78,7 +83,10 @@ fn thought_rattle_single_choose_prompt_then_exile() {
     if let Some(obj) = runner.state().objects.get(&rattle) {
         eprintln!("DEBUG: rattle abilities = {:?}", obj.abilities.len());
         for (i, def) in obj.abilities.iter().enumerate() {
-            eprintln!("DEBUG: ability {}: kind={:?}, effect={:?}", i, def.kind, def.effect);
+            eprintln!(
+                "DEBUG: ability {}: kind={:?}, effect={:?}",
+                i, def.kind, def.effect
+            );
             print_ability_chain(def, 0);
         }
     }
@@ -106,23 +114,36 @@ fn thought_rattle_single_choose_prompt_then_exile() {
             _ => None,
         })
         .expect("CardsRevealed event must be emitted");
-    assert_eq!(revealed_event.len(), 2, "exactly two nonland cards revealed");
+    assert_eq!(
+        revealed_event.len(),
+        2,
+        "exactly two nonland cards revealed"
+    );
     assert!(revealed_event.contains(&bolt) && revealed_event.contains(&bear));
-    assert!(!revealed_event.contains(&land), "land must not be in CardsRevealed");
+    assert!(
+        !revealed_event.contains(&land),
+        "land must not be in CardsRevealed"
+    );
 
     // Now we should be at ChooseFromZoneChoice
     match runner.state().waiting_for.clone() {
         WaitingFor::ChooseFromZoneChoice { cards, player, .. } => {
             assert_eq!(player, P0);
             assert!(cards.contains(&bolt) && cards.contains(&bear));
-            assert!(!cards.contains(&land), "lands are not offered to ChooseFromZoneChoice");
+            assert!(
+                !cards.contains(&land),
+                "lands are not offered to ChooseFromZoneChoice"
+            );
         }
         other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
     }
 
     // While the choice is open, the controller's filtered view must not reveal the land.
     let controller_view = filter_state_for_viewer(runner.state(), P0);
-    let land_obj = controller_view.objects.get(&land).expect("land exists in view");
+    let land_obj = controller_view
+        .objects
+        .get(&land)
+        .expect("land exists in view");
     assert_eq!(
         land_obj.name, "Hidden Card",
         "viewer-filtered state must conceal the land while choice is open"
@@ -133,21 +154,32 @@ fn thought_rattle_single_choose_prompt_then_exile() {
         .act(GameAction::SelectCards { cards: vec![bear] })
         .expect("choose the bear");
     all_events.extend(choose_result.events);
-    
+
     // Check zones immediately after choice
-    eprintln!("DEBUG after choice: bear zone={:?}, bolt zone={:?}, land zone={:?}", 
+    eprintln!(
+        "DEBUG after choice: bear zone={:?}, bolt zone={:?}, land zone={:?}",
         runner.state().objects[&bear].zone,
         runner.state().objects[&bolt].zone,
-        runner.state().objects[&land].zone);
+        runner.state().objects[&land].zone
+    );
 
     // Pass priority to finish resolution
     for i in 0..10 {
-        eprintln!("DEBUG priority pass {}: waiting_for={:?}", i, runner.state().waiting_for);
+        eprintln!(
+            "DEBUG priority pass {}: waiting_for={:?}",
+            i,
+            runner.state().waiting_for
+        );
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
                 if let Ok(result) = runner.act(GameAction::PassPriority) {
                     all_events.extend(result.events);
-                    eprintln!("DEBUG after pass {}: bear zone={:?}, bolt zone={:?}", i, runner.state().objects[&bear].zone, runner.state().objects[&bolt].zone);
+                    eprintln!(
+                        "DEBUG after pass {}: bear zone={:?}, bolt zone={:?}",
+                        i,
+                        runner.state().objects[&bear].zone,
+                        runner.state().objects[&bolt].zone
+                    );
                 } else {
                     break;
                 }
@@ -164,7 +196,7 @@ fn thought_rattle_single_choose_prompt_then_exile() {
         }
     }
 
-// Verify final state
+    // Verify final state
     let bear_zone = runner.state().objects[&bear].zone;
     let bolt_zone = runner.state().objects[&bolt].zone;
     eprintln!("bear zone: {:?}, bolt zone: {:?}", bear_zone, bolt_zone);
