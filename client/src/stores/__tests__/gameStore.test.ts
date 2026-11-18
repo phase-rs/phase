@@ -329,7 +329,7 @@ describe("gameStore", () => {
       adapter.submitAction.mock.invocationCallOrder[0],
     );
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
-    expect(useGameStore.getState().stateHistory[0]).toEqual(envelope);
+    expect(useGameStore.getState().stateHistory[0]).toEqual({ state: envelope, logSeq: 0 });
   });
 
   it("dispatch drops the checkpoint when the session turns over mid-flight", async () => {
@@ -460,7 +460,7 @@ describe("gameStore", () => {
     // Set stateHistory but no adapter
     act(() => {
       useGameStore.setState({
-        stateHistory: [buildGameState()],
+        stateHistory: [{ state: buildGameState(), logSeq: 0 }],
         adapter: null,
       });
     });
@@ -527,7 +527,7 @@ describe("gameStore", () => {
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     act(() => {
-      useGameStore.setState({ stateHistory: [state1], gameMode: "p2p-host" });
+      useGameStore.setState({ stateHistory: [{ state: state1, logSeq: 0 }], gameMode: "p2p-host" });
     });
 
     await act(() => useGameStore.getState().undo());
@@ -547,7 +547,7 @@ describe("gameStore", () => {
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     act(() => {
-      useGameStore.setState({ stateHistory: [state1], gameMode: "native-ai" });
+      useGameStore.setState({ stateHistory: [{ state: state1, logSeq: 0 }], gameMode: "native-ai" });
     });
 
     await act(() => useGameStore.getState().undo());
