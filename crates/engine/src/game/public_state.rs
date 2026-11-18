@@ -524,6 +524,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::MulliganStarted
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
+            | GameEvent::AbilityTriggered { .. }
             | GameEvent::StackResolved { .. }
             // CR 714.2: a notification consumed by triggers only; the chapter
             // ability's own effects dirty whatever display state they touched.

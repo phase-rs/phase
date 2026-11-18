@@ -12,6 +12,7 @@ mod aang_compound_tail;
 mod aang_journey_partial_fail_to_find_2722;
 mod ability_block_display_clone_gate;
 mod ability_cost_block_readout;
+mod ability_triggered_observer;
 mod abundance_optional_draw_replacement;
 mod acceptable_losses_restore;
 mod accursed_witch_dies_return_anaphor;
