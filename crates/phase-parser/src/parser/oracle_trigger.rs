@@ -75,6 +75,7 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     indicated_action_commit, optional_addressee_is_always_controller, CardPlayMode,
     CastFromZoneDriver, IndicatedActionCommit,
@@ -5115,7 +5116,7 @@ fn constraint_counts_per_definition(constraint: &TriggerConstraint) -> bool {
 /// or the first Otter spell other than ~ you've cast this turn". Each disjunct
 /// binds the triggering spell to its type AND to the ordinal-of-type count via a
 /// composed `And(TriggeringSpellMatchesFilter(filter),
-/// QuantityComparison(SpellsCastThisTurn{Controller, filter} == ordinal))`,
+/// QuantityComparison(SpellsCast{Controller, filter} == ordinal))`,
 /// collected into `TriggerCondition::Or`. Requires >= 2 disjuncts so a
 /// single-disjunct card (Vengevine, the NthSpellThisTurn constraint class) falls
 /// through to the untouched fire-time `TriggerConstraint::NthSpellThisTurn` path.
@@ -5159,7 +5160,7 @@ fn parse_disjunctive_first_spell_intervening_if<'a>(
 /// exclusion emits `Not(Named{card_name})` on the filter — the oracle normalizes
 /// the card's own name to "~", and spell-history / spell-object name matching
 /// keys on the full card name (CR 201.2). The same filter appears in both the
-/// `TriggeringSpellMatchesFilter` anchor and the `SpellsCastThisTurn` count.
+/// `TriggeringSpellMatchesFilter` anchor and the `SpellsCast` count.
 fn parse_first_spell_disjunct<'a>(
     input: &'a str,
     card_name: &str,
@@ -5189,9 +5190,10 @@ fn parse_first_spell_disjunct<'a>(
             },
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(filter),
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -8598,7 +8600,7 @@ fn extract_if_condition_with_card_name(
     // CR 601.2a + CR 603.4: disjunctive "if it's the first [type] spell, the first
     // [type] spell, or the first [type] spell other than ~ you've cast this turn"
     // intervening-if (Alania, Divergent Storm). Each disjunct lowers to
-    // And(TriggeringSpellMatchesFilter(type), SpellsCastThisTurn{You,type} == n),
+    // And(TriggeringSpellMatchesFilter(type), SpellsCast{You,type} == n),
     // collected into `TriggerCondition::Or`. The ≥2-disjunct guard inside the
     // recognizer keeps single-disjunct cards (Vengevine + the NthSpellThisTurn
     // constraint class) on the untouched fire-time `TriggerConstraint` path.

@@ -5029,9 +5029,10 @@ fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            window: TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::EQ,
@@ -5042,10 +5043,9 @@ fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
                 condition,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                        },
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Fixed { value: 0 },
@@ -8686,8 +8686,9 @@ fn trigger_if_you_lost_2_or_more_life() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
+                qty: QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -8700,7 +8701,7 @@ fn trigger_if_you_lost_2_or_more_life() {
     );
 }
 
-/// "if you lost life this turn" (no minimum) → controller LifeLostThisTurn ≥ 1.
+/// "if you lost life this turn" (no minimum) → controller LifeLost ≥ 1.
 #[test]
 fn trigger_if_you_lost_life_this_turn_no_minimum() {
     let def = parse_trigger_line(
@@ -8711,8 +8712,9 @@ fn trigger_if_you_lost_life_this_turn_no_minimum() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
+                qty: QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -10098,7 +10100,7 @@ fn trigger_if_gained_or_lost_life_compound() {
                 c,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn { .. }
+                        qty: QuantityRef::LifeLost { .. }
                     },
                     ..
                 }
@@ -14571,8 +14573,9 @@ fn parse_greatest_mana_value_among_instant_and_sorcery_spells_cast_this_turn() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     filter: Some(_),
+                    window: TurnWindow::ThisTurn,
                     ..
                 },
             },
@@ -14906,9 +14909,10 @@ fn trigger_when_you_cast_this_spell_if_youve_cast_another_spell_this_turn() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Controller,
-                    filter: None
+                    filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -14928,7 +14932,7 @@ fn trigger_attack_if_cast_spell_with_mana_value_this_turn() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Controller,
                     filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
                         FilterProp::Cmc {
@@ -14936,6 +14940,7 @@ fn trigger_attack_if_cast_spell_with_mana_value_this_turn() {
                             value: QuantityExpr::Fixed { value: 4 },
                         }
                     ]))),
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -14958,10 +14963,9 @@ fn trigger_end_step_if_cast_both_creature_and_noncreature_this_turn() {
                 condition,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
-                        },
+                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -14971,10 +14975,9 @@ fn trigger_end_step_if_cast_both_creature_and_noncreature_this_turn() {
                 condition,
                 TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })),
-                        },
+                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -16775,7 +16778,7 @@ fn ordinal_constraint_does_not_exempt_a_different_unhoisted_leading_guard() {
 
 /// CR 601.2a + CR 603.4: Alania's disjunctive "first-of-type this turn"
 /// intervening-if lowers to `Or` of composed `And(TriggeringSpellMatchesFilter,
-/// SpellsCastThisTurn == n)` disjuncts — NOT a bundled ordinal variant — and the
+/// SpellsCast == n)` disjuncts — NOT a bundled ordinal variant — and the
 /// residual "you may have target opponent draw a card. If you do, copy that
 /// spell" parses for free (optional Draw + preserved gated CopySpell).
 ///
@@ -16813,9 +16816,10 @@ fn trigger_alania_disjunctive_first_of_type_intervening_if() {
             },
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(filter),
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -30722,8 +30726,9 @@ fn combinator_handles_played_land_or_cast_spell_from_outside_hand_this_turn() {
         lhs:
             QuantityExpr::Ref {
                 qty:
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                        window: TurnWindow::ThisTurn,
                         ..
                     },
             },
@@ -40619,48 +40624,87 @@ fn unhoistable_leading_guard_lowered_to_a_back_reference_fails_closed() {
     }
 }
 
-/// CR 603.4: "a player cast two or more spells last turn" (verbatim Gatstaf
-/// Howler back face) is true only when ONE player cast two or more spells. The
-/// table-wide `SpellsCastLastTurn` total cannot express that (two players
-/// casting one spell each would satisfy it), so the guard must not lower to it:
-/// the trigger fails closed as an `unparsed_condition` gap instead of firing on
-/// a wrong count.
-/// REVERT-PROBE: restore the per-player arm in `parse_spells_cast_last_turn` →
-/// the guard hoists as `SpellsCastLastTurn >= 2` and the body parses as a
-/// transform, so the `condition == None` and gap-kind assertions flip.
+/// CR 603.4 + CR 117.1: "a player cast two or more spells last turn" (verbatim
+/// Gatstaf Howler back face) is true only when ONE player cast two or more
+/// spells, so it lowers to the existential over players
+/// `PlayerCount { PlayerAttribute { All, SpellsCast { ScopedPlayer, None,
+/// LastTurn }, GE 2 } } >= 1`, never to a table-wide total (two players casting
+/// one spell each would satisfy that: the misread #10004 fixed).
+/// REVERT-PROBE: lower the guard to `SpellsCast { All, None, LastTurn } >= 2`
+/// (the table-wide count) and the whole-condition assertion flips.
 #[test]
-fn per_player_spells_cast_last_turn_guard_fails_the_trigger_closed() {
+fn per_player_spells_cast_last_turn_guard_lowers_to_the_existential() {
     let def = parse_trigger_line(
         "At the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.",
         "Gatstaf Howler",
     );
 
-    // Reach guard: the upkeep trigger head was recognized, so the guard was
-    // examined in intervening-if position rather than the line being rejected.
+    // Reach guard: the upkeep trigger head was recognized and the body parsed.
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::Upkeep));
     assert_eq!(
-        def.condition, None,
-        "the per-player guard must not hoist to a table-wide count"
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(QuantityRef::SpellsCast {
+                            scope: CountScope::ScopedPlayer,
+                            filter: None,
+                            window: TurnWindow::LastTurn,
+                        }),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Fixed { value: 2 }),
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
     );
     let exec = def.execute.as_deref().expect("trigger execute body");
-    match &*exec.effect {
-        Effect::Unimplemented { name, description } => {
-            assert_eq!(name, ClauseGapKind::Condition.unimplemented_name());
-            assert!(
-                description
-                    .as_deref()
-                    .is_some_and(|text| text.contains("a player cast two or more spells")),
-                "the gap must carry the rejected guard: {description:?}"
-            );
-        }
-        other => panic!("the per-player guard must fail the trigger closed, got {other:?}"),
+    assert!(
+        !matches!(&*exec.effect, Effect::Unimplemented { .. }),
+        "the transform body must survive the hoist: {:?}",
+        exec.effect
+    );
+}
+
+/// I2 (strict failure): a per-player last-turn spell guard the representation
+/// cannot express fails the trigger closed as an `unparsed_condition` gap, with
+/// the head recognized and no condition hoisted: a this-turn existential (no
+/// per-candidate reader), the "since your last turn ended" window (its own
+/// per-player counter family), a last-turn count with a spell filter or
+/// unconsumed trailing text (no per-spell data survives the boundary), and a
+/// subject that does not resolve ("they").
+#[test]
+fn unrepresentable_per_player_spell_guards_fail_the_trigger_closed() {
+    for guard in [
+        "a player cast two or more spells this turn",
+        "a player cast two or more spells since your last turn ended",
+        "a player cast two or more creature spells last turn",
+        "a player cast two or more spells last turn from exile",
+        "they cast two or more spells last turn",
+    ] {
+        let text = format!("At the beginning of each upkeep, if {guard}, transform this creature.");
+        let def = parse_trigger_line(&text, "Gatstaf Howler");
+        assert_eq!(def.mode, TriggerMode::Phase, "reach for {guard:?}");
+        assert_eq!(def.phase, Some(Phase::Upkeep), "reach for {guard:?}");
+        assert_eq!(def.condition, None, "nothing was hoisted for {guard:?}");
+        let exec = def.execute.as_deref().expect("trigger execute body");
+        assert!(
+            matches!(&*exec.effect, Effect::Unimplemented { name, .. }
+                if name == ClauseGapKind::Condition.unimplemented_name()),
+            "{guard:?} must fail the trigger closed as a condition gap, got {:?}",
+            exec.effect
+        );
     }
 }
 
-/// Control for the per-player decline: the table-wide "no spells were cast last
+/// Control for the per-player guard: the table-wide "no spells were cast last
 /// turn" guard (verbatim Gatstaf Shepherd) still hoists as
-/// `SpellsCastLastTurn == 0`, with its transform body intact.
+/// `SpellsCast { All, None, LastTurn } == 0`, with its transform body intact.
 #[test]
 fn no_spells_cast_last_turn_guard_still_hoists_as_table_wide_count() {
     let def = parse_trigger_line(
@@ -40672,7 +40716,11 @@ fn no_spells_cast_last_turn_guard_still_hoists_as_table_wide_count() {
         def.condition,
         Some(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastLastTurn,
+                qty: QuantityRef::SpellsCast {
+                    scope: CountScope::All,
+                    filter: None,
+                    window: TurnWindow::LastTurn,
+                },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },

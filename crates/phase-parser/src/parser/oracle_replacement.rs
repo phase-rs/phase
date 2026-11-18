@@ -55,6 +55,7 @@ use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
     CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
@@ -6322,7 +6323,7 @@ enum EntersWithGate {
 /// Returns the unless-free head plus the outcome. Routing order matters: the
 /// "you've cast another spell" route must precede the generic static-condition
 /// route, because the generic route would parse the same tail as a plain
-/// `SpellsCastThisTurn >= 2` WITHOUT the own-cast exclusion marker that
+/// `SpellsCast >= 2` WITHOUT the own-cast exclusion marker that
 /// "another" requires (per Gatherer ruling — a permanent's own cast does not
 /// count as "another spell").
 fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
@@ -6344,9 +6345,10 @@ fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
                 head,
                 EntersWithGate::Parsed(ReplacementCondition::UnlessQuantity {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -18731,9 +18733,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(filter),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -23561,10 +23564,10 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn { .. },
+                            qty: QuantityRef::LifeLost { .. },
                         }
                     ),
-                    "count should use LifeLostThisTurn, got {count:?}"
+                    "count should use LifeLost, got {count:?}"
                 );
             }
             other => panic!("Expected PutCounter, got {other:?}"),
@@ -34348,10 +34351,11 @@ mod tests {
             def.condition,
             Some(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Opponent {
                             aggregate: crate::types::ability::AggregateFunction::Sum,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,

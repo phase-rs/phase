@@ -90,6 +90,27 @@ interface UseCardImageResult {
   source?: CardImageSource | null;
   rungs?: ImageRungs;
   advanceFailedSource?(failedSrc: string): void;
+  /**
+   * Discards this card's cached art, failed sources included, and resolves it
+   * again, for every surface showing the card. Nothing calls it but the
+   * player's tap. Absent without an oracle id. Offline, present only when this
+   * request recorded a failed source or `cardArtFailed` is set; owner art
+   * (`useCardImage`'s owner-printing overlay) applies that rule online too.
+   */
+  reload?(): void;
+  /**
+   * True while some surface of this card shows no art because its art failed
+   * to load. Surfaces ask for different image sizes, so a battlefield tile's
+   * failure never reaches a preview's own request; this lets the preview offer
+   * the reload anyway.
+   */
+  cardArtFailed?: boolean;
+  /**
+   * The card's oracle id while this result shows no art because its art failed
+   * to load. `useCardImage` counts the surface toward `cardArtFailed` with it,
+   * for the result it actually returns.
+   */
+  failedArtOracleId?: string;
 }
 
 export interface UseCardBackImageResult {
@@ -165,6 +186,17 @@ const resolvedPresentationCache = new BoundedCache<string, ResolvedPresentationC
 const stablePresentationCache = new BoundedCache<string, string>(PRESENTATION_CACHE_LIMIT);
 let globalArtInvalidationGeneration = 0;
 const cardArtInvalidationGenerations = new BoundedCache<string, number>(PRESENTATION_CACHE_LIMIT);
+// The player's reloads per card (#11008). A printings fetch invalidates a card
+// too, but never moves this count, so the owner overlay, which keys on it,
+// restarts only for a reload. Unbounded on purpose: a count evicted back to 0
+// could rebuild a key whose cached failure predates the reload. It holds one
+// number per card the player has reloaded.
+const cardArtReloadCounts = new Map<string, number>();
+// How many mounted surfaces of each card show no art because their art failed
+// to load (#11008). Each surface holds its count only while what it shows is in
+// that state, so a reload, a re-key, owner art arriving or an unmount releases
+// it.
+const failedArtSurfaceCounts = new Map<string, number>();
 
 function dispatchArtCacheEvent(detail?: string): void {
   if (detail === undefined) {
@@ -179,6 +211,37 @@ function dispatchArtCacheEvent(detail?: string): void {
   artCacheEvents.dispatchEvent(detail === undefined
     ? new Event("update")
     : new CustomEvent("update", { detail }));
+}
+
+/**
+ * The player's tap to reload one card's art. It counts the reload for the owner
+ * overlay, then sends the per-card invalidation a finished printings fetch
+ * sends, which moves the card's request keys and drops its cached
+ * presentations, failed sources included.
+ */
+function reloadCardArt(oracleId: string): void {
+  cardArtReloadCounts.set(oracleId, (cardArtReloadCounts.get(oracleId) ?? 0) + 1);
+  dispatchArtCacheEvent(oracleId);
+}
+
+/**
+ * Counts one surface of `oracleId` as showing no art after its art failed to
+ * load, until the returned release is called. Listeners hear a "failure" event
+ * when the card's first surface fails and when its last one is released.
+ */
+export function holdFailedCardArt(oracleId: string): () => void {
+  const held = failedArtSurfaceCounts.get(oracleId) ?? 0;
+  failedArtSurfaceCounts.set(oracleId, held + 1);
+  if (held === 0) artCacheEvents.dispatchEvent(new CustomEvent("failure", { detail: oracleId }));
+  return () => {
+    const remaining = (failedArtSurfaceCounts.get(oracleId) ?? 1) - 1;
+    if (remaining > 0) {
+      failedArtSurfaceCounts.set(oracleId, remaining);
+      return;
+    }
+    failedArtSurfaceCounts.delete(oracleId);
+    artCacheEvents.dispatchEvent(new CustomEvent("failure", { detail: oracleId }));
+  };
 }
 
 function cacheResolvedPresentation(
@@ -475,6 +538,45 @@ export function useLocaleArt(): string {
   }, [language]);
 
   return localeArtCacheKey(language);
+}
+
+/**
+ * One card's art reloads, for art resolved outside `useCardImage`'s own caches
+ * (the owner-printing overlay). `count` moves only when the player reloads the
+ * card, so a key built on it drops that cache's failed sources then and at no
+ * other time. `failed` is the card's `cardArtFailed`, read under this oracle
+ * id. The caller re-renders when the card is invalidated or its `failed`
+ * changes. `reload` reloads the card for every surface showing it. An empty
+ * oracle id subscribes to nothing and has no reload.
+ */
+export function useCardArtReload(oracleId: string) {
+  const [, rerenderForReload] = useState(0);
+
+  useEffect(() => {
+    if (!oracleId) return undefined;
+    const handler = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== oracleId) return;
+      rerenderForReload((tick) => tick + 1);
+    };
+    // "failure" events keep `failed` current for this card.
+    artCacheEvents.addEventListener("update", handler);
+    artCacheEvents.addEventListener("failure", handler);
+    return () => {
+      artCacheEvents.removeEventListener("update", handler);
+      artCacheEvents.removeEventListener("failure", handler);
+    };
+  }, [oracleId]);
+
+  const reload = useMemo(
+    () => (oracleId ? () => reloadCardArt(oracleId) : undefined),
+    [oracleId],
+  );
+
+  return {
+    count: cardArtReloadCounts.get(oracleId) ?? 0,
+    failed: oracleId !== "" && failedArtSurfaceCounts.has(oracleId),
+    reload,
+  } as const;
 }
 
 function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): void {
@@ -885,9 +987,22 @@ export function useCardImage(
       if (detail && detail !== target) return;
       rerenderForMetadata((generation) => generation + 1);
     };
+    // "failure" events keep `cardArtFailed` current for this card.
     artCacheEvents.addEventListener("update", handler);
-    return () => artCacheEvents.removeEventListener("update", handler);
+    artCacheEvents.addEventListener("failure", handler);
+    return () => {
+      artCacheEvents.removeEventListener("update", handler);
+      artCacheEvents.removeEventListener("failure", handler);
+    };
   }, []);
+
+  // A reload moves this oracle id's invalidation generation, so the request key
+  // changes and the new request starts with no failed sources. It is scoped by
+  // oracle id, so a token or a name without one offers no reload.
+  const reload = useMemo(
+    () => (resolvedOracleId ? () => reloadCardArt(resolvedOracleId) : undefined),
+    [resolvedOracleId],
+  );
 
   useEffect(() => visualPackRepository.subscribe(() => {
     setRepositoryRevision(visualPackRepository.currentRevision());
@@ -955,9 +1070,9 @@ export function useCardImage(
     effectiveOffline,
     currentArtInvalidationGeneration,
   );
-  const previousRequestKeyRef = useRef(requestKey);
-  const requestChanged = previousRequestKeyRef.current !== requestKey;
-  previousRequestKeyRef.current = requestKey;
+  const previousPresentationKeyRef = useRef(presentationKey);
+  const presentationChanged = previousPresentationKeyRef.current !== presentationKey;
+  previousPresentationKeyRef.current = presentationKey;
   const effectRequestKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1335,21 +1450,41 @@ export function useCardImage(
     stateRequestKey,
   ]);
 
+  const recordedFailure = failedSources.current.generation === requestKey
+    && failedSources.current.values.size > 0;
+  // This request settled with no art because its art failed to load. Online a
+  // card's art always resolves, so a settled empty request means its lookup or
+  // its image failed; offline the lookup never goes remote, so only a recorded
+  // failed source counts.
+  const showsFailedArt = stateRequestKey === requestKey
+    && src === null
+    && !isLoading
+    && (recordedFailure || !effectiveOffline);
+  const cardArtFailed = resolvedOracleId !== "" && failedArtSurfaceCounts.has(resolvedOracleId);
+  // Offline, the lookup never goes remote, so a reload can only help a failed
+  // source: an installed image that failed to load, here or on another surface.
+  const offeredReload = effectiveOffline && !recordedFailure && !cardArtFailed ? undefined : reload;
+
   // Effects reset the state after render, so a component reused for a new card
   // would otherwise expose the previous card's src for one frame. Hand previews
   // intentionally keep one mounted component while scrubbing; gate the result
   // by request identity until the new generation's local or remote stage
-  // publishes its own source.
+  // publishes its own source. A new request for the same presentation can only
+  // be an invalidation (the card reloaded, a printings fetch); it falls through
+  // to that presentation's last good art, so a surface showing art keeps it.
   if (stateRequestKey !== requestKey) {
-    if (requestChanged) {
+    if (presentationChanged) {
       return {
         src: null, isLoading: true, isRotated: false, isFlip: false,
-        source: null, advanceFailedSource,
+        source: null, advanceFailedSource, reload: offeredReload, cardArtFailed,
       };
     }
     const cachedPresentation = resolvedPresentationCache.get(requestKey);
     if (cachedPresentation) {
       const cachedSource = cachedPresentation.sources[cachedPresentation.sourceIndex] ?? null;
+      // The effect has not yet loaded this presentation's failed sources into
+      // `failedSources`, so the offline rule reads them off the presentation.
+      const cachedFailure = cachedPresentation.failedSourceValues.length > 0;
       return {
         src: cachedPresentation.src,
         isLoading: cachedPresentation.isLoading,
@@ -1358,12 +1493,14 @@ export function useCardImage(
         source: cachedSource,
         rungs: cachedSource?.kind === "fallback" ? undefined : cachedSource?.rungs,
         advanceFailedSource,
+        reload: effectiveOffline && !cachedFailure && !cardArtFailed ? undefined : reload,
+        cardArtFailed,
       };
     }
     const presentationSeed = stablePresentationCache.get(presentationKey) ?? null;
     return {
       src: presentationSeed, isLoading: true, isRotated: false, isFlip: false,
-      source: null, advanceFailedSource,
+      source: null, advanceFailedSource, reload: offeredReload, cardArtFailed,
     };
   }
 
@@ -1375,6 +1512,9 @@ export function useCardImage(
     source: activeSource,
     rungs: activeSource?.kind === "fallback" ? undefined : activeSource?.rungs,
     advanceFailedSource,
+    reload: offeredReload,
+    cardArtFailed,
+    failedArtOracleId: showsFailedArt && resolvedOracleId ? resolvedOracleId : undefined,
   };
 }
 

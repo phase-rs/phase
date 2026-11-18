@@ -9033,10 +9033,10 @@ fn collect_pending_triggers_with_collection(
             // CR 611.2f + CR 702.85a: count Cascade from the cast-time keyword
             // snapshot (`obj.cast_spell_keywords`), NOT a fresh
             // `effective_spell_keywords` query. The latter re-evaluates the
-            // grant's `SpellsCastThisTurn == 0` gate AFTER the spell was recorded,
+            // grant's `SpellsCast == 0` gate AFTER the spell was recorded,
             // which would drop a first-qualifying-spell-each-turn Cascade grant on
             // its own spell (Maelstrom Nexus / Wild-Magic Sorcerer / Tardis Bay).
-            // Only `SpellsCastThisTurn`-gated `CastWithKeyword` grants require this
+            // Only `SpellsCast`-gated `CastWithKeyword` grants require this
             // snapshot; the Storm/Ripple/Casualty/Conspire/Replicate seams stay on
             // the live query because their gates are point-stable. For printed
             // Cascade and unconditional grants the snapshot is behavior-preserving:
@@ -9414,7 +9414,7 @@ fn collect_pending_triggers_with_collection(
             // Demonstrate copy ability definition. Gate on the cast-time keyword
             // snapshot (CR 611.2f) rather than a fresh `effective_spell_keywords`
             // query, so a first-qualifying-spell grant is not dropped by the
-            // post-record `SpellsCastThisTurn == 0` gate. Count only the granted
+            // post-record `SpellsCast == 0` gate. Count only the granted
             // delta: printed Demonstrate instances are handled by the face trigger,
             // while a printed-Demonstrate spell with an extra dynamic Demonstrate
             // still gets the extra CR 702.144a trigger.
@@ -17965,7 +17965,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal { player }
         | QuantityRef::StartingDeckSize { player }
         | QuantityRef::GraveyardSize { player, .. }
-        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::LifeLost { player, .. }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -18004,7 +18004,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         // Same filter axis, optional: a `None` filter names no population to
         // re-scope, so only the `Some` arm can diverge.
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. } => {
             filter.as_ref().is_some_and(filter_binding_diverges)
@@ -18123,7 +18123,6 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
@@ -21005,6 +21004,15 @@ fn trigger_subject_read<'event, 'state>(
         .or_else(|| live.map(TriggerSourceRead::ExactLive))
 }
 
+/// CR 601.2i + CR 800.4i: table-wide number of spells cast during the previous
+/// turn: the sum of every player's latched `spells_cast_last_turn`, departed
+/// players included (their actions can still be found).
+fn spells_cast_last_turn_total(state: &GameState) -> u32 {
+    state.players.iter().fold(0u32, |total, p| {
+        total.saturating_add(p.spells_cast_last_turn)
+    })
+}
+
 /// Check whether an intervening-if condition is satisfied.
 /// Used both at fire-time and resolution-time.
 ///
@@ -21761,12 +21769,12 @@ fn evaluate_trigger_condition_with_source(
                 .iter()
                 .any(|id| matches_target_filter(state, *id, filter, &ctx))
         }
-        // CR 603.4: "if no spells were cast last turn" — check previous turn spell count.
-        TriggerCondition::NoSpellsCastLastTurn => state.spells_cast_last_turn.unwrap_or(0) == 0,
-        // CR 603.4: "if two or more spells were cast last turn"
-        TriggerCondition::TwoOrMoreSpellsCastLastTurn => {
-            state.spells_cast_last_turn.unwrap_or(0) >= 2
-        }
+        // CR 603.4: "if no spells were cast last turn" — the table-wide total of
+        // the per-player snapshots latched at the turn boundary. CR 800.4i: a
+        // departed player's casts still count.
+        TriggerCondition::NoSpellsCastLastTurn => spells_cast_last_turn_total(state) == 0,
+        // CR 603.4: "if two or more spells were cast last turn" (table-wide).
+        TriggerCondition::TwoOrMoreSpellsCastLastTurn => spells_cast_last_turn_total(state) >= 2,
         // CR 603.4 + CR 810.9a: "if you have N or more life" reads the
         // controller's TEAM total in a team format (own life off-team). Note:
         // `minimum == 0` would flip a missing-player false→true vs. the prior
@@ -23366,6 +23374,7 @@ pub mod tests {
         TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
         TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
+    use crate::types::ability::{CountScope, TurnWindow};
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
@@ -38431,9 +38440,10 @@ pub mod tests {
             trigger.trigger_zones = vec![Zone::Stack];
             trigger.condition = Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: crate::types::ability::CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -43562,14 +43572,19 @@ pub mod tests {
     }
 
     /// Gatstaf Shepherd's parsed upkeep trigger on a P0 creature, after a turn
-    /// in which `spells_cast` spells were cast; returns the stack length after
-    /// the next upkeep begins.
-    fn gatstaf_shepherd_upkeep_stack_len(spells_cast: u8) -> usize {
+    /// in which P0 cast `p0_casts` and P1 cast `p1_casts` spells (seeded into the
+    /// per-player cast journal the turn boundary latches from); returns the stack
+    /// length after the next upkeep begins.
+    fn gatstaf_shepherd_upkeep_stack_len(p0_casts: usize, p1_casts: usize) -> usize {
         let trigger = parsed_quantity_gated_trigger(
             "Gatstaf Shepherd",
             "At the beginning of each upkeep, if no spells were cast last turn, transform this creature.",
             &["Intimidate", "Transform"],
-            &QuantityRef::SpellsCastLastTurn,
+            &QuantityRef::SpellsCast {
+                scope: CountScope::All,
+                filter: None,
+                window: TurnWindow::LastTurn,
+            },
         );
         let mut state = setup();
         state.active_player = PlayerId(0);
@@ -43585,11 +43600,25 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.trigger_definitions.push(trigger);
         }
-        state.spells_cast_this_turn = spells_cast;
+        for (player, casts) in [(PlayerId(0), p0_casts), (PlayerId(1), p1_casts)] {
+            state.spells_cast_this_turn_by_player.insert(
+                player,
+                (0..casts)
+                    .map(|_| crate::types::game_state::SpellCastRecord::default())
+                    .collect(),
+            );
+        }
         let mut events = Vec::new();
         crate::game::turns::start_next_turn(&mut state, &mut events);
-        // Reach: the production turn-boundary snapshot ran.
-        assert_eq!(state.spells_cast_last_turn, Some(spells_cast));
+        // Reach: the production turn-boundary latched each player's own count.
+        assert_eq!(
+            state
+                .players
+                .iter()
+                .map(|p| p.spells_cast_last_turn as usize)
+                .collect::<Vec<_>>(),
+            vec![p0_casts, p1_casts]
+        );
         state.phase = Phase::Upkeep;
         process_triggers(
             &mut state,
@@ -43601,22 +43630,22 @@ pub mod tests {
     }
 
     /// R1. CR 603.4 + CR 601.2i: "if no spells were cast last turn" reads the
-    /// table-wide count of spells cast during the previous turn, snapshotted by
-    /// `turns::start_next_turn`. Runtime evidence for coverage classifying
-    /// `QuantityRef::SpellsCastLastTurn` as `Handled`.
-    /// REVERT-PROBE: resolve the ref as a constant 0 → the n = 1 case fires.
+    /// table-wide total of the per-player counts of the previous turn, latched
+    /// by `turns::start_next_turn`. Runtime evidence for coverage classifying
+    /// `SpellsCast { window: LastTurn }` as `Handled`.
+    /// REVERT-PROBE: resolve the ref as a constant 0 → the (1, 0) case fires.
     #[test]
     fn spells_cast_last_turn_gates_parsed_werewolf_upkeep_trigger() {
         assert_eq!(
-            gatstaf_shepherd_upkeep_stack_len(0),
+            gatstaf_shepherd_upkeep_stack_len(0, 0),
             1,
             "no spells were cast last turn: the trigger must fire"
         );
-        for spells_cast in [1, 2] {
+        for (p0, p1) in [(1, 0), (0, 1), (1, 1), (2, 0)] {
             assert_eq!(
-                gatstaf_shepherd_upkeep_stack_len(spells_cast),
+                gatstaf_shepherd_upkeep_stack_len(p0, p1),
                 0,
-                "{spells_cast} spell(s) were cast last turn: the trigger must not fire"
+                "{p0} + {p1} spell(s) were cast last turn: the trigger must not fire"
             );
         }
     }

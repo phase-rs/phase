@@ -189,7 +189,9 @@ const CARD_STATES: CardState[] = [
     isLoading: false,
     cardBackSrc: null,
     faceDown: false,
-    findCard: () => screen.getByRole("img", { name: CARD_NAME }),
+    // The tile's image role sits on its name line, which keeps its rules text
+    // readable to assistive tech (#11008), so the tile is found by its test id.
+    findCard: () => screen.getByTestId("card-art-fallback"),
   },
   {
     state: "drawn card back",

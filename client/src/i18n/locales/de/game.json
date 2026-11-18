@@ -152,7 +152,8 @@
     "loading": "{{name}} wird geladen",
     "unimplemented": "Nicht implementiert: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Getappt"
+    "tapped": "Getappt",
+    "reloadArt": "Zum Neuladen des Artworks tippen"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
@@ -162,6 +163,7 @@
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
     "reportNotSent": "Nicht gesendet",
+    "reloadArt": "Artwork neu laden",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -1857,6 +1859,13 @@
       "titleExact_one": "Wirf eine Karte ab",
       "titleExact_other": "Wirf {{count}} Karten ab",
       "titleWard": "Schutz — Wirf eine Karte ab",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Schutz",
+        "connive": "Tricksen",
+        "additionalCost": "Zusätzliche Kosten",
+        "manaAbility": "Manafähigkeit"
+      },
       "subtitleUpTo_one": "Wähle bis zu {{count}} Karte zum Abwerfen",
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten zum Abwerfen",
       "subtitleUnless": "Wähle {{count}} Karten oder 1 passende Karte zum Abwerfen",

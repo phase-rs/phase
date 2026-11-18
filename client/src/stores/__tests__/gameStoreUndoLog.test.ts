@@ -6,8 +6,8 @@
  * so in the history each LLM seat's next prompt is built from: a model was told
  * it had cast a spell that was back in its hand.
  *
- * Each undo here is pressed with nothing in flight. A play still animating
- * when Undo is pressed is a separate timing window (#11014).
+ * Each undo here is pressed with nothing in flight. Work still in flight when
+ * Undo is pressed (#11014) is covered in `undoInFlightWork.test.tsx`.
  *
  * These tests checkpoint through `gameStore.dispatch`; the `dispatch.ts`
  * pipeline's checkpoints are covered from the LLM seat's side in
@@ -19,6 +19,7 @@ import type { GameLogEntry, GameState, PersistedGameState } from "../../adapter/
 import { persistedGameStateView } from "../../adapter/types";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
+import { undoLastAction } from "../../game/dispatch";
 import { useGameStore } from "../gameStore";
 
 const HUMAN = 0;
@@ -122,7 +123,7 @@ describe("undo rewinds the game log", () => {
       "Sensei's Divining Top is destroyed",
     ]);
 
-    await useGameStore.getState().undo();
+    await undoLastAction();
 
     expect(useGameStore.getState().gameState).toEqual(HUMAN_TO_ACT);
     expect(loggedLines()).toEqual([
@@ -136,7 +137,7 @@ describe("undo rewinds the game log", () => {
     const game = await startGame([logEntry(9, "Player 1 casts Steel Seraph")]);
     await game.humanPasses([HUMAN_PASS]);
     await game.aiPlays([logEntry(10, "Elspeth Conquers Death exiles Steel Seraph")]);
-    await useGameStore.getState().undo();
+    await undoLastAction();
 
     // The same turn, played again.
     await game.humanPasses([HUMAN_PASS]);
@@ -147,7 +148,7 @@ describe("undo rewinds the game log", () => {
       "Player 2 casts Wrath of God",
     ]);
 
-    await useGameStore.getState().undo();
+    await undoLastAction();
 
     expect(loggedLines()).toEqual(["Player 1 casts Steel Seraph"]);
   });
@@ -155,7 +156,7 @@ describe("undo rewinds the game log", () => {
   it("never gives a later entry the seq of an undone one", async () => {
     const game = await startGame([logEntry(9, "Player 1 casts Steel Seraph")]);
     await game.humanPasses([HUMAN_PASS]);
-    await useGameStore.getState().undo();
+    await undoLastAction();
     await game.humanPasses([HUMAN_PASS]);
 
     // Seq 1 named the undone line, so the replayed one is 2: anything that

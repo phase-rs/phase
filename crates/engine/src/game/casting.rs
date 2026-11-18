@@ -1965,7 +1965,7 @@ fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
 }
 
 /// CR 702.137a: Spectacle's gate — whether any opponent of `caster` lost life
-/// this turn. Mirrors the existing `LifeLostThisTurn`/"an opponent lost life"
+/// this turn. Mirrors the existing `LifeLost`/"an opponent lost life"
 /// predicate (see `game/quantity.rs`) so no new state tracking is introduced;
 /// like it, a Two-Headed Giant teammate is not an opponent (CR 102.3).
 fn an_opponent_lost_life_this_turn(state: &GameState, caster: PlayerId) -> bool {
@@ -14005,7 +14005,7 @@ pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
 
 /// CR 601.2f + CR 109.5: Cost-mod static conditions mix two player scopes.
 /// `DuringYourTurn` binds to the source permanent's controller (Paladin Class),
-/// while `SpellsCastThisTurn` / first-spell quantity gates bind to the spell
+/// while `SpellsCast` / first-spell quantity gates bind to the spell
 /// caster (Heartwood Storyteller Avatar's opponent-first tax).
 fn evaluate_cost_mod_static_condition(
     state: &GameState,
@@ -29912,7 +29912,7 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         QuantityRef::HandSize { player }
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
-        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::LifeLost { player, .. }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player } => player_is_concrete(player),
         QuantityRef::StartingLifeTotal { player } => {
@@ -33736,7 +33736,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::StartingLifeTotal { player }
         | QuantityRef::StartingDeckSize { player }
         | QuantityRef::GraveyardSize { player }
-        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::LifeLost { player, .. }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
@@ -33791,7 +33791,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
                 || target_filter_reads_chosen_target(target, read)
         }
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
@@ -33848,7 +33848,6 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount

@@ -19,7 +19,7 @@ import { useLlmStore } from "../../../stores/llmStore";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { buildEngineAdapterMock } from "../../../test/factories/engineAdapterFactory";
 import { gameStateFactory } from "../../../test/factories/gameStateFactory";
-import { dispatchAction, dispatchAiActionProposal, isDispatchIdle } from "../../dispatch";
+import { dispatchAction, dispatchAiActionProposal, isDispatchIdle, undoLastAction } from "../../dispatch";
 import { createAIController } from "../aiController";
 
 const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
@@ -176,10 +176,10 @@ describe("an LLM seat's history after an undo", () => {
     ]);
 
     // Undo takes back the pass, and the Loran play with it. It is pressed
-    // with nothing in flight: a play still animating when Undo is pressed is
-    // a separate timing window (#11014).
+    // with nothing in flight; a play still animating when Undo is pressed is
+    // covered in `aiControllerLlmUndoInFlight.test.ts` (#11014).
     expect(isDispatchIdle()).toBe(true);
-    await useGameStore.getState().undo();
+    await undoLastAction();
     expect(adapter.restoreState).toHaveBeenCalledOnce();
     expect(useGameStore.getState().gameState).toEqual(HUMAN_TO_ACT);
 
