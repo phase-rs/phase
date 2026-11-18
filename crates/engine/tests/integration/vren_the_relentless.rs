@@ -3,6 +3,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -183,4 +184,59 @@ fn vren_rat_tokens_get_dynamic_bonus_from_other_rats_not_non_rats() {
     }
     let non_rat = &runner.state().objects[&non_rat];
     assert_eq!((non_rat.power, non_rat.toughness), (Some(2), Some(2)));
+}
+
+const BEAR_FORCE_PILOT_ORACLE: &str = "When The Bear Force Pilot enters the battlefield, create a 0/0 colorless artifact Vehicle token with flying, \"This creature gets +1/+1 for each Bear you control,\" and crew 2.";
+
+/// The Bear Force Pilot: the token's `crew 2` follows its quoted static and must not be
+/// dropped (CR 702.122a), alongside flying and the dynamic +1/+1 (CR 613.4c).
+#[test]
+fn bear_force_pilot_token_keeps_flying_and_crew_two_after_quoted_static() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pilot = scenario
+        .add_creature_to_hand_from_oracle(P0, "The Bear Force Pilot", 2, 2, BEAR_FORCE_PILOT_ORACLE)
+        .as_legendary()
+        .with_subtypes(vec!["Bear", "Pilot"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    mana_pool(&mut scenario, &[ManaType::Green, ManaType::Green]);
+    let mut runner = scenario.build();
+
+    runner.cast(pilot).resolve();
+    runner.advance_until_stack_empty();
+
+    let vehicles: Vec<ObjectId> = runner
+        .state()
+        .objects
+        .iter()
+        .filter(|(_, o)| o.zone == Zone::Battlefield && o.is_token)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(
+        vehicles.len(),
+        1,
+        "the ETB trigger creates one Vehicle token"
+    );
+    let token = &runner.state().objects[&vehicles[0]];
+    assert!(token.card_types.subtypes.iter().any(|s| s == "Vehicle"));
+    assert!(
+        token.keywords.contains(&Keyword::Flying),
+        "{:?}",
+        token.keywords
+    );
+    assert!(
+        token.keywords.contains(&Keyword::Crew {
+            power: 2,
+            once_per_turn: None
+        }),
+        "token must have crew 2: {:?}",
+        token.keywords
+    );
+    // The quoted static is attached to the token; its per-Bear bonus is asserted by the
+    // parser class test, since an uncrewed Vehicle is not a creature.
+    assert!(!token.static_definitions.is_empty());
 }

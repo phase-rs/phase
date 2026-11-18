@@ -7,7 +7,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::anychar;
 use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, success, value, verify};
 use nom::multi::many_till;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
@@ -1797,15 +1797,38 @@ fn known_role_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> 
 }
 
 /// Strip trailing dynamic/attachment clauses from a token "with …" keyword phrase.
-fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
-    let mut clause = text;
-    if let Ok((_, head)) = take_until::<_, _, nom::error::Error<&str>>("\"").parse(clause) {
-        clause = head;
+///
+/// CR 111.3 + CR 702.122a: the keyword list is the text OUTSIDE every quoted span
+/// ("with flying, "This creature gets ...," and crew 2" keeps `flying` and `crew 2`);
+/// quoted abilities are parsed separately as token static/granted abilities. An
+/// unterminated quote ends the clause at its opening quote.
+fn strip_token_keyword_clause_suffixes(text: &str) -> String {
+    let mut outside = String::new();
+    let mut remaining = text;
+    loop {
+        let Ok((at_quote, head)) =
+            take_until::<_, _, nom::error::Error<&str>>("\"").parse(remaining)
+        else {
+            outside.push_str(remaining);
+            break;
+        };
+        outside.push_str(head);
+        match delimited(
+            tag::<_, _, nom::error::Error<&str>>("\""),
+            take_until("\""),
+            tag("\""),
+        )
+        .parse(at_quote)
+        {
+            Ok((after_quote, _)) => remaining = after_quote,
+            Err(_) => break,
+        }
     }
+    let mut clause = outside.as_str();
     for marker in [" where ", " equal to ", " attached ", " named "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
-    clause
+    clause.to_string()
 }
 
 /// Strip a token keyword clause at the first `marker` (e.g. `" equal to "`).
@@ -1827,7 +1850,8 @@ pub(super) fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
         return Vec::new();
     };
 
-    let raw_clause = strip_token_keyword_clause_suffixes(after_with)
+    let stripped = strip_token_keyword_clause_suffixes(after_with);
+    let raw_clause = stripped
         .trim()
         .trim_end_matches(&['.', ','][..])
         .trim_end_matches(" and")
@@ -4997,5 +5021,54 @@ mod quoted_token_static_trailing_comma_tests {
             );
             check(&printed, token);
         }
+    }
+
+    fn token_keywords(clause: &str) -> Vec<Keyword> {
+        let effect = try_parse_token(&clause.to_lowercase(), clause, &mut ParseContext::default())
+            .unwrap_or_else(|| panic!("token clause must parse: {clause}"));
+        let Effect::Token { keywords, .. } = effect else {
+            panic!("expected Effect::Token for {clause}");
+        };
+        keywords
+    }
+
+    /// CR 702.122a + CR 111.3: keywords printed AFTER a token's quoted ability are
+    /// still part of the token's keyword list (The Bear Force Pilot and its Runner
+    /// print `with flying, "...," and crew 2`).
+    #[test]
+    fn token_keywords_survive_a_quoted_ability_in_the_middle() {
+        for clause in [
+            "Create a 0/0 colorless artifact Vehicle token with flying, \"This creature gets +1/+1 for each Bear you control,\" and crew 2.",
+            "Create a 0/0 colorless Vehicle artifact token with flying, \"This creature gets +1/+1 for each Bear you control,\" and crew 2.",
+        ] {
+            assert_eq!(
+                token_keywords(clause),
+                vec![
+                    Keyword::Flying,
+                    Keyword::Crew {
+                        power: 2,
+                        once_per_turn: None
+                    }
+                ],
+                "{clause}"
+            );
+            assert!(!token_statics(clause).is_empty(), "{clause}: static kept");
+        }
+    }
+
+    /// Negative control: a clause that ENDS in a quoted ability keeps only the
+    /// keywords before it, and an unterminated quote still ends the clause there.
+    #[test]
+    fn token_keyword_clause_ending_in_quote_is_unchanged() {
+        assert_eq!(
+            parse_token_keyword_clause(
+                "with flying and \"Whenever this creature attacks, draw a card.\""
+            ),
+            vec![Keyword::Flying]
+        );
+        assert_eq!(
+            parse_token_keyword_clause("with flying and \"Whenever this creature attacks"),
+            vec![Keyword::Flying]
+        );
     }
 }
