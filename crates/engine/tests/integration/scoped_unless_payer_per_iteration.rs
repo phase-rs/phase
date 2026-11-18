@@ -28,12 +28,15 @@
 //! `WaitingFor` prompts answered with real `GameAction`s.
 
 use engine::game::combat::AttackTarget;
+use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::AbilityCost;
 use engine::types::actions::{GameAction, UnlessCostBranch};
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaSourceSelection};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -505,4 +508,354 @@ fn hag_of_ceaseless_torment_upkeep_still_prompts_the_opponent() {
     }
     assert_eq!(runner.life(P0), 20, "the controller is untouched");
     assert_eq!(runner.life(P1), 20, "the life is lost only on a decline");
+}
+
+/// Ashnod's Altar, verbatim Oracle text: a mana ability whose cost is a
+/// sacrifice, so activating it would consume a permanent.
+const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+
+/// Every mana action the legal-action lists offer, flat or per object: what the
+/// AI chooses from and what the client's mana ring paints.
+fn offered_mana_actions(runner: &GameRunner) -> Vec<GameAction> {
+    let (flat, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
+    flat.iter()
+        .chain(by_object.values().flatten())
+        .filter(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { .. }
+                    | GameAction::UntapLandForMana { .. }
+                    | GameAction::ActivateAbility { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Reach guard: `land`'s mana ability is activatable for `player`, so a refused
+/// tap of it is the prompt's refusal, not a missing source.
+fn land_mana_selection(
+    runner: &GameRunner,
+    player: PlayerId,
+    land: ObjectId,
+) -> ManaSourceSelection {
+    engine::game::mana_sources::activatable_mana_source_selections(runner.state(), player)
+        .into_iter()
+        .find(|selection| selection.source.object_id == land)
+        .expect("reach guard: the land's mana ability is activatable")
+}
+
+fn activate_altar(altar: ObjectId) -> GameAction {
+    GameAction::ActivateAbility {
+        source_id: altar,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    }
+}
+
+/// CR 605.3a + CR 608.2g: submits each mana action at the open prompt and
+/// returns its refusal. Nothing moves: the prompt, `payer`'s pool, `land` and
+/// every one of `permanents` are as they were before the attempts.
+fn submit_refused_mana_actions(
+    runner: &mut GameRunner,
+    payer: PlayerId,
+    land: ObjectId,
+    permanents: &[ObjectId],
+    actions: Vec<GameAction>,
+) -> Vec<EngineError> {
+    let prompt = runner.state().waiting_for.clone();
+    let refusals = actions
+        .into_iter()
+        .map(|action| match runner.act(action.clone()) {
+            Ok(_) => panic!("{action:?} must be refused at {prompt:?}"),
+            Err(refusal) => refusal,
+        })
+        .collect();
+    assert_eq!(
+        runner.state().waiting_for,
+        prompt,
+        "the refused actions leave the prompt open"
+    );
+    assert_eq!(
+        runner.state().players[payer.0 as usize].mana_pool.total(),
+        0,
+        "no mana was produced"
+    );
+    assert!(
+        !runner.state().objects[&land].tapped,
+        "the land is untapped"
+    );
+    for permanent in permanents {
+        assert_eq!(
+            runner.state().objects[permanent].zone,
+            Zone::Battlefield,
+            "{permanent:?} was not consumed"
+        );
+    }
+    refusals
+}
+
+fn names_the_manaless_payment(refusal: &EngineError) -> bool {
+    matches!(refusal, EngineError::InvalidAction(reason) if reason.contains("asks for no mana"))
+}
+
+/// CR 605.3a + CR 117.1d + CR 608.2g: Bellowing Mauler's "each player loses 4
+/// life unless they sacrifice a nontoken creature of their choice" asks for a
+/// sacrifice (CR 701.21a), not for mana, so neither payer may activate a mana
+/// ability at their prompt: Ashnod's Altar ("Sacrifice a creature: Add
+/// {C}{C}.") and a Swamp are refused and offered by no legal-action list. The
+/// payers are asked in APNAP order (CR 101.4), and each payment then completes.
+#[test]
+fn bellowing_mauler_prompt_opens_no_mana_window() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.add_creature_from_oracle(P0, "Bellowing Mauler", 4, 6, BELLOWING_MAULER);
+    let p0_bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let p0_swamp = scenario.add_basic_land(P0, ManaColor::Black);
+    let p1_bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let p1_swamp = scenario.add_basic_land(P1, ManaColor::Black);
+    let mut runner = scenario.build();
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::UnlessPayment {
+                player: P0,
+                cost: AbilityCost::Sacrifice(_),
+                ..
+            }
+        ),
+        "reach guard: the active player is asked to sacrifice: {:?}",
+        runner.state().waiting_for
+    );
+    let offered = offered_mana_actions(&runner);
+    assert!(
+        offered.is_empty(),
+        "no mana action is offered at a sacrifice payment: {offered:?}"
+    );
+    let selection = land_mana_selection(&runner, P0, p0_swamp);
+    let refusals = submit_refused_mana_actions(
+        &mut runner,
+        P0,
+        p0_swamp,
+        &[p0_bears, altar],
+        vec![
+            activate_altar(altar),
+            GameAction::TapLandForMana { selection },
+        ],
+    );
+    for refusal in &refusals {
+        assert!(
+            names_the_manaless_payment(refusal),
+            "CR 605.3a refuses the mana action: {refusal:?}"
+        );
+    }
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P0 chooses to sacrifice");
+    match &runner.state().waiting_for {
+        WaitingFor::WardSacrificeChoice {
+            player, permanents, ..
+        } => {
+            assert_eq!(*player, P0, "P0 picks what P0 sacrifices");
+            assert!(
+                permanents.contains(&p0_bears),
+                "P0's Grizzly Bears is offered"
+            );
+        }
+        other => panic!("expected P0's sacrifice selection, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![p0_bears],
+        })
+        .expect("P0 sacrifices Grizzly Bears");
+
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::UnlessPayment {
+                player: P1,
+                cost: AbilityCost::Sacrifice(_),
+                ..
+            }
+        ),
+        "reach guard: the nonactive player is asked next: {:?}",
+        runner.state().waiting_for
+    );
+    let offered = offered_mana_actions(&runner);
+    assert!(
+        offered.is_empty(),
+        "no mana action is offered to the second payer: {offered:?}"
+    );
+    let selection = land_mana_selection(&runner, P1, p1_swamp);
+    let refusals = submit_refused_mana_actions(
+        &mut runner,
+        P1,
+        p1_swamp,
+        &[p1_bears],
+        vec![GameAction::TapLandForMana { selection }],
+    );
+    for refusal in &refusals {
+        assert!(
+            names_the_manaless_payment(refusal),
+            "CR 605.3a refuses the second payer's tap: {refusal:?}"
+        );
+    }
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("P1 declines");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.life(P0), 20, "P0 paid and kept their life");
+    assert_eq!(runner.life(P1), 16, "P1 declined and lost 4 life");
+    assert_eq!(
+        runner.state().objects[&p0_bears].zone,
+        Zone::Graveyard,
+        "P0's payment sacrificed Grizzly Bears"
+    );
+    assert!(runner.state().stack.is_empty(), "the trigger resolved");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the game returns to priority: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Rottenmouth Viper attacking P1 with no blight counter before the attack, so
+/// its trigger repeats once. P1 controls Grizzly Bears, Ashnod's Altar and a
+/// Swamp and holds one card, so both branches are payable and a sacrifice-cost
+/// mana ability and a land are on hand. Returns the runner at P1's branch
+/// choice with the Bears, the Altar, the Swamp and the card.
+fn viper_attacking_into_mana_sources() -> (GameRunner, [ObjectId; 4]) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let viper = scenario
+        .add_creature_from_oracle(P0, "Rottenmouth Viper", 6, 6, ROTTENMOUTH_VIPER)
+        .id();
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let altar = scenario
+        .add_artifact_from_oracle(P1, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let swamp = scenario.add_basic_land(P1, ManaColor::Black);
+    let card = scenario.add_card_to_hand(P1, "Filler Card");
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(viper, AttackTarget::Player(P1))])
+        .expect("Viper attacks P1");
+    runner.advance_until_stack_empty();
+    (runner, [bears, altar, swamp, card])
+}
+
+/// CR 605.3a + CR 608.2g + CR 118.12a: Rottenmouth Viper's "each opponent
+/// loses 4 life unless that player sacrifices a nonland permanent of their
+/// choice or discards a card" asks for no mana at any of its prompts: neither
+/// at the choice of which cost to pay nor at the choice of the permanent to
+/// sacrifice (CR 701.21a) or the card to discard may P1 activate Ashnod's Altar
+/// or tap a Swamp. Each branch is then paid in full.
+#[test]
+fn viper_branch_and_pick_prompts_open_no_mana_window() {
+    for branch in [0usize, 1] {
+        let (mut runner, [bears, altar, swamp, card]) = viper_attacking_into_mana_sources();
+        let p1_permanents = [bears, altar];
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::UnlessPaymentChooseCost { player: P1, costs, .. } if costs.len() == 2
+            ),
+            "reach guard: P1 chooses between the sacrifice and the discard: {:?}",
+            runner.state().waiting_for
+        );
+
+        let offered = offered_mana_actions(&runner);
+        assert!(
+            offered.is_empty(),
+            "branch {branch}: no mana action is offered at the branch choice: {offered:?}"
+        );
+        let selection = land_mana_selection(&runner, P1, swamp);
+        submit_refused_mana_actions(
+            &mut runner,
+            P1,
+            swamp,
+            &p1_permanents,
+            vec![
+                activate_altar(altar),
+                GameAction::TapLandForMana { selection },
+            ],
+        );
+
+        runner
+            .act(GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Pay { index: branch },
+            })
+            .expect("P1 chooses a branch");
+        let picked = match (&runner.state().waiting_for, branch) {
+            (
+                WaitingFor::WardSacrificeChoice {
+                    player, permanents, ..
+                },
+                0,
+            ) => {
+                assert_eq!(*player, P1, "P1 picks what P1 sacrifices");
+                assert!(
+                    permanents.contains(&bears) && permanents.contains(&altar),
+                    "the Bears and the Altar are offered: {permanents:?}"
+                );
+                bears
+            }
+            (WaitingFor::WardDiscardChoice { player, cards, .. }, 1) => {
+                assert_eq!(*player, P1, "P1 picks what P1 discards");
+                assert!(cards.contains(&card), "the card in hand is offered");
+                card
+            }
+            (other, _) => panic!("branch {branch}: expected P1's pick prompt, got {other:?}"),
+        };
+
+        let offered = offered_mana_actions(&runner);
+        assert!(
+            offered.is_empty(),
+            "branch {branch}: no mana action is offered at the pick: {offered:?}"
+        );
+        let selection = land_mana_selection(&runner, P1, swamp);
+        submit_refused_mana_actions(
+            &mut runner,
+            P1,
+            swamp,
+            &p1_permanents,
+            vec![
+                activate_altar(altar),
+                GameAction::TapLandForMana { selection },
+            ],
+        );
+
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![picked],
+            })
+            .expect("P1 completes the payment");
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            runner.state().objects[&picked].zone,
+            Zone::Graveyard,
+            "branch {branch}: the picked object was paid"
+        );
+        assert_eq!(runner.life(P1), 20, "branch {branch}: paying spares P1");
+        assert!(runner.state().stack.is_empty(), "the trigger resolved");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ),
+            "branch {branch}: P0 gets priority back: {:?}",
+            runner.state().waiting_for
+        );
+    }
 }

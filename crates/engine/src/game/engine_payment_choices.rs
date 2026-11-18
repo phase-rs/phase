@@ -2601,33 +2601,39 @@ pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
     payment_continuation_prompt(state).is_some_and(|prompt| prompt == state.waiting_for)
 }
 
-/// CR 605.3a: whether the open unless-payment prompt asks for no mana: its
-/// cost is draws only (Psychic Vortex's upkeep, Decoy Gambit's "has you draw a
-/// card"), at the offer and at the continuation of a repeated payment alike.
-/// A mana ability is activated with priority or when a rule or effect asks for
-/// a mana payment; the payer of a draw cost has neither while the ability
-/// resolves (CR 117.1d). The one mana-window authority of an unless payment:
-/// the tap preflight, the tap and activation handlers and the legal-action
-/// lists (`ai_support::mana_action_player`) read it. Every other unless cost
-/// keeps the window it had. Taking back an earlier tap (`UntapLandForMana`)
-/// activates nothing and is admitted at every unless payment, as before.
+/// CR 605.3a + CR 117.1d + CR 608.2g: whether the open unless-payment prompt
+/// asks for no mana: its cost includes no mana payment
+/// (`costs::cost_asks_for_mana`): a sacrifice (Bellowing Mauler), life
+/// (Dwarven Forge-Chanter's Ward—Pay 2 life), draws (Psychic Vortex's upkeep),
+/// a cost that adds mana (Braid of Fire's upkeep), at the offer and at the
+/// continuation of a repeated payment alike. A mana ability is activated with
+/// priority or when a rule or effect asks for a mana payment; the payer of
+/// such a cost has neither while the ability resolves. The one mana-window
+/// authority of an unless payment: the tap preflight, the tap and activation
+/// handlers and the legal-action lists (`ai_support::mana_action_player`) read
+/// it. Every unless cost that asks for mana keeps its window. Taking back an
+/// earlier tap (`UntapLandForMana`) activates nothing and is admitted at every
+/// unless payment, as before. The branch choice and pick prompts of an unless
+/// payment (CR 118.12a: `UnlessPaymentChooseCost`, `WardSacrificeChoice`,
+/// `WardDiscardChoice`, `UnlessBounceChoice`) have no mana arm in the reducer,
+/// the tap preflight or the legal-action lists, so they open no window.
 pub(crate) fn unless_prompt_asks_for_no_mana(state: &GameState) -> bool {
     matches!(
         &state.waiting_for,
-        WaitingFor::UnlessPayment { cost, .. } if costs::cost_is_only_draws(cost)
+        WaitingFor::UnlessPayment { cost, .. } if !costs::cost_asks_for_mana(cost)
     )
 }
 
-/// CR 605.3a: refuse a mana action at an unless payment of draws
+/// CR 605.3a: refuse a mana action at an unless payment that asks for no mana
 /// ([`unless_prompt_asks_for_no_mana`]). At the continuation of a repeated
 /// payment the refusal also protects the owed cursor: a mana ability that
 /// paused on a replacement choice would take the slot the cursor is parked in
 /// (`GameState::pending_cost_move_resume`), after which the prompt would read
 /// as a fresh choice.
-pub(crate) fn refuse_mana_at_draw_only_payment(state: &GameState) -> Result<(), EngineError> {
+pub(crate) fn refuse_mana_where_none_is_asked(state: &GameState) -> Result<(), EngineError> {
     if unless_prompt_asks_for_no_mana(state) {
         return Err(EngineError::InvalidAction(
-            "CR 605.3a: a payment of draws asks for no mana".to_string(),
+            "CR 605.3a: this payment asks for no mana".to_string(),
         ));
     }
     Ok(())
@@ -3005,7 +3011,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
     selection: &ManaSourceSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_draw_only_payment(state)?;
+    refuse_mana_where_none_is_asked(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -3088,7 +3094,7 @@ pub(super) fn handle_unless_payment_activate_ability(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_draw_only_payment(state)?;
+    refuse_mana_where_none_is_asked(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
