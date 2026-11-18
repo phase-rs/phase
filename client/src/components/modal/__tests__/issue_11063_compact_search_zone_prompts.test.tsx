@@ -13,8 +13,9 @@ import { ChoiceHeaderConfirm } from "../ChoiceOverlay.tsx";
 // Issue #11063: on a landscape phone (about 390 CSS px tall) the Search Library
 // prompt and the effect-zone prompts ("Choose 1 card to exile", put on top or
 // bottom, onto the battlefield, return to hand) kept the full layout: the
-// "Game Choice" eyebrow, a title and an instruction that said the same thing,
-// and a large footer confirm that said it a third time. On a short screen each
+// "Game Choice" eyebrow, a title and an instruction on lines of their own (an
+// effect-zone title only repeats its instruction's verb, as "Exile" over
+// "Choose 1 card to exile"), and a large footer confirm. On a short screen each
 // now has one header line, like the discard prompt (#11005): Search Library
 // keeps its title before the instruction, because the instruction alone does
 // not say where the cards come from; an effect-zone title only repeats the
