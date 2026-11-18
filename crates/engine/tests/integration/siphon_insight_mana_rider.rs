@@ -612,9 +612,10 @@ fn colorless_requirement_case(
         payment_mode: mode,
     });
     if mode == CastPaymentMode::Manual && cast.is_ok() {
-        // Pin mana one unit at a time. The cost matcher handles the {C} shard
-        // before generic mana, so Vizier lets the first black pip pay {C}; the
-        // next two pips reduce Matter Reshaper's generic cost.
+        // Pin mana one unit at a time. A pin records the chosen pool unit, but
+        // the matcher may allocate it to a generic pip or to {C}. Vizier makes
+        // either allocation legal for Matter Reshaper; three pins cover the
+        // full cost regardless of which allocation the matcher chooses.
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::ManaPayment { .. }
@@ -638,29 +639,40 @@ fn colorless_requirement_case(
                 .act(GameAction::SpendPoolMana { pip_id })
                 .expect("black mana is eligible for this spell's cost");
 
-            let expected_remaining = if creature {
-                match index {
-                    0 => ManaCost::generic(2),
-                    1 => ManaCost::generic(1),
-                    _ => ManaCost::NoCost,
-                }
+            let remaining = derive_views(runner.state(), Some(P0)).pending_payment_remaining;
+            if creature && index < 2 {
+                let expected_alternatives = match index {
+                    0 => vec![
+                        ManaCost::generic(2),
+                        ManaCost::Cost {
+                            shards: vec![ManaCostShard::Colorless],
+                            generic: 1,
+                        },
+                    ],
+                    1 => vec![
+                        ManaCost::generic(1),
+                        ManaCost::Cost {
+                            shards: vec![ManaCostShard::Colorless],
+                            generic: 0,
+                        },
+                    ],
+                    _ => unreachable!(),
+                };
+                assert!(
+                    expected_alternatives
+                        .iter()
+                        .any(|expected| remaining.as_ref() == Some(expected)),
+                    "after pin {}, expected one of {expected_alternatives:?}, got {remaining:?}",
+                    index + 1,
+                );
             } else {
-                ManaCost::NoCost
-            };
-            assert_eq!(
-                derive_views(runner.state(), Some(P0)).pending_payment_remaining,
-                Some(expected_remaining),
-                "{}",
-                if creature {
-                    match index {
-                        0 => "Vizier lets the first black pip pay {C}, leaving two generic",
-                        1 => "the second black pip reduces the generic remainder to one",
-                        _ => "the third black pip finishes the generic cost",
-                    }
-                } else {
-                    "the pinned black mana covers the {C} pip"
-                }
-            );
+                assert_eq!(
+                    remaining,
+                    Some(ManaCost::NoCost),
+                    "the pinned black mana fully covers the cost after pin {}",
+                    index + 1,
+                );
+            }
         }
         runner
             .act(GameAction::PassPriority)
