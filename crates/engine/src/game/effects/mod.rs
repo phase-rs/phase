@@ -13295,7 +13295,10 @@ pub(crate) fn published_revealed_ids(
                 && keep_count_expr
                     .as_ref()
                     .is_none_or(|keep| !quantity_expr_binding_diverges(keep, reader));
-            if !library_owner_is_fixed(player) || !counts_are_fixed {
+            // CR 101.4 + CR 701.20e: a scoped look runs once per seat, each seat
+            // bound by `bind_scoped_seat`, which `looked_cards` on the unbound node
+            // does not select.
+            if node.player_scope.is_some() || !library_owner_is_fixed(player) || !counts_are_fixed {
                 return None;
             }
             // CR 701.20e: only the pure peek (nothing kept on this step) hands
@@ -38451,6 +38454,20 @@ mod tests {
                 None,
             ),
             (
+                // CR 101.4 + CR 701.20e: each scoped seat looks at its own library.
+                // No printed scoped `Dig` names an owner other than `ScopedPlayer`; the
+                // nearest printed card is Explore the Vastlands ("Each player looks at
+                // the top five cards of their library"), whose owner already declines.
+                "Dig keep 0, look, each player",
+                {
+                    let mut ability = node(dig(Some(0), false, DigSource::Library), vec![]);
+                    ability.player_scope = Some(PlayerFilter::All);
+                    ability
+                },
+                unchosen,
+                None,
+            ),
+            (
                 "RevealTop, controller",
                 node(reveal_top(TargetFilter::Controller), vec![]),
                 unchosen,
@@ -38489,6 +38506,20 @@ mod tests {
             (
                 "RevealTop, scoped player without a scope",
                 node(reveal_top(TargetFilter::ScopedPlayer), vec![]),
+                unchosen,
+                None,
+            ),
+            (
+                // CR 115.1 + CR 608.2c: no printed scoped `RevealTop` reads its library
+                // owner from targets; the nearest printed card is Keen Duelist ("you and
+                // target opponent each reveal the top card of your library"), whose
+                // owner is `Controller`.
+                "RevealTop, each player, owner read from unbound targets",
+                {
+                    let mut ability = node(reveal_top(TargetFilter::Player), vec![]);
+                    ability.player_scope = Some(PlayerFilter::All);
+                    ability
+                },
                 unchosen,
                 None,
             ),
