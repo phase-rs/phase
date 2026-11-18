@@ -302,6 +302,10 @@ impl DeclarationPairs {
                     minimums: block_requirements.clone(),
                 })
             }
+            // Every other prompt is not a combat declaration, and a
+            // declaration another seat is making is not `owner`'s to compose.
+            // A selection over the two declare prompts, as the engine's
+            // contract reads them (`AiDecisionContract::contains_action`).
             _ => None,
         }
     }
@@ -318,8 +322,14 @@ impl DeclarationPairs {
     /// such declaration is completed in one batch, as the engine completes
     /// its own candidates.
     fn any_one_creature_change(&self, state: &GameState, declared: &GameAction) -> bool {
-        match (self, declared) {
-            (Self::Attacks { attacks, .. }, GameAction::DeclareAttackers { attacks: base, .. }) => {
+        match self {
+            Self::Attacks { attacks, .. } => {
+                // The engine's candidates at a declare-attackers prompt are
+                // attack declarations; any other action holds none of these
+                // pairs.
+                let GameAction::DeclareAttackers { attacks: base, .. } = declared else {
+                    return false;
+                };
                 let proposals = one_creature_changes(attacks, base);
                 complete_attacker_proposals(state, &proposals, CombatTaxPosture::Refuse)
                     .iter()
@@ -331,12 +341,13 @@ impl DeclarationPairs {
                         )
                     })
             }
-            (
-                Self::Blocks {
-                    defender, blocks, ..
-                },
-                GameAction::DeclareBlockers { assignments: base },
-            ) => {
+            Self::Blocks {
+                defender, blocks, ..
+            } => {
+                // Likewise block declarations at a declare-blockers prompt.
+                let GameAction::DeclareBlockers { assignments: base } = declared else {
+                    return false;
+                };
                 let proposals = one_creature_changes(blocks, base);
                 complete_blocker_proposals(state, *defender, &proposals, CombatTaxPosture::Refuse)
                     .iter()
@@ -348,8 +359,6 @@ impl DeclarationPairs {
                         )
                     })
             }
-            // A candidate of another kind is no declaration of these pairs.
-            _ => false,
         }
     }
 
