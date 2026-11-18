@@ -17377,6 +17377,140 @@ mod where_x_tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
+    const QUARTZWOOD_DAMAGE: &str = "the amount of damage those creatures dealt to that player";
+
+    #[test]
+    fn where_x_damage_dealt_binds_trigger_event_amount() {
+        let expected = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        for expression in [
+            "the damage dealt",
+            "the amount of damage dealt",
+            QUARTZWOOD_DAMAGE,
+        ] {
+            assert_eq!(
+                parse_where_x_quantity_expression(expression),
+                expected,
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_x_damage_dealt_preserves_suffix_meaning() {
+        use crate::types::ability::{AggregateFunction, DamageChannel, DamageKindFilter};
+
+        assert_eq!(
+            parse_where_x_quantity_expression("the damage dealt to target opponent this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DamageDealtThisTurn {
+                    source: Box::new(TargetFilter::Any),
+                    target: Box::new(TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Player,
+                            TargetFilter::Typed(
+                                TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                            ),
+                        ],
+                    }),
+                    aggregate: AggregateFunction::Sum,
+                    group_by: None,
+                    damage_kind: DamageKindFilter::Any,
+                    channel: DamageChannel::Total,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression("the damage dealt this way"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount {
+                    aggregate: AggregateFunction::Sum,
+                    channel: DamageChannel::Total,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression(&format!("{QUARTZWOOD_DAMAGE} this turn")),
+            None
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression(QUARTZWOOD_DAMAGE),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
+        );
+    }
+
+    #[test]
+    fn where_x_damage_dealt_explicit_grammar_requires_printed_subject() {
+        use crate::parser::oracle_nom::quantity::parse_quantity_ref_complete;
+
+        for subject in ["they", "it", "this creature"] {
+            let expression = format!("the amount of damage {subject} dealt to that player");
+            assert!(
+                parse_quantity_ref_complete(&expression).is_err(),
+                "{expression}"
+            );
+        }
+        assert_eq!(
+            parse_quantity_ref_complete(QUARTZWOOD_DAMAGE),
+            Ok(("", QuantityRef::EventContextAmount))
+        );
+    }
+
+    #[test]
+    fn where_x_damage_dealt_binds_quartzwood_token_stats() {
+        use crate::types::ability::DamageKindFilter;
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Trample\nWhenever one or more creatures you control with trample deal combat damage to a player, create an X/X green Dinosaur Beast creature token with trample, where X is the amount of damage those creatures dealt to that player.",
+            "Quartzwood Crasher",
+            &[],
+            &["Creature".to_string()],
+            &["Dinosaur".to_string(), "Beast".to_string()],
+        );
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected one trigger, got {:?}", parsed.triggers);
+        };
+        assert_eq!(trigger.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+        assert!(trigger.batched);
+        assert!(trigger.valid_card.is_none());
+        assert_eq!(
+            trigger.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::WithKeyword {
+                        value: crate::types::keywords::Keyword::Trample,
+                    }]),
+            ))
+        );
+        let effect = trigger
+            .execute
+            .as_ref()
+            .expect("expected trigger effect")
+            .effect
+            .as_ref();
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = effect
+        else {
+            panic!("expected token effect, got {effect:?}");
+        };
+        let stat = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(*power, stat);
+        assert_eq!(*toughness, stat);
+    }
+
     /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
     /// binds X to the rolled value via `EventContextAmount` — the same channel
     /// the inline "equal to the result" class uses. Building-block guard for
