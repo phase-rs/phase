@@ -184,6 +184,8 @@ export function DexterityFlip3D({
   const artRef = useRef<Texture | null>(null);
   const frontRef = useRef<MeshStandardMaterial | null>(null);
   const glowRef = useRef<{ mesh: Mesh; material: MeshBasicMaterial } | null>(null);
+  // Redraws a finished flight after an in-place restyle; null once disposed.
+  const redrawRef = useRef<(() => void) | null>(null);
   const failFrame = useFrameFailure();
   const { landing, fullTurns } = result;
 
@@ -193,6 +195,7 @@ export function DexterityFlip3D({
 
     settledRef.current = false;
     let disposed = false;
+    let finished = false;
     let rafId = 0;
     const flight: DexterityFlipResult = { landing, fullTurns };
 
@@ -305,7 +308,10 @@ export function DexterityFlip3D({
         settledRef.current = true;
         onSettleRef.current?.();
       }
-      if (sample.reveal >= 1) return;
+      if (sample.reveal >= 1) {
+        finished = true;
+        return;
+      }
 
       rafId = requestAnimationFrame(guardedTick);
     };
@@ -321,11 +327,23 @@ export function DexterityFlip3D({
       }
     };
 
+    // Mid-flight the next frame picks a restyle up; once the loop has stopped,
+    // draw one frame so the change reaches the canvas.
+    redrawRef.current = () => {
+      if (disposed || !finished) return;
+      try {
+        renderer.render(scene, camera);
+      } catch (error) {
+        failFrame(error);
+      }
+    };
+
     rafId = requestAnimationFrame(guardedTick);
 
     return () => {
       disposed = true;
       cancelAnimationFrame(rafId);
+      redrawRef.current = null;
       frontRef.current = null;
       glowRef.current = null;
       tileGeometry.dispose();
@@ -371,6 +389,7 @@ export function DexterityFlip3D({
         loaded = texture;
         artRef.current = texture;
         if (frontRef.current) applyArt(frontRef.current, texture);
+        redrawRef.current?.();
       },
       undefined,
       // A missing image keeps the placeholder face; the flip is cosmetic.
@@ -380,7 +399,10 @@ export function DexterityFlip3D({
       cancelled = true;
       if (!loaded) return;
       if (artRef.current === loaded) artRef.current = null;
-      if (frontRef.current?.map === loaded) applyArt(frontRef.current, null);
+      if (frontRef.current?.map === loaded) {
+        applyArt(frontRef.current, null);
+        redrawRef.current?.();
+      }
       loaded.dispose();
     };
   }, [artSrc]);
@@ -388,7 +410,9 @@ export function DexterityFlip3D({
   // ─── Accent: retints the glow in place ───
   useEffect(() => {
     const glow = glowRef.current;
-    if (glow) applyAccent(glow.mesh, glow.material, accentRgb);
+    if (!glow) return;
+    applyAccent(glow.mesh, glow.material, accentRgb);
+    redrawRef.current?.();
   }, [accentRgb]);
 
   return (
