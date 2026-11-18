@@ -1359,7 +1359,11 @@ mod tests {
                 faces,
                 scan,
                 db.valid_subtypes().clone(),
-                db.export_integrity_errors(),
+                {
+                    let mut errors = db.export_integrity_errors();
+                    errors.sort();
+                    errors
+                },
                 search,
                 subset,
             )
