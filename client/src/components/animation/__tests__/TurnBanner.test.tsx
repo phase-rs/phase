@@ -1,5 +1,5 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const motionState = vi.hoisted(() => ({ reduced: false }));
 
@@ -10,6 +10,7 @@ vi.mock("framer-motion", async (importOriginal) => ({
 
 import { TurnBanner } from "../TurnBanner";
 import { useUiStore } from "../../../stores/uiStore";
+import { stubBannerTitleLayout, type TitleWidths } from "../../../test/helpers/bannerTitleLayout";
 
 /** `turnBannerText`'s headline for an opponent named "Alphinaud Leveilleur" (#11117). */
 const LONG_TITLE = "ALPHINAUD LEVEILLEUR'S TURN";
@@ -33,10 +34,23 @@ function bandChildrenWithClass(band: HTMLElement, className: string): Element[] 
 }
 
 // happy-dom does no layout, so these tests pin the classes and structure that
-// centre, bound and size the title, not rendered positions.
+// centre and bound the title, and set the widths a browser would measure (see
+// `stubBannerTitleLayout`) to check the title is the one fitted to its line.
 describe("TurnBanner", () => {
+  let widths: TitleWidths;
+  let layout: ReturnType<typeof stubBannerTitleLayout>;
+
+  beforeEach(() => {
+    // A phone's 388px line; the title's widths at its 48px size class.
+    widths = { line: 388, oneLine: 300, longestRun: 160 };
+    layout = stubBannerTitleLayout(widths);
+  });
+
   afterEach(() => {
     cleanup();
+    layout.restore();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     motionState.reduced = false;
     useUiStore.setState({
       showTurnBanner: false,
@@ -46,22 +60,23 @@ describe("TurnBanner", () => {
     });
   });
 
-  it("centres and balances a long name inside the side gutters, sized to its estimated width", () => {
+  it("centres a long name inside the side gutters, at the floor size where it has to wrap", () => {
+    // Too wide for one line above the 28px floor.
+    widths.oneLine = 1200;
     render(<TurnBanner />);
     showBanner(LONG_TITLE);
 
     const title = screen.getByText(LONG_TITLE);
     expect(title).toHaveClass("block", "text-center", "text-balance");
-    // 27 characters, and the 12 of "LEVEILLEUR'S", at (0.68 + 0.2)em each.
-    expect(title.style.getPropertyValue("--title-width-em")).toBe("23.76");
-    expect(title.style.getPropertyValue("--title-run-width-em")).toBe("10.56");
+    expect(title.style.fontSize).toBe("28px");
 
-    // The band the title fits itself to: the full width, inside the gutters.
+    // The band is the title's line: the full width, inside the gutters.
     const band = title.parentElement!;
-    expect(band).toHaveClass("@container", "w-full", SIDE_GUTTERS);
+    expect(band).toHaveClass("w-full", SIDE_GUTTERS);
   });
 
   it("frames a wrapped title with the band's edges instead of fixed offsets from the centre", () => {
+    widths.oneLine = 1200;
     render(<TurnBanner />);
     showBanner(LONG_TITLE);
 
@@ -75,13 +90,14 @@ describe("TurnBanner", () => {
     expect(screen.getByText("Turn 3").parentElement).toBe(band);
   });
 
-  it("keeps a short name's size class and the one-line band's geometry", () => {
+  it("renders a short name as before: its size class, in a one-line band", () => {
     render(<TurnBanner />);
     showBanner("YOUR TURN");
 
     const title = screen.getByText("YOUR TURN");
     expect(title).toHaveClass("text-5xl", "font-extrabold", "tracking-[0.2em]", "uppercase");
-    expect(title.style.getPropertyValue("--title-width-em")).toBe("7.92");
+    // It fits its line, so it keeps the size class: no inline size.
+    expect(title.style.fontSize).toBe("");
 
     // 12px of padding around the 48px line: the lines sit 36px from the centre,
     // where they were drawn before, and the strip reaches 4px past them.
@@ -92,15 +108,16 @@ describe("TurnBanner", () => {
     expect(strip.style.bottom).toBe("-4px");
   });
 
-  it("centres and balances a long name under reduced motion too", () => {
+  it("fits the reduced-motion title to its line the same way", () => {
     motionState.reduced = true;
+    widths.oneLine = 600;
     render(<TurnBanner />);
     showBanner(LONG_TITLE);
 
     const title = screen.getByText(LONG_TITLE);
     expect(title).toHaveClass("text-center", "text-balance");
-    // 27 characters at (0.68 + 0.05)em: this title is `tracking-wider`.
-    expect(title.style.getPropertyValue("--title-width-em")).toBe("19.71");
-    expect(title.parentElement).toHaveClass("@container", "w-full", SIDE_GUTTERS);
+    // 600px at 48px fits the 387px the title may fill at 48 × 387 / 600.
+    expect(parseFloat(title.style.fontSize)).toBeCloseTo((48 * 387) / 600);
+    expect(title.parentElement).toHaveClass("w-full", SIDE_GUTTERS);
   });
 });

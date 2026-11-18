@@ -10,7 +10,7 @@ import { useUiStore } from "../../stores/uiStore";
 import type { DiceRollPayload } from "../../stores/uiStore";
 import type { Coin3D as Coin3DImpl } from "./dice3d/Coin3D.tsx";
 import type { Dice3D as Dice3DImpl } from "./dice3d/Dice3D.tsx";
-import { BANNER_TITLE_CONTAINER, bannerTitleStyle, type BannerTitleSize } from "./bannerTitle";
+import { BANNER_TITLE_GUTTERS, useBannerTitleFit } from "./bannerTitle";
 import { loadCoin3DModule, loadDice3DModule } from "./dice3d/loaders";
 import { safeLazy, warnOnce } from "./dice3d/safeLazy";
 
@@ -49,15 +49,10 @@ const IGNORED = "100,116,139"; // slate-500 — a dropped/ignored die, still sho
 const COIN_WON = "52,211,153"; // emerald-400 — the flipper won
 const COIN_LOST = "251,113,133"; // rose-400 — the flipper lost
 
-/** `text-4xl tracking-wider`, the contest's roll-winner caption. */
-const WINNER_CAPTION_SIZE: BannerTitleSize = { maxRem: 2.25, minRem: 1.5, letterSpacingEm: 0.05 };
-/** `text-2xl tracking-wide`, a coin flip's outcome, inside its `px-5` padding and 1px border. */
-const COIN_OUTCOME_SIZE: BannerTitleSize = {
-  maxRem: 1.5,
-  minRem: 1.125,
-  letterSpacingEm: 0.025,
-  insetRem: 2.625,
-};
+/** The smallest the 36px (`text-4xl`) roll-winner caption shrinks to before it wraps instead. */
+const WINNER_CAPTION_MINIMUM_REM = 1.5;
+/** The smallest the 24px (`text-2xl`) coin-flip outcome shrinks to before it wraps instead. */
+const COIN_OUTCOME_MINIMUM_REM = 1.125;
 
 let nextRollKey = 1;
 const rollKeys = new WeakMap<DiceRollPayload, string>();
@@ -91,8 +86,8 @@ function hasWebGL(): boolean {
  * rolls that can fire while other overlays are up.
  *
  * Its side gutters bound the captions that name a player (the roll winner, a
- * coin flip's outcome), and its width inside them is what those captions fit
- * themselves to (`bannerTitle`).
+ * coin flip's outcome): each sits in a row as wide as the overlay inside them,
+ * and fits itself to that row (`bannerTitle`).
  */
 export function DiceRollOverlay() {
   const diceRoll = useUiStore((s) => s.diceRoll);
@@ -143,7 +138,7 @@ export function DiceRollOverlay() {
     <AnimatePresence>
       {diceRoll && (
         <motion.div
-          className={`fixed inset-0 z-[55] flex items-center justify-center pointer-events-none ${BANNER_TITLE_CONTAINER}`}
+          className={`fixed inset-0 z-[55] flex items-center justify-center pointer-events-none ${BANNER_TITLE_GUTTERS}`}
           role="status"
           aria-live="polite"
           initial={{ opacity: 0 }}
@@ -300,9 +295,10 @@ function CoinFlip({
   const outcome = payload.won
     ? t("diceRoll.wonCoinFlip", { name: playerLabel(payload.playerId) })
     : t("diceRoll.lostCoinFlip", { name: playerLabel(payload.playerId) });
+  const outcomeRef = useBannerTitleFit(outcome, COIN_OUTCOME_MINIMUM_REM);
 
   return (
-    <div className="relative flex flex-col items-center gap-4 select-none">
+    <div className="relative flex w-full flex-col items-center gap-4 select-none">
       <span className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">
         {t("diceRoll.coinFlip")}
       </span>
@@ -329,16 +325,17 @@ function CoinFlip({
         }
       </DieFace>
       {/* Holds a one-line banner's height so the coin doesn't shift when it
-          lands. A long name that wraps grows the row instead of spilling out. */}
-      <div className="flex min-h-14 items-center">
+          lands. A long name that wraps grows the row instead of spilling out.
+          As wide as the overlay inside its gutters: the banner's line. */}
+      <div className="flex min-h-14 w-full items-center justify-center">
         {settled && (
           <motion.span
+            ref={outcomeRef}
             className="rounded-full border px-5 py-2 text-center text-balance text-2xl font-extrabold uppercase tracking-wide"
             initial={{ opacity: 0, scale: 0.82, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             transition={{ type: "spring", stiffness: 260, damping: 20 }}
             style={{
-              ...bannerTitleStyle(outcome, COIN_OUTCOME_SIZE),
               color: `rgb(${resultAccent})`,
               borderColor: `rgba(${resultAccent},0.7)`,
               backgroundColor: `rgba(${resultAccent},0.14)`,
@@ -412,9 +409,10 @@ function ContestDice({
         ? t("diceRoll.youWonRoll")
         : t("diceRoll.playerWonRoll", { name: getOpponentDisplayName(winner) })
       : null;
+  const captionRef = useBannerTitleFit(caption ?? "", WINNER_CAPTION_MINIMUM_REM);
 
   return (
-    <div className="relative flex flex-col items-center gap-8 select-none">
+    <div className="relative flex w-full flex-col items-center gap-8 select-none">
       <motion.span
         key={roundIndex}
         className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400"
@@ -478,16 +476,15 @@ function ContestDice({
 
       {/* Holds a one-line caption's height so the dice don't shift when it
           appears. A long name that wraps grows the row instead of spilling out.
-          Capped at the overlay's width inside its gutters: three or four seats'
-          dice make this column wider than a phone, and the caption wraps at the
-          gutters, not at the dice. */}
-      <div className="flex min-h-10 max-w-[100cqi] items-center">
+          As wide as the overlay inside its gutters, the caption's line, even
+          when three or four seats' dice run wider than a phone. */}
+      <div className="flex min-h-10 w-full items-center justify-center">
         <AnimatePresence>
           {revealed && caption && (
             <motion.span
+              ref={captionRef}
               className="text-center text-balance text-4xl font-extrabold uppercase tracking-wider"
               style={{
-                ...bannerTitleStyle(caption, WINNER_CAPTION_SIZE),
                 color: `rgb(${GOLD})`,
                 textShadow: `0 0 22px rgba(${GOLD},0.6), 0 2px 4px rgba(0,0,0,0.5)`,
               }}

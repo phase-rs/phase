@@ -1,110 +1,115 @@
+import { useLayoutEffect, useState } from "react";
+
 /**
- * Sizing for the full-screen overlay titles that print a player's name (the turn
- * banner, the first-player roll winner, a coin flip's outcome). A name can be
- * long, so each title fits itself to the screen's width instead of running off
- * it: centred, inside the side gutters, shrunk where that keeps it on one line,
- * and otherwise wrapped into balanced lines.
+ * Banner titles that print a player's name: the turn banner, the first-player
+ * roll winner, a coin flip's outcome. A name can be long, so each title fits the
+ * line it is given instead of running off the screen: centred inside the side
+ * gutters, at its size class wherever it fits on one line, shrunk to fit one line
+ * where that keeps it above a floor, and otherwise wrapped into balanced lines.
+ */
+
+/**
+ * Equal side gutters: the game screen's edge padding (`--game-edge-right`, as the
+ * mobile action rail's in `index.css`) outside the wider of the two safe-area
+ * insets. Both sides match, so a centred title keeps the screen's centre line,
+ * and the decorations around it, even when a camera cutout insets one side only.
+ */
+export const BANNER_TITLE_GUTTERS =
+  "px-[calc(max(env(safe-area-inset-left),env(safe-area-inset-right))+var(--game-edge-right,0.75rem))]";
+
+/**
+ * Fits a banner title to its line, the content box of its parent, which needs a
+ * definite width. Returns the ref to put on the title.
  *
- * Nothing here measures text: a title's width is estimated from its characters.
- * The estimates err high, so a title the estimate fits on one line has room to
- * spare; where one runs low, the title wraps, still centred and balanced. The
- * exception is a run sized to exactly a line because it is too wide for one at
- * the floor (see `bannerTitleStyle`): if the estimate runs low for it, it runs
- * past the gutters.
- */
-
-/**
- * Estimated width, in em before letter-spacing, of a character in the uppercase
- * extra-bold system sans these titles use. On an Android phone (Roboto Bold) a
- * name averages about 0.56em a character and a run of wide letters about 0.64em;
- * Helvetica-like system fonts reach about 0.66em.
- */
-const NARROW_CHARACTER_EM = 0.68;
-
-/** A full-width character is one em wide; the estimate keeps a little room, as the narrow one does. */
-const WIDE_CHARACTER_EM = 1.05;
-
-/**
- * Full-width characters: the CJK scripts, with the marks and punctuation they
- * share (such as ー); the ideographic space and the full-width forms of Latin
- * letters, digits and punctuation (such as １ and ！), common in Japanese names;
- * and emoji. A line can break on either side of one, which is how a ja or zh
- * template joins a name with no space ("{{name}}のターン").
- */
-const WIDE_CHARACTER =
-  /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\u3000\uff01-\uff60\uffe0-\uffe6\p{Emoji_Presentation}]/u;
-
-/**
- * Classes for the element a title fits itself to. Its side gutters are the game
- * screen's own edge padding (`--game-edge-right`, as the mobile action rail's in
- * `index.css`) outside the wider of the two safe-area insets. Both sides get the
- * same gutter, so a centred title shares the screen's centre line with the
- * banner's other decorations even when a camera cutout insets one side only.
- * Its width inside them is the `100cqi` that `bannerTitleStyle` divides. The
- * element needs a definite width (`w-full`, or `fixed inset-0`), because a size
- * container does not grow to fit its content.
- */
-export const BANNER_TITLE_CONTAINER =
-  "@container px-[calc(max(env(safe-area-inset-left),env(safe-area-inset-right))+var(--game-edge-right,0.75rem))]";
-
-export type BannerTitleSize = {
-  /** The title's size class, kept wherever the estimate fits it on one line. */
-  maxRem: number;
-  /** The smallest size it shrinks to before it wraps instead. */
-  minRem: number;
-  /** Its letter-spacing in em, from its `tracking-*` class. */
-  letterSpacingEm: number;
-  /** Its own horizontal padding and border, in rem, which its text can't use. */
-  insetRem?: number;
-};
-
-/**
- * Inline style that sizes a title from its estimated width to the width of the
- * nearest `BANNER_TITLE_CONTAINER`:
- * - `maxRem` wherever the estimate fits the title on one line;
- * - smaller, down to `minRem`, where that fits it on one line;
- * - otherwise `minRem`, wrapping. The floor gives way only for a run too wide
- *   for a line at it (a long one-word name): a run ends at a space, after a
- *   hyphen, and on either side of a full-width character, where a line can break.
+ * - A title that fits on one line keeps its size class, with no inline size.
+ * - One that doesn't shrinks until it fits on one line, down to `minimumRem`.
+ * - Below that it stays at `minimumRem` and wraps; the caller centres and
+ *   balances its lines (`text-center text-balance`). The floor gives way only for
+ *   a run the line can't break (a long one-word name) too wide for a line at it,
+ *   so no word runs past the gutters.
  *
- * The widths travel as custom properties, in em, so the size reads as the sum it
- * is. The caller centres and balances the wrapped lines (`text-center text-balance`).
+ * It measures the title as the browser lays it out, so it holds for any font and
+ * script. It measures again when the line resizes, when web fonts finish loading,
+ * and when the text changes.
  */
-export function bannerTitleStyle(title: string, size: BannerTitleSize) {
-  // One pass: the whole title's width, and the widest run a line can't break.
-  let titleWidthEm = 0;
-  let runWidthEm = 0;
-  let widestRunEm = 0;
-  for (const character of title) {
-    const isWide = WIDE_CHARACTER.test(character);
-    const widthEm = (isWide ? WIDE_CHARACTER_EM : NARROW_CHARACTER_EM) + size.letterSpacingEm;
-    titleWidthEm += widthEm;
+export function useBannerTitleFit(text: string, minimumRem: number) {
+  // The title, by a callback ref: a banner's title mounts after the hook's
+  // component does, when its banner or caption appears.
+  const [title, setTitle] = useState<HTMLElement | null>(null);
 
-    if (isWide) {
-      runWidthEm = 0;
-      widestRunEm = Math.max(widestRunEm, widthEm);
-      continue;
+  useLayoutEffect(() => {
+    const line = title?.parentElement;
+    if (!title || !line) {
+      return;
     }
-    if (character === " ") {
-      runWidthEm = 0;
-      continue;
-    }
-    runWidthEm += widthEm;
-    widestRunEm = Math.max(widestRunEm, runWidthEm);
-    if (character === "-") {
-      runWidthEm = 0;
-    }
-  }
 
-  const lineWidth = size.insetRem
-    ? `(100cqi - ${size.insetRem}rem)`
-    : "100cqi";
-  const fitsTitle = `calc(${lineWidth} / var(--title-width-em))`;
-  const fitsWidestRun = `calc(${lineWidth} / var(--title-run-width-em))`;
+    const fit = () => {
+      // Measure at the size class. With `width: 100%` the title spans its line;
+      // absolutely positioned, it is as wide as its own text asks, on one line
+      // (`max-content`) and at its longest unbreakable run (`min-content`). This
+      // runs before paint, so the measuring styles never show.
+      title.style.fontSize = "";
+      title.style.width = "100%";
+      const lineWidth = title.offsetWidth;
+      title.style.position = "absolute";
+      title.style.width = "max-content";
+      const oneLineWidth = title.offsetWidth;
+      title.style.width = "min-content";
+      const longestRunWidth = title.offsetWidth;
+      title.style.position = "";
+      title.style.width = "";
 
-  return {
-    "--title-width-em": Number(titleWidthEm.toFixed(3)),
-    "--title-run-width-em": Number(widestRunEm.toFixed(3)),
-    fontSize: `clamp(min(${size.minRem}rem, ${fitsWidestRun}), ${fitsTitle}, ${size.maxRem}rem)`,
-  };
+      // A title not laid out (zero width) has nothing to fit. `offsetWidth` is in
+      // whole pixels, so a pixel of slack keeps a title whose width rounded down
+      // from wrapping after all.
+      if (!lineWidth || oneLineWidth < lineWidth) {
+        return;
+      }
+
+      // Text widths scale with the font size; the title's padding and border
+      // don't. A length the browser leaves unresolved counts as none.
+      const titleStyle = getComputedStyle(title);
+      const sizeClassPx = parseFloat(titleStyle.fontSize);
+      const chromeWidth =
+        (parseFloat(titleStyle.paddingLeft) || 0) +
+        (parseFloat(titleStyle.paddingRight) || 0) +
+        (parseFloat(titleStyle.borderLeftWidth) || 0) +
+        (parseFloat(titleStyle.borderRightWidth) || 0);
+      const textRoom = lineWidth - 1 - chromeWidth;
+      const sizeToFit = (width: number) => (sizeClassPx * textRoom) / (width - chromeWidth);
+
+      const minimumPx = minimumRem * parseFloat(getComputedStyle(document.documentElement).fontSize);
+      const floorPx = Math.min(minimumPx, sizeToFit(longestRunWidth));
+      title.style.fontSize = `${Math.max(floorPx, sizeToFit(oneLineWidth))}px`;
+    };
+
+    fit();
+
+    // Refit in the frame after a resize, not inside the observer's callback:
+    // a refit changes the line's height, and resizing an observed element while
+    // its resize is being delivered makes the browser report a ResizeObserver
+    // loop error.
+    let frame = 0;
+    const resizeObserver = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(fit);
+    });
+    resizeObserver.observe(line);
+
+    // A web font that finishes loading after the first fit changes the text's width.
+    let mounted = true;
+    void document.fonts?.ready.then(() => {
+      if (mounted) {
+        fit();
+      }
+    });
+
+    return () => {
+      mounted = false;
+      resizeObserver.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [title, text, minimumRem]);
+
+  return setTitle;
 }

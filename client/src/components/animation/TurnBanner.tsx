@@ -2,12 +2,10 @@ import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { useUiStore } from "../../stores/uiStore";
-import { BANNER_TITLE_CONTAINER, bannerTitleStyle, type BannerTitleSize } from "./bannerTitle";
+import { BANNER_TITLE_GUTTERS, useBannerTitleFit } from "./bannerTitle";
 
-/** `text-5xl tracking-[0.2em]`, the cinematic title. */
-const TITLE_SIZE: BannerTitleSize = { maxRem: 3, minRem: 1.75, letterSpacingEm: 0.2 };
-/** `text-5xl tracking-wider`, the reduced-motion title. */
-const REDUCED_MOTION_TITLE_SIZE: BannerTitleSize = { maxRem: 3, minRem: 1.75, letterSpacingEm: 0.05 };
+/** The smallest the 48px (`text-5xl`) title shrinks to before it wraps instead. */
+const TITLE_MINIMUM_REM = 1.75;
 
 /**
  * Cinematic turn banner — dramatic horizontal sweep with glowing text,
@@ -23,6 +21,7 @@ export function TurnBanner() {
   const turnBannerNumber = useUiStore((s) => s.turnBannerNumber);
   const isYourTurn = useUiStore((s) => s.turnBannerIsYours);
   const shouldReduceMotion = useReducedMotion();
+  const titleRef = useBannerTitleFit(turnBannerText, TITLE_MINIMUM_REM);
 
   const colors = isYourTurn
     ? {
@@ -58,7 +57,7 @@ export function TurnBanner() {
             transition={{ duration: 0.2 }}
           >
             <div className="absolute inset-0 bg-black/50" />
-            <div className={`relative flex w-full flex-col items-center select-none gap-8 ${BANNER_TITLE_CONTAINER}`}>
+            <div className={`relative flex w-full flex-col items-center select-none gap-8 ${BANNER_TITLE_GUTTERS}`}>
               {turnBannerNumber != null && (
                 <span
                   className="text-3xl font-bold tracking-[0.5em] uppercase"
@@ -68,11 +67,9 @@ export function TurnBanner() {
                 </span>
               )}
               <span
+                ref={titleRef}
                 className="text-center text-balance text-5xl font-extrabold tracking-wider"
-                style={{
-                  ...bannerTitleStyle(turnBannerText, REDUCED_MOTION_TITLE_SIZE),
-                  color: colors.primary,
-                }}
+                style={{ color: colors.primary }}
               >
                 {turnBannerText}
               </span>
@@ -121,7 +118,7 @@ export function TurnBanner() {
               cutting through it. One line keeps the original geometry: 12px of
               padding around the 48px title puts each line 36px from the centre,
               and the strip reaches 4px past them. */}
-          <div className={`relative w-full py-3 ${BANNER_TITLE_CONTAINER}`}>
+          <div className={`relative w-full py-3 ${BANNER_TITLE_GUTTERS}`}>
             {/* Banner strip background — horizontal bar */}
             <motion.div
               className="absolute left-0 right-0"
@@ -219,9 +216,9 @@ export function TurnBanner() {
 
             {/* Banner text — scales in with punch */}
             <motion.span
+              ref={titleRef}
               className="relative block text-center text-balance text-5xl font-extrabold tracking-[0.2em] uppercase select-none"
               style={{
-                ...bannerTitleStyle(turnBannerText, TITLE_SIZE),
                 color: colors.primary,
                 textShadow: `0 0 20px ${colors.glow}, 0 0 40px ${colors.glow}, 0 0 60px ${colors.glowStrong}, 0 2px 4px rgba(0,0,0,0.5)`,
               }}
