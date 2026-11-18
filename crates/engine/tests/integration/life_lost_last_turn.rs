@@ -25,6 +25,7 @@ const FEAST: &str = "At the beginning of each upkeep, if an opponent lost life l
 const BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 const SALVE: &str = "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage that would be dealt to any target this turn.";
 const STRIKE: &str = "Target creature gets +1/+0 until end of turn.\nDraw a card.";
+const REPAY: &str = "Each player's life total becomes the lowest life total among all players.";
 
 fn cost(generic: u32, color: ManaCostShard) -> ManaCost {
     ManaCost::Cost {
@@ -533,4 +534,63 @@ fn feast_counts_an_opponent_who_lost_life_and_left_last_turn() {
     assert_idle(&runner);
     assert_eq!(plus_counters(&runner, second), 1);
     assert_eq!(plus_counters(&runner, foreign), 0);
+}
+
+#[test]
+fn feast_triggers_when_the_opponents_combined_loss_exceeds_i32() {
+    // Reachable after life doubling with Beacon of Immortality; the histories
+    // start empty. Only Repay's actual resolution writes this fixture's loss.
+    const HIGH_LIFE: i32 = 1_342_177_280;
+    let mut scenario = scenario(3);
+    scenario.with_life(P1, HIGH_LIFE);
+    scenario.with_life(P2, HIGH_LIFE);
+    for _ in 0..7 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let repay_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 5,
+    };
+    let repay = scenario
+        .add_spell_to_hand_from_oracle(P0, "Repay in Kind", false, REPAY)
+        .with_mana_cost(repay_cost.clone())
+        .id();
+    let feast = scenario
+        .add_enchantment_from_oracle(P0, "Feast on the Fallen", FEAST)
+        .with_mana_cost(cost(2, ManaCostShard::Black))
+        .id();
+    let first = bear(&mut scenario, P0);
+    let second = bear(&mut scenario, P0);
+    let mut runner = scenario.build();
+    let card = assert_card(
+        &runner,
+        repay,
+        "Repay in Kind",
+        CoreType::Sorcery,
+        repay_cost,
+    );
+    assert_noncreature(card);
+    assert_eq!(card.zone, Zone::Hand);
+    let card = assert_card(
+        &runner,
+        feast,
+        "Feast on the Fallen",
+        CoreType::Enchantment,
+        cost(2, ManaCostShard::Black),
+    );
+    assert_noncreature(card);
+    assert_eq!((card.zone, card.controller), (Zone::Battlefield, P0));
+    assert_bear(&runner, first, P0);
+    assert_bear(&runner, second, P0);
+
+    // CR 119.5: setting a lower total loses the difference. Each player's
+    // loss fits an i32, but their combined loss is 2,684,354,520.
+    let outcome = runner.cast(repay).resolve();
+    outcome.assert_zone(&[repay], Zone::Graveyard);
+    outcome.assert_life_delta(P0, 0);
+    outcome.assert_life_delta(P1, 20 - HIGH_LIFE);
+    outcome.assert_life_delta(P2, 20 - HIGH_LIFE);
+    assert_idle(&runner);
+    next_upkeep(&mut runner, P1);
+    resolve_feast(&mut runner, feast, first, second);
 }
