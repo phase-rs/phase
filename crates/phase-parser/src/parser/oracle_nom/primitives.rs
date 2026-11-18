@@ -2535,11 +2535,6 @@ mod tests {
         );
     }
 
-    /// Everything that is not a signed nonzero digit count stays declined: `[0]`
-    /// puts zero counters and no printed effect uses it, `[+X]` / `[−X]` are the
-    /// announced-X forms of a cost, an unsigned count and a number word are not the
-    /// symbol, and the brackets are required. The positive reach-guard is the first
-    /// assertion: the combinator accepts a well-formed symbol.
     /// The or-closed list grammar reads an Oxford-comma list closed by "or",
     /// and rolls an unclosed comma run back to its first leg, leaving the
     /// comma for the caller.
@@ -2556,6 +2551,11 @@ mod tests {
         assert!(list("tokens").is_err());
     }
 
+    /// Everything that is not a signed nonzero digit count stays declined: `[0]`
+    /// puts zero counters and no printed effect uses it, `[+X]` / `[−X]` are the
+    /// announced-X forms of a cost, an unsigned count and a number word are not the
+    /// symbol, and the brackets are required. The positive reach-guard is the first
+    /// assertion: the combinator accepts a well-formed symbol.
     #[test]
     fn loyalty_symbol_delta_declines_everything_else() {
         assert!(parse_loyalty_symbol_delta("[+3]").is_ok(), "reach-guard");

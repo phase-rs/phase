@@ -50,6 +50,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerCounterKind;
+use crate::types::text_grammar::parse_article_number;
 use crate::types::zones::Zone;
 
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
@@ -919,8 +920,10 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
 
 /// Parse an exact-value disjunction of literal numbers (or X): "N or M" and
 /// "N, M, ..., or K" (the Oxford comma is optional). Each leg is a
-/// [`parse_quantity_expr_number`] that is not an article ("a"/"an" would read
-/// as 1) and ends at a word boundary. The list stops before any trailing
+/// [`parse_quantity_expr_number`] that is not an article and ends at a word
+/// boundary. The article exclusion is `parse_number`'s own article atom
+/// ([`parse_article_number`]), so "a"/"an" before a space, punctuation or the
+/// end ("or a, draw a card") is never read as the leg 1. The list stops before any trailing
 /// ", <clause>", so it never consumes a clause comma.
 ///
 /// English disjunction, not a CR construct: it carries no game rule of its
@@ -930,7 +933,7 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
 pub fn parse_number_disjunction(input: &str) -> OracleResult<'_, Vec<QuantityExpr>> {
     let (rest, legs) = parse_or_closed_list(|i| {
         terminated(
-            preceded(not(parse_article), parse_quantity_expr_number),
+            preceded(not(parse_article_number), parse_quantity_expr_number),
             not(alphanumeric1),
         )
         .parse(i)
@@ -8684,8 +8687,11 @@ mod tests {
         );
         // "base" is not a number leg (Vhati il-Dal).
         assert!(parse_number_disjunction("1 or base toughness 1").is_err());
-        // The article guard: "a" never reads as the leg 1.
+        // The article guard: "a" never reads as the leg 1, before a space or
+        // before punctuation (the closing "or a," would otherwise make the
+        // clause commas list-internal, reading [4, 5, 1]).
         assert!(parse_number_disjunction("a creature spell with power 4, 5, or 6").is_err());
+        assert!(parse_number_disjunction("4, 5, or a, draw a card").is_err());
     }
 
     #[test]

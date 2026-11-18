@@ -8549,6 +8549,13 @@ pub(crate) fn parse_mana_value_suffix(
                 a,
             )
         } else {
+            // An "or" tail that neither the comparator arms above nor the
+            // exact-value list read ("mana value 4 or blue") is not an exact
+            // reading: decline the whole suffix rather than keep EQ N and strand
+            // the "or" clause.
+            not(tag::<_, _, OracleError<'_>>("or "))
+                .parse(after_num)
+                .ok()?;
             // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
             (
                 FilterProp::Cmc {
@@ -15640,6 +15647,14 @@ mod tests {
             parse_mana_value_suffix(input, &mut ctx).expect("single mana value parses");
         assert_eq!(&input[consumed..], ", reveal it, and put it into your hand");
         assert_eq!(prop, mv_eq(3));
+
+        // An "or" tail that is neither a comparator nor a number leg declines
+        // the whole suffix (the pre-list behaviour), instead of keeping EQ 4 and
+        // leaving "or blue" behind. The two positives above are the reach-guard.
+        assert_eq!(
+            parse_mana_value_suffix("with mana value 4 or blue", &mut ctx),
+            None
+        );
     }
 
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — "creature card with mana value X

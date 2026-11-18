@@ -56,7 +56,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::AbilityDefinition;
 use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
@@ -116,10 +116,7 @@ fn assert_two_clean_spell_cast_triggers(runner: &GameRunner, unsealing: ObjectId
 }
 
 /// The triggered abilities on the stack whose source is `unsealing`.
-fn unsealing_triggers_on_stack(
-    runner_state: &engine::types::game_state::GameState,
-    unsealing: ObjectId,
-) -> usize {
+fn unsealing_triggers_on_stack(runner_state: &GameState, unsealing: ObjectId) -> usize {
     runner_state
         .stack
         .iter()
@@ -133,7 +130,7 @@ fn unsealing_triggers_on_stack(
 }
 
 fn count_named_on_battlefield(
-    state: &engine::types::game_state::GameState,
+    state: &GameState,
     player: engine::types::player::PlayerId,
     name: &str,
 ) -> usize {
@@ -153,6 +150,10 @@ fn mana_units(ty: ManaType, count: u32) -> impl Iterator<Item = ManaUnit> {
 #[derive(Debug)]
 struct SarkhanObservation {
     triggers_on_stack: usize,
+    /// When a trigger went on the stack: the stack entry ids and P1's life
+    /// change right after the topmost entry (the trigger) resolved.
+    after_trigger: Option<(Vec<ObjectId>, i32)>,
+    spell: ObjectId,
     p1_life_delta: i32,
     filler_zone: Zone,
     cast_zone: Zone,
@@ -182,18 +183,55 @@ fn cast_into_sarkhan(power: i32) -> SarkhanObservation {
     let mut runner = scenario.build();
     assert_two_clean_spell_cast_triggers(&runner, sarkhan);
 
-    let commit = runner.cast(spell).target_player(P1).commit();
+    let mut commit = runner.cast(spell).target_player(P1).commit();
     let triggers_on_stack = unsealing_triggers_on_stack(commit.state(), sarkhan);
+    let after_trigger = (triggers_on_stack > 0).then(|| {
+        let p1_life = |state: &GameState| {
+            state
+                .players
+                .iter()
+                .find(|player| player.id == P1)
+                .expect("P1 exists")
+                .life
+        };
+        let life_before = p1_life(commit.state());
+        let depth = commit.state().stack.len();
+        // CR 603.3: the trigger sits above the spell, so passing priority
+        // resolves it first.
+        for _ in 0..4 {
+            if commit.state().stack.len() < depth {
+                break;
+            }
+            commit
+                .act(GameAction::PassPriority)
+                .expect("passing priority resolves the top of the stack");
+        }
+        let stack = commit.state().stack.iter().map(|entry| entry.id).collect();
+        (stack, p1_life(commit.state()) - life_before)
+    });
     let outcome = commit.resolve();
 
     SarkhanObservation {
         triggers_on_stack,
+        after_trigger,
+        spell,
         p1_life_delta: outcome.life_delta(P1),
         filler_zone: outcome.zone_of(filler),
         cast_zone: outcome.zone_of(spell),
         stack_empty_at_priority: outcome.state().stack.is_empty()
             && matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
     }
+}
+
+/// R1: the trigger resolved (P1 already lost 4) while the cast creature spell
+/// was still alone on the stack beneath it.
+fn assert_trigger_resolved_before_spell(observation: &SarkhanObservation) {
+    assert_eq!(
+        observation.after_trigger,
+        Some((vec![observation.spell], -4)),
+        "the trigger must resolve first, leaving only the creature spell on the stack, \
+         got {observation:?}"
+    );
 }
 
 /// The 4/5/6 ability alone fired: one trigger, 4 damage to P1, the filler
@@ -204,6 +242,7 @@ fn assert_four_five_six_fired_alone(observation: &SarkhanObservation, power: i32
         observation.triggers_on_stack, 1,
         "power {power}: exactly one Sarkhan trigger must go on the stack, got {observation:?}"
     );
+    assert_trigger_resolved_before_spell(observation);
     // CR 115.4 + CR 120.3: 4 damage to the declared player target.
     assert_eq!(
         observation.p1_life_delta, -4,
@@ -236,6 +275,7 @@ fn sarkhans_unsealing_power_3_below_list_does_not_trigger() {
         three.triggers_on_stack, 0,
         "power 3 is not 4, 5, or 6 and not 7 or greater, got {three:?}"
     );
+    assert_eq!(three.after_trigger, None, "{three:?}");
     assert_eq!(three.p1_life_delta, 0, "{three:?}");
     assert_eq!(three.filler_zone, Zone::Battlefield, "{three:?}");
     assert_eq!(three.cast_zone, Zone::Battlefield, "{three:?}");
@@ -252,6 +292,7 @@ fn sarkhans_unsealing_power_7_takes_only_the_seven_or_greater_ability() {
         seven.triggers_on_stack, 1,
         "power 7 must fire only the 7+ ability, got {seven:?}"
     );
+    assert_trigger_resolved_before_spell(&seven);
     // CR 120.3: exactly 4 to P1 — the 4/5/6 ability (also aimed at P1) did
     // not fire too.
     assert_eq!(seven.p1_life_delta, -4, "{seven:?}");
