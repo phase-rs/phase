@@ -19,11 +19,12 @@ pub(crate) fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json.gz")
 }
 
-fn load_fixture(path: &Path) -> CardDatabase {
+pub(crate) fn load_fixture(path: &Path) -> CardDatabase {
     let file = File::open(path).expect("integration fixture should open");
     let reader = BufReader::new(file);
     let decoder = GzDecoder::new(reader);
-    CardDatabase::from_export_reader(decoder).expect("integration fixture should load")
+    CardDatabase::from_export_reader_typing_faces_on_read(decoder)
+        .expect("integration fixture should load")
 }
 
 fn export_path() -> PathBuf {

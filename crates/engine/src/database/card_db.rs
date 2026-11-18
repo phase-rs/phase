@@ -59,14 +59,79 @@ impl From<Arc<CardDatabase>> for CardDbHandle {
     }
 }
 
+/// A `face_index` entry: typed at load, or a test loader's raw record typed on first read.
+// Typed stays inline so production faces keep CardFace's size; only the test-only Raw is boxed.
+#[cfg_attr(feature = "test-support", allow(clippy::large_enum_variant))]
+pub(crate) enum FaceSlot {
+    Typed(CardFace),
+    #[cfg(feature = "test-support")]
+    Raw(Box<RawFace>),
+}
+
+const _: () = assert!(std::mem::size_of::<FaceSlot>() == std::mem::size_of::<CardFace>());
+
+/// An export record kept as a range of the text it was read from, typed on its first read.
+#[cfg(feature = "test-support")]
+pub(crate) struct RawFace {
+    text: Arc<String>,
+    record: std::ops::Range<usize>,
+    name: String,
+    card_type: CardType,
+    scryfall_oracle_id: Option<String>,
+    face: OnceLock<CardFace>,
+}
+
+impl FaceSlot {
+    fn face(&self) -> &CardFace {
+        match self {
+            FaceSlot::Typed(face) => face,
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => raw.face.get_or_init(|| {
+                serde_json::from_str::<CardExportEntry>(&raw.text[raw.record.clone()])
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "card-data record for `{}` does not deserialize: {error}",
+                            raw.name
+                        )
+                    })
+                    .face
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            FaceSlot::Typed(face) => &face.name,
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => &raw.name,
+        }
+    }
+
+    fn card_type(&self) -> &CardType {
+        match self {
+            FaceSlot::Typed(face) => &face.card_type,
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => &raw.card_type,
+        }
+    }
+
+    fn oracle_id(&self) -> Option<&str> {
+        match self {
+            FaceSlot::Typed(face) => face.scryfall_oracle_id.as_deref(),
+            #[cfg(feature = "test-support")]
+            FaceSlot::Raw(raw) => raw.scryfall_oracle_id.as_deref(),
+        }
+    }
+}
+
 /// The face store, keyed by lowercased face name.
+/// Test loaders may leave a face untyped until its first read.
 #[derive(Default)]
-#[cfg_attr(test, derive(PartialEq))]
-pub(crate) struct FaceIndex(HashMap<String, CardFace>);
+pub(crate) struct FaceIndex(HashMap<String, FaceSlot>);
 
 impl FaceIndex {
     pub(crate) fn get(&self, key: &str) -> Option<&CardFace> {
-        self.0.get(key)
+        self.0.get(key).map(FaceSlot::face)
     }
 
     pub(crate) fn contains_key(&self, key: &str) -> bool {
@@ -87,36 +152,58 @@ impl FaceIndex {
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &CardFace)> {
-        self.0.iter()
+        self.0.iter().map(|(key, slot)| (key, slot.face()))
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = &CardFace> {
-        self.0.values()
+        self.0.values().map(FaceSlot::face)
     }
 
     #[cfg(test)]
-    pub(crate) fn insert(&mut self, key: String, face: CardFace) -> Option<CardFace> {
-        self.0.insert(key, face)
+    pub(crate) fn insert(&mut self, key: String, face: CardFace) {
+        self.0.insert(key, FaceSlot::Typed(face));
     }
 
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
-        self.0.values().map(|face| face.name.as_str())
+        self.0.values().map(FaceSlot::name)
     }
 
     pub(crate) fn oracle_ids(&self) -> impl Iterator<Item = (&String, Option<&str>)> {
-        self.0
-            .iter()
-            .map(|(key, face)| (key, face.scryfall_oracle_id.as_deref()))
+        self.0.iter().map(|(key, slot)| (key, slot.oracle_id()))
     }
 
     pub(crate) fn card_types(&self) -> impl Iterator<Item = &CardType> {
-        self.0.values().map(|face| &face.card_type)
+        self.0.values().map(FaceSlot::card_type)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn typed_face_count(&self) -> usize {
+        self.0
+            .values()
+            .filter(|slot| match slot {
+                FaceSlot::Typed(_) => true,
+                #[cfg(feature = "test-support")]
+                FaceSlot::Raw(raw) => raw.face.get().is_some(),
+            })
+            .count()
     }
 }
 
 impl From<HashMap<String, CardFace>> for FaceIndex {
     fn from(faces: HashMap<String, CardFace>) -> Self {
-        Self(faces)
+        Self(
+            faces
+                .into_iter()
+                .map(|(key, face)| (key, FaceSlot::Typed(face)))
+                .collect(),
+        )
+    }
+}
+
+#[cfg(test)]
+impl PartialEq for FaceIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|(key, face)| other.get(key) == Some(face))
     }
 }
 
@@ -202,8 +289,72 @@ impl CardDatabase {
         Ok(Self::from_export_entries(entries))
     }
 
+    /// Test loader: like [`Self::from_export_reader`], but each face is typed on its first read,
+    /// which panics naming the card if its record does not deserialize.
+    #[cfg(feature = "test-support")]
+    pub fn from_export_reader_typing_faces_on_read<R: Read>(
+        mut reader: R,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut json = String::new();
+        reader.read_to_string(&mut json)?;
+        Self::from_export_text_typing_faces_on_read(json)
+    }
+
+    #[cfg(feature = "test-support")]
+    fn from_export_text_typing_faces_on_read(
+        json: String,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let text = Arc::new(json);
+        // Borrowed raw values are slices of `text`, so each record's range is its address offset.
+        let records: HashMap<String, &serde_json::value::RawValue> = serde_json::from_str(&text)?;
+        let mut parsed = Vec::with_capacity(records.len());
+        for (key, record) in records {
+            let record = record.get();
+            let start = record.as_ptr() as usize - text.as_ptr() as usize;
+            let skeleton: ExportRecordSkeleton = serde_json::from_str(record)?;
+            parsed.push((
+                key,
+                ExportRecord {
+                    face: FaceSlot::Raw(Box::new(RawFace {
+                        text: Arc::clone(&text),
+                        record: start..start + record.len(),
+                        name: skeleton.name,
+                        card_type: skeleton.card_type,
+                        scryfall_oracle_id: skeleton.scryfall_oracle_id,
+                        face: OnceLock::new(),
+                    })),
+                    legalities: skeleton.legalities,
+                    layout: skeleton.layout,
+                    face_order: skeleton.face_index,
+                    printings: skeleton.printings,
+                    rulings: skeleton.rulings,
+                    bracket_signals: skeleton.bracket_signals,
+                },
+            ));
+        }
+        Ok(Self::from_export_records(parsed))
+    }
+
     fn from_export_entries(entries: HashMap<String, CardExportEntry>) -> Self {
-        let mut face_index = HashMap::with_capacity(entries.len());
+        Self::from_export_records(entries.into_iter().map(|(key, entry)| {
+            (
+                key,
+                ExportRecord {
+                    face: FaceSlot::Typed(entry.face),
+                    legalities: entry.legalities,
+                    layout: entry.layout,
+                    face_order: entry.face_index,
+                    printings: entry.printings,
+                    rulings: entry.rulings,
+                    bracket_signals: entry.bracket_signals,
+                },
+            )
+        }))
+    }
+
+    fn from_export_records(entries: impl IntoIterator<Item = (String, ExportRecord)>) -> Self {
+        let entries = entries.into_iter();
+        let mut face_index = HashMap::with_capacity(entries.size_hint().0);
         let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut face_order_index: HashMap<String, usize> = HashMap::new();
         let mut layout_index: HashMap<String, LayoutKind> = HashMap::new();
@@ -211,14 +362,14 @@ impl CardDatabase {
         let mut printings_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut rulings_index: HashMap<String, Vec<Ruling>> = HashMap::new();
         let mut bracket_signals_by_name: HashMap<String, BracketSignals> =
-            HashMap::with_capacity(entries.len());
+            HashMap::with_capacity(entries.size_hint().0);
 
         for (export_key, entry) in entries {
             let storage_key = export_key.to_lowercase();
-            if let Some(face_order) = entry.face_index {
+            if let Some(face_order) = entry.face_order {
                 face_order_index.insert(storage_key.clone(), face_order);
             }
-            if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
+            if let Some(oracle_id) = entry.face.oracle_id().map(str::to_string) {
                 oracle_id_index
                     .entry(oracle_id.clone())
                     .or_default()
@@ -246,7 +397,7 @@ impl CardDatabase {
         for keys in oracle_id_index.values_mut() {
             keys.sort_by_key(|key| face_order_index.get(key).copied().unwrap_or(usize::MAX));
         }
-        let face_index = FaceIndex::from(face_index);
+        let face_index = FaceIndex(face_index);
         let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
         let name_alias_index = build_name_alias_index(face_index.keys());
         let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.card_types());
@@ -999,6 +1150,39 @@ struct CardExportEntry {
     bracket_signals: BracketSignals,
 }
 
+/// An export record as the index builder consumes it.
+struct ExportRecord {
+    face: FaceSlot,
+    legalities: HashMap<String, String>,
+    layout: Option<String>,
+    face_order: Option<usize>,
+    printings: Vec<String>,
+    rulings: Vec<Ruling>,
+    bracket_signals: BracketSignals,
+}
+
+/// The fields of a card-data record the derived indices read; the rest of the record is skipped.
+#[cfg(feature = "test-support")]
+#[derive(Deserialize)]
+struct ExportRecordSkeleton {
+    name: String,
+    card_type: CardType,
+    #[serde(default)]
+    scryfall_oracle_id: Option<String>,
+    #[serde(default)]
+    legalities: HashMap<String, String>,
+    #[serde(default)]
+    layout: Option<String>,
+    #[serde(default)]
+    face_index: Option<usize>,
+    #[serde(default)]
+    printings: Vec<String>,
+    #[serde(default)]
+    rulings: Vec<Ruling>,
+    #[serde(default)]
+    bracket_signals: BracketSignals,
+}
+
 fn layout_kind_requires_multiple_faces(layout_kind: LayoutKind) -> bool {
     matches!(
         layout_kind,
@@ -1111,6 +1295,86 @@ mod tests {
         );
         let buffered = CardDatabase::from_export_reader(open()).expect("buffered parse");
         assert_same_database(&streamed, &buffered);
+    }
+
+    #[test]
+    fn lazy_fixture_load_is_observably_identical_to_the_eager_load() {
+        use crate::database::search::CardSearchQuery;
+        use crate::test_support::{assert_same_database, fixture_path, load_fixture};
+        use flate2::read::GzDecoder;
+
+        let eager = CardDatabase::from_export_reader(GzDecoder::new(BufReader::new(
+            std::fs::File::open(fixture_path()).unwrap(),
+        )))
+        .unwrap();
+        let lazy = load_fixture(&fixture_path());
+
+        for (key, slot) in &lazy.face_index.0 {
+            let FaceSlot::Raw(raw) = slot else {
+                panic!("{key} was typed at load");
+            };
+            let face = eager.face_index.get(key).unwrap();
+            assert_eq!(raw.name, face.name, "{key}");
+            assert_eq!(raw.card_type, face.card_type, "{key}");
+            assert_eq!(raw.scryfall_oracle_id, face.scryfall_oracle_id, "{key}");
+        }
+        assert_eq!(lazy.card_names(), eager.card_names());
+        assert_same_database(&eager, &lazy);
+
+        let walk = |db: &CardDatabase| {
+            let faces: std::collections::BTreeMap<String, serde_json::Value> = db
+                .face_iter()
+                .map(|(key, face)| (key.to_string(), serde_json::to_value(face).unwrap()))
+                .collect();
+            let scan: Vec<String> = db
+                .face_iter_in_scan_order()
+                .map(|(key, _)| key.to_string())
+                .collect();
+            let search = serde_json::to_value(db.search(&CardSearchQuery {
+                limit: Some(usize::MAX),
+                ..Default::default()
+            }))
+            .unwrap();
+            let all: BTreeSet<String> = db.face_index.keys().cloned().collect();
+            let subset: serde_json::Value =
+                serde_json::from_str(&db.export_subset_json(&all)).unwrap();
+            (
+                faces,
+                scan,
+                db.valid_subtypes().clone(),
+                db.export_integrity_errors(),
+                search,
+                subset,
+            )
+        };
+        assert!(walk(&eager) == walk(&lazy), "whole walks differ");
+    }
+
+    #[test]
+    fn lazy_fixture_types_every_face() {
+        use crate::test_support::{fixture_path, load_fixture};
+
+        let db = load_fixture(&fixture_path());
+        assert_eq!(db.face_index.typed_face_count(), 0);
+        assert_eq!(db.face_iter().count(), db.face_index.len());
+        assert_eq!(db.face_index.typed_face_count(), db.face_index.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "card-data record for `Words of Worship` does not deserialize")]
+    fn lazy_load_defers_a_malformed_record_until_read_and_names_it() {
+        let mut malformed = serde_json::to_value(test_face("Words of Worship")).unwrap();
+        malformed["abilities"] =
+            serde_json::json!([{"kind": "Spell", "effect": {"type": "Unknown"}}]);
+        let export = serde_json::json!({
+            "Lightning Bolt": serde_json::to_value(test_face("Lightning Bolt")).unwrap(),
+            "Words of Worship": malformed,
+        });
+        let db =
+            CardDatabase::from_export_reader_typing_faces_on_read(export.to_string().as_bytes())
+                .expect("the skeleton loads");
+        assert!(db.get_face_by_name("Lightning Bolt").is_some());
+        db.get_face_by_name("Words of Worship");
     }
 
     #[test]

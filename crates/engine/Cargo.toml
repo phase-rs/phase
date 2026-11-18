@@ -17,7 +17,7 @@ audit = []
 forge = []
 proptest = ["dep:proptest"]
 # Exposes raw zone placement for test crates; never enabled by production consumers.
-test-support = ["phase-ast/test-support", "phase-parser/test-support"]
+test-support = ["phase-ast/test-support", "phase-parser/test-support", "serde_json/raw_value"]
 # The bracket corpus harness + fixture loader. Gated out of the shipped lib /
 # WASM surface (it does std::fs I/O and carries no game behavior), exactly as
 # `combo-verify` gates `analysis::corpus`. Enabled for test builds through the

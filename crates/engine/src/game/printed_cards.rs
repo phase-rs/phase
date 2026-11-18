@@ -5198,6 +5198,34 @@ mod tests {
         assert_eq!(build_meld_pair_registry(db), expected);
     }
 
+    #[test]
+    fn hydrating_a_lazily_loaded_fixture_types_only_the_games_cards_and_meld_cards() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::test_support::{fixture_path, load_fixture};
+
+        let db = load_fixture(&fixture_path());
+        let mut scenario = GameScenario::new();
+        scenario.add_real_card(P0, "Well of Lost Dreams", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Plains", Zone::Library, &db);
+        let game_faces = db.face_index.typed_face_count();
+
+        rehydrate_game_from_card_db(&mut scenario.state, &db);
+
+        let meld_faces: std::collections::HashSet<&String> = db
+            .layout_index
+            .iter()
+            .filter(|(_, kind)| **kind == LayoutKind::Meld)
+            .flat_map(|(oracle_id, _)| &db.oracle_id_index[oracle_id])
+            .collect();
+        assert!(!scenario.state.meld_pair_registry.is_empty());
+        assert_eq!(scenario.state.all_card_names.len(), db.card_names().len());
+        assert_eq!(
+            db.face_index.typed_face_count(),
+            game_faces + meld_faces.len()
+        );
+    }
+
     /// CR 701.42b + CR 712.4: the production JSON loader's layout metadata,
     /// not arbitrary effect text, is the authority for canonical meld pairs.
     #[test]
