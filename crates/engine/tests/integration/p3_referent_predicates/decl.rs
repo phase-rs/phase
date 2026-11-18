@@ -255,6 +255,7 @@ fn p3s2a_sound_the_trumpets_land_discard_makes_no_token() {
 /// P0 casts the real `spell` at P1's real printed `victim` (a flier, an artifact) through the production cast path.
 fn bf_flow(spell: &Printed, victim: &Printed) -> (GameRunner, ObjectId, WaitingFor) {
     let mut sc = scenario();
+    sc.at_phase(Phase::PostCombatMain);
     sc.with_mana_pool(P0, mana_for(&[spell.cost], 0));
     add_counter_holder(&mut sc);
     let victim = if victim.type_line.contains("Creature") {
@@ -339,12 +340,7 @@ fn p3s2a_triumph_mv2_returns_tapped_then_exiles_at_next_end_step() {
     assert!(o.tapped, "tapped");
 
     let cast_turn = r.state().turn_number;
-    r.advance_to_combat();
-    r.act(GameAction::DeclareAttackers {
-        attacks: vec![],
-        bands: vec![],
-    })
-    .expect("declare no attackers");
+    assert_eq!(r.state().phase, Phase::PostCombatMain);
     // CR 603.7b + CR 603.3: the delayed ability triggers at the next end step;
     // the Wall is still on the battlefield pending its resolution.
     r.advance_to_end_step();
