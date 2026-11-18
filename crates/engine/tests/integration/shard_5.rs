@@ -229,6 +229,7 @@ mod swarm_combat_witness;
 mod swashbuckler_extraordinaire_declined_sacrifice_3179;
 mod swashbuckler_repro_3179_accept;
 mod swords_life_equals_power_counters_2895;
+mod syr_vondam_power_gate;
 mod szadek_combat_damage_to_counters;
 mod taigam_master_opportunist_exiles_cast_spell_749;
 mod taii_wakeen;
