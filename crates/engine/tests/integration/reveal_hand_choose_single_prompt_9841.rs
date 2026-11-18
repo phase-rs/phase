@@ -156,7 +156,7 @@ fn thought_rattle_single_choose_prompt_then_exile() {
     assert!(runner.state().stack.is_empty());
 }
 
-/// CR 608.2c + CR 700.2: Karn, Scion of Urza +1 partitions revealed cards:
+/// CR 608.2c: Karn, Scion of Urza +1 partitions revealed cards:
 /// "Reveal the top two cards of your library. An opponent chooses one of them.
 /// Put that card into your hand and exile the other with a silver counter on it."
 ///
