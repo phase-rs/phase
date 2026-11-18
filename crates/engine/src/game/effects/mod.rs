@@ -12928,7 +12928,10 @@ fn resolve_legacy_effect(
         Effect::DamageAll { .. } => deal_damage::resolve_all(state, ability, events),
         Effect::DamageEachPlayer { .. } => deal_damage::resolve_each_player(state, ability, events),
         Effect::DestroyAll { .. } => destroy::resolve_all(state, ability, events),
-        Effect::ChangeZone { .. } => return change_zone::resolve(state, ability, events),
+        Effect::ChangeZone { .. } => {
+            eprintln!("DEBUG mod.rs: ChangeZone resolve, ability.source_id={:?}, effect={:?}", ability.source_id, ability.effect);
+            return change_zone::resolve(state, ability, events);
+        }
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
