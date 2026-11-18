@@ -3990,8 +3990,12 @@ fn settle_simultaneous_unless(
         // CR 603.2 + CR 603.3 + CR 616.1: a delivery paused on a replacement
         // choice after earlier chosen actions completed (a sacrifice before a
         // discard) leaves no priority wait, so the reducer epilogue runs no
-        // pipeline. The completed actions' triggers are collected here and wait
-        // in the deferred queue until a player would receive priority.
+        // pipeline. This pipeline collects the triggers of the completed
+        // actions that no collector has claimed (a completed sacrifice batch's);
+        // a discard the paused discard node completed was collected and claimed
+        // by that node's park, so it is not collected again (CR 603.2c). The
+        // collected triggers wait in the deferred queue until a player would
+        // receive priority.
         SettlePipeline::ReducerEpilogue { event_start } => {
             (!matches!(state.waiting_for, WaitingFor::Priority { .. })).then_some(event_start)
         }

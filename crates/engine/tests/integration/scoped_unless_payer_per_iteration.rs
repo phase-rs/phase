@@ -1543,6 +1543,191 @@ fn viper_last_sacrifice_pick_before_a_paused_discard_keeps_its_triggers() {
     }
 }
 
+/// The Megrim board for the V9d rows: Rottenmouth Viper and Megrim
+/// ("Whenever an opponent discards a card, this enchantment deals 2 damage to
+/// that player.") under P0, Leyline of the Void under P1 and Rest in Peace
+/// under P2. P1's own Leyline does not replace P1's card, so P1's discard meets
+/// Rest in Peace alone and completes; P2's card meets both, so P2's discard
+/// pauses on P2's CR 616.1 choice after P1's has completed in the same discard
+/// node.
+fn viper_megrim_board(
+    player_count: u8,
+    starting_blight_counters: u32,
+) -> Option<(GameRunner, ObjectId)> {
+    let db = shared_card_db()?;
+    let (mut scenario, viper) = viper_board(player_count, starting_blight_counters);
+    let megrim = scenario.add_real_card(P0, "Megrim", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Leyline of the Void", Zone::Battlefield, db);
+    scenario.add_real_card(P2, "Rest in Peace", Zone::Battlefield, db);
+    Some((viper_attacks(scenario, viper), megrim))
+}
+
+/// Megrim triggers queued, awaiting their controller's CR 603.3b ordering, or
+/// on the stack.
+fn megrim_triggers(runner: &GameRunner, megrim: ObjectId) -> usize {
+    let ordering = match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers { triggers, .. } => triggers
+            .iter()
+            .filter(|trigger| trigger.source_id == megrim)
+            .count(),
+        _ => 0,
+    };
+    stack_entries_from(runner, megrim) + deferred_from(runner, megrim) + ordering
+}
+
+/// The V9d pause: P1's discard completed (its card is in exile) and P2's
+/// discard waits on P2's CR 616.1 choice. CR 603.2: P1's one discard
+/// triggered Megrim once.
+fn assert_paused_after_one_completed_discard(
+    runner: &GameRunner,
+    megrim: ObjectId,
+    completed: ObjectId,
+    paused: ObjectId,
+    context: &str,
+) {
+    assert_eq!(
+        zone_of(runner, completed),
+        Zone::Exile,
+        "{context}: reach guard: P1's discard completed before the pause"
+    );
+    assert_eq!(
+        zone_of(runner, paused),
+        Zone::Hand,
+        "{context}: reach guard: P2's card is still in hand"
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => {
+            assert_eq!(*player, P2, "{context}: P2 orders the replacements")
+        }
+        other => panic!("{context}: expected P2's CR 616.1 choice, got {other:?}"),
+    }
+    assert_eq!(
+        megrim_triggers(runner, megrim),
+        1,
+        "{context}: P1's one discard triggered Megrim once"
+    );
+}
+
+/// The V9d resume: P2 orders the replacements, its card is exiled, and each
+/// opponent's one discard has triggered Megrim exactly once (CR 603.2).
+fn answer_the_paused_discard(runner: &mut GameRunner, megrim: ObjectId, paused: ObjectId) {
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P2 orders the replacements");
+    assert_eq!(zone_of(runner, paused), Zone::Exile);
+    assert_eq!(
+        megrim_triggers(runner, megrim),
+        2,
+        "one Megrim trigger for each opponent's discard, got wait {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(megrim_triggers(runner, megrim), 0);
+}
+
+/// V9d(a). CR 603.2 + CR 603.2c + CR 616.1: the last answer is P2's discard
+/// pick. In the one discard node P1's card is discarded and P2's then pauses;
+/// the pause queues Megrim's trigger for P1's discard, and the pick's settle
+/// does not collect that discard a second time.
+#[test]
+fn viper_last_discard_pick_before_a_paused_discard_triggers_megrim_once() {
+    let Some((mut runner, megrim)) = viper_megrim_board(3, 0) else {
+        return;
+    };
+    let p1_card = object_named(&runner, "Filler Card 1");
+    let p2_card = object_named(&runner, "Filler Card 2");
+
+    assert_eq!(prompted(&runner), P1);
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, p1_card);
+    assert_eq!(prompted(&runner), P2);
+    choose_branch(&mut runner, Branch::Discard);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::WardDiscardChoice { player: P2, .. }
+        ),
+        "reach guard: the last answer is P2's discard pick, got {:?}",
+        runner.state().waiting_for
+    );
+    pick(&mut runner, p2_card);
+
+    assert_paused_after_one_completed_discard(&runner, megrim, p1_card, p2_card, "the pick");
+    answer_the_paused_discard(&mut runner, megrim, p2_card);
+    assert_eq!(runner.life(P1), 18);
+    assert_eq!(runner.life(P2), 18);
+    assert_eq!(runner.life(P0), 20);
+}
+
+/// V9d(b). As V9d(a) with two blight counters: each opponent discards for one
+/// instance and declines the other, so the last answer is P2's decline and
+/// the `RunFrom` settle scans the delivery. Each opponent loses 4 life once and
+/// takes 2 damage from Megrim once.
+#[test]
+fn viper_last_decline_before_a_paused_discard_triggers_megrim_once() {
+    let Some((mut runner, megrim)) = viper_megrim_board(3, 1) else {
+        return;
+    };
+    let p1_card = object_named(&runner, "Filler Card 1");
+    let p2_card = object_named(&runner, "Filler Card 2");
+
+    for (seat, card) in [(P1, p1_card), (P2, p2_card)] {
+        assert_eq!(prompted(&runner), seat);
+        choose_branch(&mut runner, Branch::Discard);
+        pick(&mut runner, card);
+        assert_eq!(prompted(&runner), seat);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::UnlessPayment { .. } | WaitingFor::UnlessPaymentChooseCost { .. }
+            ),
+            "reach guard: {seat:?}'s second instance is an unless prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        decline(&mut runner);
+    }
+
+    assert_paused_after_one_completed_discard(&runner, megrim, p1_card, p2_card, "the decline");
+    answer_the_paused_discard(&mut runner, megrim, p2_card);
+    assert_eq!(runner.life(P1), 14);
+    assert_eq!(runner.life(P2), 14);
+    assert_eq!(runner.life(P0), 20);
+}
+
+/// V9d(c). CR 104.3a + CR 800.4f + CR 603.2c: the last chooser concedes, which
+/// completes collection, and the concession delivers the poll. P1's discard
+/// completes and P2's pauses inside that delivery; the departure's collection
+/// of the delivery does not collect P1's discard a second time.
+#[test]
+fn viper_last_chooser_conceding_before_a_paused_discard_triggers_megrim_once() {
+    let Some((mut runner, megrim)) = viper_megrim_board(4, 0) else {
+        return;
+    };
+    let p1_card = object_named(&runner, "Filler Card 1");
+    let p2_card = object_named(&runner, "Filler Card 2");
+
+    for (seat, card) in [(P1, p1_card), (P2, p2_card)] {
+        assert_eq!(prompted(&runner), seat);
+        choose_branch(&mut runner, Branch::Discard);
+        pick(&mut runner, card);
+    }
+    assert_eq!(
+        poll(&runner).map(|carrier| carrier.current_player),
+        Some(P3),
+        "reach guard: P3 is the last chooser"
+    );
+    assert_eq!(zone_of(&runner, p1_card), Zone::Hand);
+
+    concede(&mut runner, P3);
+
+    assert!(is_eliminated(&runner, P3));
+    assert_paused_after_one_completed_discard(&runner, megrim, p1_card, p2_card, "the concession");
+    answer_the_paused_discard(&mut runner, megrim, p2_card);
+    assert_eq!(runner.life(P1), 18);
+    assert_eq!(runner.life(P2), 18);
+    assert_eq!(runner.life(P0), 20);
+}
+
 /// V10. CR 118.12: the chosen discard pays a cost, so Library of Leng ("If an
 /// effect causes you to discard a card, …") does not apply.
 #[test]

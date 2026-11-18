@@ -1437,21 +1437,37 @@ fn batch_or_drain_observer_triggers(
 /// `events` is the current action buffer. Under a live announcement only the
 /// span it does not own is collected here (CR 601.2h + CR 603.3), and an event
 /// another collector already claimed this action is not collected again
-/// (CR 603.2c).
+/// (CR 603.2c). Every occurrence collected here is claimed for ordinary
+/// collectors, so a later scan of the same buffer (the action's post-action
+/// pipeline, a departure's collection) does not collect it a second time;
+/// delayed collectors keep their CR 603.7 view of it, as nothing here collects
+/// delayed triggers.
 pub(crate) fn defer_observer_triggers_for_paused_choice(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     event_start: usize,
 ) {
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, event_start);
-    let trigger_events: Vec<GameEvent> =
-        unclaimed_observer_events(state, events, owned.start, owned.end)
-            .into_iter()
-            .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
-            .collect();
-    if !trigger_events.is_empty() {
-        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
+    if owned.end <= owned.start {
+        return;
     }
+    let mut unclaimed = super::triggers::unclaimed_trigger_events_from(
+        &events[..owned.end],
+        owned.start,
+        super::triggers::TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    );
+    unclaimed.retain(|event| !matches!(event, GameEvent::PhaseChanged { .. }));
+    if unclaimed.events.is_empty() {
+        return;
+    }
+    super::triggers::collect_action_end_triggers_into_deferred(state, &unclaimed.events);
+    super::triggers::claim_trigger_event_occurrences(
+        state,
+        events,
+        unclaimed.positions().iter().copied(),
+        super::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+    );
 }
 
 /// CR 603.2 + CR 603.3b + CR 701.23: after a search tutor's put/shuffle

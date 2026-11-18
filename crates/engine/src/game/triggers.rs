@@ -12046,11 +12046,30 @@ pub(crate) fn collect_departure_triggers_into_deferred(
     looked_back: Option<(ImmediatelyBeforeObservers, usize, usize)>,
 ) {
     collect_unclaimed_triggers_into_deferred(state, events, event_start, looked_back);
-    let claims = (event_start..events.len()).map(|index| ConsumedTriggerEventOccurrence {
-        event: events[index].clone(),
-        occurrence: trigger_event_occurrence(events, index),
-        scope: ConsumedTriggerEventScope::AllCollectors,
-    });
+    claim_trigger_event_occurrences(
+        state,
+        events,
+        event_start..events.len(),
+        ConsumedTriggerEventScope::AllCollectors,
+    );
+}
+
+/// CR 603.2c: record that a collector has taken the occurrences at `positions`
+/// of the full action buffer `events`, so a later scan of the same buffer does
+/// not collect them again for the collectors `scope` names.
+pub(crate) fn claim_trigger_event_occurrences(
+    state: &mut GameState,
+    events: &[GameEvent],
+    positions: impl IntoIterator<Item = usize>,
+    scope: ConsumedTriggerEventScope,
+) {
+    let claims = positions
+        .into_iter()
+        .map(|index| ConsumedTriggerEventOccurrence {
+            event: events[index].clone(),
+            occurrence: trigger_event_occurrence(events, index),
+            scope,
+        });
     state.consumed_before_priority_trigger_events.extend(claims);
 }
 
