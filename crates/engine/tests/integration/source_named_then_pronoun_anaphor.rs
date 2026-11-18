@@ -4,7 +4,9 @@
 //! (CR 109.2b); that spell must not capture the pronoun, or the card's untap or
 //! return misses the card itself.
 
+use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -14,10 +16,14 @@ use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
+use crate::support::shared_card_db;
+
 const BLISTERCOIL_WEIRD: &str = "Whenever you cast an instant or sorcery spell, this creature gets +1/+1 until end of turn. Untap it.";
 const GWENNA: &str = "{T}: Add two mana in any combination of colors. Spend this mana only to cast creature spells or activate abilities of creature sources.\nWhenever you cast a creature spell with power 5 or greater, put a +1/+1 counter on Gwenna and untap it.";
 const HIKARI: &str = "Flying\nWhenever you cast a Spirit or Arcane spell, you may exile Hikari. If you do, return it to the battlefield under its owner's control at the beginning of the next end step.";
 const DIVINATION: &str = "Draw two cards.";
+// Norin the Wary's printed text, with `~` standing for the host's name.
+const NORIN_SHAPE: &str = "When a player casts a spell or a creature attacks, exile Wary Spirit. Return it to the battlefield under its owner's control at the beginning of the next end step.";
 const REACH_THROUGH_MISTS: &str = "Draw a card.";
 
 fn free() -> ManaCost {
@@ -214,6 +220,98 @@ fn hikari_accept_returns_at_next_end_step() {
     assert_eq!(zone(&runner, hikari), Zone::Battlefield);
     assert_eq!(runner.state().objects[&hikari].controller, P0);
     assert_eq!(zone(&runner, reach_through_mists), Zone::Graveyard);
+}
+
+/// CR 730.3c + CR 603.7e: when the exiled source is a merged permanent, "return
+/// it" finds every object that permanent became in exile, so the mutate rider
+/// returns with Hikari, as a separate, unmerged object (CR 730.3).
+#[test]
+fn hikari_merged_returns_every_component() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = scenario();
+    // Printed cards: the delayed return's CR 603.7a origin is keyed by them.
+    let hikari = scenario.add_real_card(P0, "Hikari, Twilight Guardian", Zone::Battlefield, db);
+    let rider = scenario.add_real_card(P0, "Gemrazer", Zone::Battlefield, db);
+    let reach_through_mists = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reach Through Mists", true, REACH_THROUGH_MISTS)
+        .with_subtypes(vec!["Arcane"])
+        .with_mana_cost(free())
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let mut events = Vec::new();
+        merge_object_onto(state, rider, hikari, MergeSide::Bottom, &mut events);
+        state.battlefield.retain(|&id| id != rider);
+    }
+
+    runner.cast(reach_through_mists).accept_optional().resolve();
+    drain_stack(&mut runner);
+    assert_eq!(zone(&runner, hikari), Zone::Exile);
+    assert_eq!(
+        zone(&runner, rider),
+        Zone::Exile,
+        "reach guard: the pile split into exile"
+    );
+
+    resolve_the_end_step_return(&mut runner);
+    for id in [hikari, rider] {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield, "{id:?} returns");
+        assert_eq!(
+            obj.controller, P0,
+            "{id:?} returns under its owner's control"
+        );
+        assert!(
+            obj.merged_components.is_empty() && obj.split_from_merge_survivor.is_none(),
+            "{id:?} returns as a separate, unmerged object"
+        );
+    }
+}
+
+/// CR 730.3c + CR 603.7c: Norin's unconditional shape ("exile ~. Return it …")
+/// returns through the tracked set its exile published; that return also finds
+/// every object the merged permanent became. The host is a non-Human Spirit
+/// carrying Norin's printed text, since mutate needs a non-Human host.
+#[test]
+fn norin_shape_merged_returns_every_component() {
+    let mut scenario = scenario();
+    let wary = scenario
+        .add_creature(P0, "Wary Spirit", 2, 1)
+        .with_subtypes(vec!["Spirit"])
+        .from_oracle_text(NORIN_SHAPE)
+        .id();
+    let rider = scenario.add_creature(P0, "Gemrazer", 4, 4).id();
+    let divination = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
+        .with_mana_cost(free())
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        let mut events = Vec::new();
+        merge_object_onto(state, rider, wary, MergeSide::Bottom, &mut events);
+        state.battlefield.retain(|&id| id != rider);
+    }
+
+    runner.cast(divination).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(zone(&runner, wary), Zone::Exile);
+    assert_eq!(
+        zone(&runner, rider),
+        Zone::Exile,
+        "reach guard: the pile split into exile"
+    );
+
+    resolve_the_end_step_return(&mut runner);
+    for id in [wary, rider] {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield, "{id:?} returns");
+        assert!(
+            obj.merged_components.is_empty() && obj.split_from_merge_survivor.is_none(),
+            "{id:?} returns as a separate, unmerged object"
+        );
+    }
 }
 
 /// CR 608.2d: declining "you may exile Hikari" exiles nothing and schedules

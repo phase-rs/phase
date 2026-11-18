@@ -692,6 +692,18 @@ pub(crate) fn expand_returned_merge_components(
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     if matches!(target_filter, TargetFilter::SelfRef) {
+        // CR 603.7c + CR 730.3c: a delayed return whose source binding followed
+        // the source to the object it became when it left ("exile ~. Return it
+        // … at the beginning of the next end step") finds every object the
+        // merged permanent became.
+        if delayed_binding_found_departed_source(state, ability) {
+            let mut expanded = resolved.clone();
+            if resolved.contains(&ability.source_id) {
+                let components = co_split_components(state, ability.source_id, &expanded);
+                expanded.extend(components);
+            }
+            return expanded;
+        }
         // CR 701.24a + CR 730.3c: a source's own recorded departure is
         // followed only by the move component of a terminal-shuffle operation
         // ("shuffle it into its owner's library"), whose order is randomized.
@@ -715,6 +727,34 @@ pub(crate) fn expand_returned_merge_components(
         expanded.extend(components);
     }
     expanded
+}
+
+/// CR 603.7c + CR 400.7: this is a delayed ability (CR 603.7a) whose source
+/// binding names the source's current off-battlefield incarnation: the binding
+/// followed the source to the new object it became when it left
+/// (`delayed_source_context`). A library destination is excluded: ordering
+/// several returned components there is not implemented (#10759).
+fn delayed_binding_found_departed_source(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if ability.delayed_origin.is_none()
+        || matches!(
+            ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        )
+    {
+        return false;
+    }
+    let (Some(binding), Some(source)) = (
+        ability.trigger_source.as_ref(),
+        state.objects.get(&ability.source_id),
+    ) else {
+        return false;
+    };
+    source.zone != Zone::Battlefield
+        && binding.identity.expected_zone == source.zone
+        && binding.identity.reference == ObjectIncarnationRef::from_object(source)
 }
 
 /// CR 701.24a: the effect is the move component of a parser-emitted "shuffle
