@@ -1311,12 +1311,28 @@ const TINDER_FARM: &str =
     "This land enters tapped.\n{T}: Add {G}.\n{T}, Sacrifice this land: Add {R}{W}.";
 const YAVIMAYA: &str = "Each land is a Forest in addition to its other land types.";
 
+/// Tinder Farm's "{T}, Sacrifice this land: Add {R}{W}." carrying ability: the
+/// one printed ability whose cost composes a tap with a sacrifice.
+fn tinder_farm_sacrifice_ability_idx(runner: &GameRunner, tinder_farm: ObjectId) -> usize {
+    runner.state().objects[&tinder_farm]
+        .abilities
+        .iter()
+        .position(|a| {
+            engine::types::ability::cost_has_component(&a.cost, |c| {
+                matches!(c, engine::types::ability::AbilityCost::Sacrifice { .. })
+            })
+        })
+        .expect("Tinder Farm sacrifice mana ability")
+}
+
 /// Issue #9690: A "whenever a Forest is tapped for mana" trigger must fire
-/// when the Forest leaves the battlefield as part of the mana ability's own
-/// cost (CR 603.10a, CR 608.2h: LKI). With Yavimaya, Cradle of Growth making
-/// all lands Forests and Vernal Bloom on the battlefield, activating Tinder
-/// Farm's "{T}, Sacrifice this land: Add {R}{W}." must add {R}{W} plus the
-/// additional {G} from Vernal Bloom, giving {R}{W}{G}.
+/// when the mana ability resolves and produces mana (CR 106.12a), even though
+/// the Forest was sacrificed as part of its cost (CR 701.21a), reading the
+/// departed land's characteristics from last-known information (CR 608.2h).
+/// With Yavimaya, Cradle of Growth making all lands Forests and Vernal Bloom
+/// on the battlefield, activating Tinder Farm's "{T}, Sacrifice this land:
+/// Add {R}{W}." must add {R}{W} plus the additional {G} from Vernal Bloom,
+/// giving {R}{W}{G}.
 #[test]
 fn vernal_bloom_triggers_on_forest_sacrificed_as_part_of_mana_cost() {
     let mut scenario = GameScenario::new();
@@ -1336,18 +1352,7 @@ fn vernal_bloom_triggers_on_forest_sacrificed_as_part_of_mana_cost() {
         .tapped = false;
     engine::game::layers::evaluate_layers(runner.state_mut());
 
-    // Find the ability with cost "{T}, Sacrifice this land"
-    let sac_ability_idx = runner.state().objects[&tinder_farm]
-        .abilities
-        .iter()
-        .position(|a| {
-            matches!(
-                &a.cost,
-                Some(engine::types::ability::AbilityCost::Composite { costs })
-                    if costs.iter().any(|c| matches!(c, engine::types::ability::AbilityCost::Sacrifice { .. }))
-            )
-        })
-        .expect("Tinder Farm sacrifice mana ability");
+    let sac_ability_idx = tinder_farm_sacrifice_ability_idx(&runner, tinder_farm);
 
     runner.activate(tinder_farm, sac_ability_idx).resolve();
 
@@ -1375,14 +1380,18 @@ fn vernal_bloom_triggers_on_forest_sacrificed_as_part_of_mana_cost() {
     );
 }
 
-/// Issue #9690: Stolen land edge: P0 controls Yavimaya and Vernal Bloom,
-/// steals P1's Tinder Farm, and activates "{T}, Sacrifice this land: Add {R}{W}."
-/// P0 receives {R}{W}{G}, P1 receives nothing, and Tinder Farm ends in P1's graveyard.
+/// Issue #9690: Stolen land edge: P1 controls Vernal Bloom so the test
+/// distinguishes the land's controller from the enchantment's controller.
+/// P0 controls Yavimaya, steals P1's Tinder Farm, and activates
+/// "{T}, Sacrifice this land: Add {R}{W}." P0 — the land's controller when it
+/// was tapped (CR 106.12a, read through LKI per CR 608.2h) — receives
+/// {R}{W}{G} while the Bloom's controller P1 receives nothing, and Tinder Farm
+/// ends in its owner P1's graveyard (CR 701.21a).
 #[test]
 fn vernal_bloom_triggers_on_stolen_forest_sacrificed_as_part_of_mana_cost() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_enchantment_from_oracle(P0, "Vernal Bloom", VERNAL_BLOOM);
+    scenario.add_enchantment_from_oracle(P1, "Vernal Bloom", VERNAL_BLOOM);
     scenario.add_land_from_oracle(P0, "Yavimaya, Cradle of Growth", YAVIMAYA);
     let tinder_farm = scenario
         .add_land_from_oracle(P1, "Tinder Farm", TINDER_FARM)
@@ -1411,17 +1420,7 @@ fn vernal_bloom_triggers_on_stolen_forest_sacrificed_as_part_of_mana_cost() {
         "reach guard: P0 controls the stolen Tinder Farm"
     );
 
-    let sac_ability_idx = runner.state().objects[&tinder_farm]
-        .abilities
-        .iter()
-        .position(|a| {
-            matches!(
-                &a.cost,
-                Some(engine::types::ability::AbilityCost::Composite { costs })
-                    if costs.iter().any(|c| matches!(c, engine::types::ability::AbilityCost::Sacrifice { .. }))
-            )
-        })
-        .expect("Tinder Farm sacrifice mana ability");
+    let sac_ability_idx = tinder_farm_sacrifice_ability_idx(&runner, tinder_farm);
 
     runner.activate(tinder_farm, sac_ability_idx).resolve();
 
@@ -1447,10 +1446,24 @@ fn vernal_bloom_triggers_on_stolen_forest_sacrificed_as_part_of_mana_cost() {
         Zone::Graveyard,
         "Tinder Farm was sacrificed to the graveyard"
     );
+    // CR 701.21a: it went to its OWNER's graveyard — assert the destination
+    // zone list, not just the owner stamp.
+    assert!(
+        runner.state().players[P1.0 as usize]
+            .graveyard
+            .contains(&tinder_farm),
+        "Tinder Farm must be in owner P1's graveyard"
+    );
+    assert!(
+        !runner.state().players[P0.0 as usize]
+            .graveyard
+            .contains(&tinder_farm),
+        "P0's graveyard must not hold the stolen land"
+    );
     assert_eq!(
         runner.state().objects[&tinder_farm].owner,
         P1,
-        "Tinder Farm is in owner P1's graveyard"
+        "Tinder Farm's owner is P1"
     );
 }
 
