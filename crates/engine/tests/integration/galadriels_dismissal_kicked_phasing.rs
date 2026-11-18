@@ -855,6 +855,111 @@ fn childhood_barn_declining_one_opponents_slot_keeps_the_other() {
     );
 }
 
+/// A two-player Barn board with exactly ONE announced pick, plus a free
+/// Cloudshift in that pick's controller's hand.
+fn barn_board_single_pick() -> (GameRunner, ObjectId, ObjectId) {
+    use engine::types::format::FormatConfig;
+    use engine::types::mana::ManaCost;
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 2, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let pick = scenario.add_creature(P1, "Only Pick", 2, 2).id();
+    let cloudshift = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cloudshift", true, CLOUDSHIFT)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    install_barn_planes(&mut runner);
+    (runner, pick, cloudshift)
+}
+
+/// CR 608.2b: when EVERY announced occurrence of the chaos ability is illegal
+/// at resolution, none of the ability happens — no untap, no phase-out, no
+/// can't-phase-in rider, and no delayed phase-in. This is the all-`Dropped`
+/// shape of the fanout arm, reached through the production entry.
+#[test]
+fn childhood_barn_single_blinked_pick_lets_the_whole_ability_do_nothing() {
+    let (mut runner, pick, cloudshift) = barn_board_single_pick();
+
+    let mut events = Vec::new();
+    let target_slots = open_barn_prompt(&mut runner, &mut events);
+    assert_eq!(
+        target_slots.len(),
+        2,
+        "a two-player Barn announces one header + object slot, got {target_slots:?}"
+    );
+
+    let incarnation_before = runner.state().objects[&pick].incarnation;
+    events.extend(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1), TargetRef::Object(pick)],
+            })
+            .expect("Barn accepts its one pick")
+            .events,
+    );
+
+    // Blink the ONLY pick in response, through the real priority window.
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ) {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority toward P1's response window")
+                .events,
+        );
+    }
+    runner.cast(cloudshift).target_object(pick).commit();
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority through Cloudshift and the chaos ability")
+                .events,
+        );
+    }
+    assert_ne!(
+        runner.state().objects[&pick].incarnation,
+        incarnation_before,
+        "reach guard: Cloudshift made a new object (CR 400.7)"
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentPhasedOut { .. })),
+        "CR 608.2b: nothing is affected, so nothing phases out"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "CR 608.2b: the delayed phase-in clause never runs, got {:?}",
+        runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .map(|t| t.ability.targets.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        runner.state().objects[&pick].is_phased_in(),
+        "the blinked pick is phased in"
+    );
+    assert!(
+        !runner.state().objects[&pick].tapped,
+        "the untap instruction did not run either"
+    );
+}
+
 /// CR 115.7a + CR 115.1: Spellskite forces "a target" of the Barn's chaos
 /// ability to itself, which is P0's — so it is not a legal new target for
 /// either opponent's slot, and both announced picks stay unchanged. This is the
