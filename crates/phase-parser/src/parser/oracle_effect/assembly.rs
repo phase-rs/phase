@@ -3577,8 +3577,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
                 if let Some(sub) = def.sub_ability.as_mut() {
                     sub.repeat_for = Some(qty.clone());
+                    sub.repeat_timing = clause_ir.repeat_timing;
                 } else {
                     def.repeat_for = Some(qty.clone());
+                    def.repeat_timing = clause_ir.repeat_timing;
                 }
             } else if ir.clauses.len() == 1
                 && clause_ir.parsed.sub_ability.is_none()
@@ -3599,6 +3601,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             } else {
                 release_iteration_destination(def.effect.as_mut(), qty);
                 def.repeat_for = Some(qty.clone());
+                def.repeat_timing = clause_ir.repeat_timing;
             }
         }
         if let Some(scope) = clause_ir.player_scope.clone() {
@@ -3991,6 +3994,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     std::mem::take(&mut inner.optional_for)
                 };
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
+                let lifted_repeat_timing = std::mem::take(&mut inner.repeat_timing);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
                 // is the node that occupies this clause's slot in the parent's
@@ -4021,6 +4025,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 current.optional = lifted_optional;
                 current.optional_for = lifted_optional_for;
                 current.repeat_for = lifted_repeat_for;
+                current.repeat_timing = lifted_repeat_timing;
                 current.player_scope = lifted_player_scope;
                 current.sub_link = lifted_sub_link;
                 current.sibling_condition = lifted_sibling_condition;
@@ -5348,7 +5353,9 @@ mod arena_tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain_ir;
     use crate::parser::oracle_ir::ast::parsed_clause;
-    use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder, InjectedColorChoice};
+    use crate::parser::oracle_ir::effect_chain::{
+        ClauseIr, ClauseIrBuilder, InjectedColorChoice, RepeatCount,
+    };
     use crate::parser::oracle_nom::context::ParseContext;
     #[cfg(feature = "cli")]
     use crate::types::ability::OpponentMayScope;
@@ -5885,7 +5892,7 @@ mod arena_tests {
                     intrinsic: None,
                 },
             )
-            .repeat_for(repeat_for)
+            .repeat_for(repeat_for.map(RepeatCount::sequential))
             .delayed_condition(delayed)
             .prefix_delayed_condition(prefix_delayed)
             .push();

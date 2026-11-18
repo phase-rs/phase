@@ -270,6 +270,7 @@ pub fn build_resolved_from_def_with_targets(
     resolved.target_constraints = def.target_constraints.clone();
     resolved.target_choice_timing = def.target_choice_timing;
     resolved.repeat_for = def.repeat_for.clone();
+    resolved.repeat_timing = def.repeat_timing;
     // CR 608.2c + CR 107.1c: Carry the loop-continuation predicate through so the
     // `repeat_until` dispatch in `resolve_ability_chain` can re-follow the chain.
     resolved.repeat_until = def.repeat_until.clone();
@@ -372,7 +373,7 @@ pub(crate) fn materialize_coin_branches(resolved: &mut ResolvedAbility) {
 ///
 /// Fields from `sub`: effect, duration, sub_ability, else_ability,
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
-/// target_constraints, target_choice_timing, description, repeat_for,
+/// target_constraints, target_choice_timing, description, repeat_for, repeat_timing,
 /// min_x_value, forward_result, unless_pay, distribution, distribute,
 /// target_selection_mode, entry_onset.
 ///
@@ -428,6 +429,7 @@ pub(crate) fn apply_instead_swap(
     overridden.target_choice_timing = sub.target_choice_timing;
     overridden.description = sub.description.clone();
     overridden.repeat_for = sub.repeat_for.clone();
+    overridden.repeat_timing = sub.repeat_timing;
     overridden.min_x_value = sub.min_x_value;
     overridden.forward_result = sub.forward_result;
     overridden.unless_pay = sub.unless_pay.clone();

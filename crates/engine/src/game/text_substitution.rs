@@ -313,6 +313,7 @@ fn rewrite_resolved_ability(
         sub_link: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the repeat driver (phase 3)
         modal: _,
         parent_target_missing_reason: _,
         illegal_targets_disposition: _,

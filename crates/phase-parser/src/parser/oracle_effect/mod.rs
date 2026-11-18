@@ -142,15 +142,15 @@ use crate::types::ability::{
     OriginConstraint, PerPlayerScope, PerpetualModification, PlayPermissionInvalidation,
     PlayerChoiceDistinctness, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
     PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
-    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    SpellbookSelection, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause,
-    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate,
-    TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
-    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole,
-    ZoneOwner,
+    ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition, ReplacementDefinition,
+    ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
+    SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin,
+    TargetSelectionMode, ThisWayCause, TokenAttackDestination, TrackedAnaphorSource,
+    TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier,
+    UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // Imported on its own line rather than folded into the block above: that block
 // is the busiest merge point in this file, and a one-name addition inside it
@@ -216,8 +216,8 @@ pub(crate) use crate::parser::oracle_ir::context::{
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
-    InjectedColorChoice, OtherwiseKind, PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind, ResidualConditionPolicy, ShellStage,
+    InjectedColorChoice, OtherwiseKind, PlayerScopeRewrite, PriorModifier, RepeatCount,
+    ReplaceMeaningKind, ReplicateKind, ResidualConditionPolicy, ShellStage,
 };
 use crate::types::ability::TargetChoiceTiming;
 use crate::types::mana::ManaExpiry;
@@ -23233,7 +23233,9 @@ fn try_parse_proliferate_target(text: &str) -> Option<Effect> {
 /// (which surfaces the target slot), and a sub-ability carries the iteration and
 /// the choice:
 ///   - `repeat_for: DistinctCounterKindsAmong { filter: ParentTarget }` — one
-///     iteration per distinct counter kind already on the chosen permanent. The
+///     iteration per distinct counter kind already on the chosen permanent,
+///     stamped `SimultaneousInstances` through `RepeatCount::for_each_prefix`
+///     (CR 608.2c + CR 101.4). The
 ///     `repeat_for` loop resolves the kind set against the inherited target and
 ///     rebinds each tagged branch to the iterated kind (CR 608.2c).
 ///   - `Effect::ChooseOneOf { chooser: Controller, branches: [PutCounter,
@@ -23350,11 +23352,16 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
             kind: ChooseOneOfKind::Ordinary,
         },
     );
-    choice_sub.repeat_for = Some(QuantityExpr::Ref {
-        qty: QuantityRef::DistinctCounterKindsAmong {
-            filter: TargetFilter::ParentTarget,
-        },
-    });
+    // CR 608.2c + CR 101.4: a leading "for each <count>," peel; stamped through the
+    // single authority, like the shared peel.
+    let (repeat_for, repeat_timing) =
+        RepeatCount::into_parts(Some(RepeatCount::for_each_prefix(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::ParentTarget,
+            },
+        })));
+    choice_sub.repeat_for = repeat_for;
+    choice_sub.repeat_timing = repeat_timing;
 
     Some(ParsedEffectClause {
         history: Vec::new(),
@@ -38852,8 +38859,8 @@ enum CastAnaphor {
 fn lower_copy_each_tracked_spell(
     text: &str,
     mut clause: ParsedEffectClause,
-    repeat_for: Option<QuantityExpr>,
-) -> (ParsedEffectClause, Option<QuantityExpr>) {
+    repeat_for: Option<RepeatCount>,
+) -> (ParsedEffectClause, Option<RepeatCount>) {
     let lower = text.to_lowercase();
     let distributive = preceded(
         opt(tag::<_, _, OracleError<'_>>("you may ")),
@@ -38878,10 +38885,10 @@ fn lower_copy_each_tracked_spell(
     ) {
         return (clause, repeat_for);
     }
-    let factor = match repeat_for {
+    let factor = match repeat_for.as_ref().map(RepeatCount::count) {
         None => 1,
-        Some(QuantityExpr::Fixed { value }) if value > 0 => value,
-        other => return (clause, other),
+        Some(QuantityExpr::Fixed { value }) if *value > 0 => *value,
+        Some(_) => return (clause, repeat_for),
     };
     *target = TargetFilter::ParentTarget;
     let members = QuantityExpr::Ref {
@@ -38895,7 +38902,9 @@ fn lower_copy_each_tracked_spell(
             inner: Box::new(members),
         }
     };
-    (clause, Some(count))
+    // CR 608.2e: the copy count is a number of separate copies, not a for-each
+    // instance set.
+    (clause, Some(RepeatCount::sequential(count)))
 }
 
 /// CR 115.6 + CR 601.2c: "cast up to one target <card> …" (Finale of Promise,
@@ -43975,6 +43984,12 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
                 None
             };
             defs[index + 1].optional = false;
+            // The timing moves with the count (CR 608.2); a dropped count resets it.
+            defs[index + 1].repeat_timing = if multiplicity.is_some() {
+                defs[index].repeat_timing
+            } else {
+                RepeatForTiming::Sequential
+            };
             defs[index + 1].repeat_for = multiplicity;
             defs.remove(index);
             continue;
@@ -44013,6 +44028,7 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
             };
             defs[index].optional = false;
             defs[index].repeat_for = None;
+            defs[index].repeat_timing = RepeatForTiming::Sequential;
             defs.remove(index + 1);
         } else {
             index += 1;
@@ -45949,7 +45965,7 @@ enum ConsumerBinding {
 /// Anything else is `Declined`; the caller replaces the consumer with an honest gap.
 fn bind_revealed_this_way_consumer(
     effect: &mut Effect,
-    repeat_for: &mut Option<QuantityExpr>,
+    repeat_for: &mut Option<RepeatCount>,
     player_scope: &mut Option<PlayerFilter>,
     reveal_scope: Option<&PlayerFilter>,
 ) -> ConsumerBinding {
@@ -45967,7 +45983,7 @@ fn bind_revealed_this_way_consumer(
     match reveal_scope {
         Some(scope) => {
             let repeats_same_population = matches!(
-                repeat_for,
+                repeat_for.as_ref().map(RepeatCount::count),
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::PlayerCount { filter },
                 }) if filter == scope
@@ -45975,6 +45991,7 @@ fn bind_revealed_this_way_consumer(
             if !repeats_same_population || player_scope.is_some() {
                 return ConsumerBinding::Declined;
             }
+            // Clearing the carrier clears the timing with its count.
             *repeat_for = None;
             *player_scope = Some(scope.clone());
         }
@@ -50650,6 +50667,8 @@ fn parse_effect_chain_ir_body(
                 RepeatProcessOutcome::FixedCount(qty) => {
                     if let Some(first) = builder.clauses_mut().first_mut() {
                         first.repeat_for = Some(qty);
+                        // CR 608.2e: "repeat this process" is a series of separate steps.
+                        first.repeat_timing = RepeatForTiming::Sequential;
                     }
                 }
                 // CR 608.2c: only a single-clause process can carry the count on
@@ -50661,6 +50680,8 @@ fn parse_effect_chain_ir_body(
                 RepeatProcessOutcome::CappedRepeat(qty) => {
                     if let [only] = builder.clauses_mut() {
                         only.repeat_for = Some(qty);
+                        // CR 608.2e: a capped repeat is a series of separate steps.
+                        only.repeat_timing = RepeatForTiming::Sequential;
                     } else {
                         builder
                             .clause(
@@ -52047,9 +52068,11 @@ fn parse_effect_chain_ir_body(
             // `ParentTarget`. An unadmitted or non-restating clause falls through
             // to the generic arm below and keeps its prior parse.
             (
-                Some(QuantityExpr::Ref {
+                // CR 608.2c + CR 101.4: a for-each prefix peel, stamped through the
+                // single authority.
+                Some(RepeatCount::for_each_prefix(QuantityExpr::Ref {
                     qty: producer.population_count(),
-                }),
+                })),
                 body,
                 None,
                 None,
@@ -52113,7 +52136,7 @@ fn parse_effect_chain_ir_body(
             );
             continue;
         }
-        // CR 608.2c + CR 102.2: "for each <player set>, … from that player's
+        // CR 608.2c: "for each <player set>, … from that player's
         // <zone> …" names the iterated player as the owner of an UNTARGETED
         // object source. A count-only `PlayerCount` repeat cannot carry that
         // per-player binding (the body would resolve against the controller),
@@ -52122,7 +52145,7 @@ fn parse_effect_chain_ir_body(
         // fan-out and a non-possessive "that player" is owned by the
         // token-destination / defender binders, so neither is claimed here.
         if matches!(
-            repeat_for,
+            repeat_for.as_ref().map(RepeatCount::count),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount { .. }
             })
@@ -52151,12 +52174,15 @@ fn parse_effect_chain_ir_body(
         } else {
             (None, text)
         };
+        // CR 608.2e: every count merged here ("twice" / "N times", difference,
+        // pending) is a series of separate steps; only the for-each prefix peel
+        // above carries `SimultaneousInstances`.
         let repeat_for = repeat_for
-            .or(repeat_count)
+            .or(repeat_count.map(RepeatCount::sequential))
             // CR 608.2c: difference-repeat count detected after the leading
             // conditional strip ("a number of times equal to the difference").
-            .or(difference_repeat)
-            .or_else(|| pending_repeat_for.take());
+            .or(difference_repeat.map(RepeatCount::sequential))
+            .or_else(|| pending_repeat_for.take().map(RepeatCount::sequential));
         let owner_relative_player_scope = chain_parent_target_owner_scope_for_chunk
             .zip(strip_owner_relative_each_other_player_subject(&text));
         let (player_scope, text, subject_worded_exile) =
@@ -53259,7 +53285,7 @@ fn parse_effect_chain_ir_body(
                 is_optional,
                 opponent_may_scope: opponent_may_scope.as_ref(),
                 condition: condition.as_ref(),
-                repeat_for: repeat_for.as_ref(),
+                repeat_for: repeat_for.as_ref().map(RepeatCount::count),
                 player_scope: player_scope.as_ref(),
                 clause_duration: None,
             };
@@ -53357,7 +53383,7 @@ fn parse_effect_chain_ir_body(
                 is_optional,
                 opponent_may_scope: opponent_may_scope.as_ref(),
                 condition: condition.as_ref(),
-                repeat_for: repeat_for.as_ref(),
+                repeat_for: repeat_for.as_ref().map(RepeatCount::count),
                 player_scope: player_scope.as_ref(),
                 clause_duration: None,
             };
@@ -53573,11 +53599,14 @@ fn parse_effect_chain_ir_body(
                         *target = TargetFilter::TriggeringSource;
                     }
                 }
-                (stripped_clause, repeat_for.or(suffix_repeat_for))
+                (
+                    stripped_clause,
+                    repeat_for.or(suffix_repeat_for.map(RepeatCount::sequential)),
+                )
             } else if let Some((fanout_clause, fanout_spec, fanout_ctx)) =
                 parse_for_each_opponent_target_fanout_clause(
                     &text_no_qty,
-                    repeat_for.as_ref(),
+                    repeat_for.as_ref().map(RepeatCount::count),
                     multi_target.as_ref(),
                     ctx,
                 )
@@ -53592,7 +53621,7 @@ fn parse_effect_chain_ir_body(
                 // cannot clobber a prior count.
                 (
                     parse_effect_clause_with_damage_context(&text_no_qty, ctx, damage_context),
-                    Some(lifted_qty),
+                    Some(RepeatCount::sequential(lifted_qty)),
                 )
             } else {
                 (
@@ -53860,7 +53889,8 @@ fn parse_effect_chain_ir_body(
         // count-less "investigate for each … this way" (Declaration in Stone) into
         // this chunk's repeat count (→ `AbilityDefinition.repeat_for`). take() so
         // it is consumed within this chunk; a pre-existing repeat_for wins.
-        let mut repeat_for = repeat_for.or_else(|| ctx.pending_repeat_for.take());
+        let mut repeat_for =
+            repeat_for.or_else(|| ctx.pending_repeat_for.take().map(RepeatCount::sequential));
         // CR 109.5: Rebind recipient-bearing nodes inside a decline body so the
         // body's "you"/"that player" anaphors resolve relative to the surrounding
         // per-player iteration. The two walkers are parallel inverses:
@@ -55309,7 +55339,7 @@ fn parse_effect_chain_ir_body(
                     is_optional,
                     opponent_may_scope: opponent_may_scope.as_ref(),
                     condition: condition.as_ref().or(clause.condition.as_ref()),
-                    repeat_for: repeat_for.as_ref(),
+                    repeat_for: repeat_for.as_ref().map(RepeatCount::count),
                     player_scope: player_scope.as_ref(),
                     clause_duration: clause.duration.as_ref(),
                 };
@@ -55323,7 +55353,8 @@ fn parse_effect_chain_ir_body(
                     check_def.optional = true;
                 }
                 if let Some(ref qty) = repeat_for {
-                    check_def.repeat_for = Some(qty.clone());
+                    check_def.repeat_for = Some(qty.count().clone());
+                    check_def.repeat_timing = qty.timing();
                 }
                 if let Some(ref scope) = player_scope {
                     check_def.player_scope = Some(scope.clone());
@@ -55352,6 +55383,7 @@ fn parse_effect_chain_ir_body(
                     let lifted_optional = inner.optional;
                     let lifted_optional_for = inner.optional_for;
                     let lifted_repeat_for = inner.repeat_for.clone();
+                    let lifted_repeat_timing = inner.repeat_timing;
                     let lifted_player_scope = inner.player_scope.clone();
                     check_def = AbilityDefinition::new(
                         kind,
@@ -55365,6 +55397,7 @@ fn parse_effect_chain_ir_body(
                     check_def.optional = lifted_optional;
                     check_def.optional_for = lifted_optional_for;
                     check_def.repeat_for = lifted_repeat_for;
+                    check_def.repeat_timing = lifted_repeat_timing;
                     check_def.player_scope = lifted_player_scope;
                 }
                 if needs_tracked_set {

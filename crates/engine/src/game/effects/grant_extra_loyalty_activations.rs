@@ -192,6 +192,7 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
