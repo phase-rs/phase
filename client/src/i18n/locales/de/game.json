@@ -1857,6 +1857,13 @@
       "titleExact_one": "Wirf eine Karte ab",
       "titleExact_other": "Wirf {{count}} Karten ab",
       "titleWard": "Schutz — Wirf eine Karte ab",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Schutz",
+        "connive": "Tricksen",
+        "additionalCost": "Zusätzliche Kosten",
+        "manaAbility": "Manafähigkeit"
+      },
       "subtitleUpTo_one": "Wähle bis zu {{count}} Karte zum Abwerfen",
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten zum Abwerfen",
       "subtitleUnless": "Wähle {{count}} Karten oder 1 passende Karte zum Abwerfen",

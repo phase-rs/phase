@@ -1895,6 +1895,13 @@
       "titleExact_one": "Discard a card",
       "titleExact_other": "Discard {{count}} cards",
       "titleWard": "Ward — Discard a card",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Ward",
+        "connive": "Connive",
+        "additionalCost": "Additional cost",
+        "manaAbility": "Mana ability"
+      },
       "subtitleUpTo_one": "Choose up to {{count}} card to discard",
       "subtitleUpTo_other": "Choose up to {{count}} cards to discard",
       "subtitleUnless": "Choose {{count}} cards or 1 matching card to discard",

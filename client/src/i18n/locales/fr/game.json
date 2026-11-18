@@ -1857,6 +1857,13 @@
       "titleExact_one": "Défaussez-vous d'une carte",
       "titleExact_other": "Défaussez-vous de {{count}} cartes",
       "titleWard": "Garde — Défaussez-vous d'une carte",
+      "instructionWithReason": "{{reason}} : {{instruction}}",
+      "reason": {
+        "ward": "Garde",
+        "connive": "Combine",
+        "additionalCost": "Coût supplémentaire",
+        "manaAbility": "Capacité de mana"
+      },
       "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte à défausser",
       "subtitleUpTo_other": "Choisissez jusqu'à {{count}} cartes à défausser",
       "subtitleUnless": "Choisissez {{count}} cartes ou 1 carte correspondante à défausser",

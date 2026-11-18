@@ -1857,6 +1857,13 @@
       "titleExact_one": "Scarta una carta",
       "titleExact_other": "Scarta {{count}} carte",
       "titleWard": "Difesa — Scarta una carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Difesa",
+        "connive": "Connivere",
+        "additionalCost": "Costo aggiuntivo",
+        "manaAbility": "Abilità di mana"
+      },
       "subtitleUpTo_one": "Scegli fino a {{count}} carta da scartare",
       "subtitleUpTo_other": "Scegli fino a {{count}} carte da scartare",
       "subtitleUnless": "Scegli {{count}} carte o 1 carta corrispondente da scartare",

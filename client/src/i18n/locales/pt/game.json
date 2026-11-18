@@ -1857,6 +1857,13 @@
       "titleExact_one": "Descarte uma carta",
       "titleExact_other": "Descarte {{count}} cartas",
       "titleWard": "Vigilância — Descarte uma carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Vigilância",
+        "connive": "Conluiar",
+        "additionalCost": "Custo adicional",
+        "manaAbility": "Habilidade de mana"
+      },
       "subtitleUpTo_one": "Escolha até {{count}} carta para descartar",
       "subtitleUpTo_other": "Escolha até {{count}} cartas para descartar",
       "subtitleUnless": "Escolha {{count}} cartas ou 1 carta correspondente para descartar",

@@ -1857,6 +1857,13 @@
       "titleExact_one": "Odrzuć kartę",
       "titleExact_other": "Odrzuć {{count}} kart",
       "titleWard": "Ward — Odrzuć kartę",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Ward",
+        "connive": "Connive",
+        "additionalCost": "Koszt dodatkowy",
+        "manaAbility": "Zdolność manowa"
+      },
       "subtitleUpTo_one": "Wybierz do {{count}} karty do odrzucenia",
       "subtitleUpTo_other": "Wybierz do {{count}} kart do odrzucenia",
       "subtitleUnless": "Wybierz {{count}} kart lub 1 pasującą kartę do odrzucenia",

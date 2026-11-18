@@ -1895,6 +1895,13 @@
       "titleExact_one": "カード1枚を捨てる",
       "titleExact_other": "カード{{count}}枚を捨てる",
       "titleWard": "護法 — カード1枚を捨てる",
+      "instructionWithReason": "{{reason}}：{{instruction}}",
+      "reason": {
+        "ward": "護法",
+        "connive": "謀議",
+        "additionalCost": "追加コスト",
+        "manaAbility": "マナ能力"
+      },
       "subtitleUpTo_one": "捨てるカードを最大{{count}}枚選択",
       "subtitleUpTo_other": "捨てるカードを最大{{count}}枚選択",
       "subtitleUnless": "{{count}}枚のカード、または条件に一致するカード1枚を捨てるものを選択",
