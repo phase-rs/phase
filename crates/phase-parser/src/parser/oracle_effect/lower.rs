@@ -17365,6 +17365,7 @@ mod tests {
 #[cfg(test)]
 mod where_x_tests {
     use super::{parse_where_x_quantity_expression, strip_trailing_duration, WhereXBinding};
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
         DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
@@ -17413,8 +17414,9 @@ mod where_x_tests {
         assert_eq!(
             parse_where_x_quantity_expression("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             })
         );

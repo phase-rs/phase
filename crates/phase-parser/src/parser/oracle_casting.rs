@@ -17,6 +17,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_saga::is_saga_chapter;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AdditionalCost, CastingRestriction, Comparator, CountScope, ParsedCondition,
     QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
@@ -775,7 +776,7 @@ pub fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestricti
 /// "you've cast another [<filter>] spell this turn" (Illusory Angel, Talara's
 /// Battalion) is checked BEFORE the spell is cast (CR 601.3), when the spell
 /// being cast is not yet in this turn's spell history. The shared condition
-/// grammar reads the phrase as `SpellsCastThisTurn >= 2`, which is right where
+/// grammar reads the phrase as `SpellsCast >= 2`, which is right where
 /// the condition is evaluated on resolution (the resolving spell is already
 /// recorded) but asks for TWO earlier spells here — so the card was never
 /// castable. Same shape as the ETB "unless you've cast another spell" route in
@@ -786,9 +787,10 @@ fn parse_casting_condition(condition_text: &str) -> Option<ParsedCondition> {
         if rest.trim().is_empty() {
             return Some(ParsedCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -1393,9 +1395,10 @@ Trample";
                     lhs:
                         QuantityExpr::Ref {
                             qty:
-                                QuantityRef::SpellsCastThisTurn {
+                                QuantityRef::SpellsCast {
                                     scope: CountScope::Controller,
                                     filter: Some(filter),
+                                    window: TurnWindow::ThisTurn,
                                 },
                         },
                     comparator: Comparator::GE,
@@ -1456,9 +1459,10 @@ Trample";
                 [CastingRestriction::RequiresCondition {
                     condition: Some(ParsedCondition::QuantityComparison {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: None,
+                                window: TurnWindow::ThisTurn
                             }
                         },
                         comparator: Comparator::GE,
@@ -1526,7 +1530,7 @@ Trample";
                 [CastingRestriction::RequiresCondition {
                     condition: Some(ParsedCondition::QuantityComparison {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn { .. }
+                            qty: QuantityRef::LifeLost { .. }
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },
