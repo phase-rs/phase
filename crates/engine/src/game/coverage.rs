@@ -60,7 +60,6 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
-use std::sync::LazyLock;
 use strum::IntoEnumIterator;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
@@ -645,8 +644,10 @@ pub struct CoverageSummary {
     pub supported_cards: usize,
     pub coverage_pct: f64,
     pub keyword_count: usize,
-    #[serde(default)]
-    pub token_coverage: TokenCoverageSummary,
+    /// `None` from [`analyze_coverage`]: the token catalog does not depend on the database, so
+    /// only the printed report computes it ([`analyze_token_coverage`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_coverage: Option<TokenCoverageSummary>,
     #[serde(default)]
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     /// Per-set coverage rollup. Each card counts toward every set it was
@@ -7308,18 +7309,8 @@ fn token_pt_provenance_has_no_materialization_gap(
     ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
 
-/// The token-catalog coverage summary, computed once per process.
-///
-/// Its only inputs are the compiled-in token catalog ([`known_token_presets`])
-/// and the pure Oracle parser, so the summary is a process-wide constant that
-/// does not depend on the `CardDatabase` being analyzed. Deriving it re-parses
-/// every catalog preset's rules text (~1.5k lines), which dominated each
-/// [`analyze_coverage`] call: ~20s per call in an unoptimized build against
-/// microseconds for a one-card database, so a test that analyzes N one-card
-/// databases paid the catalog parse N times.
-static TOKEN_COVERAGE: LazyLock<TokenCoverageSummary> = LazyLock::new(analyze_token_coverage);
-
-fn analyze_token_coverage() -> TokenCoverageSummary {
+/// Coverage of the compiled-in token catalog ([`known_token_presets`]); re-parses every preset's rules text.
+pub fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
     let mut gap_token_accumulators: BTreeMap<(String, String), (usize, usize, Vec<String>)> =
@@ -7978,7 +7969,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
-        token_coverage: TOKEN_COVERAGE.clone(),
+        token_coverage: None,
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -20054,6 +20045,7 @@ mod tests {
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
         }));
+        assert_eq!(analyze_token_coverage(), summary);
     }
 
     #[test]
@@ -23401,6 +23393,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let db = CardDatabase::from_json_str(&export).expect("test export should deserialize");
         let summary = analyze_coverage(&db);
 
+        assert!(summary.token_coverage.is_none());
         assert_eq!(
             summary.coverage_by_set.get("SET_A"),
             Some(&SetCoverageSummary {
