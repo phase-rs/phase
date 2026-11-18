@@ -32119,8 +32119,11 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 /// clause (terminal events, player actions, clause results, per-seat union)
 /// once no prompt, replacement, cursor, or copy owner remains.
 ///
-/// Transient pause state holding only public-board events, like its
-/// `pending_combat_lifelink` sibling — never viewer-filtered.
+/// Transient pause state holding only public-board events. Unlike its
+/// `pending_combat_lifelink` sibling (stripped in `visibility.rs` because a
+/// combat batch can carry redactable events), this record needs no viewer
+/// filtering: every fed span is token-entry public-board events under the
+/// compound gate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSimultaneousTokenClause {
     /// The creating instruction's source, naming the deferred terminal events.
