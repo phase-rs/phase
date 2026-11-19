@@ -8,6 +8,7 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagn
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
@@ -18199,6 +18200,131 @@ fn find_effect_boundary_skips_spell_quality_comma() {
         &suffix[..expected.len()],
         expected,
         "boundary should follow the spell-quality clause, got {suffix:?}"
+    );
+}
+
+const SARKHANS_UNSEALING_LIST_LINE: &str = "Whenever you cast a creature spell with power 4, 5, or 6, this enchantment deals 4 damage to any target.";
+const SARKHANS_UNSEALING_SEVEN_LINE: &str = "Whenever you cast a creature spell with power 7 or greater, this enchantment deals 4 damage to each opponent and each creature and planeswalker they control.";
+const KOZILEKS_UNSEALING_LIST_LINE: &str = "Whenever you cast a creature spell with mana value 4, 5, or 6, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"";
+const KOZILEKS_UNSEALING_SEVEN_LINE: &str =
+    "Whenever you cast a creature spell with mana value 7 or greater, draw three cards.";
+
+/// CR 603.1: the commas inside an exact-value number list in the trigger
+/// condition are list separators; the condition/effect boundary is the comma
+/// after the list's last leg.
+#[test]
+fn find_effect_boundary_skips_number_list_commas() {
+    for (line, expected) in [
+        (SARKHANS_UNSEALING_LIST_LINE, ", this enchantment deals"),
+        (KOZILEKS_UNSEALING_LIST_LINE, ", create two"),
+        // Bakersbane Duo: a single number right before the effect comma is not
+        // a list, so the boundary stays at that comma.
+        (
+            "Whenever you expend 4, this creature gets +1/+1 until end of turn. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
+            ", this creature gets",
+        ),
+    ] {
+        let lower = line.to_lowercase();
+        let boundary = find_effect_boundary(&lower).expect("effect boundary");
+        let suffix = &lower[boundary..];
+        assert_eq!(
+            &suffix[..expected.len()],
+            expected,
+            "boundary of {line:?} should precede {expected:?}, got {suffix:?}"
+        );
+    }
+}
+
+/// CR 208.1 + CR 603.1: Sarkhan's Unsealing's first trigger reads "power 4,
+/// 5, or 6" whole — an `AnyOf` of three power EQ comparisons — and its effect
+/// is the plain 4 damage to any target, with no `Unimplemented` link.
+#[test]
+fn sarkhans_unsealing_power_value_list_trigger() {
+    let trigger = parse_trigger_line(SARKHANS_UNSEALING_LIST_LINE, "Sarkhan's Unsealing");
+    assert_eq!(trigger.mode, TriggerMode::SpellCast);
+    let power_eq = |value| FilterProp::PtComparison {
+        stat: PtStat::Power,
+        scope: PtValueScope::Current,
+        comparator: Comparator::EQ,
+        value: QuantityExpr::Fixed { value },
+    };
+    let expected = FilterProp::AnyOf {
+        props: vec![power_eq(4), power_eq(5), power_eq(6)],
+    };
+    let valid_card = trigger.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(valid_card, &|prop| *prop == expected),
+        "valid_card must hold the power value list, got {valid_card:?}"
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_no_unimplemented(execute);
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "expected 4 damage to any target, got {:?}",
+        execute.effect
+    );
+
+    // Reach-guard: the 7+ line still parses through the same path.
+    let seven = parse_trigger_line(SARKHANS_UNSEALING_SEVEN_LINE, "Sarkhan's Unsealing");
+    assert_eq!(seven.mode, TriggerMode::SpellCast);
+    let seven_card = seven.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(seven_card, &|prop| *prop
+            == FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            }),
+        "7+ line must keep power GE 7, got {seven_card:?}"
+    );
+}
+
+/// CR 202.3 + CR 603.1: Kozilek's Unsealing's first trigger reads "mana value
+/// 4, 5, or 6" whole — an `AnyOf` of three mana-value EQ comparisons — and its
+/// effect creates two Eldrazi Spawn, with no `Unimplemented` link.
+#[test]
+fn kozileks_unsealing_mana_value_list_trigger() {
+    let trigger = parse_trigger_line(KOZILEKS_UNSEALING_LIST_LINE, "Kozilek's Unsealing");
+    assert_eq!(trigger.mode, TriggerMode::SpellCast);
+    let mv_eq = |value| FilterProp::Cmc {
+        comparator: Comparator::EQ,
+        value: QuantityExpr::Fixed { value },
+    };
+    let expected = FilterProp::AnyOf {
+        props: vec![mv_eq(4), mv_eq(5), mv_eq(6)],
+    };
+    let valid_card = trigger.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(valid_card, &|prop| *prop == expected),
+        "valid_card must hold the mana value list, got {valid_card:?}"
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_no_unimplemented(execute);
+    let Effect::Token { name, count, .. } = execute.effect.as_ref() else {
+        panic!("expected a token effect, got {:?}", execute.effect);
+    };
+    assert_eq!(name, "Eldrazi Spawn");
+    assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+
+    // Reach-guard: the 7+ line still parses through the same path.
+    let seven = parse_trigger_line(KOZILEKS_UNSEALING_SEVEN_LINE, "Kozilek's Unsealing");
+    assert_eq!(seven.mode, TriggerMode::SpellCast);
+    let seven_card = seven.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(seven_card, &|prop| *prop
+            == FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            }),
+        "7+ line must keep mana value GE 7, got {seven_card:?}"
     );
 }
 
