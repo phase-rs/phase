@@ -1448,14 +1448,44 @@ fn exile_owned_objects_on_player_left_game(
                 .flat_map(|zone| super::targeting::zone_object_ids(state, zone)),
         )
         .chain(resolving_spell)
-        .chain(held_components)
+        .chain(held_components.iter().copied())
         .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
         .collect();
     to_exile.sort_by_key(|id| id.0);
     to_exile.dedup();
+    // CR 730.3: the still-merged permanent's exit routes its absorbed
+    // cards. Retire their pending moves, but don't deliver them a second time
+    // or count them as independent battlefield departures.
+    let absorbed: Vec<_> = held_components
+        .into_iter()
+        .filter_map(|id| {
+            let card = state.objects.get(&id)?;
+            (card.owner == player && card.split_from_merge_survivor.is_none())
+                .then(|| ObjectIncarnationRef::from_object(card))
+        })
+        .collect();
 
     for id in to_exile {
+        if absorbed.iter().any(|component| component.object_id == id) {
+            continue;
+        }
         move_owned_object_leaving_game(state, id, player, events);
+    }
+    for component in absorbed {
+        abandon_pending_zone_change_member_for_player_left(state, component, player);
+        if state
+            .objects
+            .get(&component.object_id)
+            .is_some_and(|card| ObjectIncarnationRef::from_object(card) == component)
+        {
+            super::merge::put_component_into_zone(
+                state,
+                component.object_id,
+                Zone::Exile,
+                None,
+                events,
+            );
+        }
     }
 }
 

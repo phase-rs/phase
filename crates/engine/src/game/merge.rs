@@ -492,11 +492,6 @@ pub fn split_merged_permanent_on_leave(
     // (it lands in `default_dest == dest` via `move_to_zone`).
     let card_route = state.merged_card_component_route;
 
-    // CR 730.3 + CR 400.7: before the surviving object changes zone, drop the
-    // merge's layer-1 copy effect and flush layers so it leaves as its own card.
-    remove_merge_layer_effect(state, merged_id);
-    crate::game::layers::flush_layers(state);
-
     for component_id in components {
         // The surviving object itself rides the normal `move_to_zone` flow; only
         // the absorbed (non-survivor) components need explicit routing here.
@@ -524,7 +519,7 @@ pub fn split_merged_permanent_on_leave(
             state,
             component_id,
             component_dest,
-            survivor_successor,
+            Some(survivor_successor),
             events,
         );
     }
@@ -945,7 +940,7 @@ pub(crate) fn put_component_into_zone(
     state: &mut GameState,
     component_id: ObjectId,
     dest: Zone,
-    survivor_successor: ObjectIncarnationRef,
+    survivor_successor: Option<ObjectIncarnationRef>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 603.10a: snapshot the component's characteristics BEFORE the CR 400.7
@@ -965,7 +960,7 @@ pub(crate) fn put_component_into_zone(
     // CR 730.3c: the cleanup clears previous incarnation links. Stamp the
     // new link only on arrival so a parked choice cannot expose a split card.
     if let Some(obj) = state.objects.get_mut(&component_id) {
-        obj.split_from_merge_survivor = Some(survivor_successor);
+        obj.split_from_merge_survivor = survivor_successor;
     }
 
     crate::game::restrictions::record_zone_change(state, &mut record);

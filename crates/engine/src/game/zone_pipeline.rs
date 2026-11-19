@@ -1373,6 +1373,18 @@ fn move_batch_member_with_terminal(
             crate::game::layers::mark_layers_full(state);
             return ZoneMoveTerminalResult::Completed(completion);
         }
+        if matches!(req.cause, ZoneChangeCause::PlayerLeftGame)
+            && !object.merged_components.is_empty()
+        {
+            // CR 800.4a: the procedure, not a replacement-aware delivery
+            // batch, owns its still-merged permanent and every split card.
+            let delivery_start = events.len();
+            zones::move_to_zone(state, req.object_id, req.to, events);
+            return ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
+                member,
+                &events[delivery_start..],
+            ));
+        }
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange {
             enter_transformed,
@@ -1796,6 +1808,7 @@ fn move_arranged_batch_then(
         parking,
         staged_entry,
         staged_parent,
+        &completion,
         component_delivery_parent.as_ref(),
         events,
     ) {
@@ -1864,7 +1877,9 @@ fn move_arranged_batch_then(
             // CR 701.20d + CR 616.1: the reorder rides the same parked owner; its
             // drain settles the reorder before running this completion.
             pending.library_reorder = library_reorder;
-            pending.attempted = ids;
+            if pending.staged.is_none() {
+                pending.attempted = ids;
+            }
             pending.zone_change_record_start = zone_change_record_start;
             pending.deferred_events.extend(events.drain(event_start..));
             BatchMoveResult::NeedsChoice
@@ -1998,6 +2013,7 @@ fn deliver_batch(
     parking: BatchDeliveryParking,
     staged_entry: Option<StagedBatchDelivery>,
     staged_parent: Option<PendingComponentDeliveryParent>,
+    completion: &Option<BatchCompletion>,
     handback: Option<&PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
@@ -2009,6 +2025,7 @@ fn deliver_batch(
             logical_zone_change_group,
             staged,
             staged_parent,
+            completion,
             events,
         );
     }
@@ -2568,6 +2585,22 @@ fn drive_staged_approval(
         }
         run.blocking_settled = false;
         let member = owner.staged.as_ref().expect("asking is staged").members[index].clone();
+        if !staged_member_is_live(state, &member) {
+            mark_staged_member_preempted(owner, index);
+            return StagedConsult::Continue;
+        }
+        if member.merged_departure.is_some()
+            && member.state == StagedBatchMemberState::InnerConsulting
+            && member.pending_outcome.is_none()
+        {
+            // CR 800.4a + CR 616.1: the question was withdrawn without
+            // answering. Consult the surviving physical move again; it has
+            // no approval to carry into delivery.
+            owner.paused_current = None;
+            release_staged_asking(owner, index);
+            set_staged_member_state(owner, index, StagedBatchMemberState::Unconsulted);
+            return StagedConsult::Continue;
+        }
         if let (
             StagedMemberOperation::Destroy(operation),
             StagedBatchMemberState::InnerConsulting,
@@ -4811,6 +4844,7 @@ fn deliver_staged_batch_entry(
     logical_zone_change_group: LogicalZoneChangeGroup,
     staged: StagedBatchDelivery,
     component_delivery_parent: Option<PendingComponentDeliveryParent>,
+    completion: &Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
     let run_start = events.len();
@@ -4821,6 +4855,7 @@ fn deliver_staged_batch_entry(
         staged,
         component_delivery_parent,
     );
+    owner.completion.clone_from(completion);
     match run_staged_batch(state, &mut owner, events, run_start) {
         StagedStop::Paused | StagedStop::Arranging => {
             state
@@ -6358,6 +6393,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
         BatchDeliveryParking::ReparkOwner(owner),
         None,
         None,
+        &completion,
         component_delivery_parent.as_ref(),
         events,
     ) {
@@ -6433,10 +6469,6 @@ fn drain_staged_batch(
     // the run belongs above it, so the owner must be inserted back below that
     // child (and above its ChangeZone marker).
     let repark_boundary = state.resolution_stack.capture_child_boundary();
-    let component_delivery_parent = owner.component_delivery_parent.clone();
-    let completion = owner.completion.clone();
-    let attempted = owner.attempted.clone();
-    let zone_change_record_start = owner.zone_change_record_start;
     let collector = staged_segment_collector(&owner);
     // The resumed window (the answer or child that let this owner continue) is
     // held on the owner like every earlier parked segment. While approving, it
@@ -6451,7 +6483,7 @@ fn drain_staged_batch(
             state,
             &mut owner.logical_zone_change_group,
             &owner.deferred_events[resume_start..],
-            component_delivery_parent.as_ref(),
+            owner.component_delivery_parent.as_ref(),
             collector,
         )
         .expect("resumed staged approval retains its exact consultation segment");
@@ -6467,7 +6499,7 @@ fn drain_staged_batch(
                 state,
                 &mut owner.logical_zone_change_group,
                 &paused.delivery_events,
-                component_delivery_parent.as_ref(),
+                owner.component_delivery_parent.as_ref(),
                 collector,
             )
             .expect("resumed staged batch retains its exact paused delivery");
@@ -6503,10 +6535,6 @@ fn drain_staged_batch(
 
     match stop {
         StagedStop::Paused | StagedStop::Arranging => {
-            owner.component_delivery_parent = component_delivery_parent;
-            owner.completion = completion;
-            owner.attempted = attempted;
-            owner.zone_change_record_start = zone_change_record_start;
             state.repark_batch_owner_below_children(owner, repark_boundary);
         }
         StagedStop::Delivered => {
@@ -6515,10 +6543,6 @@ fn drain_staged_batch(
                     player: state.active_player,
                 };
             }
-            owner.component_delivery_parent = component_delivery_parent;
-            owner.completion = completion;
-            owner.attempted = attempted;
-            owner.zone_change_record_start = zone_change_record_start;
             let deferred_events = std::mem::take(&mut owner.deferred_events);
             settle_batch_owner(state, owner, deferred_events, events);
         }
@@ -9352,7 +9376,7 @@ fn deliver_replaced_batch_member(
                     state,
                     object_id,
                     to,
-                    survivor_successor,
+                    Some(survivor_successor),
                     events,
                 );
                 if let (Zone::Library, Some(position)) = (to, position) {

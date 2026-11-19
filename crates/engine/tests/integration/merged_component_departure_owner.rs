@@ -50,14 +50,8 @@
 //! (CR 903.3); CR 903.9b offers its owner the command zone when it would be put
 //! into a library.
 //!
-//! Known defect, not under test and not rules-correct: when Brokkos is the
-//! survivor with Circuit Mender mutated on top (`Pile::MenderOverBrokkos`), the
-//! merged permanent has Circuit Mender's abilities (CR 730.2a) and its
-//! leaves-the-battlefield ability should look back and trigger (CR 603.10a), but
-//! it does not trigger even with nothing parked. For that pile the rows compare
-//! the parked run with the unparked one and use Ninth Bridge Patrol to observe
-//! the departure. The defect is at the merge base too (`merge.rs` removes the
-//! merge layer effect before the move) and has no upstream issue yet.
+//! Non-positioned moves such as Chaos Warp still use the serial split path;
+//! its known look-back defect is outside these positioned-placement changes.
 
 use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -443,16 +437,16 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile, arrange: bool) 
     mender_departure_triggers(runner.state())
 }
 
-/// The unparked control, pinned for both piles. With Circuit Mender as the
-/// survivor its own trigger fires once. With Brokkos as the survivor it does not
-/// fire at all: that is the known look-back defect in the module note, pinned
-/// here as it is so a fix of it fails this row and is noticed, while the rows
-/// require the parked run to match the control either way.
+/// Positioned moves see Circuit Mender's ability on either merged pile
+/// (CR 730.2a + CR 603.10a). The non-positioned Chaos Warp control keeps the
+/// existing serial path's observation; each parked run must match its control.
 fn assert_control(spell_name: &str, pile_shape: Pile, control: &[PlayerId]) {
-    let expected: &[PlayerId] = match pile_shape {
-        Pile::BrokkosUnderMender => &[P1],
-        Pile::MenderOverBrokkos => &[],
-    };
+    let expected: &[PlayerId] =
+        if spell_name == "Chaos Warp" && matches!(pile_shape, Pile::MenderOverBrokkos) {
+            &[]
+        } else {
+            &[P1]
+        };
     assert_eq!(control, expected, "{spell_name} {pile_shape:?} control");
 }
 
