@@ -19668,14 +19668,16 @@ pub(super) fn max_x_value_excluding(
                 spell_ctx.as_ref(),
                 object_id,
             );
-            let tap = tap_mode
-                .filter(|mode| {
-                    state.objects.get(&id).is_some_and(|o| {
-                        super::casting::tap_payment_eligible(state, o, player, *mode)
-                    })
+            if mana != 0 {
+                return mana;
+            }
+            // CR 101.2 + CR 701.26a: a prohibition on tapping overrides tap-payment permission.
+            u32::from(tap_mode.is_some_and(|mode| {
+                state.objects.get(&id).is_some_and(|object| {
+                    super::casting::tap_payment_eligible(state, object, player, mode)
+                        && !super::restrictions::object_cant_tap(state, id)
                 })
-                .map_or(0, |_| 1);
-            mana.max(tap)
+            }))
         })
         .sum();
     // CR 702.66a-b: Delve applies after total cost is determined and can pay
