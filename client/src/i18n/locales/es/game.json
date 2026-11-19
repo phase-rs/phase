@@ -1555,6 +1555,7 @@
     },
     "search": {
       "title": "Buscar en la biblioteca",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Elige {{count}} carta",
       "subtitleExact_other": "Elige {{count}} cartas",
       "subtitleUpTo_one": "Elige hasta {{count}} carta",

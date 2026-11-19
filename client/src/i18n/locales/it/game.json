@@ -1555,6 +1555,7 @@
     },
     "search": {
       "title": "Cerca nel grimorio",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Scegli {{count}} carta",
       "subtitleExact_other": "Scegli {{count}} carte",
       "subtitleUpTo_one": "Scegli fino a {{count}} carta",

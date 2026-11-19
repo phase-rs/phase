@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "An optional-effect prompt reached inside a replacement’s own action carries that action’s amount (OptionalEffectFrame.replacement_action). Older readers drop the field, so the resumed action can read the wrong amount."
+}
