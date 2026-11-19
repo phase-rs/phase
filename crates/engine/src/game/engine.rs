@@ -7207,8 +7207,11 @@ fn materialize_object_growth_shortcut(
     result.waiting_for = state.waiting_for.clone();
 }
 
-/// Appends one committed repetition of a taken shortcut, opened by its marker.
+/// Appends one committed repetition of a taken shortcut, opened by its marker, and retires the
+/// action-scoped journal entries it recorded from `journal_start` on (CR 732.1b).
 fn commit_repetition(
+    state: &mut GameState,
+    journal_start: usize,
     events: &mut Vec<GameEvent>,
     controller: PlayerId,
     repetition: u32,
@@ -7219,6 +7222,7 @@ fn commit_repetition(
         repetition,
     });
     events.append(cycle);
+    state.retire_repetition_journal(journal_start);
 }
 
 /// CR 732.1b: the shortcut's result is the board; the record keeps the first and last repetition,
@@ -7300,6 +7304,7 @@ pub(crate) fn drive_persistent_axis_collapse(
         take_cost.begin_cycle();
         reseed(state);
         let before = predicted.map(|_| state.clone());
+        let journal_start = state.resolved_rules_journal.entries().len();
         let mut cycle_events = Vec::new();
         let ended = super::period_confirm::perform_cycle(
             state,
@@ -7323,7 +7328,14 @@ pub(crate) fn drive_persistent_axis_collapse(
         let verdict = repetition_verdict(&ended, departure);
         if predicted.is_some() && verdict == RepetitionVerdict::Ended {
             delivered += 1;
-            commit_repetition(events, controller, delivered, &mut cycle_events);
+            commit_repetition(
+                state,
+                journal_start,
+                events,
+                controller,
+                delivered,
+                &mut cycle_events,
+            );
             #[cfg(feature = "test-support")]
             take_cost.end_cycle();
             break;
@@ -7340,6 +7352,7 @@ pub(crate) fn drive_persistent_axis_collapse(
             delivered = 0;
             for k in 0..prefix {
                 reseed(state);
+                let journal_start = state.resolved_rules_journal.entries().len();
                 let mut cycle_events = Vec::new();
                 match super::period_confirm::perform_cycle(
                     state,
@@ -7350,7 +7363,14 @@ pub(crate) fn drive_persistent_axis_collapse(
                 ) {
                     CycleEnd::CameRound => {
                         delivered += 1;
-                        commit_repetition(events, controller, delivered, &mut cycle_events);
+                        commit_repetition(
+                            state,
+                            journal_start,
+                            events,
+                            controller,
+                            delivered,
+                            &mut cycle_events,
+                        );
                     }
                     CycleEnd::Refused(OfferRefusal::LifeChangeUnrepresentable { player }) => {
                         *state = snapshot;
@@ -7366,7 +7386,14 @@ pub(crate) fn drive_persistent_axis_collapse(
             break;
         }
         delivered += 1;
-        commit_repetition(events, controller, delivered, &mut cycle_events);
+        commit_repetition(
+            state,
+            journal_start,
+            events,
+            controller,
+            delivered,
+            &mut cycle_events,
+        );
         #[cfg(feature = "test-support")]
         take_cost.end_cycle();
     }
