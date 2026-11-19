@@ -213,8 +213,8 @@ fn damping_sphere_counts_the_player_casting_the_spell() {
     runner.cast(damping_sphere).resolve();
     assert!(runner.state().battlefield.contains(&damping_sphere));
 
-    // P0 has cast two spells and P1 has cast one. With P1 active, the next
-    // spell costs one extra mana for P1's own history, not two for P0's.
+    // P0 has cast three spells, including Damping Sphere, and P1 has cast one.
+    // With P1 active, the next spell costs one extra mana for P1's history.
     runner.state_mut().active_player = P1;
     give_priority_to_p1(&mut runner);
     cast_and_assert_life_delta(&mut runner, p1_next_spell, "P1 next spell", P1, 0);
