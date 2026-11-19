@@ -87,7 +87,7 @@ fn add_burden_of_proof(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
-/// CR 601.2 + CR 608.3b: cast the Aura on `host` and resolve it, then check the
+/// CR 601.2 + CR 608.3c: cast the Aura on `host` and resolve it, then check the
 /// cast completed: empty stack, a priority window, the Aura on the battlefield.
 fn cast_burden_of_proof_on(runner: &mut GameRunner, aura: ObjectId, host: ObjectId) {
     runner.cast(aura).target_object(host).resolve();

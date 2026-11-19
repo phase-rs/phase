@@ -17,8 +17,10 @@ use nom::sequence::{delimited, pair, terminated};
 
 /// CR 509.1b: "can't block X" is the whitelist "can block only attackers that
 /// are not X" — the single inversion authority for every "can't block
-/// <object>" reading (rule statics here; granted restrictions in
-/// `parse_restriction_modes`).
+/// <object>" reading (rule statics here; the shared restriction grammar
+/// `parse_restriction_modes` for granted restrictions and for printed
+/// enchanted/equipped predicates, e.g. Spectral Grasp's "Enchanted creature
+/// can't block creatures you control.").
 pub(crate) fn cant_block_object_mode(object: TargetFilter) -> StaticMode {
     StaticMode::BlockRestriction {
         filter: TargetFilter::Not {

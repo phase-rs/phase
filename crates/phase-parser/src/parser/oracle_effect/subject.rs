@@ -8352,9 +8352,11 @@ fn parse_restriction_list_atom(input: &str) -> OracleResult<'_, Vec<StaticMode>>
 
 /// CR 509.1b: the "can't block <object>" predicate — negation, then the object
 /// read by the single block-object authority. Self-object forms ("block
-/// ~/this creature/it") are owned by [`parse_restriction_list_atom`] and are
-/// declined by the object authority; a trailing rider is left for the
-/// caller's all_consuming.
+/// ~/this creature/it") are owned by [`parse_restriction_list_atom`], which
+/// runs first; the object authority leaves self-object rejection to its
+/// callers and currently returns `Err` for each of these forms, which
+/// `parse_restriction_modes_cant_block_object_declines` pins. A trailing
+/// rider is left for the caller's all_consuming.
 fn parse_cant_block_object_predicate(input: &str) -> OracleResult<'_, TargetFilter> {
     preceded(
         alt((tag("can't block "), tag("cannot block "))),
