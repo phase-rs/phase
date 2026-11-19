@@ -3,10 +3,10 @@
 //! (`BecomesTarget`) and the crime it commits (`CrimeCommitted`) — trigger the
 //! abilities that watch for them exactly once, whichever context emitted them.
 //!
-//! The class (Firebender Ascension): the abilities that trigger on
-//! becoming the target of an ability (193 cards, objects and players), on a
-//! crime (21 cards) and ward (325 cards). They are reached here through the
-//! shared matcher, so each row covers its whole family.
+//! The class: the abilities that trigger on becoming the target of an ability
+//! (objects and players), on a crime, and ward. In MTGJSON AtomicCards
+//! 5.3.0+20261101 that is 193, 21 and 325 cards. They are reached here through
+//! the shared matcher, so each test covers its whole family.
 //!
 //! Each emission context has exactly one owner:
 //! - a dispatch window collects its own range (the window collector);
@@ -30,7 +30,7 @@
 //! (At Knifepoint also matches; its "target" is inside a token's ability.)
 //! Next-sentence predicate
 //! `(commits? a crime|becomes? the targets? of [^.]*abilit[^.]*)[^.]*\.[^.]*\btarget\b`
-//! (over the same verbatim face texts) adds no observer whose own trigger has a
+//! (over the same MTGJSON face texts) adds no observer whose own trigger has a
 //! target slot: every hit's "target" belongs to a different ability or to
 //! reminder text (Agrus Kos, Altanak, Cathedral Acolyte, Cephalid Illusionist,
 //! Crystalline Nautilus, Dwarven Mattock, Elder Owyn Lyons, Falcon's Wing
@@ -41,7 +41,7 @@
 //! Kos's "could target" names the copies its resolution makes, not a target of
 //! its own trigger.
 //!
-//! Drain sites not wrapped by the drain owner rule, by reading: a combat-damage
+//! Drain sites not wrapped in `drain_on_action_buffer`, and why: a combat-damage
 //! window cannot be rescanned (a window emission comes with a stack push, so
 //! the `CombatDamage` pass skips its trigger scan, and the damage-assignment
 //! arms process triggers inline). The elimination drain is wrapped inside
@@ -337,7 +337,7 @@ fn select_targets(runner: &mut GameRunner, targets: Vec<TargetRef>) -> ActionRes
 }
 
 /// Answer every CR 603.3b order prompt with the identity order until the game
-/// reaches `Priority`; any other prompt fails the row.
+/// reaches `Priority`; any other prompt fails the test.
 fn order_identity_until_priority(runner: &mut GameRunner) {
     for _ in 0..8 {
         match runner.state().waiting_for.clone() {
@@ -629,7 +629,7 @@ fn f5_valiant_of_a_finisher_target_is_collected_once() {
 }
 
 // ---------------------------------------------------------------------------
-// Priority end: unchanged placement, exact count
+// Priority end: placement above the drained sibling, exact count
 // ---------------------------------------------------------------------------
 
 /// F-6: CR 603.3b: Fiend Hunter's ETB targets Tar Pit Warrior; the drain places
@@ -669,7 +669,7 @@ fn f6_priority_end_places_the_span_once_above_the_drained_sibling() {
     );
 }
 
-/// F-6c: the crime sibling at a `Priority` end (preservation).
+/// F-6c: the crime sibling at a `Priority` end.
 #[test]
 fn f6c_priority_end_crime_is_collected_once() {
     let mut scenario = GameScenario::new();

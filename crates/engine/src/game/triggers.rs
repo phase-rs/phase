@@ -15596,8 +15596,8 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     // `is_pending_trigger_construction_active` above,
     // `elimination::drain_or_clear_deferred_triggers_after_elimination`'s
     // `pending_trigger_order.is_some()` guard, and the reducer dispatching on
-    // the `(waiting_for, action)` pair. The deferred queue is not empty while
-    // `OrderTriggers` is open in general: an action-seam construction finisher
+    // the `(waiting_for, action)` pair. The deferred queue is not always empty while
+    // `OrderTriggers` is open: an action-seam construction finisher
     // queues the abilities its own target choice triggered after its drain
     // returned on that prompt (CR 603.3b). The only waiting-state-agnostic entries are
     // concession/elimination and debug actions, which is why `elimination.rs`
