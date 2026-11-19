@@ -43,8 +43,8 @@ use crate::types::resolved_commands::{
     ResolvedTriggerCollectionReplayInvariantError,
 };
 use crate::types::statics::{
-    CausingObject, ControlledCreatureEvent, StaticMode, SuppressedTriggerEvent, TriggerCause,
-    ZoneChangeQualifier,
+    CausingObject, CausingPlayer, ControlledCreatureEvent, PlayerCauseAction, StaticMode,
+    SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
 };
 use crate::types::triggers::{AttackTargetFilter, TriggerEventKey, TriggerMode};
 use crate::types::zones::Zone;
@@ -16195,6 +16195,10 @@ pub enum LatchedRelativeProperty {
     EquippedByDoubler,
     /// Greater power than the doubler's.
     PowerGreaterThanDoubler,
+    /// CR 108.3 + CR 109.5: owned by the doubler's controller ("a permanent you
+    /// control but don't own" — Jabs, Mistress of Mockery), judged on the
+    /// watcher's latched owner.
+    OwnedByDoublerController,
 }
 
 /// Whether a printed doubler scope is judged on the latched (look-back) path
@@ -16383,6 +16387,12 @@ fn latched_property_kind(
         } => Some(LatchedRelativeProperty::AttachedToDoubler),
         FilterProp::EquippedBy => Some(LatchedRelativeProperty::EquippedByDoubler),
         FilterProp::PowerGTSource => Some(LatchedRelativeProperty::PowerGreaterThanDoubler),
+        // CR 108.3 + CR 603.10d: "you own" names the doubler's latched
+        // controller; the watcher's owner is captured with it. Any other
+        // ownership reference reads players the capture doesn't hold.
+        FilterProp::Owned {
+            controller: crate::types::ability::ControllerRef::You,
+        } => Some(LatchedRelativeProperty::OwnedByDoublerController),
         FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::HasColor { .. }
@@ -16606,6 +16616,9 @@ fn latched_relative_matches(
                 _ => false,
             }
         }
+        LatchedRelativeProperty::OwnedByDoublerController => {
+            watcher.lki.owner == doubler.controller()
+        }
     }
 }
 
@@ -16720,6 +16733,8 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
         | TriggerCause::ControlledCreature { .. }
         | TriggerCause::ControllerCastOrCopiedSpell { .. }
         | TriggerCause::RoomEntered
+        | TriggerCause::PlayerAction { .. }
+        | TriggerCause::TurnedFaceUp
         | TriggerCause::BattlefieldTransition { .. } => false,
     }
 }
@@ -16861,6 +16876,36 @@ pub(super) fn trigger_cause_matches(
             // additional time when a dungeon room is entered.
             matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
+        TriggerCause::PlayerAction { player, action } => {
+            let acting_player = match (action, event) {
+                // CR 119.3: a positive life change is a life gain (Dr.
+                // Beverly Crusher: "you gaining life").
+                (
+                    PlayerCauseAction::GainedLife,
+                    Some(GameEvent::LifeChanged {
+                        player_id, amount, ..
+                    }),
+                ) if *amount > 0 => *player_id,
+                // CR 121.1: a card draw (Krang, the All-Powerful: "a player
+                // drawing a card").
+                (
+                    PlayerCauseAction::DrewCard,
+                    Some(
+                        GameEvent::CardDrawn { player_id, .. }
+                        | GameEvent::CardsDrawn { player_id, .. },
+                    ),
+                ) => *player_id,
+                (PlayerCauseAction::GainedLife | PlayerCauseAction::DrewCard, _) => return false,
+            };
+            match player {
+                CausingPlayer::Any => true,
+                // CR 109.5: "you" is the doubler's controller.
+                CausingPlayer::You => acting_player == doubler_controller,
+            }
+        }
+        // CR 116.2b + CR 708.8: turning a face-down permanent face up
+        // (Panoptic Projektor).
+        TriggerCause::TurnedFaceUp => matches!(event, Some(GameEvent::TurnedFaceUp { .. })),
         TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
             // CR 601.2 + CR 707.10: Veyran-class doublers fire only for
             // triggers caused by the doubler's controller casting or copying
@@ -24597,6 +24642,10 @@ pub mod tests {
                 r#"{"filters": [{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Shaman"}]}, {"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Wizard"}]}], "type": "Or"}"#,
             ),
             (
+                "Jabs, Mistress of Mockery",
+                r#"{"filters": [{"controller": "You", "properties": [], "type": "Typed", "type_filters": ["Permanent"]}, {"filter": {"controller": null, "properties": [{"controller": "You", "type": "Owned"}], "type": "Typed", "type_filters": []}, "type": "Not"}], "type": "And"}"#,
+            ),
+            (
                 "Katara, the Fearless",
                 r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Ally"}]}"#,
             ),
@@ -24691,6 +24740,15 @@ pub mod tests {
                 core_types: vec![CoreType::Instant],
             },
             TriggerCause::RoomEntered,
+            TriggerCause::PlayerAction {
+                player: CausingPlayer::You,
+                action: PlayerCauseAction::GainedLife,
+            },
+            TriggerCause::PlayerAction {
+                player: CausingPlayer::Any,
+                action: PlayerCauseAction::DrewCard,
+            },
+            TriggerCause::TurnedFaceUp,
             TriggerCause::BattlefieldTransition {
                 enter: true,
                 leave: true,

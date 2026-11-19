@@ -3969,6 +3969,9 @@ pub(crate) fn parse_static_line_inner(
     //   — Valiant Emberkin (BecameTarget); "dealing combat damage to a player
     //   causes" — Felix Five-Boots (DealsCombatDamageToPlayer).
     // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
+    // - "you gaining life causes" / "a player drawing a card causes" — Dr.
+    //   Beverly Crusher, Krang, the All-Powerful (PlayerAction); "turning a
+    //   face-down permanent face up causes" — Panoptic Projektor (TurnedFaceUp).
     // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
     //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
     //   entering", so both CoreTypes qualify; narrower wordings ("creature
@@ -4035,6 +4038,15 @@ pub(crate) fn parse_static_line_inner(
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
             TriggerCause::CreatureDying
+        } else if let Some(cause) = parse_player_action_cause(tp.lower) {
+            cause
+        } else if nom_primitives::scan_preceded(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("turning a face-down permanent face up causes ").parse(i)
+        })
+        .is_some()
+        {
+            // CR 116.2b + CR 708.8: Panoptic Projektor.
+            TriggerCause::TurnedFaceUp
         } else if let Some(cause) = parse_battlefield_transition_cause(tp.lower) {
             cause
         } else if nom_primitives::scan_contains(tp.lower, "entering")
@@ -4197,6 +4209,33 @@ fn parse_zone_change_qualifiers(lower: &str) -> Vec<ZoneChangeQualifier> {
         qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Planeswalker));
     }
     qualifiers
+}
+
+/// CR 603.2d: "<player> <action> causes" — a doubler's player-action cause:
+/// "you gaining life causes" (Dr. Beverly Crusher, CR 119.3) or "a player
+/// drawing a card causes" (Krang, the All-Powerful, CR 121.1). The player and
+/// the action are independent axes.
+fn parse_player_action_cause(lower: &str) -> Option<TriggerCause> {
+    let (_, (player, action), _) = nom_primitives::scan_preceded(lower, |i| {
+        terminated(
+            (
+                terminated(
+                    alt((
+                        value(CausingPlayer::You, tag::<_, _, OracleError<'_>>("you")),
+                        value(CausingPlayer::Any, tag("a player")),
+                    )),
+                    tag(" "),
+                ),
+                alt((
+                    value(PlayerCauseAction::GainedLife, tag("gaining life")),
+                    value(PlayerCauseAction::DrewCard, tag("drawing a card")),
+                )),
+            ),
+            tag(" causes "),
+        )
+        .parse(i)
+    })?;
+    Some(TriggerCause::PlayerAction { player, action })
 }
 
 /// CR 603.6a + CR 603.6c: Parse Gandalf-class battlefield transition causes.

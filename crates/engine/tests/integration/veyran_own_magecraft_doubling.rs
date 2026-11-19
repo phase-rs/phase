@@ -17,24 +17,29 @@
 //! Signals: a creature's power counts its resolved pump/counter instances;
 //! Witherbloom Apprentice's life gain counts its resolved Magecraft instances.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, WardCost};
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const VEYRAN: &str = "Magecraft — Whenever you cast or copy an instant or sorcery spell, Veyran gets +1/+1 until end of turn.\nIf you casting or copying an instant or sorcery spell causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
 const WITHERBLOOM_APPRENTICE: &str = "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 1 life and you gain 1 life.";
 const HARMONIC_PRODIGY: &str = "Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)\nIf a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.";
 const STORMCHASER_MAGE: &str = "Flying, haste\nProwess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)";
-const ECHOES_OF_ETERNITY: &str = "If a triggered ability of a colorless spell you control or another colorless permanent you control triggers, that ability triggers an additional time.\nWhenever you cast a colorless spell, copy it. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)";
 const VALIANT_EMBERKIN: &str = "Haste\nWhenever this creature enters or attacks, target creature you control perpetually gets +1/+0.\nIf a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
 const HEARTFIRE_HERO: &str = "Valiant — Whenever this creature becomes the target of a spell or ability you control for the first time each turn, put a +1/+1 counter on it.\nWhen this creature dies, it deals damage equal to its power to each opponent.";
 const THE_FISH_BREWER: &str = "When The Fish Brewer enters the battlefield or attacks, create a 1/1 Fish creature token that's all colors.\nIf another permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, tap any number of Fish you control. That ability triggers an additional time for each Fish tapped this way.";
@@ -43,11 +48,10 @@ const QUICK_STUDY: &str = "Draw two cards.";
 /// Targeted: Twincast copying it takes the CR 707.10c retarget walk, whose
 /// copy observers drain after the walk completes.
 const INSPIRATION: &str = "Target player draws two cards.";
+const DIVINATION: &str = "Draw two cards.";
 const TWINCAST: &str =
     "Copy target instant or sorcery spell. You may choose new targets for the copy.";
 const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
-const DESOLATION_TWIN: &str =
-    "When you cast this spell, create a 10/10 colorless Eldrazi creature token.";
 const FELIX_FIVE_BOOTS: &str = "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
 const MURDER: &str = "Destroy target creature.";
 const JABS: &str = "If a triggered ability of a permanent you control but don't own triggers, that ability triggers an additional time.";
@@ -65,6 +69,76 @@ fn scenario() -> GameScenario {
     s
 }
 
+/// The integration card fixture: printed cards with their exported parse.
+fn db() -> &'static CardDatabase {
+    shared_card_db().expect("integration card fixture loads")
+}
+
+fn mana(color: ManaType, count: usize) -> Vec<ManaUnit> {
+    (0..count)
+        .map(|_| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn build(s: GameScenario) -> GameRunner {
+    let mut runner = s.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db());
+    runner
+}
+
+/// Triggered abilities of `source` on the stack.
+fn stacked_triggers_of(runner: &GameRunner, source: ObjectId) -> usize {
+    runner
+        .state()
+        .stack
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == source)
+        })
+        .count()
+}
+
+fn plus_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Pass priority (ordering any simultaneous triggers, declaring no attackers)
+/// until `done` holds. Returns the events of every action taken.
+fn pass_until(runner: &mut GameRunner, done: impl Fn(&GameRunner) -> bool) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..256 {
+        if done(runner) {
+            return events;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                events.extend(runner.declare_attackers(&[]).expect("no attackers").events);
+            }
+            WaitingFor::Priority { .. } => {
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pass priority")
+                        .events,
+                );
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("pass_until did not settle");
+}
+
+fn on_stack(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().stack.iter().any(|e| e.id == id)
+}
+
 fn add_veyran(s: &mut GameScenario) -> ObjectId {
     s.add_creature_from_oracle(P0, "Veyran, Voice of Duality", 2, 2, VEYRAN)
         .with_subtypes(vec!["Efreet", "Wizard"])
@@ -75,11 +149,6 @@ fn add_apprentice(s: &mut GameScenario) -> ObjectId {
     s.add_creature_from_oracle(P0, "Witherbloom Apprentice", 2, 2, WITHERBLOOM_APPRENTICE)
         .with_subtypes(vec!["Human", "Druid"])
         .id()
-}
-
-fn add_echoes(s: &mut GameScenario) {
-    s.add_enchantment_from_oracle(P0, "Echoes of Eternity", ECHOES_OF_ETERNITY)
-        .with_subtypes(vec!["Eldrazi"]);
 }
 
 fn add_instant(s: &mut GameScenario, name: &str, text: &str) -> ObjectId {
@@ -227,7 +296,9 @@ fn veyran_doubles_its_own_magecraft_on_copy() {
 }
 
 /// Same through the CR 707.10c retarget walk (Twincast copying a targeted
-/// spell), whose copy observers drain after the walk completes.
+/// spell). CR 707.10c: the copy is put onto the stack once its targets are
+/// decided, so its Magecraft waits at the `CopyRetarget` prompt and, once the
+/// choice is answered, triggers exactly twice.
 #[test]
 fn veyran_doubles_its_own_magecraft_on_retargetable_copy() {
     let mut s = scenario();
@@ -236,14 +307,77 @@ fn veyran_doubles_its_own_magecraft_on_retargetable_copy() {
     let twincast = add_instant(&mut s, "Twincast", TWINCAST);
     let mut runner = s.build();
 
-    let copies = cast_then_twincast(&mut runner, spell, twincast);
+    cast(&mut runner, spell);
+    drive_preferring(&mut runner, false, Some(TargetRef::Player(P0)));
+    pass_until(&mut runner, |r| r.state().stack.len() == 1);
+    cast(&mut runner, twincast);
+    drive(&mut runner, false);
+    // Resolve Twincast's own cast triggers, then Twincast itself.
+    let mut events = pass_until(&mut runner, |r| {
+        matches!(r.state().waiting_for, WaitingFor::CopyRetarget { .. }) || !on_stack(r, twincast)
+    });
 
-    assert_eq!(copies, 1, "one copy, one SpellCopied");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. }),
+        "Twincast offers new targets for the copy: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        stacked_triggers_of(&runner, veyran),
+        0,
+        "the copy's Magecraft waits for the retarget choice"
+    );
+
+    events.extend(
+        runner
+            .act(GameAction::KeepAllCopyTargets)
+            .expect("keep the copy's targets")
+            .events,
+    );
+    events.extend(drive(&mut runner, false));
+    assert_eq!(count_copies(&events), 1, "one copy, one SpellCopied");
+    assert_eq!(
+        stacked_triggers_of(&runner, veyran),
+        2,
+        "the copy triggers Veyran's Magecraft twice"
+    );
+
+    drive(&mut runner, true);
     assert_eq!(
         power(&runner, veyran),
         8,
         "2 + 2 (cast) + 2 (cast) + 2 (copy)"
     );
+}
+
+/// The same for a sorcery: Divination's cast and its Twincast copy each
+/// trigger Veyran's own Magecraft exactly twice. Revert-to-red: restoring the
+/// blanket self-exclusion leaves one instance for each.
+#[test]
+fn veyran_doubles_its_own_magecraft_on_sorcery_cast_and_copy() {
+    let mut s = scenario();
+    let veyran = add_veyran(&mut s);
+    let divination = s
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
+        .id();
+    let twincast = add_instant(&mut s, "Twincast", TWINCAST);
+    let mut runner = s.build();
+
+    cast(&mut runner, divination);
+    drive(&mut runner, false);
+    assert_eq!(stacked_triggers_of(&runner, veyran), 2, "sorcery cast");
+
+    pass_until(&mut runner, |r| r.state().stack.len() == 1);
+    cast(&mut runner, twincast);
+    drive(&mut runner, false);
+    assert_eq!(stacked_triggers_of(&runner, veyran), 2, "Twincast cast");
+
+    pass_until(&mut runner, |r| !on_stack(r, twincast));
+    drive(&mut runner, false);
+    assert_eq!(stacked_triggers_of(&runner, veyran), 2, "sorcery copy");
+
+    drive(&mut runner, true);
+    assert_eq!(power(&runner, veyran), 2 + 6);
 }
 
 /// CR 603.2c: without a doubler, one copy is one Magecraft trigger: a
@@ -288,21 +422,29 @@ fn veyran_doubles_another_magecraft_permanent_on_cast_and_copy() {
 }
 
 /// CR 603.2d: two Veyrans each add one additional time, so each Veyran's own
-/// Magecraft triggers three times per cast or copy.
+/// Magecraft triggers three times per cast or copy. The printed legendary
+/// Veyrans share a battlefield under Mirror Gallery ("The 'legend rule'
+/// doesn't apply."; CR 704.5j).
 #[test]
 fn two_veyrans_trigger_each_magecraft_three_times() {
     let mut s = scenario();
-    let first = add_veyran(&mut s);
-    let second = add_veyran(&mut s);
-    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
-    let twincast = add_instant(&mut s, "Twincast", TWINCAST);
-    let mut runner = s.build();
+    s.add_real_card(P0, "Mirror Gallery", Zone::Battlefield, db());
+    let first = s.add_real_card(P0, "Veyran, Voice of Duality", Zone::Battlefield, db());
+    let second = s.add_real_card(P0, "Veyran, Voice of Duality", Zone::Battlefield, db());
+    let spell = s.add_real_card(P0, "Quick Study", Zone::Hand, db());
+    let twincast = s.add_real_card(P0, "Twincast", Zone::Hand, db());
+    s.with_mana_pool(P0, mana(ManaType::Blue, 5));
+    let mut runner = build(s);
+    let (first_before, second_before) = (power(&runner, first), power(&runner, second));
 
     cast_then_twincast(&mut runner, spell, twincast);
 
     // Three events (two casts, one copy), three instances each.
-    assert_eq!(power(&runner, first), 2 + 9);
-    assert_eq!(power(&runner, second), 2 + 9);
+    for id in [first, second] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+    }
+    assert_eq!(power(&runner, first) - first_before, 9);
+    assert_eq!(power(&runner, second) - second_before, 9);
 }
 
 /// A doubler that says "another" skips its own triggers through its scope:
@@ -344,13 +486,15 @@ fn another_scoped_doubler_does_not_double_itself() {
 /// permanent, not a spell, and not "another", so its own copy trigger triggers
 /// once: one colorless spell cast, one copy. Revert-to-red: without the stack
 /// scope on the "spell" disjunct, that disjunct matches Echoes on the
-/// battlefield and the spell is copied twice.
+/// battlefield and the spell is copied twice. Desolation Twin ({10}) is a
+/// printed colorless spell (CR 105.2c).
 #[test]
 fn echoes_of_eternity_does_not_double_its_own_trigger() {
     let mut s = scenario();
-    add_echoes(&mut s);
-    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
-    let mut runner = s.build();
+    s.add_real_card(P0, "Echoes of Eternity", Zone::Battlefield, db());
+    let spell = s.add_real_card(P0, "Desolation Twin", Zone::Hand, db());
+    s.with_mana_pool(P0, mana(ManaType::Colorless, 10));
+    let mut runner = build(s);
 
     let mut events = cast(&mut runner, spell);
     events.extend(drive(&mut runner, true));
@@ -369,12 +513,10 @@ fn echoes_of_eternity_does_not_double_its_own_trigger() {
 #[test]
 fn echoes_of_eternity_doubles_a_colorless_spells_cast_trigger() {
     let mut s = scenario();
-    add_echoes(&mut s);
-    let twin = s
-        .add_creature_to_hand_from_oracle(P0, "Desolation Twin", 10, 10, DESOLATION_TWIN)
-        .with_subtypes(vec!["Eldrazi"])
-        .id();
-    let mut runner = s.build();
+    s.add_real_card(P0, "Echoes of Eternity", Zone::Battlefield, db());
+    let twin = s.add_real_card(P0, "Desolation Twin", Zone::Hand, db());
+    s.with_mana_pool(P0, mana(ManaType::Colorless, 10));
+    let mut runner = build(s);
 
     cast(&mut runner, twin);
     drive(&mut runner, true);
@@ -629,6 +771,189 @@ fn jabs_doubles_only_triggers_of_permanents_you_control_but_dont_own() {
             life(&runner) - before,
             expected,
             "Apprentice owned by {owner:?}"
+        );
+    }
+}
+
+/// Attack P1 with `attacker` unblocked and return how many triggered abilities
+/// of `source` are on the stack when combat damage first puts any there.
+fn combat_damage_triggers_of(
+    runner: &mut GameRunner,
+    attacker: ObjectId,
+    source: ObjectId,
+) -> usize {
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("attacker declared");
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("no blocks");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                return stacked_triggers_of(runner, source);
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("combat did not reach a trigger");
+}
+
+/// CR 603.2c + CR 603.2d: Dr. Beverly Crusher doubles only triggers that "you
+/// gaining life" causes. Snake Umbra grants Crusher "Whenever this creature
+/// deals damage to an opponent, you may draw a card."; that trigger is caused
+/// by damage, so it triggers once. Revert-to-red: with the cause parsed as
+/// `Any`, Crusher doubles the granted trigger (two).
+#[test]
+fn dr_beverly_crusher_does_not_double_a_damage_trigger() {
+    let mut s = scenario();
+    let crusher = s.add_real_card(P0, "Dr. Beverly Crusher", Zone::Battlefield, db());
+    let umbra = s.add_real_card(P0, "Snake Umbra", Zone::Hand, db());
+    s.with_mana_pool(P0, mana(ManaType::Green, 3));
+    let mut runner = build(s);
+    runner.cast(umbra).target_object(crusher).commit();
+    drive(&mut runner, true);
+    assert_eq!(
+        runner.state().objects[&umbra]
+            .attached_to
+            .and_then(|t| t.as_object()),
+        Some(crusher),
+        "Snake Umbra enchants Crusher"
+    );
+
+    assert_eq!(combat_damage_triggers_of(&mut runner, crusher, crusher), 1);
+}
+
+/// CR 603.2d + CR 119.3: "you gaining life" is Crusher's cause, so its own
+/// life-gain trigger triggers twice when Revitalize gains life: two counters.
+#[test]
+fn dr_beverly_crusher_doubles_its_own_life_gain_trigger() {
+    let mut s = scenario();
+    let crusher = s.add_real_card(P0, "Dr. Beverly Crusher", Zone::Battlefield, db());
+    let revitalize = s.add_real_card(P0, "Revitalize", Zone::Hand, db());
+    s.with_mana_pool(P0, mana(ManaType::White, 2));
+    let mut runner = build(s);
+
+    cast(&mut runner, revitalize);
+    drive(&mut runner, true);
+
+    assert_eq!(plus_counters(&runner, crusher), 2);
+}
+
+/// CR 603.2d + CR 121.1: "a player drawing a card" is Krang's cause, so its
+/// own "second card each turn" trigger triggers twice when Divination draws
+/// two: two counters.
+#[test]
+fn krang_doubles_its_own_draw_trigger() {
+    let mut s = scenario();
+    let krang = s.add_real_card(P0, "Krang, the All-Powerful", Zone::Battlefield, db());
+    let divination = s.add_real_card(P0, "Divination", Zone::Hand, db());
+    s.with_mana_pool(P0, mana(ManaType::Blue, 3));
+    let mut runner = build(s);
+
+    cast(&mut runner, divination);
+    drive(&mut runner, true);
+
+    assert_eq!(plus_counters(&runner, krang), 2);
+}
+
+/// CR 603.2d: Krang and Panoptic Projektor do not double a trigger their
+/// cause doesn't name: Witherbloom Apprentice's Magecraft triggers once for a
+/// cast. Revert-to-red: with the cause parsed as `Any`, it gains 2.
+#[test]
+fn typed_cause_doublers_do_not_double_a_cast_trigger() {
+    for doubler in ["Krang, the All-Powerful", "Panoptic Projektor"] {
+        let mut s = scenario();
+        s.add_real_card(P0, doubler, Zone::Battlefield, db());
+        add_apprentice(&mut s);
+        let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
+        let mut runner = build(s);
+        let before = life(&runner);
+
+        cast(&mut runner, spell);
+        drive(&mut runner, true);
+
+        assert_eq!(life(&runner) - before, 1, "{doubler}");
+    }
+}
+
+/// CR 603.2d + CR 702.37e + CR 708.8: turning a face-down permanent face up is
+/// Panoptic Projektor's cause, so Ashcloud Phoenix's "When this creature is
+/// turned face up" trigger triggers twice.
+#[test]
+fn panoptic_projektor_doubles_a_turned_face_up_trigger() {
+    let mut s = scenario();
+    s.add_real_card(P0, "Panoptic Projektor", Zone::Battlefield, db());
+    let phoenix = s.add_real_card(P0, "Ashcloud Phoenix", Zone::Hand, db());
+    s.with_mana_pool(P0, mana(ManaType::Red, 6));
+    let mut runner = build(s);
+    let mut events = Vec::new();
+    engine::game::morph::play_face_down(runner.state_mut(), P0, phoenix, &mut events)
+        .expect("play the Phoenix face down");
+
+    runner
+        .act(GameAction::TurnFaceUp {
+            object_id: phoenix,
+            x: 0,
+        })
+        .expect("turn the Phoenix face up");
+    drive(&mut runner, false);
+
+    assert_eq!(stacked_triggers_of(&runner, phoenix), 2);
+}
+
+fn treasures_of(runner: &GameRunner, player: PlayerId) -> usize {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let obj = &runner.state().objects[id];
+            obj.name == "Treasure" && obj.controller == player
+        })
+        .count()
+}
+
+/// CR 603.2d + CR 603.10d: Jabs doubles a look-back control-change trigger of
+/// a permanent its controller controlled but didn't own. P0 steals P1's
+/// Zidane, Tantalus Thief with Act of Treason; when control returns to P1 at
+/// cleanup, Zidane's "Whenever an opponent gains control of a permanent from
+/// you" triggers for P0 from Zidane as P0 controlled it, and Jabs doubles it:
+/// two Treasures. With P0 owning Zidane, Jabs doesn't apply: one. Revert-to-red:
+/// with `Owned` unjudged on the latched path, the stolen Zidane gives one.
+#[test]
+fn jabs_doubles_a_look_back_trigger_of_a_permanent_you_dont_own() {
+    for (owner, expected) in [(P1, 2), (P0, 1)] {
+        let mut s = scenario();
+        s.add_real_card(P0, "Jabs, Mistress of Mockery", Zone::Battlefield, db());
+        let zidane = s.add_real_card(P1, "Zidane, Tantalus Thief", Zone::Battlefield, db());
+        let treason = s.add_real_card(P0, "Act of Treason", Zone::Hand, db());
+        s.with_mana_pool(P0, mana(ManaType::Red, 3));
+        for i in 0..10 {
+            s.add_card_to_library_top(P1, &format!("P1 Lib {i}"));
+        }
+        let mut runner = build(s);
+        runner.state_mut().objects.get_mut(&zidane).unwrap().owner = owner;
+
+        runner.cast(treason).target_object(zidane).commit();
+        drive(&mut runner, true);
+        assert_eq!(runner.state().objects[&zidane].controller, P0);
+        let before = treasures_of(&runner, P0);
+
+        let turn = runner.state().turn_number;
+        pass_until(&mut runner, |r| r.state().turn_number != turn);
+
+        assert_eq!(
+            treasures_of(&runner, P0) - before,
+            expected,
+            "Zidane owned by {owner:?}"
         );
     }
 }

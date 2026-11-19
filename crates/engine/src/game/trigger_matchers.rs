@@ -2550,6 +2550,8 @@ fn cause_subjects(cause: &TriggerCause, event: &GameEvent) -> Vec<ObjectId> {
         | TriggerCause::ControlledCreature { .. }
         | TriggerCause::ControllerCastOrCopiedSpell { .. }
         | TriggerCause::RoomEntered
+        | TriggerCause::PlayerAction { .. }
+        | TriggerCause::TurnedFaceUp
         | TriggerCause::BattlefieldTransition { .. } => Vec::new(),
     }
 }

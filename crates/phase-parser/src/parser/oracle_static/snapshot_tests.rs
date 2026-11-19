@@ -936,6 +936,37 @@ fn controlled_creature_event_doubler_causes() {
     }
 }
 
+/// CR 603.2d + CR 119.3 + CR 121.1 + CR 116.2b: a doubler whose cause is a
+/// player's action or turning a permanent face up keeps that cause, instead of
+/// the unrestricted `Any` (Dr. Beverly Crusher, Krang, the All-Powerful,
+/// Panoptic Projektor).
+#[test]
+fn player_action_and_face_up_doubler_causes() {
+    for (text, cause) in [
+        (
+            "If you gaining life causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            TriggerCause::PlayerAction {
+                player: CausingPlayer::You,
+                action: PlayerCauseAction::GainedLife,
+            },
+        ),
+        (
+            "If a player drawing a card causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            TriggerCause::PlayerAction {
+                player: CausingPlayer::Any,
+                action: PlayerCauseAction::DrewCard,
+            },
+        ),
+        (
+            "If turning a face-down permanent face up causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            TriggerCause::TurnedFaceUp,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("expected DoubleTriggers static");
+        assert_eq!(def.mode, StaticMode::DoubleTriggers { cause }, "{text}");
+    }
+}
+
 /// CR 603.2d: "another permanent entering" (The Fish Brewer) excludes the
 /// doubler's own entering; "a permanent entering" (Yarok) does not.
 #[test]

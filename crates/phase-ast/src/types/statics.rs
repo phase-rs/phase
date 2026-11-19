@@ -716,6 +716,27 @@ impl CausingObject {
     }
 }
 
+/// CR 603.2d: which player's action a trigger doubler's cause names, relative
+/// to the doubler's controller: "you gaining life" (Dr. Beverly Crusher) or "a
+/// player drawing a card" (Krang, the All-Powerful).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CausingPlayer {
+    /// Any player.
+    Any,
+    /// CR 109.5: the doubler's controller.
+    You,
+}
+
+/// CR 603.2d: the player action that causes a trigger, for
+/// `TriggerCause::PlayerAction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlayerCauseAction {
+    /// CR 119.3: the player gains life.
+    GainedLife,
+    /// CR 121.1: the player draws a card.
+    DrewCard,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(from = "TriggerCauseWire")]
 pub enum TriggerCause {
@@ -762,6 +783,16 @@ pub enum TriggerCause {
     /// CR 309.4c: Trigger was caused by entering a dungeon room
     /// (Hama Pashar-class). Matches `GameEvent::RoomEntered` events.
     RoomEntered,
+    /// CR 603.2d: Trigger was caused by a player's action ("If you gaining
+    /// life causes ..." — Dr. Beverly Crusher; "If a player drawing a card
+    /// causes ..." — Krang, the All-Powerful).
+    PlayerAction {
+        player: CausingPlayer,
+        action: PlayerCauseAction,
+    },
+    /// CR 116.2b + CR 708.8: Trigger was caused by turning a face-down
+    /// permanent face up (Panoptic Projektor).
+    TurnedFaceUp,
     /// CR 603.6a + CR 603.6c: Trigger was caused by a permanent entering
     /// and/or leaving the battlefield (Gandalf the White-class). `enter` /
     /// `leave` select which directions qualify; when both are true, either
@@ -816,6 +847,11 @@ enum TriggerCauseWire {
         #[serde(default)]
         qualifiers: Vec<ZoneChangeQualifier>,
     },
+    PlayerAction {
+        player: CausingPlayer,
+        action: PlayerCauseAction,
+    },
+    TurnedFaceUp,
     /// LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: the pre-2026-Q4
     /// shape of `ControlledCreature { event: DealtDamage }`.
     ControlledCreatureDealtDamage,
@@ -844,6 +880,10 @@ impl From<TriggerCauseWire> for TriggerCause {
                 TriggerCause::ControllerCastOrCopiedSpell { core_types }
             }
             TriggerCauseWire::RoomEntered => TriggerCause::RoomEntered,
+            TriggerCauseWire::PlayerAction { player, action } => {
+                TriggerCause::PlayerAction { player, action }
+            }
+            TriggerCauseWire::TurnedFaceUp => TriggerCause::TurnedFaceUp,
             TriggerCauseWire::BattlefieldTransition {
                 enter,
                 leave,
@@ -908,6 +948,10 @@ impl fmt::Display for TriggerCause {
                 write!(f, "ControllerCastOrCopiedSpell([{}])", names.join(","))
             }
             TriggerCause::RoomEntered => write!(f, "RoomEntered"),
+            TriggerCause::PlayerAction { player, action } => {
+                write!(f, "PlayerAction({player:?},{action:?})")
+            }
+            TriggerCause::TurnedFaceUp => write!(f, "TurnedFaceUp"),
             TriggerCause::BattlefieldTransition {
                 enter,
                 leave,
@@ -4945,6 +4989,15 @@ mod tests {
                 core_types: vec![super::super::card_type::CoreType::Instant],
             },
             TriggerCause::RoomEntered,
+            TriggerCause::PlayerAction {
+                player: CausingPlayer::You,
+                action: PlayerCauseAction::GainedLife,
+            },
+            TriggerCause::PlayerAction {
+                player: CausingPlayer::Any,
+                action: PlayerCauseAction::DrewCard,
+            },
+            TriggerCause::TurnedFaceUp,
             TriggerCause::BattlefieldTransition {
                 enter: true,
                 leave: false,
