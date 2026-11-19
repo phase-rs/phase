@@ -357,6 +357,7 @@ mod crafty_cutpurse_independent_redirect;
 mod craterhoof_behemoth_dynamic_pump_2875;
 mod create_card_copy_with_chosen_name;
 mod created_token_counter_sequence;
+mod creature_type_choice_suggestions;
 mod crime_tracking;
 mod crippling_fear_chosen_type_exclusion;
 mod cross_line_instead_override_branch;
