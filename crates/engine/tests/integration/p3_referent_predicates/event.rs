@@ -738,3 +738,111 @@ fn p3s2a_prismari_trigger_reads_its_own_cast_after_a_recast() {
         "T1 (the MV 6 cast) puts the counter; T2 (the MV 3 recast) does not"
     );
 }
+
+// ---------------------------------------------------------------- two observers of one event (ordering)
+
+/// Count the magecraft/cast triggers `sources` have on the stack, one per source, all from `cast`'s cast event.
+fn triggers_from_cast(r: &GameRunner, sources: &[ObjectId], cast: ObjectId) -> usize {
+    r.state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility {
+                    source_id,
+                    trigger_event: Some(GameEvent::SpellCast { object_id, .. }),
+                    ..
+                } if sources.contains(source_id) && *object_id == cast
+            )
+        })
+        .count()
+}
+
+/// CR 603.3b + CR 608.2h: two Prismari Apprentices observe ONE cast of Overrun (mana value 5). Each trigger's
+/// condition reads the cast spell's mana value and writes only counters on its own source, so neither result
+/// depends on the order and the controller is not asked to order them. A "board P/T read" profile of the mana
+/// value gate would see the sibling's own-counter write as a feed and prompt (the ordering-parity regression).
+#[test]
+fn p3s2a_two_prismari_apprentices_observe_one_cast_without_an_ordering_prompt() {
+    let mut sc = scenario();
+    sc.with_mana_pool(P0, mana_for(&[OVERRUN.cost], 0));
+    sc.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
+    let first = add_prismari(&mut sc);
+    let second = add_prismari(&mut sc);
+    let spell = add_spell(&mut sc, P0, &OVERRUN);
+    let mut r = sc.build();
+    cast_spell(&mut r, spell);
+    assert_eq!(
+        triggers_from_cast(&r, &[first, second], spell),
+        2,
+        "reach guard: both apprentices triggered on the cast; waiting {:?}",
+        r.state().waiting_for
+    );
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+        "no ordering prompt for two identical independent observers, got {:?}",
+        r.state().waiting_for
+    );
+    let w = drain(&mut r);
+    assert!(
+        matches!(w, WaitingFor::Priority { .. }),
+        "resolved, got {w:?}"
+    );
+    assert_eq!(zone(r.state(), spell), Zone::Graveyard, "Overrun resolved");
+    for apprentice in [first, second] {
+        assert_eq!(
+            plus_counters(r.state(), apprentice),
+            1,
+            "MV 5 >= 5: each apprentice gets its own counter"
+        );
+    }
+}
+
+/// The same two-observer discriminator for Herald of Ilharg: a mana value 5 creature spell (Serra Angel) is
+/// cast, both heralds trigger on that one event, each gets its two counters and damages the opponent for the
+/// counters on it. No ordering prompt; the opponent loses 4 life whichever resolves first.
+#[test]
+fn p3s2a_two_heralds_observe_one_cast_without_an_ordering_prompt() {
+    let mut sc = scenario();
+    sc.with_mana_pool(P0, mana_for(&[SERRA_ANGEL.cost], 0));
+    let first = add_herald(&mut sc);
+    let second = add_herald(&mut sc);
+    let spell = add_creature_in_hand(&mut sc, P0, &SERRA_ANGEL);
+    let mut r = sc.build();
+    let life_before = life(r.state(), P1);
+    cast_spell(&mut r, spell);
+    assert_eq!(
+        triggers_from_cast(&r, &[first, second], spell),
+        2,
+        "reach guard: both heralds triggered on the cast; waiting {:?}",
+        r.state().waiting_for
+    );
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+        "no ordering prompt for two identical independent observers, got {:?}",
+        r.state().waiting_for
+    );
+    let w = drain(&mut r);
+    assert!(
+        matches!(w, WaitingFor::Priority { .. }),
+        "resolved, got {w:?}"
+    );
+    assert_eq!(
+        zone(r.state(), spell),
+        Zone::Battlefield,
+        "Serra Angel resolved"
+    );
+    for herald in [first, second] {
+        assert_eq!(
+            plus_counters(r.state(), herald),
+            2,
+            "each herald puts two counters on itself"
+        );
+    }
+    assert_eq!(
+        life_before - life(r.state(), P1),
+        4,
+        "MV 5 >= 5: each herald deals damage equal to its two counters"
+    );
+}

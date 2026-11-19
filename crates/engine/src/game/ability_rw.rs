@@ -4568,6 +4568,16 @@ fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
     }
 }
 
+/// CR 202.3: whether a filter property only compares mana value. The one allow-list the
+/// event-bound `TargetMatchesFilter` narrowing accepts; every other property (power, toughness,
+/// counters, keywords, types, colors, face-down state, ...) keeps the board P/T read.
+fn filter_prop_is_mana_value(prop: &FilterProp) -> bool {
+    matches!(
+        prop,
+        FilterProp::Cmc { .. } | FilterProp::ManaValueParity { .. } | FilterProp::ManaCostIn { .. }
+    )
+}
+
 /// Read an object characteristic at a given scope (§2 read-carrier closure):
 /// Source ⇒ `reads_src`; Recipient ⇒ nothing (read-modify-write); event objects
 /// ⇒ `reads_event_live`; other object scopes ⇒ `reads_board`.
@@ -7434,6 +7444,21 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         } => {
             let mut p = if *use_lki {
                 frozen_source_read()
+            } else if matches!(subject, ObjectScope::EventSource)
+                && !crate::types::ability::filter_contains_filter_prop(
+                    filter,
+                    &|prop| !filter_prop_is_mana_value(prop),
+                )
+            {
+                // CR 603.2 + CR 608.2h + CR 202.3: an event-bound predicate whose only properties
+                // compare mana value reads the event object, recorded below as `reads_event_live`,
+                // exactly as `TriggerCondition::TriggeringSpellMatchesFilter` does; the same-event
+                // event-object discriminator orders it against a sibling that writes that object.
+                // A board P/T read would make a sibling's write to its OWN counters look like a
+                // feed (Prismari Apprentice and Herald of Ilharg observing one cast). Residual,
+                // shared with that precedent: a board-wide write that changes the event object's
+                // mana value (turn face down, copy) is not an event-object write.
+                filter_threshold_quantity_reads(filter)
             } else {
                 let mut p = reads_board_of(StateKind::ObjectPt);
                 p.current_pt_reads.add(PtReadScope::Board);
@@ -10471,6 +10496,104 @@ mod tests {
             false
         ));
         assert!(!reads_counters(typed(vec![counters]), true));
+    }
+
+    /// CR 603.2 + CR 608.2h: an event-bound `TargetMatchesFilter` whose properties only compare
+    /// mana value is an event-object read, not a board P/T read, so two observers of one event that each put counters on THEMSELVES (Prismari
+    /// Apprentice, Herald of Ilharg) commute. A predicate that does read P/T or counters, a
+    /// sibling that writes the event object, and a non-event subject all stay dependent.
+    #[test]
+    fn event_bound_mana_value_predicate_is_an_event_read_not_a_board_pt_read() {
+        let mv_at_least_5 = || {
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: qfix(5),
+            }]))
+        };
+        let power_at_least_3 = || {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: crate::types::ability::PtStat::Power,
+                    scope: Default::default(),
+                    comparator: Comparator::GE,
+                    value: qfix(3),
+                },
+            ]))
+        };
+        let gated = |filter: TargetFilter, subject: ObjectScope, effect: Effect| {
+            cond(
+                ra(effect),
+                AbilityCondition::TargetMatchesFilter {
+                    filter,
+                    use_lki: false,
+                    subject_slot: None,
+                    subject,
+                },
+            )
+        };
+        // POS: the class. Own-counter write under an event-bound mana-value gate: no board
+        // P/T read, an event-live read, and the distinct-source same-event pair auto-orders.
+        let observer = gated(
+            mv_at_least_5(),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        let profile = ability_rw_profile(&observer);
+        assert!(profile.reads_event_live, "reads the event object");
+        assert!(
+            profile.reads_board.is_empty()
+                && !profile.current_pt_reads.contains(PtReadScope::Board),
+            "a mana-value read is not a board P/T read"
+        );
+        assert!(
+            !conflicts(&observer, &se()),
+            "two such observers of one event commute (CR 603.3b)"
+        );
+        // GUARD 1: the same predicate on a declared target stays a live board P/T read.
+        let target_scoped = gated(
+            mv_at_least_5(),
+            ObjectScope::Target,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            conflicts(&target_scoped, &se()),
+            "a Target-scoped read keeps the board P/T read and the feed from own counters"
+        );
+        // GUARD 2: an event-bound predicate that reads power stays a board P/T read.
+        let power_reader = gated(
+            power_at_least_3(),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&power_reader).reads_board.object_pt,
+            "an event-bound power read is a board P/T read"
+        );
+        assert!(
+            conflicts(&power_reader, &se()),
+            "a live board P/T reader is still dependent on a sibling's counters"
+        );
+        // GUARD 2b: any other event-bound property (here face-down state, which a turn-face-down
+        // write changes) is outside the mana-value allow-list and keeps the board P/T read.
+        let face_down = gated(
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::FaceDown])),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&face_down).reads_board.object_pt && conflicts(&face_down, &se()),
+            "a non-mana-value event-bound property keeps the board P/T read"
+        );
+        // GUARD 3: a sibling that writes the EVENT object under the mana-value read feeds it.
+        let event_writer = gated(
+            mv_at_least_5(),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::TriggeringSource),
+        );
+        assert!(
+            conflicts(&event_writer, &se()),
+            "an event-object write read back by the live event read is order-observable"
+        );
     }
 
     /// §L6 (CR 303.4d + CR 301.5c): an Aura/Equipment is never attached to itself
