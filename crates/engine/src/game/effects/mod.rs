@@ -23281,6 +23281,7 @@ fn set_player_scope_sacrifice_waiting_for(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 }
 
@@ -44643,6 +44644,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         crate::game::engine::apply(
@@ -53522,6 +53524,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -53571,6 +53574,7 @@ mod tests {
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             },
             GameAction::SelectCards {
                 cards: vec![second],
