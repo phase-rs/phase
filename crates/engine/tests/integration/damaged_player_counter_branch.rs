@@ -8,7 +8,7 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
@@ -16,6 +16,12 @@ use engine::types::zones::Zone;
 use crate::support::shared_card_db;
 
 const P2: PlayerId = PlayerId(2);
+const RADGULL_ORACLE: &str = "Flying\nWhenever this creature deals combat damage to a player, that player gets two rad counters if they don't have any rad counters. Otherwise, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)";
+
+enum RadgullSource {
+    Export,
+    Oracle,
+}
 
 struct Board {
     runner: GameRunner,
@@ -30,10 +36,29 @@ fn board_with<T>(
     other_rad: u32,
     setup: impl FnOnce(&mut GameScenario, &CardDatabase) -> T,
 ) -> (Board, T) {
+    board_with_source(damaged_rad, other_rad, RadgullSource::Export, setup)
+}
+
+fn board_with_source<T>(
+    damaged_rad: u32,
+    other_rad: u32,
+    source: RadgullSource,
+    setup: impl FnOnce(&mut GameScenario, &CardDatabase) -> T,
+) -> (Board, T) {
     let db = shared_card_db().expect("printed integration card database");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let gull = scenario.add_real_card(P0, "Vexing Radgull", Zone::Battlefield, db);
+    let gull = match source {
+        RadgullSource::Export => {
+            scenario.add_real_card(P0, "Vexing Radgull", Zone::Battlefield, db)
+        }
+        RadgullSource::Oracle => scenario
+            .add_creature(P0, "Vexing Radgull", 1, 2)
+            .with_subtypes(vec!["Bird", "Mutant"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{U}"))
+            .from_oracle_text_with_keywords(&["Flying"], RADGULL_ORACLE)
+            .id(),
+    };
     let hawk = scenario.add_real_card(P2, "Suntail Hawk", Zone::Battlefield, db);
     let selected = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
     let untouched = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
@@ -314,13 +339,23 @@ fn a_flying_blocker_takes_the_damage_instead_of_the_player() {
 #[test]
 fn give_two_rad_only_when_the_damaged_player_has_none() {
     let mut board = board(0, 3);
-    let events = attack(&mut board, None);
-    let id = assert_trigger(&board, &events, [3, 3, 0]);
+    assert_zero_branch(&mut board);
+}
+
+#[test]
+fn live_oracle_parser_drives_the_zero_rad_branch() {
+    let (mut board, ()) = board_with_source(0, 3, RadgullSource::Oracle, |_, _| ());
+    assert_zero_branch(&mut board);
+}
+
+fn assert_zero_branch(board: &mut Board) {
+    let events = attack(board, None);
+    let id = assert_trigger(board, &events, [3, 3, 0]);
     let selections = [TargetRef::Player(P1), TargetRef::Object(board.selected)];
     let (prompts, events) = finish(&mut board.runner, id, &selections);
     assert_eq!((rad(&board.runner), prompts), ([3, 3, 2], 0));
     assert_eq!(rad_changes(&events), [(P2, 2)]);
-    assert_collateral(&board, 0, 0);
+    assert_collateral(board, 0, 0);
 }
 
 #[test]
@@ -484,6 +519,71 @@ fn simultaneous_attackers_bind_their_own_damaged_seats() {
     let counters = &runner.state().objects;
     assert_eq!(counters[&board.selected].counters[&CounterType::Stun], 3);
     assert_eq!(counters[&board.untouched].counters[&CounterType::Stun], 2);
+}
+
+#[test]
+fn both_pending_triggers_read_the_departed_players_last_rad_total() {
+    for before in [0, 4] {
+        let (mut board, second_gull) = board_with(before, 0, |scenario, db| {
+            scenario.add_real_card(P0, "Vexing Radgull", Zone::Battlefield, db)
+        });
+        let runner = &mut board.runner;
+        let events = combat(
+            runner,
+            &[
+                (board.gull, AttackTarget::Player(P2)),
+                (second_gull, AttackTarget::Player(P2)),
+            ],
+            None,
+        );
+        assert_eq!(runner.life(P2), 18);
+        if let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for {
+            assert_eq!(*player, P0);
+            assert_eq!(triggers.len(), 2);
+            runner
+                .act(GameAction::OrderTriggers { order: vec![0, 1] })
+                .expect("order both pending damage triggers before the concession");
+        }
+        assert_eq!(runner.state().stack.len(), 2);
+        for source in [board.gull, second_gull] {
+            let entry = runner
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.source_id == source)
+                .expect("independent printed source");
+            assert_event_binding(entry, &events, source, P2);
+        }
+        let pending = [
+            runner.state().stack.back().unwrap().id,
+            runner.state().stack.front().unwrap().id,
+        ];
+        assert_eq!(rad(runner), [0, 0, before]);
+        runner
+            .act(GameAction::Concede { player_id: P2 })
+            .expect("damaged player concedes");
+        assert!(runner.state().players[2].is_eliminated);
+        assert_eq!(
+            runner.state().stack.len(),
+            2,
+            "P0 still controls both triggers"
+        );
+        let expected_choices = usize::from(before > 0);
+        for id in pending {
+            let (choices, events) = finish(runner, id, &[TargetRef::Object(board.selected)]);
+            assert_eq!(
+                rad(runner),
+                [0, 0, before],
+                "CR 800.4i: departure freezes P2's counter information"
+            );
+            assert_eq!(
+                choices, expected_choices,
+                "branch reads the departed seat's last rad total"
+            );
+            assert!(rad_changes(&events).is_empty());
+        }
+        assert_collateral(&board, 0, (expected_choices as u32) * 2);
+    }
 }
 
 #[test]

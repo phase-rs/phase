@@ -393,11 +393,14 @@ pub fn resolve(
         targeted
     };
 
+    // CR 101.3 + CR 800.4i: A departed event player can still supply last
+    // known information to the branch predicate, but cannot receive counters.
     let additions: Vec<_> = players
-        .iter()
+        .into_iter()
+        .filter(|&player_id| crate::game::players::is_alive(state, player_id))
         .map(|player_id| PendingCounterAddition::Player {
             actor: ability.controller,
-            player_id: *player_id,
+            player_id,
             counter_kind: *counter_kind,
             count: amount,
             // CR 614.16: resolving-effect placements are eligible.
