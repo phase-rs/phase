@@ -12933,8 +12933,7 @@ fn bind_prevented_destroy_continuation(
         controller,
         vec![TargetRef::Object(destroyed)],
     );
-    // CR 109.5: "that player" in the chain is the destroyed permanent's
-    // controller when that is someone other than the replacement's controller.
+    // Bind the affected permanent's controller separately from the replacement's controller.
     if let Some(affected_controller) = state
         .objects
         .get(&destroyed)
@@ -15517,6 +15516,21 @@ pub fn replace_event(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     replace_event_on_entry_board(state, proposed, events, None)
+}
+
+/// Discover a departure's first real choice, including one reached after a
+/// mandatory replacement. A choice-free event with no applicable replacement
+/// needs no scratch board. Speculative proposals are private to this preview.
+pub(crate) fn preview_departure_replacement(
+    board: &mut std::borrow::Cow<'_, GameState>,
+    proposed: ProposedEvent,
+) -> ReplacementResult {
+    if find_applicable_replacements(board, &proposed, replacement_registry()).is_empty() {
+        return ReplacementResult::Execute(proposed);
+    }
+    let _recorder =
+        ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
+    replace_event(board.to_mut(), proposed, &mut Vec::new())
 }
 
 pub(crate) fn replace_event_on_entry_board(

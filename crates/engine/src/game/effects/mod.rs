@@ -28274,6 +28274,11 @@ fn resolve_chain_body(
         } // end shares_quality_failed else
     }
 
+    // CR 608.2c: Destroy consulted and delivered all slots of one instruction
+    // as one batch. Continue (or park) only the next written instruction.
+    let destroy_tail = destroy::after_destroy_slots(ability);
+    let ability = destroy_tail.as_deref().unwrap_or(ability);
+
     // CR 701.61a + CR 608.2c: Forage owns the nested B→C→tail chain it
     // constructs at runtime. Its nested completion node is the sole publisher
     // of the action and its ledgers; the outer frame must not walk or publish

@@ -123,6 +123,72 @@ fn zombies_on_battlefield(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 616.1 + CR 101.4: both Kalitas controllers choose between the opposing
+/// Kalitas and Rest in Peace. The active player decides first in either board order.
+#[test]
+fn both_kalitas_choose_replacements_in_apnap_order_before_wrath_delivers() {
+    for first in [P1, P0] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let second = if first == P0 { P1 } else { P0 };
+        let first_kalitas = scenario
+            .add_creature_from_oracle(first, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+            .id();
+        let second_kalitas = scenario
+            .add_creature_from_oracle(second, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+            .id();
+        let rest = scenario
+            .add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE)
+            .id();
+        let wrath = scenario
+            .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+            .id();
+        let mut runner = scenario.build();
+        let mut events = runner.cast(wrath).commit().resolve().events().to_vec();
+        let (active, nonactive) = if first == P0 {
+            (first_kalitas, second_kalitas)
+        } else {
+            (second_kalitas, first_kalitas)
+        };
+        for (chooser, opponent_kalitas, answer) in [(P0, nonactive, nonactive), (P1, active, rest)]
+        {
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("expected a replacement choice for {chooser:?}");
+            };
+            assert_eq!(*player, chooser, "first permanent belonged to {first:?}");
+            assert!(candidates.iter().any(|c| c.source_id == opponent_kalitas));
+            assert!(candidates.iter().any(|c| c.source_id == rest));
+            for id in [active, nonactive] {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+            }
+            events.extend(choose_replacement_from(&mut runner, answer));
+        }
+        runner.advance_until_stack_empty();
+        for id in [active, nonactive] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+            assert_eq!(zone_changes_of(&events, id), 1);
+        }
+        let departures: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged { object_id, .. }
+                    if [active, nonactive].contains(object_id) =>
+                {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(departures, [first_kalitas, second_kalitas]);
+        let tokens = zombies_on_battlefield(runner.state());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(runner.state().objects[&tokens[0]].controller, P1);
+    }
+}
+
 /// CR 616.1 + CR 701.8a: Rest in Peace and Kalitas both apply to the opposing
 /// creature's death, so its controller chooses one. Answering that choice does
 /// not abandon the rest of Wrath of God: the batch resumes, so Kalitas is
@@ -785,6 +851,132 @@ fn decimate_destroys_every_target_after_an_ordering_choice() {
     assert_eq!(state.objects[&zombie_tokens[0]].controller, P1);
     assert!(state.stack.is_empty());
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+#[test]
+fn decimate_consults_every_slot_before_the_coated_kalitas_leaves() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let coating = scenario.add_real_card(P0, "Liquimetal Coating", Zone::Battlefield, db);
+    let kalitas = scenario.add_real_card(P0, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let rip = scenario.add_real_card(P1, "Rest in Peace", Zone::Battlefield, db);
+    let forest = scenario.add_basic_land(P1, engine::types::mana::ManaColor::Green);
+    let decimate = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Decimate",
+            false,
+            "Destroy target artifact, target creature, target enchantment, and target land.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: coating,
+            ability_index: 0,
+            payment_mode: Default::default(),
+        })
+        .expect("activate Liquimetal Coating");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(kalitas)),
+        })
+        .expect("choose Kalitas as the Coating target");
+    runner.advance_until_stack_empty();
+
+    let outcome = runner
+        .cast(decimate)
+        .target_objects(&[kalitas, bears, rip, forest])
+        .commit()
+        .resolve();
+    let mut events = outcome.events().to_vec();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "the Bear's controller must choose between Kalitas and Rest in Peace: {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(*player, P1);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_id == kalitas));
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_id == rip));
+    assert_eq!(runner.state().objects[&kalitas].zone, Zone::Battlefield);
+    events.extend(choose_replacement_from(&mut runner, kalitas));
+    runner.advance_until_stack_empty();
+    for id in [kalitas, bears, rip, forest] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+        assert_eq!(zone_changes_of(&events, id), 1);
+    }
+    assert_eq!(zombies(&events), 1);
+    let zombies = zombies_on_battlefield(runner.state());
+    assert_eq!(zombies.len(), 1);
+    assert_eq!(runner.state().objects[&zombies[0]].controller, P0);
+}
+
+/// Synthetic Decimate siblings. A second printed verb starts another
+/// instruction; a further slot of the first verb shares its replacement
+/// consultation. The life-gain sentence follows both targets in either case.
+#[test]
+fn destroy_list_ends_at_the_next_instruction_and_resumes_its_tail_once() {
+    for (oracle, joined) in [
+        (
+            "Destroy target artifact and target creature. You gain 1 life.",
+            true,
+        ),
+        (
+            "Destroy target artifact. Destroy target creature. You gain 1 life.",
+            false,
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let kalitas = scenario
+            .add_creature_from_oracle(P0, "Artifact Kalitas", 3, 4, KALITAS)
+            .as_artifact_creature()
+            .id();
+        let bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic destruction", false, oracle)
+            .id();
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        let outcome = runner
+            .cast(spell)
+            .target_objects(&[kalitas, bear])
+            .commit()
+            .resolve();
+        let mut events = outcome.events().to_vec();
+        if joined {
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            assert_eq!(
+                runner.life(P0),
+                life,
+                "the common tail waits behind both targets"
+            );
+            events.extend(choose_replacement_from(&mut runner, kalitas));
+        } else {
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+        }
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.life(P0), life + 1, "resolve the written tail once");
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Exile);
+        assert_eq!(zombies(&events), usize::from(joined));
+    }
 }
 
 /// CR 608.2c + CR 614.6: Fumigate's trailing "You gain 1 life for each creature

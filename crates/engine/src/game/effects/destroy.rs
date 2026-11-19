@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::game_object::ObjectIdentityBindingExt;
 use crate::game::replacement::{self, ReplacementResult};
@@ -216,6 +217,34 @@ fn destroy_group_start(state: &GameState, ability: &ResolvedAbility, events_len:
     }
 }
 
+/// CR 608.2c: the parser marks each subsequent operand of the same destruction
+/// instruction (Decimate) as a list slot. A separately gated or repeated
+/// instruction must still pass through the chain driver's own entry point.
+fn following_destroy_slots(ability: &ResolvedAbility) -> impl Iterator<Item = &ResolvedAbility> {
+    let root = &ability.effect;
+    std::iter::successors(ability.sub_ability.as_deref(), |slot| slot.sub_ability.as_deref())
+        .take_while(move |slot| {
+            slot.instruction_join == InstructionJoin::ListSlot
+                && matches!((root, &slot.effect),
+                    (Effect::Destroy { cant_regenerate: a, .. }, Effect::Destroy { cant_regenerate: b, .. }) if a == b)
+                && slot.condition.is_none()
+                && slot.else_ability.is_none()
+                && !slot.optional
+                && slot.unless_pay.is_none()
+                && slot.repeat_for.is_none()
+                && slot.player_scope.is_none()
+        })
+}
+
+/// A batch that consumes the list also consumes its slot nodes. The parked
+/// owner and the synchronous chain walker both advance to this same tail.
+pub(super) fn after_destroy_slots(ability: &ResolvedAbility) -> Option<Box<ResolvedAbility>> {
+    let last = following_destroy_slots(ability).last()?;
+    Some(super::rebound_ability(ability, |producer| {
+        producer.sub_ability.clone_from(&last.sub_ability);
+    }))
+}
+
 /// CR 701.8a: Destroy moves permanent from battlefield to owner's graveyard.
 /// CR 701.8b: Indestructible permanents can't be destroyed.
 /// Skips objects with the "indestructible" keyword.
@@ -238,8 +267,9 @@ pub fn resolve(
     // CR 115.3: one object may fill several of the instruction's target slots,
     // but it is destroyed once, so it joins the batch once (first slot wins).
     let mut seen = HashSet::new();
-    let members: Vec<_> = destroyed_targets(state, ability)
-        .into_iter()
+    let members: Vec<_> = std::iter::once(ability)
+        .chain(following_destroy_slots(ability))
+        .flat_map(|slot| destroyed_targets(state, slot))
         .filter_map(|target| match target {
             TargetRef::Object(object_id) => Some(object_id),
             TargetRef::Player(_) => None,
@@ -254,7 +284,7 @@ pub fn resolve(
         state,
         &members,
         SimultaneousDepartureOwner::Destruction {
-            producer: Box::new(ability.clone()),
+            producer: after_destroy_slots(ability).unwrap_or_else(|| Box::new(ability.clone())),
         },
         Some(ability.source_id),
         cant_regenerate,
@@ -720,6 +750,99 @@ pub(crate) fn resume_parked_departure_consult(
     Ok(())
 }
 
+fn departure_proposal(
+    pending: &PendingSimultaneousDeparture,
+    member: SimultaneousDepartureMember,
+) -> (ConsultStep, ProposedEvent) {
+    match member.departure {
+        SimultaneousDeparture::Destroy => (
+            ConsultStep::Destruction,
+            ProposedEvent::Destroy {
+                object_id: member.object_id,
+                source: pending.source,
+                cant_regenerate: pending.cant_regenerate,
+                applied: HashSet::new(),
+            },
+        ),
+        SimultaneousDeparture::PutIntoGraveyard => (
+            ConsultStep::GraveyardMove {
+                source: None,
+                cause: DepartureCause::Move,
+            },
+            ProposedEvent::zone_change(member.object_id, Zone::Battlefield, Zone::Graveyard, None),
+        ),
+    }
+}
+
+/// CR 701.8a: an approved destruction still owes its graveyard-move consult.
+/// Both the chooser preview and the live consult (including a resumed answer)
+/// follow that transition here.
+fn consult_graveyard_move(
+    step: ConsultStep,
+    result: ReplacementResult,
+    replace: impl FnOnce(ProposedEvent) -> ReplacementResult,
+) -> (ConsultStep, ReplacementResult) {
+    match (step, result) {
+        (
+            ConsultStep::Destruction,
+            ReplacementResult::Execute(ProposedEvent::Destroy {
+                object_id, source, ..
+            }),
+        ) => (
+            ConsultStep::GraveyardMove {
+                source,
+                cause: DepartureCause::Destruction,
+            },
+            replace(ProposedEvent::zone_change(
+                object_id,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                source,
+            )),
+        ),
+        other => other,
+    }
+}
+
+/// CR 616.1 + CR 101.4 + CR 805.6: only a member actually awaiting a
+/// replacement choice competes for APNAP order. The pipeline names the chooser,
+/// including a choice owed by the replacement's source controller.
+fn next_departure_consult(state: &GameState, pending: &PendingSimultaneousDeparture) -> usize {
+    if pending.unconsulted.len() < 2 {
+        return 0;
+    }
+    let chooser_rank = |member: SimultaneousDepartureMember| {
+        let obj = state.objects.get(&member.object_id)?;
+        if obj.zone != Zone::Battlefield || obj.is_phased_out() {
+            return None;
+        }
+        let mut board = Cow::Borrowed(state);
+        let mut preview = |event| replacement::preview_departure_replacement(&mut board, event);
+        let (step, proposed) = departure_proposal(pending, member);
+        let first = preview(proposed);
+        match consult_graveyard_move(step, first, preview).1 {
+            ReplacementResult::NeedsChoice(chooser) => {
+                Some(crate::game::topology::apnap_team_rank(state, chooser))
+            }
+            ReplacementResult::Execute(_) | ReplacementResult::Prevented => None,
+        }
+    };
+    let Some(mut earliest) = chooser_rank(pending.unconsulted[0]) else {
+        return 0;
+    };
+    let mut next = 0;
+    for (index, &member) in pending.unconsulted.iter().enumerate().skip(1) {
+        if earliest == 0 {
+            break;
+        }
+        if let Some(rank) = chooser_rank(member).filter(|rank| *rank < earliest) {
+            earliest = rank;
+            next = index;
+        }
+    }
+    next
+}
+
 /// Consult the remaining members, then deliver every queued one, parking the
 /// batch on the first choice. Runs the owner's completion once nothing is
 /// left. `stamp_from` is where this batch's events begin in `events`.
@@ -729,8 +852,10 @@ fn advance_simultaneous_departure(
     stamp_from: usize,
     events: &mut Vec<GameEvent>,
 ) -> SimultaneousDepartureOutcome {
+    let resumed_with_queued_members = !pending.queued.is_empty() && pending.delivered.is_empty();
     while !pending.unconsulted.is_empty() {
-        let member = pending.unconsulted.remove(0);
+        let next = next_departure_consult(state, &pending);
+        let member = pending.unconsulted.remove(next);
         // CR 400.7: an earlier member's replacing instructions may have moved
         // this one already; it is no longer on the battlefield to depart.
         let Some(binding) = state
@@ -742,30 +867,7 @@ fn advance_simultaneous_departure(
             continue;
         };
         let child_stack_start = state.resolution_stack.capture_child_boundary();
-        let (step, proposed) = match member.departure {
-            SimultaneousDeparture::Destroy => (
-                ConsultStep::Destruction,
-                ProposedEvent::Destroy {
-                    object_id: member.object_id,
-                    source: pending.source,
-                    cant_regenerate: pending.cant_regenerate,
-                    applied: HashSet::new(),
-                },
-            ),
-            // CR 704.5f: a put-into-graveyard death has no destroying source.
-            SimultaneousDeparture::PutIntoGraveyard => (
-                ConsultStep::GraveyardMove {
-                    source: None,
-                    cause: DepartureCause::Move,
-                },
-                ProposedEvent::zone_change(
-                    member.object_id,
-                    Zone::Battlefield,
-                    Zone::Graveyard,
-                    None,
-                ),
-            ),
-        };
+        let (step, proposed) = departure_proposal(&pending, member);
         let result = replacement::replace_event(state, proposed, events);
         if settle_consult(state, &mut pending, member, binding, step, result, events)
             == ConsultFlow::Paused
@@ -775,6 +877,14 @@ fn advance_simultaneous_departure(
         }
     }
 
+    if resumed_with_queued_members && pending.queued.len() > 1 {
+        // APNAP orders the choices, not the resulting deliveries. Restore the
+        // batch's announcement order after all outstanding choices have settled.
+        let order: HashMap<_, _> = pending.announced.iter().copied().zip(0..).collect();
+        pending
+            .queued
+            .sort_by_key(|member| order.get(&member.object_id).copied().unwrap_or(usize::MAX));
+    }
     while !pending.queued.is_empty() {
         let queued = pending.queued.remove(0);
         // CR 400.7: the consulted object already left (sacrificed by another
@@ -832,6 +942,9 @@ fn settle_consult(
     result: ReplacementResult,
     events: &mut Vec<GameEvent>,
 ) -> ConsultFlow {
+    let (step, result) = consult_graveyard_move(step, result, |event| {
+        replacement::replace_event(state, event, events)
+    });
     match (step, result) {
         (_, ReplacementResult::NeedsChoice(player)) => {
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
@@ -841,30 +954,6 @@ fn settle_consult(
                 step,
             });
             ConsultFlow::Paused
-        }
-        // CR 701.8a: the destruction happens, so its graveyard move is
-        // consulted next.
-        (
-            ConsultStep::Destruction,
-            ReplacementResult::Execute(ProposedEvent::Destroy {
-                object_id, source, ..
-            }),
-        ) => {
-            let zone_proposed =
-                ProposedEvent::zone_change(object_id, Zone::Battlefield, Zone::Graveyard, source);
-            let result = replacement::replace_event(state, zone_proposed, events);
-            settle_consult(
-                state,
-                pending,
-                member,
-                binding,
-                ConsultStep::GraveyardMove {
-                    source,
-                    cause: DepartureCause::Destruction,
-                },
-                result,
-                events,
-            )
         }
         // CR 614.6: an outer redirect of the destruction itself.
         (
