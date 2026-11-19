@@ -393,6 +393,7 @@ fn prompt_resolution_tap_untap_choice(
         // Tap/untap selection performs no zone move, so no bounded-move
         // duration rides the round-trip.
         duration: None,
+        privacy_zones: None,
     };
     true
 }
@@ -1060,7 +1061,7 @@ mod tests {
             state.objects[&faerie].counters.get(&CounterType::Stun),
             Some(&1)
         );
-        assert!(events.iter().any(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 } if *object_id == faerie)));
+        assert!(events.iter().any(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. } if *object_id == faerie)));
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == faerie)));
@@ -1183,7 +1184,7 @@ mod tests {
             .transient_continuous_effects
             .iter()
             .all(|effect| effect.id != duration_id));
-        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 } if *object_id == faerie)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. } if *object_id == faerie)).count(), 1);
     }
 
     #[test]

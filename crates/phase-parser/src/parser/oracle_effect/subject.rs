@@ -4914,6 +4914,32 @@ pub(super) fn parse_leading_subject_application(
     parse_subject_application(&subject_text, ctx)
 }
 
+/// CR 608.2c: the singular anaphor "a creature / a permanent dealt damage this
+/// way" — a back-reference to the objects the preceding damage instruction struck
+/// ("this way"), not a fresh target. The single authority for these tags, shared
+/// by the die-exile rider (`oracle_effect/mod.rs::try_parse_die_exile_rider` and
+/// `bind_die_exile_rider_antecedent`) and the regen rider
+/// ([`subject_application_for_cant_be_regenerated`]). Prefix match on already
+/// lowercased text; callers decide what must follow.
+///
+/// Returns the card-type noun the anaphor names. CR 109.2: a card type or subtype
+/// word on its own describes a permanent of that type, so "a creature dealt damage
+/// this way" is only a creature; CR 110.1: "a permanent" is anything on the
+/// battlefield and adds no type restriction (`TypeFilter::Permanent`).
+pub(super) fn parse_dealt_damage_this_way_subject(i: &str) -> OracleResult<'_, TypeFilter> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            tag("a creature dealt damage this way"),
+        ),
+        value(
+            TypeFilter::Permanent,
+            tag("a permanent dealt damage this way"),
+        ),
+    ))
+    .parse(i)
+}
+
 /// CR 608.2c + CR 701.19c: Resolve the subject of a DAMAGE-form
 /// "[noun] dealt damage this way can't be regenerated [this turn]" clause.
 ///
@@ -4935,9 +4961,11 @@ pub(super) fn parse_leading_subject_application(
 fn subject_application_for_cant_be_regenerated(subject: &str) -> Option<SubjectApplication> {
     let lower = subject.to_lowercase();
     let matched = all_consuming(alt((
-        tag::<_, _, OracleError<'_>>("a creature dealt damage this way"),
-        tag("creatures dealt damage this way"),
-        tag("a permanent dealt damage this way"),
+        value((), parse_dealt_damage_this_way_subject),
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("creatures dealt damage this way"),
+        ),
     )))
     .parse(lower.as_str())
     .is_ok();

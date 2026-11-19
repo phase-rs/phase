@@ -114,8 +114,8 @@ fn board_a_policy(accepts: &mut usize) -> impl FnMut(&GameState) -> Option<GameA
 
 fn board_a_performed(accepts: usize) -> Option<Performed> {
     let mut board = crate::abdel_adrian_animate_dead_altar_board::build()?;
-    // The trace carries the sampler's gate, so a board built with detection OFF records nothing
-    // at all; Board A's builder is shared with rows that do not need it.
+    // The play trace records nothing under detection OFF at all; Board A's builder is shared with
+    // rows that do not need it.
     board.runner.state_mut().loop_detection =
         engine::types::game_state::LoopDetectionMode::Interactive;
     cast_animate_dead_on(&mut board.runner, board.animate_dead, board.abdel);

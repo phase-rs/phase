@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use crate::database::bracket_lists::BracketSignals;
 use crate::database::card_db::{
     build_name_alias_index, build_search_face_keys, collect_creature_type_vocabulary, CardDatabase,
+    FaceIndex,
 };
 use crate::database::legality::normalize_legalities;
-use crate::database::mtgjson::load_atomic_cards;
+use crate::database::mtgjson::{load_atomic_cards, AtomicCardsFile};
 use crate::database::name_copy_gate::gate_unmaterializable_name_copies;
 use crate::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, layout_faces_mut, map_layout,
@@ -17,8 +18,11 @@ use crate::types::card::{CardFace, CardLayout, CardRules};
 
 /// Load a card database from MTGJSON, running the Oracle text parser on each card.
 pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Error>> {
-    let atomic = load_atomic_cards(mtgjson_path)?;
+    Ok(load_from_atomic_cards(load_atomic_cards(mtgjson_path)?))
+}
 
+/// Build a card database from loaded MTGJSON atomic cards, running the Oracle text parser on each card.
+pub(crate) fn load_from_atomic_cards(atomic: AtomicCardsFile) -> CardDatabase {
     let mut cards: HashMap<String, CardRules> = HashMap::new();
     let mut face_index: HashMap<String, CardFace> = HashMap::new();
     let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
@@ -153,9 +157,10 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         }
     }
 
-    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
+    let face_index = FaceIndex::from(face_index);
+    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.card_types());
     let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
-    Ok(CardDatabase {
+    CardDatabase {
         cards,
         name_alias_index: build_name_alias_index(face_index.keys()),
         face_index,
@@ -171,7 +176,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         bracket_signals_by_name,
         creature_type_vocabulary,
         valid_subtypes: Default::default(),
-    })
+    }
 }
 
 fn runtime_layout_kind(layout_kind: LayoutKind) -> Option<crate::types::card::LayoutKind> {

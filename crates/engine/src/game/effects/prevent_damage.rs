@@ -1716,7 +1716,8 @@ mod tests {
             is_combat: true,
             applied: std::collections::HashSet::new(),
         };
-        let mut pass = crate::game::replacement::CombatDamageReplacementPass::new([proposed]);
+        let mut pass =
+            crate::game::replacement::CombatDamageReplacementPass::new(&state, [proposed]);
         let outcome = crate::game::replacement::replace_combat_damage_batch(
             &mut state,
             &mut events,

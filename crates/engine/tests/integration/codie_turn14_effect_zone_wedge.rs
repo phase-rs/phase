@@ -278,6 +278,7 @@ fn park_prompt(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 }
 

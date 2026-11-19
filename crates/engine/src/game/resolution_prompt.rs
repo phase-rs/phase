@@ -89,7 +89,7 @@ pub(crate) fn probe_resolution(
         return ResolutionProbe::Prompted;
     }
     // The SAME re-entrancy guard `apply_confirmed_shortcut` holds across its own
-    // clone-and-drive. It suppresses ring accumulation and shortcut detection
+    // clone-and-drive. It suppresses play-trace recording and shortcut detection
     // inside the probe, which is exactly the recursion hazard a speculative
     // resolve would otherwise open.
     let _probe = SimulationProbeGuard::enter();
@@ -180,7 +180,7 @@ fn resolution_probe_verdict(
 /// arm's resolver has been fixed yet. It is fail-closed — it can only turn a
 /// verdict into `MayPrompt`, never the reverse — so a resolver gaining a real
 /// prompt never invalidates it.
-fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
+pub(crate) fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
     match q {
         QuantityExpr::UpTo { .. } => true,
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
@@ -212,7 +212,7 @@ fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 /// `ResolutionProbe::Prompted`, which OBSERVES the real resolver opening a real
 /// prompt on the real board. The arm only decides which classes are worth paying
 /// a clone for.
-fn effect_offers_choice(e: &Effect) -> bool {
+pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
@@ -295,6 +295,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
@@ -633,6 +634,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no choice
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no choice
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity, no choice
         controller: _,           // player id
         original_controller: _,  // player id
         scoped_player: _,        // player id (iteration binding)
@@ -667,6 +669,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
         entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
@@ -792,7 +795,7 @@ mod tests {
     use crate::types::game_state::DistributionUnit;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::{CounterPlacement, DrawEventStage};
+    use crate::types::proposed_event::{CounterCause, CounterPlacement, DrawEventStage};
     use crate::types::zones::Zone;
     use std::collections::BTreeMap;
 
@@ -1582,6 +1585,7 @@ mod tests {
                         actor: PlayerId(0),
                         object_id: victim,
                         counter_type: CounterType::Plus1Plus1,
+                        cause: CounterCause::Other,
                     },
                     count,
                     applied: Default::default(),

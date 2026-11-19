@@ -1318,8 +1318,11 @@ fn replicate_declared_before_targets_still_exiles_three() {
         );
 
         assert_cast_completes(&runner, pyromatics, &trail);
-        assert!(
-            trail.count("OptionalCostChoice") >= 1,
+        // CR 601.2b: one replicate run (each payment, then the decline),
+        // never offered again after the targets.
+        assert_eq!(
+            trail.count("OptionalCostChoice"),
+            replicate as usize + 1,
             "replicate={replicate}: {:?}",
             trail.prompts
         );

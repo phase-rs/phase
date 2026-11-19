@@ -168,6 +168,23 @@ pub fn resolve(
         _ => (&TargetFilter::None, Zone::Hand, false),
     };
 
+    // CR 608.2c + CR 609.3: the immediate parent handed this "that card" return
+    // nothing (a Dig of an empty library, an empty ChooseFromZone, a failed
+    // search). Resolve as a no-op before `resolved_targets`, whose unresolved
+    // `ParentTarget` inference would otherwise name the ability's own source —
+    // a zero-target Wake to Slaughter would return itself to its owner's hand.
+    // Mirrors `change_zone::resolve`'s missing-referent guard.
+    if matches!(target_filter, TargetFilter::ParentTarget)
+        && ability.parent_target_missing_reason.is_some()
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
     let targets: Vec<_> = effective_targets
         .iter()
@@ -278,6 +295,7 @@ pub fn resolve(
                     is_cost_payment: false,
                     enters_modified_if: None,
                     duration: None,
+                    privacy_zones: None,
                 };
                 return Ok(());
             }
@@ -378,6 +396,7 @@ pub fn resolve(
                     is_cost_payment: false,
                     enters_modified_if: None,
                     duration: None,
+                    privacy_zones: None,
                 };
                 return Ok(());
             }
@@ -581,6 +600,7 @@ fn set_scoped_bounce_waiting_for(
         enters_modified_if: None,
         duration: None,
         performed_by: None,
+        privacy_zones: None,
     };
 }
 
@@ -975,6 +995,7 @@ pub fn resolve_all(
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             };
             return Ok(());
         }

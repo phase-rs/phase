@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ParkedEntry gains entry_attack, so an attacking entrant whose as-enters continuation paused is seated by the logical owner that resumes it. An older reader drops the field and the entrant never attacks; an entrant's own as-enters DieRolled is parked with its entry and released with it, so an older reader's custody takes it and drops its ordinary observers."
+}

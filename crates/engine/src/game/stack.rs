@@ -2,8 +2,8 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousEffectOnset, ContinuousModification,
     CopyCountStatus, DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition,
-    KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
+    InstructionJoin, KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition,
+    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
     TargetSelectionMode, TriggerCondition, TriggerDefinitionRef,
 };
 use crate::types::card_type::CoreType;
@@ -17,6 +17,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
+use crate::types::resolution::ResolutionFrame;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
     ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
@@ -181,6 +182,22 @@ pub(super) fn abandon_active_resolution_carrier(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) {
     super::priority::clear_priority_passes(state);
+    let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+    // An owner drain whose chain raised no child is the active frame at its own
+    // prompt.
+    if matches!(
+        state.resolution_stack.last(),
+        Some(ResolutionFrame::PostReplacement(_))
+    ) {
+        state.abandon_active_replacement_tails();
+        // CR 800.4a: a paused ChangeZone owner beneath it is the same family, and
+        // its tail goes with it, as in `abandon_change_zone_family_for_controller`.
+        if state.active_change_zone_frame().is_some() {
+            let _ = state
+                .take_active_change_zone_frame()
+                .expect("the checked ChangeZone owner is the active frame");
+        }
+    }
     let _ = state
         .clear_active_ability_continuation()
         .expect("resolution abandonment cannot clear a buried ability continuation");
@@ -198,11 +215,11 @@ pub(super) fn abandon_active_resolution_carrier(
         state.resolving_stack_object = object;
     }
     state.resolution_source_relatch = None;
-    // CR 614.12a: these entries had not happened yet; abandoning the family
-    // abandons them. Entries held in `unsettled_entry_batch_events` did happen
-    // (CR 603.2), so they stay and are checked at the next collector; CR 800.4a
-    // removes the departed player's own abilities there.
-    state.deferred_entry_events.clear();
+    // CR 603.2 + CR 800.4a: completed entries already happened and survive,
+    // including entries held in unsettled_entry_batch_events. CR 614.12a:
+    // only this abandoned family's pending entries have not happened yet.
+    super::engine_replacement::drop_abandoned_family_entries(state, carrier);
+
     state.pending_token_battlefield_entry = None;
 }
 
@@ -3242,9 +3259,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                     exile_links: zone_pipeline::ExileLinkSpec::default(),
                                     drain:
                                         crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                                    // Spell resolution delivers to the battlefield
-                                    // or graveyard — never a library placement.
-                                    library_placement: None,
                                 },
                                 events,
                             ) {
@@ -4083,6 +4097,9 @@ fn resolve_keyword_action(
                     spacecraft_id,
                     CounterType::Generic("charge".to_string()),
                     counters_added,
+                    // CR 614.16: station's charge counters are placed by a
+                    // resolving keyword action.
+                    crate::types::proposed_event::CounterCause::ResolvingEffect,
                     events,
                 ) {
                     effects::counters::stash_pending_counter_completion_with_actions(
@@ -4864,6 +4881,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -4913,6 +4931,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5012,6 +5031,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5123,6 +5144,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -5172,6 +5194,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5248,6 +5271,8 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5361,6 +5386,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -5410,6 +5436,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5491,6 +5518,8 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5761,6 +5790,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         target_reads: a_target_reads,
         entry_onset: a_entry_onset,
         sibling_condition: a_sibling_condition,
+        instruction_join: a_instruction_join,
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
@@ -5773,6 +5803,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: a_illegal_target_slots,
         unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
+        declared_player_target_slots: a_declared_player_target_slots,
         // CR 608.2e: a player-scope driver's transient capture, never on a
         // stack entry; guaranteed `None` ONE HOP upstream by the
         // batch-candidate checks, like the modal ordinal.
@@ -5856,6 +5887,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         target_reads: b_target_reads,
         entry_onset: b_entry_onset,
         sibling_condition: b_sibling_condition,
+        instruction_join: b_instruction_join,
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
@@ -5868,6 +5900,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: b_illegal_target_slots,
         unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
+        declared_player_target_slots: b_declared_player_target_slots,
         // CR 608.2e: a player-scope driver's transient capture, never on a
         // stack entry; guaranteed `None` ONE HOP upstream by the
         // batch-candidate checks, like the modal ordinal.
@@ -5910,6 +5943,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_illegal_target_slots == b_illegal_target_slots
         && a_unjudged_target_slots == b_unjudged_target_slots
         && a_illegal_local_target_slots == b_illegal_local_target_slots
+        && a_declared_player_target_slots == b_declared_player_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind
@@ -5973,6 +6007,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_target_reads == b_target_reads
         && a_entry_onset == b_entry_onset
         && a_sibling_condition == b_sibling_condition
+        && a_instruction_join == b_instruction_join
         && a_modal == b_modal
         && a_mode_abilities == b_mode_abilities
         && a_parent_target_missing_reason == b_parent_target_missing_reason
@@ -6431,8 +6466,8 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCast, StackPaidSnapshot,
-        WaitingFor,
+        AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, ParkedEntry, ParkedEntryState,
+        PendingCast, StackPaidSnapshot, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggerFiring};
     use crate::types::keywords::Keyword;
@@ -7396,6 +7431,82 @@ mod tests {
             lower[..2]
         );
         assert_eq!(state.objects[&lower[2]].zone, Zone::Graveyard);
+    }
+
+    /// Decision 3 of the park: a whole-carrier abandonment owns only the pending
+    /// entries of the family it abandons. A completed entry happened, and a
+    /// pending entry of another carrier stays for its producer.
+    #[test]
+    fn abandoning_a_resolution_drops_only_its_own_pending_entries() {
+        fn parked(id: u64, state: ParkedEntryState) -> ParkedEntry {
+            ParkedEntry {
+                event: GameEvent::LandPlayed {
+                    object_id: ObjectId(id),
+                    player_id: PlayerId(0),
+                    from_zone: Zone::Hand,
+                },
+                state,
+                entry_attack: None,
+                held_triggers: Vec::new(),
+            }
+        }
+        let pending = |carrier| ParkedEntryState::Pending { carrier };
+        let completed = parked(1, ParkedEntryState::Completed);
+        let other = ObjectId(9_002);
+
+        for zone in [Zone::Graveyard, Zone::Stack] {
+            let mut state = setup();
+            let carrier = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Carrier".to_string(),
+                zone,
+            );
+            state.resolving_stack_entry = Some(pending_spell_entry(carrier));
+            if zone == Zone::Stack {
+                state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell: carrier });
+            }
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            state.deferred_entry_events = vec![
+                completed.clone(),
+                parked(2, pending(Some(carrier))),
+                parked(3, pending(Some(other))),
+                parked(4, pending(None)),
+            ];
+            abandon_active_resolution_carrier(
+                &mut state,
+                super::super::lifecycle::DelayedTerminalDisposition::Removed,
+            );
+            assert_eq!(
+                state.deferred_entry_events,
+                vec![
+                    completed.clone(),
+                    parked(3, pending(Some(other))),
+                    parked(4, pending(None)),
+                ],
+                "{zone:?}"
+            );
+            assert_eq!(
+                state.resolving_stack_entry.is_some(),
+                zone == Zone::Stack,
+                "reach guard: an owed spell keeps its carrier"
+            );
+        }
+
+        // No carrier: the abandoned family is the entries parked outside one.
+        let mut state = setup();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.deferred_entry_events = vec![completed.clone(), parked(4, pending(None))];
+        abandon_active_resolution_carrier(
+            &mut state,
+            super::super::lifecycle::DelayedTerminalDisposition::Removed,
+        );
+        assert_eq!(state.deferred_entry_events, vec![completed]);
     }
 
     /// CR 608.2n: abandoning a resolution family keeps the carrier of an instant
@@ -11456,7 +11567,6 @@ mod tests {
                     batch_events: Vec::new(),
                     damage_to_players: Vec::new(),
                     prevention_tally: Vec::new(),
-                    lives_before: vec![20, 20],
                     sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
                     replacement: None,
                     phase_c_remnant: None,

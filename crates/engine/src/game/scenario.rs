@@ -947,6 +947,39 @@ impl GameScenario {
         builder
     }
 
+    /// Add an enchantment card to hand with abilities parsed from Oracle text.
+    ///
+    /// Mirrors `add_artifact_to_hand_from_oracle` for enchantments (CR 303.1).
+    /// Subtypes (e.g. Aura, CR 303.4) are the caller's concern — chain
+    /// `.with_subtypes(..)` on the returned builder.
+    pub fn add_enchantment_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        // CR 208.3: a noncreature object not on the battlefield has power or
+        // toughness only if it has a power and toughness printed on it.
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add an instant or sorcery to a player's hand without Oracle text.
     ///
     /// Use `is_instant: true` for instants, `false` for sorceries.
@@ -2159,7 +2192,7 @@ impl GameRunner {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
-            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
+            WaitingFor::MemberOrderChoice { .. } => "MemberOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -2411,6 +2444,7 @@ pub struct SpellCast<'a> {
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
     casting_variant_face: Option<CastingVariantFace>,
+    casting_keyword: Option<crate::types::keywords::Keyword>,
     free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
@@ -2441,6 +2475,7 @@ impl<'a> SpellCast<'a> {
             adventure_creature: None,
             casting_variant: None,
             casting_variant_face: None,
+            casting_keyword: None,
             free_cast: false,
             modes: None,
             x: None,
@@ -2528,6 +2563,14 @@ impl<'a> SpellCast<'a> {
     ) -> Self {
         self.casting_variant = Some(variant);
         self.casting_variant_face = Some(face);
+        self
+    }
+
+    /// With [`Self::casting_variant`], choose the option that pays this keyword
+    /// instance, for a card with several instances of one alternative-cost
+    /// keyword (CR 113.2c + CR 601.2b).
+    pub fn casting_keyword(mut self, keyword: crate::types::keywords::Keyword) -> Self {
+        self.casting_keyword = Some(keyword);
         self
     }
 
@@ -2682,6 +2725,7 @@ impl<'a> SpellCast<'a> {
             adventure_creature,
             casting_variant,
             casting_variant_face,
+            casting_keyword,
             free_cast,
             modes,
             x,
@@ -2820,7 +2864,10 @@ impl<'a> SpellCast<'a> {
                             .enumerate()
                             .filter_map(|(index, option)| {
                                 (option.variant == variant
-                                    && casting_variant_face.is_none_or(|face| option.face == face))
+                                    && casting_variant_face.is_none_or(|face| option.face == face)
+                                    && casting_keyword.as_ref().is_none_or(|keyword| {
+                                        option.alternative_cost_keyword.as_ref() == Some(keyword)
+                                    }))
                                 .then_some(index)
                             })
                             .collect();

@@ -791,9 +791,16 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
 /// target by an effect such as Torch the Tower or Obliterating Bolt. It is
 /// resolution-installed in the live replacement store, is not a copiable value,
 /// and ends when that object leaves the battlefield (CR 400.7).
+///
+/// CR 109.2: a rider whose printed subject names a card type ("a creature dealt
+/// damage this way") carries `And[SelfRef, Typed(..)]` rather than a bare
+/// `SelfRef`; either way `valid_card` names only the carrier.
 pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinition) -> bool {
     def.event == ReplacementEvent::Moved
-        && matches!(def.valid_card, Some(TargetFilter::SelfRef))
+        && def
+            .valid_card
+            .as_ref()
+            .is_some_and(super::ability_rw::filter_is_self_scoped)
         && matches!(def.expiry, Some(RestrictionExpiry::EndOfTurn))
         && def.destination_zone == Some(Zone::Graveyard)
         && def.execute.as_deref().is_some_and(|execute| {
@@ -1905,8 +1912,17 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
 /// database layout metadata and the parsed meld instruction. A forged effect
 /// whose three named faces are not all database-backed meld faces is excluded.
 fn build_meld_pair_registry(db: &CardDatabase) -> HashMap<String, MeldPairRecord> {
+    // CR 701.42a + CR 712.4a: a meld instruction is printed on one card of a
+    // meld pair, so only meld cards' faces can carry one.
+    meld_pairs_from_faces(db, db.faces_with_layout(LayoutKind::Meld))
+}
+
+fn meld_pairs_from_faces<'a>(
+    db: &CardDatabase,
+    faces: impl Iterator<Item = &'a CardFace>,
+) -> HashMap<String, MeldPairRecord> {
     let mut registry = HashMap::new();
-    for (_, face) in db.face_iter() {
+    for face in faces {
         let mut effects = Vec::new();
         collect_meld_effects_from_face(face, &mut effects);
         for (source, partner, result) in effects {
@@ -2302,7 +2318,63 @@ mod tests {
     use super::*;
     use crate::game::game_object::PrototypeFormState;
     use crate::types::ability::ChooseOneOfKind;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::format::FormatConfig;
+
+    /// CR 614.1a + CR 400.7 + CR 707.2: the resolution-installed die-exile rider is
+    /// recognized by the carrier-scoped `valid_card` it carries, bare (a subject with
+    /// no card-type noun) or conjoined with the subject's type (CR 109.2). A `Moved`
+    /// rider whose `valid_card` has no `SelfRef` conjunct could match other objects,
+    /// so it is not the carrier-bound rider.
+    #[test]
+    fn runtime_die_exile_rider_is_recognized_by_a_carrier_scoped_valid_card() {
+        let rider = |valid_card: TargetFilter| {
+            let exile = AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    library_shuffle: Default::default(),
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(valid_card)
+                .destination_zone(Zone::Graveyard)
+                .execute(exile);
+            def.expiry = Some(RestrictionExpiry::EndOfTurn);
+            def
+        };
+        let creature = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        // Positive reach: both carrier-scoped shapes are the rider, so the predicate
+        // is live and the negative below is not vacuous.
+        assert!(is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::SelfRef
+        )));
+        assert!(is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, creature()],
+            }
+        )));
+        // A typed filter with no `SelfRef` conjunct is not carrier-scoped.
+        assert!(!is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::And {
+                filters: vec![creature()],
+            }
+        )));
+        assert!(!is_runtime_target_die_exile_replacement(&rider(creature())));
+    }
 
     /// Pre-PR saves persist Horde token-layout objects with default `Card`
     /// routing and no `printed_ref`, so the face reapply skips them and a
@@ -5116,6 +5188,42 @@ mod tests {
         }
         let json = serde_json::Value::Object(map).to_string();
         CardDatabase::from_json_str(&json).expect("export db should parse")
+    }
+
+    #[test]
+    fn meld_pair_registry_equals_the_every_face_walk_on_the_committed_fixture() {
+        let db = crate::test_support::shared_card_db();
+        let expected = meld_pairs_from_faces(db, db.face_iter().map(|(_, face)| face));
+        assert!(!expected.is_empty());
+        assert_eq!(build_meld_pair_registry(db), expected);
+    }
+
+    #[test]
+    fn hydrating_a_lazily_loaded_fixture_types_only_the_games_cards_and_meld_cards() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::test_support::{fixture_path, load_fixture};
+
+        let db = load_fixture(&fixture_path());
+        let mut scenario = GameScenario::new();
+        scenario.add_real_card(P0, "Well of Lost Dreams", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Plains", Zone::Library, &db);
+        let game_faces = db.face_index.typed_face_count();
+
+        rehydrate_game_from_card_db(&mut scenario.state, &db);
+
+        let meld_faces: std::collections::HashSet<&String> = db
+            .layout_index
+            .iter()
+            .filter(|(_, kind)| **kind == LayoutKind::Meld)
+            .flat_map(|(oracle_id, _)| &db.oracle_id_index[oracle_id])
+            .collect();
+        assert!(!scenario.state.meld_pair_registry.is_empty());
+        assert_eq!(scenario.state.all_card_names.len(), db.card_names().len());
+        assert_eq!(
+            db.face_index.typed_face_count(),
+            game_faces + meld_faces.len()
+        );
     }
 
     /// CR 701.42b + CR 712.4: the production JSON loader's layout metadata,

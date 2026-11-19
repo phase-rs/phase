@@ -1760,7 +1760,10 @@ fn zone_of_zone_ref(z: &ZoneRef) -> Zone {
 
 /// A read filter that provably counts only the member's own source (a `SelfRef`
 /// conjunct) — routes to per-member-private `reads_src` (§2 read-carrier closure).
-fn filter_is_self_scoped(f: &TargetFilter) -> bool {
+/// Also the authority for "this filter names only the carrier": a `valid_card` of
+/// `SelfRef` or `And[SelfRef, ..]` can match only the object hosting the
+/// definition (`printed_cards::is_runtime_target_die_exile_replacement`).
+pub(crate) fn filter_is_self_scoped(f: &TargetFilter) -> bool {
     match f {
         TargetFilter::SelfRef => true,
         TargetFilter::And { filters } => filters.iter().any(filter_is_self_scoped),
@@ -2075,6 +2078,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         // the parser can emit (`Controller`, `ScopedPlayer`) have non-legacy
         // `ControllerRef` analogues, so the monarch subject axis stays here.
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -2228,6 +2232,9 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         // `legacy_trigger_condition` sibling arm for the same reasoning.
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: no `legacy_player_scope` classifier exists — same
+        // reasoning as the monarch arm above.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2383,16 +2390,15 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::CardsDrawnLastTurn { .. }
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -3975,6 +3981,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ManifestDread
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
@@ -4325,7 +4332,7 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // taken this turn — the recorded spells have left the stack (CR 400.7)
         // and are read from their snapshots, not from the board. That is why
         // this classifies as turn-scoped player state rather than a board read.
-        // Mirrors `QuantityRef::SpellsCastThisTurn`'s own `JournalCast` read so
+        // Mirrors `QuantityRef::SpellsCast`'s own `JournalCast` read so
         // the two readings of the same population agree.
         //
         // NOT CR 601.2a, which this comment used to cite: 601.2a describes how a
@@ -4723,6 +4730,7 @@ fn walk_ability(
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no read/write effect
+        declared_player_target_slots: _, // CR 115.1 announced player-role identity, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -4767,6 +4775,7 @@ fn walk_ability(
         target_reads: _, // origin of `Target` reads; the reads are profiled on condition/effect
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         sibling_condition: _, // replication marker, no read/write effect
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         replacement_applied: _,
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
@@ -4916,6 +4925,7 @@ fn walk_definition(
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -6796,6 +6806,12 @@ fn rw_effect(
             amount: _,
             is_combat: _,
         }
+        | Effect::ResumeDamageBatch {
+            kind: _,
+            replaced: _,
+            remaining: _,
+            awaiting: _,
+        }
         | Effect::Cleanup {
             clear_remembered: _,
             clear_chosen_player: _,
@@ -7331,15 +7347,17 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // (Fairgrounds Trumpeter). Fail-closed on a departure reentry hazard.
         QuantityRef::CounterAddedThisTurn { .. } => reads_frozen_of(StateKind::ObjectCounters),
         // Player-resource journals.
-        QuantityRef::LifeLostThisTurn { player: _ }
+        QuantityRef::LifeLost {
+            player: _,
+            window: _,
+        }
         | QuantityRef::LifeGainedThisTurn { player: _ }
         | QuantityRef::DamageDealtThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
-        QuantityRef::SpellsCastThisTurn { .. }
+        QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::OpponentSpellsCastSinceLastTurn { player: _ }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -7569,6 +7587,15 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // holder's installed boons; like the monarch designation the read
         // profile is entirely determined by the subject scope.
         TriggerCondition::HasBoon { player } => rw_player_scope(player),
+        // CR 122.1f: poison is a player counter (CR 122.1f defines "poisoned"
+        // as having one or more poison counters). The read profile records the
+        // PlayerLife kind (where poison counters live) and merges the subject
+        // scope classification from rw_player_scope.
+        TriggerCondition::IsPoisoned { player } => {
+            let mut p = reads_player_of(StateKind::PlayerLife);
+            p.merge(rw_player_scope(player));
+            p
+        }
         TriggerCondition::GainedLife { minimum: _ }
         | TriggerCondition::LostLife
         | TriggerCondition::LostLifeLastTurn => reads_player_of(StateKind::JournalLife),
@@ -7717,6 +7744,14 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         // entirely determined by the monarch subject scope.
         StaticCondition::IsMonarch { player } => rw_player_scope(player),
         StaticCondition::HasBoon { player } => rw_player_scope(player),
+        // CR 122.1f: the poison predicate reads the scoped player's poison
+        // total (the sibling-mutable `PlayerLife` row), exactly like the
+        // `TriggerCondition::IsPoisoned` sibling — never a designation.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            let mut p = reads_player_of(StateKind::PlayerLife);
+            p.merge(rw_player_scope(player));
+            p
+        }
         StaticCondition::DevotionGE { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents => reads_zone_membership(),
         StaticCondition::IsPresent { filter } => match filter {
@@ -8435,7 +8470,7 @@ mod tests {
         );
 
         // (a) CR 601.2a: a turn journal is turn-scoped PLAYER state. It must
-        // declare the same `JournalCast` read `QuantityRef::SpellsCastThisTurn`
+        // declare the same `JournalCast` read `QuantityRef::SpellsCast`
         // declares, and must NOT claim a board read.
         let journal_profile = characteristic_source_read(&journal);
         assert_eq!(
@@ -11262,5 +11297,48 @@ mod attacked_referent_classification_tests {
             ),
             "distinct-event siblings: one's damage can remove the other's recipient"
         );
+    }
+}
+
+#[cfg(test)]
+mod poison_condition_rw_tests {
+    use super::*;
+
+    use crate::types::ability::AggregateFunction;
+
+    /// CR 122.1f: the poison predicate reads the player's poison-counter total,
+    /// which rides the sibling-mutable `PlayerLife` row (the same proxy as
+    /// `QuantityRef::PlayerCounter`). `rw_player_scope` classifies only the
+    /// subject and is empty for `DefendingPlayer`, so the profile must record
+    /// the player read itself — otherwise a same-event poison write cannot be
+    /// ordered against the trigger.
+    #[test]
+    fn poison_predicate_reads_the_player_poison_total() {
+        let expected = reads_player_of(StateKind::PlayerLife);
+        for player in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::DefendingPlayer,
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+        ] {
+            let profile = trigger_condition_rw_profile(&TriggerCondition::IsPoisoned {
+                player: player.clone(),
+            });
+            assert_eq!(
+                profile, expected,
+                "a poison read is a player-state read ({player:?})"
+            );
+            // The static sibling (`StaticCondition::PlayerIsPoisoned`) feeds the
+            // same ordering model and must record the same player read.
+            let static_profile = rw_static_condition(&StaticCondition::PlayerIsPoisoned {
+                player: player.clone(),
+            });
+            assert_eq!(
+                static_profile, expected,
+                "the static sibling arm records the same player read ({player:?})"
+            );
+        }
     }
 }

@@ -381,6 +381,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
     };
     let state = runner.state_mut();
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::SearchFound {
             searcher: P0,
             library_owner: Some(P0),
@@ -395,7 +396,6 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: ZoneDeliveryExileTracking::None,
