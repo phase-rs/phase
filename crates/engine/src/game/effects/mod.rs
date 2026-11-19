@@ -32888,27 +32888,33 @@ pub(crate) fn evaluate_condition(
         // anaphor from the triggering event (`TargetFilter::TriggeringSource`
         // — the same fallback tier `TargetMatchesFilter` uses to bind the
         // anaphor), so the event subject is an antecedent too. This fallback
-        // is gated on the whole resolving chain declaring no *chooseable*
-        // slots: a chain that declared an "up to N target ..." slot and was
-        // left with zero chosen (CR 115.6) must keep reading false rather
-        // than borrowing an unrelated event subject (Faller's Faithful
-        // "destroy up to one other target creature. If that creature wasn't
-        // dealt damage this turn, ..."). Marauding Raptor's "If a Dinosaur is
-        // dealt damage this way" reached resolution with empty `targets` and
-        // no declared slots and previously suppressed its pump rider here.
+        // applies only when the chain names NO referent at all
+        // (`parent_chain_referents` is `None`). A chain whose declared slot
+        // holds a player (CR 115.4: "deals 1 damage to any target" aimed at a
+        // player) names that player, and a chain that declared an "up to N
+        // target ..." slot and was left with zero chosen (CR 115.6) names the
+        // empty set; both keep reading false rather than borrowing an
+        // unrelated event subject (The Black Arrow's ETB source; Faller's
+        // Faithful "destroy up to one other target creature. If that creature
+        // wasn't dealt damage this turn, ..."). Whether damage was actually
+        // dealt is not this conjunct's job: the "dealt damage this way" rider
+        // pairs it with `PreviousEffectAmount`, which reads the
+        // post-prevention amount (CR 615.1a). Marauding Raptor's "If a
+        // Dinosaur is dealt damage this way" reached resolution with empty
+        // `targets` and no declared slots and previously suppressed its pump
+        // rider here.
         AbilityCondition::HasObjectTarget => {
             ability
                 .targets
                 .iter()
                 .any(|t| matches!(t, TargetRef::Object(_)))
-                || !crate::game::targeting::chain_declares_chooseable_target_slots(
-                    crate::game::targeting::resolving_root_ability(state, ability),
-                ) && crate::game::targeting::resolve_event_context_target(
-                    state,
-                    &TargetFilter::TriggeringSource,
-                    ability.source_id,
-                )
-                .is_some_and(|t| matches!(t, TargetRef::Object(_)))
+                || crate::game::targeting::parent_chain_referents(state, ability).is_none()
+                    && crate::game::targeting::resolve_event_context_target(
+                        state,
+                        &TargetFilter::TriggeringSource,
+                        ability.source_id,
+                    )
+                    .is_some_and(|t| matches!(t, TargetRef::Object(_)))
         }
         // CR 608.2c: Compound condition — all inner conditions must be true.
         AbilityCondition::And { conditions } => conditions
