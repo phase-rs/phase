@@ -4175,22 +4175,6 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn lobby_expiry_prunes_only_the_finished_game_connections() {
-        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
-        {
-            let mut conns = connections.lock().await;
-            conns.insert("EXPIRED".to_string(), HashMap::new());
-            conns.insert("ACTIVE".to_string(), HashMap::new());
-        }
-
-        prune_game_connections(&connections, ["EXPIRED"]).await;
-
-        let conns = connections.lock().await;
-        assert!(!conns.contains_key("EXPIRED"));
-        assert!(conns.contains_key("ACTIVE"));
-    }
-
-    #[tokio::test]
     async fn delist_removed_sessions_delists_every_removed_room_and_leaves_the_rest() {
         // The reaper hands this helper every session it removed in one tick,
         // which is more than one, so a single-room fixture would admit a

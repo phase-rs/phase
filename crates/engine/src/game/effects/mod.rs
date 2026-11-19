@@ -15341,6 +15341,27 @@ fn resolve_effect_node(
                 },
             })
         }
+        Effect::ChangeZone { .. } => {
+            let (result, progress) =
+                LegacyEffectBoundary::run(state, ability, |state, boundary| {
+                    let result = change_zone::resolve(state, ability, events)?;
+                    retire_empty_replacement_frames(state, boundary);
+                    Ok(result)
+                })?;
+            // CR 603.2c + CR 608.2c: Detention Sphere pattern — ChangeZone to Exile
+            // resolved the same-name mass exile continuation inline as one logical
+            // event, so transfer ownership of the tail to avoid resolving it again.
+            let tail = if change_zone::same_name_mass_exile_sub(ability).is_some() {
+                TailOwnership::Transferred
+            } else {
+                TailOwnership::Caller
+            };
+            Ok(EffectStep {
+                progress,
+                result,
+                tail,
+            })
+        }
         _ => {
             let (result, progress) =
                 LegacyEffectBoundary::run(state, ability, |state, boundary| {

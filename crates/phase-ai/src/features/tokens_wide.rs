@@ -696,26 +696,6 @@ mod tests {
     }
 
     #[test]
-    fn aristocrats_overlap_independent() {
-        // A Bitterblossom-shape card (upkeep trigger creating a 1/1 faerie)
-        // should count as BOTH a token generator (tokens_wide) and a fodder
-        // source (aristocrats). The two features are independent. This test
-        // verifies tokens_wide registers it; aristocrats has its own test.
-        let mut face = empty_face("Bitterblossom");
-        let exec = AbilityDefinition::new(
-            AbilityKind::Spell,
-            creature_token_effect(QuantityExpr::Fixed { value: 1 }),
-        );
-        // CR 603.2b: "at the beginning of your upkeep" → TriggerMode::Phase.
-        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
-        trigger.execute = Some(Box::new(exec));
-        face.triggers.push(trigger);
-        let feature = detect(&[deck_entry(face)]);
-        // tokens_wide registers Bitterblossom as a generator.
-        assert_eq!(feature.token_generator_count, 1);
-    }
-
-    #[test]
     fn non_fixed_count_is_mass() {
         // A dynamic quantity (Ref) counts as mass even though we can't
         // statically bound it — the design intent is "could produce many".

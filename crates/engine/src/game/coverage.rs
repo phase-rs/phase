@@ -60,7 +60,6 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
-use std::sync::LazyLock;
 use strum::IntoEnumIterator;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
@@ -645,8 +644,10 @@ pub struct CoverageSummary {
     pub supported_cards: usize,
     pub coverage_pct: f64,
     pub keyword_count: usize,
-    #[serde(default)]
-    pub token_coverage: TokenCoverageSummary,
+    /// `None` from [`analyze_coverage`]: the token catalog does not depend on the database, so
+    /// only the printed report computes it ([`analyze_token_coverage`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_coverage: Option<TokenCoverageSummary>,
     #[serde(default)]
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     /// Per-set coverage rollup. Each card counts toward every set it was
@@ -7308,18 +7309,8 @@ fn token_pt_provenance_has_no_materialization_gap(
     ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
 
-/// The token-catalog coverage summary, computed once per process.
-///
-/// Its only inputs are the compiled-in token catalog ([`known_token_presets`])
-/// and the pure Oracle parser, so the summary is a process-wide constant that
-/// does not depend on the `CardDatabase` being analyzed. Deriving it re-parses
-/// every catalog preset's rules text (~1.5k lines), which dominated each
-/// [`analyze_coverage`] call: ~20s per call in an unoptimized build against
-/// microseconds for a one-card database, so a test that analyzes N one-card
-/// databases paid the catalog parse N times.
-static TOKEN_COVERAGE: LazyLock<TokenCoverageSummary> = LazyLock::new(analyze_token_coverage);
-
-fn analyze_token_coverage() -> TokenCoverageSummary {
+/// Coverage of the compiled-in token catalog ([`known_token_presets`]); re-parses every preset's rules text.
+pub fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
     let mut gap_token_accumulators: BTreeMap<(String, String), (usize, usize, Vec<String>)> =
@@ -7978,7 +7969,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
-        token_coverage: TOKEN_COVERAGE.clone(),
+        token_coverage: None,
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -11842,13 +11833,10 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
     }
 }
 
-/// Whether the per-candidate reader behind `PlayerFilter::PlayerAttribute`
-/// (`effects::candidate_player_scalar`) answers `attr`, for the two
-/// window-parameterized history families. `Unhandled` exactly for a spell attr
-/// the reader returns `None` for (a this-turn count, or a last-turn count with a
-/// filter: the candidate predicate would fail closed and the guard never fire)
-/// and for a `LifeLost` attr in the last-turn window (no producer yet). Every
-/// other attr is `Handled`: their classification is deliberately unchanged.
+/// Coverage for the windowed history families read by
+/// `effects::candidate_player_scalar`. Both life-loss windows are readable.
+/// A this-turn spell attr or a filtered last-turn spell attr fails closed in
+/// that reader and must remain `Unhandled`. Other attrs are unchanged.
 fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
     use FeatureSupport::*;
     match attr {
@@ -11857,10 +11845,6 @@ fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
             filter: _,
             window: _,
         } if !candidate_scalar_reads_spell_attr(attr) => Unhandled,
-        QuantityRef::LifeLost {
-            player: _,
-            window: TurnWindow::LastTurn,
-        } => Unhandled,
         QuantityRef::SpellsCast {
             scope: _,
             filter: _,
@@ -11868,7 +11852,7 @@ fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
         }
         | QuantityRef::LifeLost {
             player: _,
-            window: TurnWindow::ThisTurn,
+            window: TurnWindow::ThisTurn | TurnWindow::LastTurn,
         } => Handled,
         // Every other ref is `Handled` here (their classification is unchanged),
         // enumerated so a new `QuantityRef` variant must be classified at this
@@ -12450,19 +12434,14 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
-        // CR 119.3 + CR 500: only the this-turn window has a producer. A deserialized
-        // `LastTurn` payload is read by the resolver but no parser path emits it until
-        // the life last-turn grammar lands, so it is classified unsupported (never
-        // advertised as supported), at this top-level position and, through
-        // `window_attr_support`, in a nested `PlayerAttribute`.
         QuantityRef::LifeLost {
+            player: _,
             window: TurnWindow::ThisTurn,
-            ..
         } => ("LifeLostThisTurn", Handled),
         QuantityRef::LifeLost {
+            player: _,
             window: TurnWindow::LastTurn,
-            ..
-        } => ("LifeLostLastTurn", Unhandled),
+        } => ("LifeLostLastTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
         QuantityRef::SpellsCast {
             window: TurnWindow::ThisTurn,
@@ -20066,6 +20045,7 @@ mod tests {
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
         }));
+        assert_eq!(analyze_token_coverage(), summary);
     }
 
     #[test]
@@ -23413,6 +23393,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let db = CardDatabase::from_json_str(&export).expect("test export should deserialize");
         let summary = analyze_coverage(&db);
 
+        assert!(summary.token_coverage.is_none());
         assert_eq!(
             summary.coverage_by_set.get("SET_A"),
             Some(&SetCoverageSummary {
@@ -25413,17 +25394,12 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
-    /// C5 (D3 + Change 1). The attr nested in `PlayerCount { PlayerAttribute }`
-    /// is read by `effects::candidate_player_scalar`, which fails closed on
-    /// every spell attr except the unfiltered last-turn count and has no
-    /// last-turn life producer yet. Coverage must classify each such nested
-    /// payload unsupported (at the nested position) and a top-level
-    /// `LifeLost { LastTurn }` unsupported too, while Howler's real attr and the
-    /// this-turn life attr stay supported. Each row is a real Howler face with
-    /// only the condition's attr swapped, so a classifier that stops at the
-    /// outer `PlayerCount` (the pre-D3 blindness) flips every unsupported row.
+    /// C5 (D3): Check coverage at both the top-level quantity and nested
+    /// candidate attr positions. The candidate reader supports both life-loss
+    /// windows, but only the unfiltered last-turn spell count. The unmodified
+    /// Howler face is the positive control for the substituted conditions.
     #[test]
-    fn nested_window_attrs_the_reader_fails_closed_on_are_unsupported() {
+    fn windowed_history_coverage_distinguishes_supported_payloads() {
         let supported_with = |condition: TriggerCondition| {
             let mut face = gatstaf_howler_face();
             face.triggers[0].condition = Some(condition);
@@ -25436,35 +25412,31 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 window,
             })
         };
-        let life_attr = |window: TurnWindow| {
-            existential_over_attr(QuantityRef::LifeLost {
-                player: PlayerScope::ScopedPlayer,
-                window,
-            })
-        };
-        // Reach: the unmodified attr is supported, so every red row below is
-        // red because of its attr and not because the swapped face is broken.
         assert!(supported_with(spell_attr(None, TurnWindow::LastTurn)));
-        assert!(supported_with(life_attr(TurnWindow::ThisTurn)));
+        for window in [TurnWindow::ThisTurn, TurnWindow::LastTurn] {
+            assert!(supported_with(existential_over_attr(
+                QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window,
+                }
+            )));
+            assert!(supported_with(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLost {
+                        player: PlayerScope::Controller,
+                        window,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }));
+        }
         // Nested attrs the per-candidate reader fails closed on.
         assert!(!supported_with(spell_attr(
             Some(TargetFilter::Typed(TypedFilter::creature())),
             TurnWindow::LastTurn
         )));
         assert!(!supported_with(spell_attr(None, TurnWindow::ThisTurn)));
-        assert!(!supported_with(life_attr(TurnWindow::LastTurn)));
-        // Top-level last-turn life: classified unsupported until the life
-        // last-turn grammar lands.
-        assert!(!supported_with(TriggerCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeLost {
-                    player: PlayerScope::Controller,
-                    window: TurnWindow::LastTurn,
-                },
-            },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
-        }));
         // Top-level filtered last-turn spell count: no per-spell data survives.
         assert!(!supported_with(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
