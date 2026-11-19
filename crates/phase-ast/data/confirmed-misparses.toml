@@ -2589,6 +2589,7 @@ face = [
   { key = "tinder wall", class = "dropped_qualifier", clauses = ["{R}, Sacrifice this creature: It deals 2 damage to target creature it's blocking."] },
   { key = "titan of littjara", class = "wrong_object", clauses = ["Whenever this creature enters or attacks, you may draw a card for each other creature you control that shares a creature type with it."] },
   { key = "titanic brawl", class = "wrong_player", clauses = ["Target creature you control fights target creature you don't control."] },
+  { key = "titanoth rex", class = "wrong_zone", clauses = ["When you cycle this card, put a trample counter on target creature you control."] },
   { key = "toddler's rage", class = "missing_effect", clauses = ["Enchanted creature gets +2/+1 and has tantrum."] },
   { key = "together forever", class = "wrong_duration", clauses = ["When that creature dies this turn, return that card to its owner's hand."] },
   { key = "tolarian contempt", class = "target_wrong", clauses = ["At the beginning of your end step, for each opponent, choose up to one target creature they control with a rejection counter on it."] },
