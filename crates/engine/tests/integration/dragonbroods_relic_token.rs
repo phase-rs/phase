@@ -7,7 +7,8 @@
 //!
 //! The creating ability names the token "Reliquary Dragon" and makes it all five colors. The
 //! quoted "When this token enters, ..." is a triggered ability the token has; its target is
-//! chosen when it triggers (CR 603.3d), so the activation itself chooses no target (CR 602.2b).
+//! chosen when that ability is put on the stack (CR 603.3d), so the activation itself chooses
+//! no target (CR 602.2b).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
@@ -65,7 +66,7 @@ fn life(runner: &GameRunner, player: engine::types::player::PlayerId) -> i32 {
 
 /// Activate the Relic's token ability through the real action. Returns the prompt the
 /// activation stopped at (if it asked for a target) and drives the token's enter trigger,
-/// targeting P1 when it triggers.
+/// targeting P1 when the trigger is put on the stack.
 fn activate_and_resolve(runner: &mut GameRunner, relic: ObjectId) -> Vec<String> {
     let mut prompts = Vec::new();
     runner
@@ -112,7 +113,7 @@ fn reliquary_dragon(runner: &GameRunner) -> ObjectId {
 }
 
 /// CR 602.2b + CR 603.3d: the activation chooses no target; the token's enter trigger asks for
-/// its target when it triggers, and deals 3 damage to it. A guard (it passes at the base): the
+/// its target when it is put on the stack, and deals 3 damage to it. A guard (it passes at the base): the
 /// "activation target" the task reported was the scenario harness's `.resolve()` asking for the
 /// token trigger's target, not a slot of the activation itself.
 #[test]
