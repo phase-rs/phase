@@ -29382,140 +29382,136 @@ fn resolve_chain_body(
 
         // Check if the sub_ability has a condition that gates its execution.
         // Casting-time conditions are evaluated against the parent's SpellContext.
-        if let Some(ref condition) = sub.condition {
-            // CR 608.2c: "Instead" overrides are terminal — the Cow swap above either
-            // replaced the parent's effect (condition met) or didn't (condition not met).
-            // When NOT swapped, the base chain (else_ability) runs after the parent's own
-            // effect. This is shared by EVERY "instead" condition kind — additional-cost /
-            // cast-variant / target-keyword gated overrides, and the general
-            // `ConditionInstead` wrapper — because the swap check above (~line 6444)
-            // already treats all four uniformly; the not-swap continuation must too.
-            // Issue #4772 (Too Evil to Stay Dead): "Choose target creature card … with
-            // mana value 4 or less. If this spell was cast using teamwork, instead choose
-            // target creature card in your graveyard. Return the chosen card to the
-            // battlefield." lowers to a base `TargetOnly` clause whose sub is the
-            // teamwork-gated override (`AdditionalCostPaidInstead`), whose own sub is the
-            // trailing `ChangeZone` (`SequentialSibling`, no `else_ability`). Before this
-            // fix, only the `ConditionInstead` arm below had the `sub.sub_ability`
-            // tail-runner fallback, so when teamwork was NOT paid the swap correctly did
-            // not fire but the trailing `ChangeZone` was silently dropped along with the
-            // consumed override node — the spell targeted a card and did nothing.
-            if is_instead_override(sub) {
-                // CR 608.2c: which continuation runs is decided by
-                // `instead_declined_continuation`, the same selector the CR 106.7
-                // could-produce walker matches, so the two cannot drift.
-                match instead_declined_continuation(sub) {
-                    Some(InsteadDeclined::Else(base_chain)) => {
-                        let mut resolved = base_chain.clone();
-                        if should_propagate_parent_targets(ability, &resolved) {
-                            resolved.mirror_targets_from(ability);
-                        }
-                        apply_parent_chain_context(
-                            &mut resolved,
-                            ability,
-                            effect_context_object.as_ref(),
-                            state,
-                        );
-                        // CR 608.2c: only unfinished parent work delays this chain;
-                        // an enclosing caller's prompt does not suspend this instruction.
-                        if progress.is_pending() {
-                            // The shared continuation authority places it relative to
-                            // whatever paused (a draw pair, a direct choice).
-                            if state.resolution_stack.capture_child_boundary() == child_stack_start
-                                && state.active_ability_continuation().is_some()
-                                && state.active_ability_continuation()
-                                    == pending_continuation_before.as_ref()
-                            {
-                                state.park_ability_continuation(PendingContinuation::new(
-                                    Box::new(resolved),
-                                    state,
-                                ));
-                            } else {
-                                append_to_pending_continuation(state, Some(Box::new(resolved)));
-                            }
-                        } else {
-                            progress =
-                                resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
-                        }
+        // CR 608.2c: "Instead" overrides are terminal — the Cow swap above either
+        // replaced the parent's effect (condition met) or didn't (condition not met).
+        // When NOT swapped, the base chain (else_ability) runs after the parent's own
+        // effect. This is shared by EVERY "instead" condition kind — additional-cost /
+        // cast-variant / target-keyword gated overrides, and the general
+        // `ConditionInstead` wrapper — because the swap check above (~line 6444)
+        // already treats all four uniformly; the not-swap continuation must too.
+        // Issue #4772 (Too Evil to Stay Dead): "Choose target creature card … with
+        // mana value 4 or less. If this spell was cast using teamwork, instead choose
+        // target creature card in your graveyard. Return the chosen card to the
+        // battlefield." lowers to a base `TargetOnly` clause whose sub is the
+        // teamwork-gated override (`AdditionalCostPaidInstead`), whose own sub is the
+        // trailing `ChangeZone` (`SequentialSibling`, no `else_ability`). Before this
+        // fix, only the `ConditionInstead` arm below had the `sub.sub_ability`
+        // tail-runner fallback, so when teamwork was NOT paid the swap correctly did
+        // not fire but the trailing `ChangeZone` was silently dropped along with the
+        // consumed override node — the spell targeted a card and did nothing.
+        if is_instead_override(sub) {
+            // CR 608.2c: which continuation runs is decided by
+            // `instead_declined_continuation`, the same selector the CR 106.7
+            // could-produce walker matches, so the two cannot drift.
+            match instead_declined_continuation(sub) {
+                Some(InsteadDeclined::Else(base_chain)) => {
+                    let mut resolved = base_chain.clone();
+                    if should_propagate_parent_targets(ability, &resolved) {
+                        resolved.mirror_targets_from(ability);
                     }
-                    Some(InsteadDeclined::Tail(tail)) => {
-                        let mut resolved = tail.clone();
-                        // CR 120.1 + CR 115.10a + CR 601.2c: a one-sided-fight
-                        // `DealDamage { damage_source: Target }` tail ("It deals damage equal
-                        // to its power …") names the boosted creature (the base's chosen
-                        // object) as the SOURCE; the tail carries only its fresh recipient
-                        // slot, so prepend the base's object => targets = [source(own),
-                        // recipient(foe)] — the exact contract the swap path's one-sided-fight
-                        // block builds (CR 208.1: power read live at resolution). Otherwise
-                        // (a target-less anaphoric tail — "Untap that creature." / "Draw a
-                        // card.") inherit the base's targets, exactly as the else path does
-                        // above.
-                        //
-                        // CR 608.2b: classified by the SAME helper the ordinary
-                        // chain descent uses, so a subject pruned as an illegal
-                        // target is RECORDED rather than silently dropped.
-                        // Open-coding the prepend here previously let the tail's
-                        // own recipient slide into the subject slot and deal its
-                        // own power to itself — Throw from the Saddle with its
-                        // rider removed in response killed the foe it targeted.
-                        //
-                        // No `!tail.targets.is_empty()` gate: a FILTER-BASED
-                        // batch tail (`DamageAll`, whose recipients come from a
-                        // filter rather than a slot) carries no targets of its
-                        // own, and gating on that would route it past the
-                        // classifier to ordinary context propagation — which
-                        // clears the binding and leaves the clause falling back
-                        // to the spell as its source. The classifier itself
-                        // decides what such a tail needs: `None` while the
-                        // parent still holds its subject (ordinary propagation
-                        // supplies it, below), `Illegal` once the parent lost it.
-                        match one_sided_fight_subject_binding(ability, tail) {
-                            Some(subject) => {
-                                resolved = prepare_one_sided_fight_child(
-                                    subject,
-                                    ability,
-                                    tail,
-                                    effect_context_object.as_ref(),
-                                    state,
-                                );
-                            }
-                            None => {
-                                if should_propagate_parent_targets(ability, &resolved) {
-                                    resolved.mirror_targets_from(ability);
-                                }
-                                apply_parent_chain_context(
-                                    &mut resolved,
-                                    ability,
-                                    effect_context_object.as_ref(),
-                                    state,
-                                );
-                            }
-                        }
-                        if progress.is_pending() {
-                            // CR 608.2c: the tail is a later instruction of the
-                            // parent; the shared continuation authority keeps it
-                            // outside a paused replacement draw pair.
-                            if state.resolution_stack.capture_child_boundary() == child_stack_start
-                                && state.active_ability_continuation().is_some()
-                                && state.active_ability_continuation()
-                                    == pending_continuation_before.as_ref()
-                            {
-                                state.park_ability_continuation(PendingContinuation::new(
-                                    Box::new(resolved),
-                                    state,
-                                ));
-                            } else {
-                                append_to_pending_continuation(state, Some(Box::new(resolved)));
-                            }
+                    apply_parent_chain_context(
+                        &mut resolved,
+                        ability,
+                        effect_context_object.as_ref(),
+                        state,
+                    );
+                    // CR 608.2c: only unfinished parent work delays this chain;
+                    // an enclosing caller's prompt does not suspend this instruction.
+                    if progress.is_pending() {
+                        // The shared continuation authority places it relative to
+                        // whatever paused (a draw pair, a direct choice).
+                        if state.resolution_stack.capture_child_boundary() == child_stack_start
+                            && state.active_ability_continuation().is_some()
+                            && state.active_ability_continuation()
+                                == pending_continuation_before.as_ref()
+                        {
+                            state.park_ability_continuation(PendingContinuation::new(
+                                Box::new(resolved),
+                                state,
+                            ));
                         } else {
-                            progress =
-                                resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
+                            append_to_pending_continuation(state, Some(Box::new(resolved)));
                         }
+                    } else {
+                        progress = resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
                     }
-                    None => {}
                 }
-                return Ok(progress);
+                Some(InsteadDeclined::Tail(tail)) => {
+                    let mut resolved = tail.clone();
+                    // CR 120.1 + CR 115.10a + CR 601.2c: a one-sided-fight
+                    // `DealDamage { damage_source: Target }` tail ("It deals damage equal
+                    // to its power …") names the boosted creature (the base's chosen
+                    // object) as the SOURCE; the tail carries only its fresh recipient
+                    // slot, so prepend the base's object => targets = [source(own),
+                    // recipient(foe)] — the exact contract the swap path's one-sided-fight
+                    // block builds (CR 208.1: power read live at resolution). Otherwise
+                    // (a target-less anaphoric tail — "Untap that creature." / "Draw a
+                    // card.") inherit the base's targets, exactly as the else path does
+                    // above.
+                    //
+                    // CR 608.2b: classified by the SAME helper the ordinary
+                    // chain descent uses, so a subject pruned as an illegal
+                    // target is RECORDED rather than silently dropped.
+                    // Open-coding the prepend here previously let the tail's
+                    // own recipient slide into the subject slot and deal its
+                    // own power to itself — Throw from the Saddle with its
+                    // rider removed in response killed the foe it targeted.
+                    //
+                    // No `!tail.targets.is_empty()` gate: a FILTER-BASED
+                    // batch tail (`DamageAll`, whose recipients come from a
+                    // filter rather than a slot) carries no targets of its
+                    // own, and gating on that would route it past the
+                    // classifier to ordinary context propagation — which
+                    // clears the binding and leaves the clause falling back
+                    // to the spell as its source. The classifier itself
+                    // decides what such a tail needs: `None` while the
+                    // parent still holds its subject (ordinary propagation
+                    // supplies it, below), `Illegal` once the parent lost it.
+                    match one_sided_fight_subject_binding(ability, tail) {
+                        Some(subject) => {
+                            resolved = prepare_one_sided_fight_child(
+                                subject,
+                                ability,
+                                tail,
+                                effect_context_object.as_ref(),
+                                state,
+                            );
+                        }
+                        None => {
+                            if should_propagate_parent_targets(ability, &resolved) {
+                                resolved.mirror_targets_from(ability);
+                            }
+                            apply_parent_chain_context(
+                                &mut resolved,
+                                ability,
+                                effect_context_object.as_ref(),
+                                state,
+                            );
+                        }
+                    }
+                    if progress.is_pending() {
+                        // CR 608.2c: the tail is a later instruction of the
+                        // parent; the shared continuation authority keeps it
+                        // outside a paused replacement draw pair.
+                        if state.resolution_stack.capture_child_boundary() == child_stack_start
+                            && state.active_ability_continuation().is_some()
+                            && state.active_ability_continuation()
+                                == pending_continuation_before.as_ref()
+                        {
+                            state.park_ability_continuation(PendingContinuation::new(
+                                Box::new(resolved),
+                                state,
+                            ));
+                        } else {
+                            append_to_pending_continuation(state, Some(Box::new(resolved)));
+                        }
+                    } else {
+                        progress = resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
+                    }
+                }
+                None => {}
             }
+            return Ok(progress);
         }
         // If the effect resolver already set up a pending_continuation without
         // opening a choice (e.g. clash injects modified context for

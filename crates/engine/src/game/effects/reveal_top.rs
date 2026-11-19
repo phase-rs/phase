@@ -86,14 +86,14 @@ pub(crate) enum RevealTopSelection {
     /// CR 701.20a + CR 601.2c: two or more target players each reveal their
     /// own top cards, in target order. A player whose library is empty reveals
     /// nothing and has no entry.
-    EachTargetPlayer(Vec<(PlayerId, Vec<ObjectId>)>),
+    EachTargeted(Vec<(PlayerId, Vec<ObjectId>)>),
     /// CR 701.20a: one player's top cards — empty when that library is.
-    OnePlayer {
+    One {
         player: PlayerId,
         cards: Vec<ObjectId>,
     },
     /// CR 608.2b: the player reference names no one, so nothing is revealed.
-    NoPlayer,
+    Nobody,
 }
 
 impl RevealTopSelection {
@@ -101,11 +101,11 @@ impl RevealTopSelection {
     /// `last_revealed_ids`.
     pub(crate) fn into_cards(self) -> Vec<ObjectId> {
         match self {
-            RevealTopSelection::EachTargetPlayer(reveals) => {
+            RevealTopSelection::EachTargeted(reveals) => {
                 reveals.into_iter().flat_map(|(_, cards)| cards).collect()
             }
-            RevealTopSelection::OnePlayer { cards, .. } => cards,
-            RevealTopSelection::NoPlayer => Vec::new(),
+            RevealTopSelection::One { cards, .. } => cards,
+            RevealTopSelection::Nobody => Vec::new(),
         }
     }
 }
@@ -137,11 +137,11 @@ pub(crate) fn revealed_cards(
                     Some((pid, library.iter().take(count).copied().collect()))
                 })
                 .collect();
-            RevealTopSelection::EachTargetPlayer(reveals)
+            RevealTopSelection::EachTargeted(reveals)
         }
-        RevealSubjects::One(None) => RevealTopSelection::NoPlayer,
+        RevealSubjects::One(None) => RevealTopSelection::Nobody,
         // Take the top `count` cards (library[0] = top, per zones.rs convention).
-        RevealSubjects::One(Some(target_player)) => RevealTopSelection::OnePlayer {
+        RevealSubjects::One(Some(target_player)) => RevealTopSelection::One {
             player: target_player,
             cards: state
                 .library_of(target_player)
@@ -171,7 +171,7 @@ pub fn resolve(
     state.last_parent_target_missing_reason = None;
 
     let (target_player, revealed_ids) = match selection {
-        RevealTopSelection::EachTargetPlayer(reveals) => {
+        RevealTopSelection::EachTargeted(reveals) => {
             let mut accumulated: Vec<ObjectId> = Vec::new();
             for (pid, revealed_ids) in reveals {
                 // CR 701.20b: Revealing a card doesn't cause it to leave its zone.
@@ -200,12 +200,12 @@ pub fn resolve(
             });
             return Ok(());
         }
-        RevealTopSelection::NoPlayer => {
+        RevealTopSelection::Nobody => {
             super::publish_reveal_result(state, Vec::new());
             state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
             return Ok(());
         }
-        RevealTopSelection::OnePlayer { player, cards } => (player, cards),
+        RevealTopSelection::One { player, cards } => (player, cards),
     };
 
     if state.library_of(target_player).is_empty() {
