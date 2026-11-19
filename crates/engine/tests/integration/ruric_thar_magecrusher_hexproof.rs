@@ -970,16 +970,17 @@ fn assert_poison_ordering_prompt(runner: &GameRunner, doubler: ObjectId, halver:
         .expect("the ordering choice is pending");
     assert!(
         matches!(
-            pending.proposed,
-            ProposedEvent::AddCounter {
-                placement: CounterPlacement::Player {
-                    actor,
-                    player_id,
-                    counter_kind: PlayerCounterKind::Poison,
-                },
-                ..
-            } if actor == P0 && player_id == P1
-        ),
+                    pending.proposed,
+                    ProposedEvent::AddCounter {
+                        placement: CounterPlacement::Player {
+                            actor,
+                            player_id,
+                            counter_kind: PlayerCounterKind::Poison,
+        ..
+                        },
+                        ..
+                    } if actor == P0 && player_id == P1
+                ),
         "the paused event must be P0 giving P1 poison counters, got {:?}",
         pending.proposed
     );
@@ -2423,6 +2424,7 @@ fn poison_prompt(runner: &GameRunner) -> (PlayerId, PlayerId, PlayerId, u32, usi
                 actor,
                 player_id,
                 counter_kind: PlayerCounterKind::Poison,
+                ..
             },
         count,
         ..
@@ -2656,6 +2658,7 @@ fn horde_loss_then_toxic(toxic: bool, pair: bool) -> (usize, usize, usize, u32, 
                                 actor,
                                 player_id,
                                 counter_kind: PlayerCounterKind::Poison,
+                                ..
                             },
                         count,
                         ..

@@ -23,7 +23,8 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedDoubleFaces, CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopiedDoubleFaces, CopyTokenSpec, CounterCause, EtbTapState, ProposedEvent,
+    TokenCharacteristics,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -621,6 +622,24 @@ pub(crate) fn drain_pending_copy_token_resolution(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 614.12a + CR 608.2c: retiring a member's as-enters roll can
+    // expose its copy owner before the priority boundary commits that liminal
+    // member. The owner still owes that entry and its batch, so neither its
+    // next batch nor its completed "those tokens" result may run yet. The
+    // entry's recorded producer distinguishes it from a nested copy owner.
+    let pending_entry_producer = match state.pending_liminal_entry_resume.as_ref() {
+        Some(PendingLiminalEntryResume::Token { source_id, .. }) => state
+            .liminal_entries
+            .get(source_id)
+            .map(|entry| entry.source_id),
+        Some(PendingLiminalEntryResume::Meld { .. }) | None => None,
+    };
+    if state
+        .active_copy_token()
+        .is_some_and(|owner| Some(owner.source_id) == pending_entry_producer)
+    {
+        return;
+    }
     // CR 603.6a + CR 603.3b: the inline liminal terminal also enters here.
     // Claim its entries before taking the owner or resuming a later instruction.
     let copy_owner = state.active_copy_token().cloned();
@@ -644,6 +663,16 @@ pub(crate) fn drain_pending_copy_token_resolution(
 }
 
 fn drain_copy_token_resolution(
+    state: &mut GameState,
+    pending: PendingCopyTokenResolution,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::pre_entry_view::with_copy_owner_board(state, |state| {
+        drain_copy_token_resolution_on_board(state, pending, events);
+    });
+}
+
+fn drain_copy_token_resolution_on_board(
     state: &mut GameState,
     mut pending: PendingCopyTokenResolution,
     events: &mut Vec<GameEvent>,
@@ -860,33 +889,34 @@ pub(crate) fn copy_token_co_entrants(
                 crate::types::resolution::ResolutionFrame::CopyToken(owner) => {
                     Some(owner.created_ids.as_slice())
                 }
-                crate::types::resolution::ResolutionFrame::AbilityContinuation(_)
-                | crate::types::resolution::ResolutionFrame::RepeatFor(_)
-                | crate::types::resolution::ResolutionFrame::RepeatUntil(_)
-                | crate::types::resolution::ResolutionFrame::RepeatedOptionalPayment(_)
-                | crate::types::resolution::ResolutionFrame::ChangeZone(_)
-                | crate::types::resolution::ResolutionFrame::BatchDelivery(_)
-                | crate::types::resolution::ResolutionFrame::CounterMoves(_)
-                | crate::types::resolution::ResolutionFrame::CounterRemovals(_)
-                | crate::types::resolution::ResolutionFrame::CounterAdditions(_)
-                | crate::types::resolution::ResolutionFrame::DebugCardEntries(_)
-                | crate::types::resolution::ResolutionFrame::EachPlayerCopyChosen(_)
-                | crate::types::resolution::ResolutionFrame::ChooseOneOf(_)
-                | crate::types::resolution::ResolutionFrame::VoteBallot(_)
-                | crate::types::resolution::ResolutionFrame::PerPlayerZoneChoice(_)
-                | crate::types::resolution::ResolutionFrame::PerCategoryZoneChoice(_)
-                | crate::types::resolution::ResolutionFrame::OptionalEffect(_)
-                | crate::types::resolution::ResolutionFrame::CoinFlip(_)
-                | crate::types::resolution::ResolutionFrame::DieRoll(_)
-                | crate::types::resolution::ResolutionFrame::Proliferate(_)
-                | crate::types::resolution::ResolutionFrame::MultiDraw(_)
-                | crate::types::resolution::ResolutionFrame::Discard(_)
-                | crate::types::resolution::ResolutionFrame::ConniveReentry(_)
-                | crate::types::resolution::ResolutionFrame::LifeTotalAssignment(_)
-                | crate::types::resolution::ResolutionFrame::SpellResolution(_)
-                | crate::types::resolution::ResolutionFrame::MutateMerge(_)
-                | crate::types::resolution::ResolutionFrame::CipherEncode(_)
-                | crate::types::resolution::ResolutionFrame::PostReplacement(_) => None,
+                crate::types::resolution::ResolutionFrame::AbilityContinuation(..)
+                | crate::types::resolution::ResolutionFrame::RepeatFor(..)
+                | crate::types::resolution::ResolutionFrame::RepeatUntil(..)
+                | crate::types::resolution::ResolutionFrame::RepeatedOptionalPayment(..)
+                | crate::types::resolution::ResolutionFrame::ChangeZone(..)
+                | crate::types::resolution::ResolutionFrame::BatchDelivery(..)
+                | crate::types::resolution::ResolutionFrame::CounterMoves(..)
+                | crate::types::resolution::ResolutionFrame::CounterRemovals(..)
+                | crate::types::resolution::ResolutionFrame::CounterAdditions(..)
+                | crate::types::resolution::ResolutionFrame::DebugCardEntries(..)
+                | crate::types::resolution::ResolutionFrame::EachPlayerCopyChosen(..)
+                | crate::types::resolution::ResolutionFrame::ChooseOneOf(..)
+                | crate::types::resolution::ResolutionFrame::VoteBallot(..)
+                | crate::types::resolution::ResolutionFrame::PerPlayerZoneChoice(..)
+                | crate::types::resolution::ResolutionFrame::PerCategoryZoneChoice(..)
+                | crate::types::resolution::ResolutionFrame::OptionalEffect(..)
+                | crate::types::resolution::ResolutionFrame::CoinFlip(..)
+                | crate::types::resolution::ResolutionFrame::DieRoll(..)
+                | crate::types::resolution::ResolutionFrame::Proliferate(..)
+                | crate::types::resolution::ResolutionFrame::MultiDraw(..)
+                | crate::types::resolution::ResolutionFrame::Discard(..)
+                | crate::types::resolution::ResolutionFrame::ConniveReentry(..)
+                | crate::types::resolution::ResolutionFrame::LifeTotalAssignment(..)
+                | crate::types::resolution::ResolutionFrame::SpellResolution(..)
+                | crate::types::resolution::ResolutionFrame::MutateMerge(..)
+                | crate::types::resolution::ResolutionFrame::CipherEncode(..)
+                | crate::types::resolution::ResolutionFrame::EntryAttackSeat(..)
+                | crate::types::resolution::ResolutionFrame::PostReplacement(..) => None,
             })
             .last()
             .unwrap_or_default(),
@@ -895,6 +925,8 @@ pub(crate) fn copy_token_co_entrants(
     let mut seen: HashSet<ObjectId> = HashSet::with_capacity(capacity);
     let mut co_entrants: Vec<ObjectId> = Vec::with_capacity(capacity);
     for id in resolution.iter().chain(batch_prefix) {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_copy_entrant_membership_probe();
         if *id != entrant && seen.insert(*id) {
             co_entrants.push(*id);
         }
@@ -1051,6 +1083,31 @@ pub(crate) fn apply_copy_token_after_replacement(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
+    state: &mut GameState,
+    token_owner: crate::types::player::PlayerId,
+    copy: CopyTokenSpec,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
+    final_count: u32,
+    initial_created_ids: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> CopyTokenApplyStatus {
+    crate::game::pre_entry_view::with_copy_batch_board(state, |state| {
+        apply_copy_token_batch_on_board(
+            state,
+            token_owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            final_count,
+            initial_created_ids,
+            events,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_copy_token_batch_on_board(
     state: &mut GameState,
     token_owner: crate::types::player::PlayerId,
     copy: CopyTokenSpec,
@@ -1449,6 +1506,39 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // controller) leaves the copied counters off; the loyalty and the creating
         // effect's own counters are not gated (see their split above). Same order
         // as the routing list, so counter replacements see the same sequence.
+        // CR 614.12 + CR 707.5: use the same resident-effect projection for a
+        // copied roll as for the copied counters on this placed-token route.
+        // The batch's shared pre-entry board serves this read, as it does the
+        // counters below; it is only projected when the body has a roll at all.
+        let rolls = entrant_body.as_ref().is_some_and(|body| {
+            let rollers: Vec<_> = body
+                .replacement_definitions
+                .iter_all()
+                .filter(|def| crate::game::replacement::replacement_rolls_as_it_enters(def))
+                .collect();
+            if rollers.is_empty() {
+                return false;
+            }
+            let mut absent = copy_token_co_entrants(state, token_id, &created_ids);
+            absent.push(token_id);
+            let board = entry_board.get_or_insert_with(|| {
+                crate::game::filter::TokenEntryBatchBoard::new(state, &absent)
+            });
+            board.refresh(state, &absent);
+            let projection =
+                crate::game::filter::BattlefieldEntrantProjection::token_on_pre_entry_board(
+                    std::borrow::Cow::Borrowed(board.board()),
+                    body,
+                );
+            rollers.into_iter().any(|def| {
+                projection
+                    .as_ref()
+                    .is_none_or(|projection| projection.retains_replacement(def))
+            })
+        });
+        if rolls {
+            super::record_runtime_unimplemented(state, token_id, "copied_as_enters_roll");
+        }
         let token_etb_counters: Vec<(crate::types::counter::CounterType, u32)> = {
             let projection = entrant_body
                 .as_ref()
@@ -1851,6 +1941,9 @@ fn finish_non_liminal_copy_token_entry(
                 token_id,
                 counter_type.clone(),
                 *counter_count,
+                // CR 614.16: entering-with-counters placements are
+                // replacement-driven entry modifications.
+                CounterCause::ReplacementOrPrevention,
                 events,
             )
         {
@@ -1864,6 +1957,9 @@ fn finish_non_liminal_copy_token_entry(
                         object_id: token_id,
                         counter_type: counter_type.clone(),
                         count: *count,
+                        // CR 614.16: entering-with-counters placements are
+                        // replacement-driven entry modifications.
+                        cause: CounterCause::ReplacementOrPrevention,
                     }
                 })
                 .collect();
@@ -2370,6 +2466,9 @@ fn apply_token_modifications(
                     token_id,
                     counter_type.clone(),
                     n,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    CounterCause::ReplacementOrPrevention,
                     events,
                 ) {
                     super::counters::stash_pending_counter_post_actions(

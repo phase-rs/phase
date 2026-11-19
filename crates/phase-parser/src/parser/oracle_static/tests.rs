@@ -8,6 +8,7 @@ use super::*;
 use crate::parser::oracle_keyword::{
     classify_cant_be_targeted, is_source_qualified_cant_be_targeted, CantBeTargetedScope,
 };
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     BlockPairDirection, CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef,
@@ -6819,9 +6820,10 @@ fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
         lhs:
             QuantityExpr::Ref {
                 qty:
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(TargetFilter::Or { filters }),
+                        window: TurnWindow::ThisTurn,
                     },
             },
         comparator: Comparator::GE,
@@ -8362,7 +8364,7 @@ fn static_cost_floor_canonical_form_no_condition() {
 /// "first spell each turn" gate, so the reduction applied to every spell, every
 /// time. Asserts all three load-bearing axes are present:
 ///   1. `spell_filter` carries `HasXInManaCost` (CR 107.3) — only {X}-spells.
-///   2. `condition` gates on `SpellsCastThisTurn(HasXInManaCost) == 0` — only
+///   2. `condition` gates on `SpellsCast(HasXInManaCost) == 0` — only
 ///      the FIRST such spell each turn. "each turn" carries NO `DuringYourTurn`,
 ///      so the first {X}-spell qualifies on any player's turn.
 ///   3. `dynamic_count` is `CountersOn { Source, Plus1Plus1 }` — reduces by K
@@ -8416,16 +8418,15 @@ fn static_zimone_first_x_spell_each_turn_reduces_per_plus1_counter() {
             &condition,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
-                        filter: Some(inner),
-                    },
+                        filter: Some(inner), window: TurnWindow::ThisTurn },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
             } if matches!(inner, TargetFilter::Typed(itf) if itf.properties.contains(&FilterProp::HasXInManaCost))
         ),
-        "expected SpellsCastThisTurn(HasXInManaCost) == 0 with no DuringYourTurn, got {condition:?}"
+        "expected SpellsCast(HasXInManaCost) == 0 with no DuringYourTurn, got {condition:?}"
     );
 }
 
@@ -8474,7 +8475,7 @@ fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
             condition,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { scope: CountScope::Controller, filter: Some(inner) },
+                    qty: QuantityRef::SpellsCast { scope: CountScope::Controller, filter: Some(inner), window: TurnWindow::ThisTurn },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -8520,10 +8521,9 @@ fn static_first_qualified_spell_costs_more_handles_each_opponent_casts() {
         &condition,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
-                    filter: Some(inner),
-                },
+                    filter: Some(inner), window: TurnWindow::ThisTurn },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -8562,10 +8562,9 @@ fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
         &condition,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
-                    filter: Some(inner),
-                },
+                    filter: Some(inner), window: TurnWindow::ThisTurn },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -8606,10 +8605,9 @@ fn static_first_kicked_spell_costs_less() {
         &condition,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
-                    filter: Some(inner),
-                },
+                    filter: Some(inner), window: TurnWindow::ThisTurn },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -28275,7 +28273,7 @@ fn static_spells_from_exile_have_convoke() {
 // has [keyword]" once-per-turn keyword grants (cluster-04). ---
 
 /// CR 611.2f: assert a `CastWithKeyword` static's condition is the
-/// `SpellsCastThisTurn(filter) == 0` first-spell gate, optionally wrapped in an
+/// `SpellsCast(filter) == 0` first-spell gate, optionally wrapped in an
 /// `And` with `DuringYourTurn`. Returns the inner spell filter for further
 /// assertions.
 fn assert_first_spell_gate(
@@ -28302,16 +28300,17 @@ fn assert_first_spell_gate(
         lhs:
             QuantityExpr::Ref {
                 qty:
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(inner),
+                        window: TurnWindow::ThisTurn,
                     },
             },
         comparator: Comparator::EQ,
         rhs: QuantityExpr::Fixed { value: 0 },
     } = gate
     else {
-        panic!("expected SpellsCastThisTurn(filter) == 0 gate, got {gate:?}");
+        panic!("expected SpellsCast(filter) == 0 gate, got {gate:?}");
     };
     inner
 }
@@ -28530,7 +28529,7 @@ fn nth_qualified_spell_filter_bare_historic_supported() {
 fn nth_qualified_spell_filter_second_spell_gates_on_one_prior_cast() {
     // CR 601.2f: "the second spell you cast each turn costs {N} less" must NOT
     // collapse to a filterless, conditionless reducer (which would cheapen every
-    // spell). The ordinal threads to `SpellsCastThisTurn == ordinal - 1`, so the
+    // spell). The ordinal threads to `SpellsCast == ordinal - 1`, so the
     // reduction applies only while exactly one qualifying spell has already been
     // cast this turn (the spell now being cast is the second).
     let result =
@@ -28562,8 +28561,9 @@ fn nth_qualified_spell_filter_second_spell_gates_on_one_prior_cast() {
     assert!(matches!(
         lhs,
         QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
+                window: TurnWindow::ThisTurn,
                 ..
             },
         }
@@ -28826,10 +28826,11 @@ fn static_spells_from_hand_with_dynamic_mana_value_have_cascade() {
                 tf.properties.contains(&FilterProp::Cmc {
                     comparator: Comparator::LE,
                     value: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn {
+                        qty: QuantityRef::LifeLost {
                             player: PlayerScope::Opponent {
                                 aggregate: AggregateFunction::Sum,
                             },
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                 }),
@@ -36474,8 +36475,9 @@ fn cost_mod_color_and_or_disjunction_builds_anyof_filter() {
     assert_eq!(amount, ManaCost::generic(1));
     assert_eq!(
         dynamic_count,
-        Some(QuantityRef::LifeLostThisTurn {
+        Some(QuantityRef::LifeLost {
             player: PlayerScope::Controller,
+            window: TurnWindow::ThisTurn,
         }),
     );
 
@@ -36549,13 +36551,13 @@ fn rowan_scion_of_war_activated_ability_parses_clean() {
         );
     };
     let StaticMode::ModifyCost {
-        dynamic_count: Some(QuantityRef::LifeLostThisTurn { .. }),
+        dynamic_count: Some(QuantityRef::LifeLost { .. }),
         spell_filter: Some(TF::Typed(tf)),
         ..
     } = &definition.mode
     else {
         panic!(
-            "expected ModifyCost keyed to LifeLostThisTurn, got {:?}",
+            "expected ModifyCost keyed to LifeLost, got {:?}",
             definition.mode
         );
     };

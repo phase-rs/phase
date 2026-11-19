@@ -1,7 +1,8 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{
     apply_damage_after_replacement, pre_replacement_damage_gate,
-    settle_parked_player_damage_results, DamageContext, DamagePostLossDrainOutcome, DamageResult,
+    settle_parked_player_damage_results, wither_infect_post_counter_core, DamageContext,
+    DamagePostLossDrainOutcome, DamageResult, PostCounterFlow,
 };
 use crate::game::effects::life::{ReplacementDeferred, StagedLifeGain};
 use crate::game::game_object::GameObject;
@@ -288,6 +289,15 @@ fn finish_combat_damage_sub_step(
     damage_events: &[GameEvent],
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    // CR 104.1: a rider ended the game inside the batch ("A game ends immediately when a player
+    // wins"), so nothing after the batch happens: no sub-step bookkeeping, no state-based
+    // actions, no ability put on the stack, and no later combat damage step. A rider's drain
+    // restored the caller's wait over the batch's `GameOver`, so restore it from `game_end`.
+    if state.game_end.is_some() {
+        crate::game::elimination::ensure_game_over_if_terminal(state, events);
+        return pending_combat_damage_waiting(state);
+    }
+
     // CR 500.6: "at the beginning of that step" abilities trigger when the step
     // begins. `process_combat_damage_triggers` synthesizes the PhaseChanged
     // marker for that batch, so the FIRST-STRIKE sub-step always carries it, and
@@ -1769,6 +1779,15 @@ enum PhaseCRunOutcome {
     PausedOnGain {
         index: usize,
     },
+    /// CR 120.3d + CR 616.1: leg `index` paused on its `-1/-1` counter
+    /// replacements (a combat-flagged counter stash is parked). Same folding
+    /// contract as `PausedOnReplacement`: the leg's lifelink share and bookkeeping
+    /// are already folded into the accumulators; legs after `index` never
+    /// applied. The resume runs the core ONLY (no lifelink — it drains via
+    /// the folded tail).
+    PausedOnCounter {
+        index: usize,
+    },
 }
 
 /// CR 510.2 + CR 616.1: outcome of completing a parked Phase C tail.
@@ -2049,8 +2068,15 @@ fn stage_combat_lifelink_gain(
         // `mark_phase_transition_awaiting_post_replacement` only for the
         // substitution variant), so the divergence here is deliberate, not an
         // oversight.
+        //
+        // CR 104.1: a substitute that ended the game (Laboratory Maniac's win)
+        // left `GameOver`; the earlier wait is never restored over it.
         Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
-            state.waiting_for = waiting_before;
+            if state.game_end.is_some() {
+                crate::game::elimination::ensure_game_over_if_terminal(state, batch_events);
+            } else {
+                state.waiting_for = waiting_before;
+            }
             GainStageOutcome::Done
         }
     }
@@ -2157,11 +2183,12 @@ fn planned_gain_queue(
 /// or infect result pauses with results still owed (a combat-flagged stash
 /// that was absent before this leg) or whose poison counters pause with
 /// nothing owed (no stash) folds eagerly and parks the tail so the prompt
-/// surfaces; `None` survivors apply as 0 with
-/// bookkeeping, exactly as the never-paused path would. Before a leg that
-/// damages a player, the lifelink gains whose choices come first are staged
-/// (`stage_earlier_apnap_lifelink`), which can clear `lifelink_controller`
-/// markers on `legs[index..]`.
+/// surfaces; a leg whose `-1/-1` counter placement pauses (a combat-flagged
+/// counter stash that was absent before this leg) folds eagerly and parks the
+/// same way; `None` survivors apply as 0 with bookkeeping, exactly as the
+/// never-paused path would. Before a leg that damages a player, the lifelink
+/// gains whose choices come first are staged (`stage_earlier_apnap_lifelink`),
+/// which can clear `lifelink_controller` markers on `legs[index..]`.
 fn run_phase_c_legs(
     state: &mut GameState,
     legs: &mut [PendingCombatLeg],
@@ -2187,7 +2214,8 @@ fn run_phase_c_legs(
                 // parked (a loss pause, or an infect pause that owes toxic).
                 // Both fold `stashed.actual_amount`, which equals the
                 // survivor's `dealt_amount` (players have no excess).
-                let had_stash = state.pending_damage_post_loss.is_some();
+                let had_loss_stash = state.pending_damage_post_loss.is_some();
+                let had_counter_stash = state.pending_damage_post_counter.is_some();
                 // CR 120.4b: the post-replacement amount this leg deals, read
                 // before the apply consumes the event (a counter pause leaves
                 // no stash to read it from).
@@ -2200,7 +2228,7 @@ fn run_phase_c_legs(
                     DamageResult::Applied(amt) => amt,
                     DamageResult::NeedsChoice => {
                         let mut loss_pause_amount = None;
-                        if !had_stash {
+                        if !had_loss_stash {
                             if let Some(stashed) = state.pending_damage_post_loss.as_ref() {
                                 if stashed.is_combat {
                                     loss_pause_amount = Some(stashed.actual_amount);
@@ -2210,6 +2238,19 @@ fn run_phase_c_legs(
                         if let Some(amt) = loss_pause_amount {
                             fold_combat_leg_amount(state, leg, amt, accums);
                             return PhaseCRunOutcome::PausedOnReplacement { index };
+                        }
+                        // CR 120.3d + CR 616.1: a `-1/-1` counter placement paused —
+                        // same folding contract as the loss pause: fold eagerly, park
+                        // the tail; the resume runs the core ONLY (lifelink arrives
+                        // via the folded tail).
+                        if !had_counter_stash {
+                            if let Some(stashed) = state.pending_damage_post_counter.as_ref() {
+                                if stashed.is_combat {
+                                    let amt = stashed.actual_amount;
+                                    fold_combat_leg_amount(state, leg, amt, accums);
+                                    return PhaseCRunOutcome::PausedOnCounter { index };
+                                }
+                            }
                         }
                         // CR 120.4c + CR 616.1: no fresh stash means the leg
                         // paused on its poison-counter result with nothing
@@ -2278,14 +2319,13 @@ fn build_combat_damage_to_players_aggregate(
 }
 
 /// CR 510.2 + CR 616.1: complete a parked Phase C tail — settle the paused
-/// leg's parked results (its toxic poison, then its deferred `DamageDealt`
-/// event + CR 120.1 record when still owed), apply the remaining legs, then
-/// build the aggregate and the per-source lifelink gains onto the record.
-/// Only called once the paused result fully settles (the wrapper resumes
-/// combat solely on a Priority return, Execute or Prevented). A parked result
-/// that pauses again (the toxic poison meeting its own CR 616.1 choice)
-/// re-parks the remnant UNCHANGED: its `remaining` legs have not run, and the
-/// paused leg's amounts folded eagerly at park time.
+/// leg's parked results (a loss stash's toxic poison and deferred `DamageDealt`
+/// event + CR 120.1 record when still owed, or a counter stash's deferred
+/// remainder), apply the remaining legs, then build the aggregate and the
+/// per-source lifelink gains onto the record. Only called once the paused
+/// result fully settles. A parked result that pauses again re-parks the
+/// remnant UNCHANGED: its `remaining` legs have not run, and the paused leg's
+/// amounts folded eagerly at park time.
 fn complete_combat_phase_c_remnant(
     state: &mut GameState,
     remnant: PendingCombatPhaseCRemnant,
@@ -2310,6 +2350,31 @@ fn complete_combat_phase_c_remnant(
                 remnant,
                 on_gain: false,
             };
+        }
+    }
+    // CR 120.3d + CR 616.1: the same contract for a counter-paused leg — run
+    // the core ONLY (F1 split: lifelink already folded at park time). A core
+    // pause hands ownership to the redirect leg's own stash, exactly as the
+    // loss path leaves a re-parked loss stash for the code above on re-entry.
+    if let Some(stashed) = state
+        .pending_damage_post_counter
+        .take_if(|stashed| stashed.is_combat)
+    {
+        let ctx = DamageContext::from(stashed.ctx);
+        // CR 120.10: the remnant passes the STASHED pre-damage values — never
+        // a live reread (loyalty/defense removal already ran before the park).
+        match wither_infect_post_counter_core(
+            state,
+            &ctx,
+            &stashed.target,
+            stashed.actual_amount,
+            stashed.loyalty_before,
+            stashed.defense_before,
+            true,
+            &mut record.batch_events,
+        ) {
+            PostCounterFlow::Paused => {}
+            PostCounterFlow::Continue { .. } => {}
         }
     }
     let PendingCombatPhaseCRemnant {
@@ -2347,6 +2412,18 @@ fn complete_combat_phase_c_remnant(
             on_gain: true,
         },
         PhaseCRunOutcome::PausedOnReplacement { index } => RemnantOutcome::Repaused {
+            remnant: PendingCombatPhaseCRemnant {
+                remaining: remaining[index + 1..].to_vec(),
+                lifelink_by_source: accums.lifelink_by_source,
+                combat_damage_to_players: accums.combat_damage_to_players,
+                source_incarnations: accums.source_incarnations,
+                staged_gains: accums.staged_gains,
+            },
+            on_gain: false,
+        },
+        // CR 120.3d + CR 616.1: same re-park shape as the loss pause — the
+        // paused leg rides its combat-flagged counter stash.
+        PhaseCRunOutcome::PausedOnCounter { index } => RemnantOutcome::Repaused {
             remnant: PendingCombatPhaseCRemnant {
                 remaining: remaining[index + 1..].to_vec(),
                 lifelink_by_source: accums.lifelink_by_source,
@@ -2505,7 +2582,8 @@ pub(crate) fn apply_combat_damage(
         replacement: None,
         phase_c_remnant: None,
     };
-    let pass = replacement::CombatDamageReplacementPass::new(proposed_events);
+    // CR 608.2f + CR 700.1: the pass reads the printed guards once, as the batch opens.
+    let pass = replacement::CombatDamageReplacementPass::new(state, proposed_events);
     run_combat_damage_replacements(state, record, entries, pass, None)
 }
 
@@ -2533,6 +2611,11 @@ fn run_combat_damage_replacements(
         resume,
     ) {
         replacement::CombatDamageReplacementOutcome::Complete => {
+            // CR 104.1: a game that ended inside the pass ends the batch: nothing is dealt,
+            // gained or prevented after it.
+            if state.game_end.is_some() {
+                return CombatDamageBatch::Complete(record.batch_events);
+            }
             apply_combat_damage_survivors(state, record, entries, pass)
         }
         replacement::CombatDamageReplacementOutcome::Paused { waiting_for } => {
@@ -2541,7 +2624,9 @@ fn run_combat_damage_replacements(
             // and reinstalled on resume. CR 615.8: the one-shot application
             // ledger is parked with it, so a "next time" shield that already
             // applied to an earlier portion still covers the source's portions
-            // proposed after the pause. The tally is sorted so a parked state
+            // proposed after the pause, and the printed guards' reading the pass
+            // opened with is parked too, so every later portion meets that one
+            // reading (CR 608.2f). The tally is sorted so a parked state
             // serializes identically however the map iterated.
             let mut prevention_tally: Vec<_> = pass.tally.into_iter().collect();
             prevention_tally.sort_unstable();
@@ -2550,6 +2635,7 @@ fn run_combat_damage_replacements(
                 entries,
                 resolved: pass.resolved,
                 one_shot_applications: pass.one_shot_applications,
+                settled_guards: pass.settled_guards,
             });
             state.waiting_for = (*waiting_for).clone();
             let events = record.batch_events.clone();
@@ -2581,6 +2667,7 @@ fn resume_combat_damage_replacements(
             .into_iter()
             .collect(),
         one_shot_applications: parked.one_shot_applications,
+        settled_guards: parked.settled_guards,
     };
     run_combat_damage_replacements(state, record, parked.entries, pass, Some(resume))
 }
@@ -2673,6 +2760,10 @@ fn apply_combat_damage_survivors(
     let park = match run_phase_c_legs(state, &mut legs, &mut accums, &mut record.batch_events) {
         PhaseCRunOutcome::Complete => None,
         PhaseCRunOutcome::PausedOnReplacement { index } => Some((index + 1, false)),
+        // CR 120.3d + CR 616.1: a `-1/-1` counter placement paused — park
+        // exactly like the loss pause (the paused leg's post-counter work
+        // rides its combat-flagged counter stash).
+        PhaseCRunOutcome::PausedOnCounter { index } => Some((index + 1, false)),
         PhaseCRunOutcome::PausedOnGain { index } => Some((index, true)),
     };
     if let Some((park_from, on_gain)) = park {
@@ -2737,7 +2828,13 @@ fn drain_combat_lifelink(
     state: &mut GameState,
     mut record: PendingCombatLifelink,
 ) -> CombatDamageBatch {
-    while let Some(gain) = record.remaining.pop_front() {
+    // CR 104.1: "A game ends immediately when a player wins". An earlier gain's
+    // replacement (Nefarious Lich's draw, then Laboratory Maniac's win) can end
+    // the game inside the batch; no later source's gain is staged after that.
+    while state.game_end.is_none() {
+        let Some(gain) = record.remaining.pop_front() else {
+            break;
+        };
         // CR 616.1: the gaining player must choose which replacement applies
         // first. Nothing was staged for this source, and it is deliberately
         // NOT re-queued into `remaining` (see `stage_combat_lifelink_gain`).
@@ -2781,12 +2878,16 @@ fn drain_combat_lifelink(
         );
     }
     // CR 510.2: the per-player aggregate, emitted after the gains exactly as it
-    // is on a batch that never paused.
+    // is on a batch that never paused. It records damage already dealt in Phase
+    // C, before any gain could end the game, so it is kept on a terminal batch.
     record.batch_events.append(&mut record.damage_to_players);
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
+    if state.game_end.is_none() {
+        fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    }
     CombatDamageBatch::Complete(record.batch_events)
 }
 
@@ -2808,6 +2909,11 @@ fn fire_combat_prevention_riders(
     events: &mut Vec<GameEvent>,
 ) {
     for &(key, total_prevented) in prevention_tally {
+        // CR 104.1: a rider that ended the game (New Way Forward's damage meeting an empty
+        // Nefarious Lich graveyard) ends the batch; no later shield's rider runs.
+        if state.game_end.is_some() {
+            break;
+        }
         let rid = key.as_replacement_id();
         if total_prevented <= 0 {
             continue;
@@ -2889,9 +2995,8 @@ fn fire_combat_prevention_riders(
                 drain.event_source = Some(source);
             }
         }
-        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-            state, None, None, None, events,
-        );
+        // CR 510.2: Phase D settles every pause the rider raises, as the per-portion drain does.
+        replacement::drain_combat_damage_rider(state, events);
     }
 }
 

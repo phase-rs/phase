@@ -11,6 +11,7 @@ use crate::parser::oracle_effect::parse_effect_chain_with_context_ability_root;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
+use crate::types::ability::TurnWindow;
 use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair, terminated};
@@ -2410,7 +2411,7 @@ pub(crate) enum NthQualifiedSpell {
     /// A representable Nth-spell subject: the qualifying spell filter, the timing
     /// window over which the ordinal is measured, and the 1-based ordinal `N`
     /// ("first" → 1, "second" → 2, …). The gate is
-    /// `SpellsCastThisTurn(filter) == N - 1` (see [`nth_qualified_spell_condition`]).
+    /// `SpellsCast(filter) == N - 1` (see [`nth_qualified_spell_condition`]).
     Supported {
         filter: TargetFilter,
         timing: NthEventTimingKind,
@@ -2432,7 +2433,7 @@ pub(crate) enum NthQualifiedSpell {
 /// ordinal — not just the first — is covered (Highspire Bell-Ringer, Uthros
 /// Psionicist, Monk Class, Raging Battle Mouse, and Alisaie Leveilleur all print
 /// "the second spell you cast each turn costs …"). The ordinal threads into
-/// [`nth_qualified_spell_condition`] as the `SpellsCastThisTurn == N - 1` gate.
+/// [`nth_qualified_spell_condition`] as the `SpellsCast == N - 1` gate.
 fn parse_spell_ordinal_prefix(subject: &str) -> Option<(u32, &str)> {
     preceded(
         tag::<_, _, OracleError<'_>>("the "),
@@ -2699,7 +2700,7 @@ fn split_first_spell_timing(text: &str) -> Option<(NthEventTimingKind, &str)> {
 
 /// CR 601.2f + CR 107.3: Build the "the <ordinal> qualified spell <timing>" gate.
 /// The 1-based `ordinal` (`"first"` → 1, `"second"` → 2, …) lowers to
-/// `SpellsCastThisTurn(filter) == ordinal - 1`: the reduction applies precisely
+/// `SpellsCast(filter) == ordinal - 1`: the reduction applies precisely
 /// while exactly `ordinal - 1` matching spells have already been cast this turn,
 /// so the spell now being cast is the Nth (the currently-casting spell is not yet
 /// counted, matching the merged `first == 0` behavior). The timing axis adds a
@@ -2712,9 +2713,10 @@ pub(crate) fn nth_qualified_spell_condition(
 ) -> StaticCondition {
     let nth_this_turn = StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(filter.clone()),
+                window: TurnWindow::ThisTurn,
             },
         },
         comparator: Comparator::EQ,

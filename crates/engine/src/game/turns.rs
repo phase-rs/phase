@@ -18,7 +18,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ExtraTurnId, ObjectId};
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterCause, ProposedEvent};
 use crate::types::statics::{HandSizeModification, StaticMode, StaticModeKind};
 
 use super::combat;
@@ -799,6 +799,16 @@ fn enter_phase(
         .is_some_and(|stashed| stashed.is_combat)
     {
         state.pending_damage_post_loss = None;
+    }
+    // CR 120.3d + CR 724.1a: same abandonment mirror for a combat-flagged
+    // counter stash (a non-combat stash belongs to an unrelated resolution
+    // and survives).
+    if state
+        .pending_damage_post_counter
+        .as_ref()
+        .is_some_and(|stashed| stashed.is_combat)
+    {
+        state.pending_damage_post_counter = None;
     }
 
     // CR 500.1: captured BEFORE the assignment below, which is the only place
@@ -2010,8 +2020,22 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.lands_played_this_turn = 0;
     // CR 901.9 / CR 116.2i: planar die special-action costs reset each turn.
     state.planar_die_actions_this_turn.clear();
-    // CR 603.4: Snapshot spell count for werewolf "last turn" conditions before resetting.
-    state.spells_cast_last_turn = Some(state.spells_cast_this_turn);
+    // CR 601.2i + CR 603.4 + CR 800.4i: Latch each player's own spell count for
+    // "a player cast two or more spells last turn" (werewolf transform clause)
+    // from the per-player cast journal, BEFORE `spells_cast_this_turn_by_player`
+    // is cleared below. Every player is latched, including one who has left the
+    // game: CR 800.4i lets an effect find actions a departed player took. Both
+    // turn-skip early returns precede this statement, so a skipped turn
+    // (CR 614.10) never begins and is never latched as a zero-cast turn, and an
+    // extra turn (CR 500.7) overwrites the snapshot like any other turn.
+    for player in &mut state.players {
+        player.spells_cast_last_turn = state
+            .spells_cast_this_turn_by_player
+            .get(&player.id)
+            .map_or(0, |records| {
+                u32::try_from(records.len()).unwrap_or(u32::MAX)
+            });
+    }
     // CR 500.1: Reset per-turn spell cast counters.
     state.spells_cast_this_turn = 0;
     // CR 700.13: crimes are a per-turn player record.
@@ -3993,6 +4017,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
         .collect();
 
     // CR 614.1: Route through replacement pipeline so Vorinclex-class effects apply.
+    // CR 614.16: the lore placement is a turn-based action — fail closed.
     for (index, saga_id) in saga_ids.iter().copied().enumerate() {
         if !super::effects::counters::add_counter_with_replacement(
             state,
@@ -4000,6 +4025,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
             saga_id,
             CounterType::Lore,
             1,
+            CounterCause::Other,
             events,
         ) {
             let remaining = saga_ids[index + 1..]
@@ -4010,6 +4036,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
                     object_id,
                     counter_type: CounterType::Lore,
                     count: 1,
+                    cause: CounterCause::Other,
                 })
                 .collect();
             super::effects::counters::stash_pending_counter_additions(

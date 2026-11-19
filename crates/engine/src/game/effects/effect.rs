@@ -1685,7 +1685,7 @@ fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent
 /// cost {X} less … where X is the amount of life you lost/gained this turn"),
 /// CR 611.2d requires X to be determined exactly once, on resolution — not
 /// re-read at each later cast. The parser lowers X as
-/// `ModifyCost { amount, dynamic_count: Some(LifeLostThisTurn/…), .. }`, where
+/// `ModifyCost { amount, dynamic_count: Some(LifeLost/…), .. }`, where
 /// the effective reduction is `amount * resolve_quantity(dynamic_count)`
 /// (casting.rs::collect_self_cost_modifiers). We resolve that multiplier here
 /// and fold it into a concrete `amount` (via [`ManaCost::scaled`], matching the
@@ -5013,6 +5013,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 6,
                 result: Some(4),
+                pre_entry_source: None,
             },
             GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
@@ -5037,6 +5038,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result: Some(4),
+            pre_entry_source: None,
         }];
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {

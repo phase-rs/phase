@@ -2514,8 +2514,20 @@ pub fn candidate_actions_broad_with_probe(
             choices,
             count,
             min_count,
-            ..
-        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+            resume,
+        } => {
+            // CR 601.2g + CR 601.2h: the AI plans its mana-ability payments, so
+            // it doesn't spend a creature held for the spell's deferred tap cost.
+            let choices: Vec<ObjectId> = choices
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    !matches!(resume, CostResume::ManaAbility { .. })
+                        || !crate::game::restrictions::payment_tap_reserved(state, id)
+                })
+                .collect();
+            bounded_select_card_candidates(*player, &choices, *min_count..=*count)
+        }
         // CR 117.1 + CR 601.2b: Aggregate-threshold "exile any number" cost
         // (Baron Helmut Zemo's Boast). The threshold is satisfied by ANY chosen
         // subset whose summed `property` meets the comparator, so enumerate
@@ -6206,7 +6218,12 @@ fn mana_payment_actions(
             match mode {
                 // CR 701.67a: no tap past the waterbend cost's generic count.
                 ConvokeMode::Waterbend
-                    if obj.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Waterbend,
+                    ) && waterbend_taps_remaining > 0 =>
                 {
                     // Waterbend: always colorless
                     actions.push(candidate(
@@ -6218,7 +6235,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                ConvokeMode::Improvise
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Improvise,
+                    ) =>
+                {
                     // CR 702.126a: Improvise pays generic mana — always colorless.
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -6229,7 +6253,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                ConvokeMode::Convoke
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Convoke,
+                    ) =>
+                {
                     // CR 702.51a: Colorless (for generic) always available
                     actions.push(candidate(
                         GameAction::TapForConvoke {

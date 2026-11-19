@@ -3573,6 +3573,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -5532,6 +5533,7 @@ mod tests {
                 event_target: None,
                 event_amount: None,
                 controller: None,
+                parked_entrants: Vec::new(),
             },
             ResidentDrainPolicy::Replace,
         );
@@ -5580,6 +5582,7 @@ mod tests {
                 event_source: None,
                 event_amount: None,
                 controller: None,
+                parked_entrants: Vec::new(),
             },
             ResidentDrainPolicy::Replace,
         );
@@ -9572,6 +9575,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 8,
             result: Some(7),
+            pre_entry_source: None,
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
     }
@@ -9585,6 +9589,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result: None,
+            pre_entry_source: None,
         };
         assert_eq!(extract_amount_from_event(&event), None);
     }

@@ -6787,6 +6787,39 @@ const MAIN_BUILD_UNTAP_SUBSET: &str =
 const MAIN_BUILD_PHASED_OUT_CANDIDATE: &str =
     include_str!("../fixtures/legacy_untap_prompts/phased_out_candidate.json");
 
+/// A main-build save as the committed fixture. These saves predate the per-player
+/// `spells_cast_last_turn` snapshot: each carries a NONZERO table-wide total of the previous turn,
+/// which cannot say which player cast the spells, so restore refuses the unchanged fixture
+/// (CR 603.4, EH1). The fixture stays byte-for-byte as recorded, as evidence of that refusal. The
+/// untap-step behavior these tests pin does not read the snapshot, so it is exercised on the same
+/// save with the legacy key removed in memory (the state a save taken after a turn without casts
+/// has).
+fn main_build_save(raw: &str) -> serde_json::Value {
+    let save: serde_json::Value = serde_json::from_str(raw).expect("main save");
+    assert!(
+        save["state"]["spells_cast_last_turn"]
+            .as_u64()
+            .is_some_and(|total| total > 0),
+        "reach: the committed save carries a nonzero legacy table-wide total"
+    );
+    let refusal = serde_json::from_value::<PersistedGameState>(save.clone())
+        .map_err(|error| format!("{error:?}"))
+        .and_then(|persisted| {
+            persisted
+                .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}"))
+        });
+    let error = refusal.expect_err("the unchanged legacy save is refused at restore");
+    assert!(error.contains("spells_cast_last_turn"), "{error}");
+    let mut restorable = save;
+    restorable["state"]
+        .as_object_mut()
+        .expect("state object")
+        .remove("spells_cast_last_turn");
+    restorable
+}
+
 /// Restore through the persisted pipeline every load uses (the WASM restore and
 /// server-core's `from_persisted` call this chokepoint).
 fn restore_save(save: serde_json::Value) -> GameRunner {
@@ -6852,7 +6885,7 @@ fn a_main_build_save_at_the_untap_choice_restarts_the_untap_step() {
     ] {
         assert_oracle(db, name, oracle);
     }
-    let save: serde_json::Value = serde_json::from_str(MAIN_BUILD_UNTAP_CHOICE).expect("main save");
+    let save = main_build_save(MAIN_BUILD_UNTAP_CHOICE);
     assert!(!save["state"]["waiting_for"]["data"]
         .as_object()
         .unwrap()
@@ -6952,7 +6985,7 @@ fn a_main_build_save_at_the_untap_subset_restarts_the_untap_step() {
     ] {
         assert_oracle(db, name, oracle);
     }
-    let save: serde_json::Value = serde_json::from_str(MAIN_BUILD_UNTAP_SUBSET).expect("main save");
+    let save = main_build_save(MAIN_BUILD_UNTAP_SUBSET);
     assert!(!save["state"]["waiting_for"]["data"]
         .as_object()
         .unwrap()
@@ -7049,8 +7082,7 @@ fn a_main_build_save_offers_the_determinations_phasing_produces() {
     let db = load_db().expect("card db");
     assert_oracle(db, HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE);
     assert_oracle(db, REALITY_RIPPLE, REALITY_RIPPLE_ORACLE);
-    let save: serde_json::Value =
-        serde_json::from_str(MAIN_BUILD_PHASED_OUT_CANDIDATE).expect("main save");
+    let save = main_build_save(MAIN_BUILD_PHASED_OUT_CANDIDATE);
     assert!(!save["state"]["waiting_for"]["data"]
         .as_object()
         .unwrap()
@@ -11088,5 +11120,68 @@ fn line_cutter_roll_places_visit_once_at_resolution_boundary() {
     assert_eq!(
         runner.state().waiting_for,
         WaitingFor::Priority { player: P0 }
+    );
+}
+
+/// Adaptive Shimmerer's VERBATIM Oracle text ({5} 0/0, card-data export):
+/// "Flash\nThis creature enters with three +1/+1 counters on it."
+const ADAPTIVE_SHIMMERER_ORACLE: &str =
+    "Flash\nThis creature enters with three +1/+1 counters on it.";
+
+/// CR 614.16 second clause + the Doubling Season entering ruling (V6):
+/// Adaptive Shimmerer cast under Doubling Season enters with 6 +1/+1
+/// counters, not 3 — entering-with-counters placements are
+/// replacement-driven entry modifications (`ReplacementOrPrevention`), which
+/// the gate keeps eligible. Single candidate: no CR 616.1 prompt opens.
+/// (Doubling Season is staged via from_oracle — the live parser — so the def
+/// carries the CR 614.16 gate; the committed fixture entry predates the tag.)
+///
+/// Preservation pin: 6 both pre- and post-tag — stamping the ETB commit
+/// `Other` un-doubles it to 3 with no other row catching it. The planeswalker
+/// starting-loyalty sibling rides the same commit site and lives in
+/// `spark_double_as_enters.rs` (`spark_double_season_doubles_the_merged_loyalty`).
+#[test]
+fn adaptive_shimmerer_entering_counters_still_double_under_doubling_season() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    let shimmerer = scenario
+        .add_creature_to_hand_from_oracle(P0, "Adaptive Shimmerer", 0, 0, ADAPTIVE_SHIMMERER_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 5,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    let outcome = runner.cast(shimmerer).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the cast must settle to priority with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert_settled(&runner);
+    assert_eq!(
+        outcome.zone_of(shimmerer),
+        Zone::Battlefield,
+        "reach-guard: Adaptive Shimmerer resolved onto the battlefield"
+    );
+    assert_eq!(
+        plus_counters(&runner, shimmerer),
+        6,
+        "CR 614.16: entering-with-counters stays eligible, so the 3 counters double to 6"
     );
 }

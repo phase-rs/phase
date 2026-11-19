@@ -1526,6 +1526,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AggregateFunction, ChooseOneOfKind, ControllerRef, QuantityExpr, QuantityRef,
         SharedQuality, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -1835,8 +1836,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::LoseLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Target,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: None,
@@ -2502,7 +2504,7 @@ mod tests {
 
     /// CR 115.10a + CR 119.3 + CR 608.2c (Wound Reflection / Archfiend of Despair /
     /// Warlock Class L3): "each opponent loses life equal to the life they lost
-    /// this turn" resolves with a `LifeLostThisTurn { ScopedPlayer }` amount under
+    /// this turn" resolves with a `LifeLost { ScopedPlayer }` amount under
     /// `player_scope: Opponent`. Each iterated opponent must lose its OWN life lost
     /// this turn — NOT the source controller's. The controller's count is seeded
     /// high (99) as a trap: the prior `Controller`-scoped encoding drained every
@@ -2525,8 +2527,9 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::LoseLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::ScopedPlayer,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: None,
