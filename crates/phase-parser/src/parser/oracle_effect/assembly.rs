@@ -2873,8 +2873,15 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                                 instead_override_body_mut(&mut instead),
                                 *declared_antecedent,
                             );
-                            if let (Some(producer_clause), Some(index)) =
-                                (declared_antecedent, bound_antecedent)
+                            // With no following instructions, direct attachment below
+                            // already preserves the original override (including its kind).
+                            if let Some((producer_clause, index)) = declared_antecedent
+                                .zip(bound_antecedent)
+                                .filter(|(_, index)| {
+                                    index + 1 < defs.len()
+                                        || ir.clauses.last().map(|last| last.id)
+                                            != Some(clause_ir.id)
+                                })
                             {
                                 // CR 608.2c, 614.6: the named producer alone is replaced.
                                 // Its intrinsic continuation belongs to the fallback. Leave
@@ -2891,10 +2898,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                                 defs.insert(next, instead);
                                 let tail = next + 1;
                                 while env.arena.prov_at(tail).is_some_and(|prov| {
-                                    prov.origin == Some(*producer_clause)
+                                    prov.origin == Some(producer_clause)
                                         || prov.role
                                             == NodeRole::ContinuationProduct {
-                                                intrinsic_to: Some(*producer_clause),
+                                                intrinsic_to: Some(producer_clause),
                                             }
                                 }) {
                                     let intrinsic = Some(Box::new(defs.remove(tail)));
@@ -6975,6 +6982,25 @@ mod arena_tests {
             Some("Borg"),
             "the override restates the Borg token: {override_def:?}"
         );
+    }
+
+    #[test]
+    fn throne_of_empires_terminal_override_keeps_its_activated_kind() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{1}, {T}: Create a 1/1 white Soldier creature token. Create five of those tokens instead if you control artifacts named Crown of Empires and Scepter of Empires.",
+            "Throne of Empires",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let (base, replacement) = instead_antecedent(&parsed.abilities[0]);
+        assert_eq!(base.kind, AbilityKind::Activated);
+        assert_eq!(replacement.kind, base.kind);
+        assert!(matches!(
+            replacement.effect.as_ref(),
+            Effect::Token { name, count: QuantityExpr::Fixed { value: 5 }, .. } if name == "Soldier"
+        ));
+        assert!(replacement.sub_ability.is_none());
     }
 
     /// The declaration itself, read off the parsed IR: the override clause names
