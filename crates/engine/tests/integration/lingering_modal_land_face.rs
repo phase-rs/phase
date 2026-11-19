@@ -386,9 +386,11 @@ fn the_land_back_face_is_refused_after_the_window_expires() {
     );
 }
 
-/// CR 305.3 + CR 116.2a: a land is played only on the owner's turn. During the
-/// opponent's turn the exiled land back face is neither offered nor playable,
-/// even when the owner receives priority there.
+/// CR 305.3 + CR 116.2a: a land is played only on its player's own turn. During
+/// the opponent's turn the exiled land back face is neither offered nor
+/// playable, even when the owner receives priority there. The engine resolves
+/// the land-playing player to the active player (P1), so the refusal is the
+/// permission's grantee check (it names P0), not a separate turn check.
 #[test]
 fn the_land_back_face_is_refused_on_the_opponents_turn() {
     let Some(mut b) = board() else { return };
