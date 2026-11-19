@@ -13367,6 +13367,18 @@ enum ParsedElement<'a> {
     Replacement(&'a ReplacementDefinition),
 }
 
+fn effect_has_nested_static_condition(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            static_abilities,
+            ..
+        } if static_abilities
+            .iter()
+            .any(|static_ability| static_ability.condition.is_some())
+    )
+}
+
 impl<'a> ParsedElement<'a> {
     fn description_lower(&self) -> Option<String> {
         match self {
@@ -13416,12 +13428,15 @@ impl<'a> ParsedElement<'a> {
                     || d.activation_restrictions
                         .iter()
                         .any(|r| matches!(r, ActivationRestriction::RequiresCondition { .. }))
+                    || effect_has_nested_static_condition(&d.effect)
             }),
             ParsedElement::Trigger(t) => {
                 t.condition.is_some()
-                    || t.execute
-                        .as_ref()
-                        .is_some_and(|e| ability_tree_any(e, &|d| d.condition.is_some()))
+                    || t.execute.as_ref().is_some_and(|e| {
+                        ability_tree_any(e, &|d| {
+                            d.condition.is_some() || effect_has_nested_static_condition(&d.effect)
+                        })
+                    })
             }
             ParsedElement::Static(s) => s.condition.is_some(),
             ParsedElement::Replacement(r) => {
@@ -25481,6 +25496,38 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .any(|f| matches!(f, SemanticFinding::DroppedCondition { condition_text, .. } if condition_text == "as long as")),
             "Should detect dropped 'as long as' condition: {findings:?}"
         );
+    }
+
+    #[test]
+    fn test_audit_accepts_condition_on_nested_generic_static() {
+        let mut face = make_face();
+        let oracle = "Target creature gains flying as long as you control a Dragon.";
+        face.oracle_text = Some(oracle.to_string());
+        let static_ability = StaticDefinition::continuous()
+            .affected(TargetFilter::Any)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(StaticCondition::DuringYourTurn)
+            .description(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![static_ability],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            )
+            .description(oracle.to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(!findings
+            .iter()
+            .any(|finding| matches!(finding, SemanticFinding::DroppedCondition { .. })));
     }
 
     #[test]

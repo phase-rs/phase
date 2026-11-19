@@ -176,6 +176,7 @@ mod splice_cost_rebuild;
 mod split_offstack_mana_value;
 mod springheart_nantuko_bestow_landfall;
 mod springheart_realdb_repro;
+mod sproutwatch_dryad;
 mod squall_attack_batch_chosen_number;
 mod squirming_emergence_mana_value_target;
 mod squirrel_mob_dynamic_pump;
