@@ -36531,11 +36531,10 @@ fn reanimator_aura_grant_etb_lowers_to_grant_chain() {
 /// #5253 (Railway Brawler): "Whenever another creature you control enters, put
 /// X +1/+1 counters on it, where X is its power." The "its" in the count clause
 /// is the ENTERING creature (the counter recipient), not the ability carrier.
-/// The `parse_self_power_ref` combinator lowers "its power" to
-/// `Power { scope: Source }` (carrier), so an enters-trigger lift remaps the
-/// count to `EventSource` when the counter target is itself the event object.
-/// Reverting the lift leaves `scope: Source` — the count would read Railway
-/// Brawler's power instead of the entering creature's (the #5253 bug).
+/// The where-X characteristic rung binds the count to the entering creature
+/// (`EventSource`); a count read off the source would read Railway Brawler's
+/// power (the #5253 bug), and this assertion goes red. The count is not clamped
+/// (a count slot, CR 107.1b is the handler's).
 #[test]
 fn railway_brawler_counter_count_reads_entering_creature_power() {
     let parsed = parse_oracle_text(
@@ -36587,12 +36586,9 @@ fn railway_brawler_counter_count_reads_entering_creature_power() {
     );
 }
 
-/// Negative reach-guard for the #5253 lift: a genuine self-power counter read —
+/// Negative reach-guard for #5253: a genuine self-power counter read —
 /// "Whenever ~ attacks, put a number of +1/+1 counters on ~ equal to its power"
-/// — must KEEP `scope: Source`. The lift only fires on a single-object
-/// zone-change trigger whose counter target is the event object; an attacks
-/// trigger putting counters on the source (`SelfRef`) is untouched, so the
-/// carrier's own power is preserved.
+/// — must KEEP `scope: Source`, so the carrier's own power is preserved.
 #[test]
 fn self_power_counter_on_source_keeps_source_scope() {
     let parsed = parse_oracle_text(
@@ -36614,7 +36610,7 @@ fn self_power_counter_on_source_keeps_source_scope() {
 
     // Whether or not this exact phrasing fully parses, if it DOES produce a
     // PutCounter with a per-object power ref, that ref must stay Source-scoped
-    // (an attacks trigger is not a zone-change trigger, so the lift is inert).
+    // (on an attacks trigger, "its" is the carrier).
     if let Some(QuantityExpr::Ref {
         qty: QuantityRef::Power { scope },
     }) = count
@@ -44646,6 +44642,377 @@ fn received_damage_siblings_without_windows_keep_no_condition() {
     assert_eq!(galleon.mode, TriggerMode::ExcessDamageAll);
     assert_eq!(galleon.damage_kind, DamageKindFilter::NoncombatOnly);
     assert_eq!(galleon.condition, None);
+}
+
+/// Every quantity slot a where-X definition can fill in the six class cards'
+/// trigger bodies, labeled by its consumer, walked over the whole ability tree
+/// (`sub_ability`, `else_ability`, nested definitions). `Fixed` values are
+/// skipped (Arahbo's Eminence "+3/+3").
+fn where_x_consumer_slots(def: &AbilityDefinition, out: &mut Vec<(&'static str, QuantityExpr)>) {
+    let mut push = |label: &'static str, value: &QuantityExpr| {
+        if !matches!(value, QuantityExpr::Fixed { .. }) {
+            out.push((label, value.clone()));
+        }
+    };
+    match def.effect.as_ref() {
+        Effect::PayCost {
+            cost: AbilityCost::PayLife { amount },
+            ..
+        } => push("PayLife", amount),
+        Effect::Draw { count, .. } => push("Draw", count),
+        Effect::GainLife { amount, .. } => push("GainLife", amount),
+        Effect::LoseLife { amount, .. } => push("LoseLife", amount),
+        Effect::Token { count, .. } => push("Token", count),
+        Effect::Dig { count, .. } => push("Dig", count),
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => {
+            for (label, value) in [("PumpPower", power), ("PumpToughness", toughness)] {
+                if let PtValue::Quantity(value) = value {
+                    push(label, value);
+                }
+            }
+        }
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for modification in static_abilities.iter().flat_map(|s| &s.modifications) {
+                match modification {
+                    ContinuousModification::AddDynamicPower { value } => {
+                        push("AddDynamicPower", value)
+                    }
+                    ContinuousModification::AddDynamicToughness { value } => {
+                        push("AddDynamicToughness", value)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    for next in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        where_x_consumer_slots(next, out);
+    }
+    def.effect
+        .for_each_nested_definition(&mut |_, nested| where_x_consumer_slots(nested, out));
+}
+
+/// Collect every serialized node's `type` tag, and the scope of every
+/// `Power`/`Toughness` reference, under `value`.
+fn walk_serialized_types(
+    value: &serde_json::Value,
+    scopes: &mut Vec<serde_json::Value>,
+    types: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(kind)) = map.get("type") {
+                types.push(kind.clone());
+                if kind == "Power" || kind == "Toughness" {
+                    if let Some(scope) = map.get("scope") {
+                        scopes.push(scope.clone());
+                    }
+                }
+            }
+            map.values()
+                .for_each(|v| walk_serialized_types(v, scopes, types));
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|v| walk_serialized_types(v, scopes, types)),
+        _ => {}
+    }
+}
+
+/// Every `Power`/`Toughness` reference scope and every quantity node type in a
+/// parsed face, read from its serialized form so no slot is missed.
+fn serialized_characteristic_scopes_and_types(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    let mut scopes = Vec::new();
+    let mut types = Vec::new();
+    for value in [
+        serde_json::to_value(&parsed.triggers).unwrap(),
+        serde_json::to_value(&parsed.abilities).unwrap(),
+        serde_json::to_value(&parsed.statics).unwrap(),
+    ] {
+        walk_serialized_types(&value, &mut scopes, &mut types);
+    }
+    (scopes, types)
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+/// #7851, CR 608.2k + CR 608.2h + CR 603.10a: in a trigger body whose "it" names
+/// the trigger event's object (the dying enchanted/equipped creature, the
+/// attacking Cat), "where X is its power/toughness" reads THAT object
+/// (`ObjectScope::EventSource`, departure LKI at runtime), never the Aura,
+/// Equipment or Arahbo. Every X slot of each card binds it — the lowering path
+/// and the count slot alike. Only Arahbo's X, which a "+X/+X" adds, is clamped
+/// at zero (CR 107.1b; Arahbo ruling: "If the attacking Cat's power is negative
+/// at that time, X is 0."). Verbatim Oracle text.
+#[test]
+fn where_x_its_characteristic_binds_trigger_event_object() {
+    type SlotCase<'a> = (
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        Vec<(&'a str, QuantityExpr)>,
+    );
+    let event = |qty: fn(ObjectScope) -> QuantityRef| QuantityExpr::Ref {
+        qty: qty(ObjectScope::EventSource),
+    };
+    let power = event(|scope| QuantityRef::Power { scope });
+    let toughness = event(|scope| QuantityRef::Toughness { scope });
+    let clamped_power = QuantityExpr::ClampMin {
+        inner: Box::new(power.clone()),
+        minimum: 0,
+    };
+    let cases: [SlotCase<'_>; 6] = [
+        (
+            "Mask of Griselbrand",
+            "Equipped creature has flying and lifelink.\nWhenever equipped creature dies, you may pay X life, where X is its power. If you do, draw X cards.\nEquip {3}",
+            &["Artifact"],
+            &["Equipment"],
+            vec![("PayLife", power.clone()), ("Draw", power.clone())],
+        ),
+        (
+            "Dying Wish",
+            "Enchant creature you control\nWhen enchanted creature dies, target player loses X life and you gain X life, where X is its power.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("LoseLife", power.clone()), ("GainLife", power.clone())],
+        ),
+        (
+            "Fruit of the First Tree",
+            "Enchant creature\nWhen enchanted creature dies, you gain X life and draw X cards, where X is its toughness.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("GainLife", toughness.clone()), ("Draw", toughness.clone())],
+        ),
+        (
+            "Murder Investigation",
+            "Enchant creature you control\nWhen enchanted creature dies, create X 1/1 white Soldier creature tokens, where X is its power.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("Token", power.clone())],
+        ),
+        (
+            "Necrosynthesis",
+            "Enchant creature\nEnchanted creature has \"Whenever another creature dies, put a +1/+1 counter on this creature.\"\nWhen enchanted creature dies, look at the top X cards of your library, where X is its power. Put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("Dig", power.clone())],
+        ),
+        (
+            "Arahbo, Roar of the World",
+            "Eminence — At the beginning of combat on your turn, if Arahbo is in the command zone or on the battlefield, another target Cat you control gets +3/+3 until end of turn.\nWhenever another Cat you control attacks, you may pay {1}{G}{W}. If you do, it gains trample and gets +X/+X until end of turn, where X is its power.",
+            &["Creature"],
+            &["Cat", "Avatar"],
+            vec![
+                ("AddDynamicPower", clamped_power.clone()),
+                ("AddDynamicToughness", clamped_power.clone()),
+            ],
+        ),
+    ];
+    for (name, text, types, subtypes, expected) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        let mut slots = Vec::new();
+        for trigger in &parsed.triggers {
+            let execute = trigger
+                .execute
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name}: trigger without execute"));
+            // Reach guard: the body parsed to concrete effects.
+            assert!(!has_unimplemented(execute), "{name}: {execute:#?}");
+            where_x_consumer_slots(execute, &mut slots);
+        }
+        // Arahbo's "+X/+X" may lower as a `Pump` instead of a continuous grant;
+        // both carry the same signed amount.
+        let normalized: Vec<(&str, QuantityExpr)> = slots
+            .into_iter()
+            .map(|(label, value)| match label {
+                "PumpPower" => ("AddDynamicPower", value),
+                "PumpToughness" => ("AddDynamicToughness", value),
+                _ => (label, value),
+            })
+            .collect();
+        assert_eq!(normalized, expected, "{name}");
+    }
+}
+
+/// #7851 preservation, CR 201.5 + CR 113.7: an explicit self-reference
+/// ("Ratatwotwo's power", "this creature's power") names the ability's source
+/// even when the trigger's "it" names another object; the rung never touches
+/// it and no clamp is added. Verbatim Oracle text. Ratatwotwo's trigger mode
+/// stays `TriggerMode::Unknown`, but its body's "it" is still the trigger
+/// event's object (its Pump target is `TriggeringSource`, asserted below), so
+/// the characteristic rung is active and the explicit "Ratatwotwo's power" must
+/// still read `Source`. Esper Sentinel's "unless that player pays {X}, where X
+/// is this creature's power" is hoisted by the context-free
+/// `extract_unless_pay_modifier`, so that row guards the face only.
+#[test]
+fn where_x_explicit_self_reference_keeps_source_under_event_subject() {
+    let source = serde_json::to_value(ObjectScope::Source).unwrap();
+    for (name, text, types, subtypes, event_object_body) in [
+        (
+            "Ratatwotwo",
+            "When Ratatwotwo enters the battlefield, create a Chef Role token attached to up to one other target creature you control. (Enchanted creature gets +1/+1 and has \"Whenever this creature attacks, create a Food token.\")\nWhenever a creature you control enchanted by a Chef Role attacks or blocks, it gets +X/+X until end of turn, where X is Ratatwotwo's power.",
+            &["Creature"][..],
+            &["Rat"][..],
+            true,
+        ),
+        (
+            "Esper Sentinel",
+            "Whenever an opponent casts their first noncreature spell each turn, draw a card unless that player pays {X}, where X is this creature's power.",
+            &["Artifact", "Creature"][..],
+            &["Human", "Soldier"][..],
+            false,
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        if event_object_body {
+            assert!(
+                parsed.triggers.iter().any(|trigger| matches!(
+                    trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+                    Some(Effect::Pump {
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    })
+                )),
+                "{name}: {:#?}",
+                parsed.triggers
+            );
+        }
+        let (scopes, types) = serialized_characteristic_scopes_and_types(&parsed);
+        // Reach guard: the self-reference was read at all.
+        assert!(!scopes.is_empty(), "{name}: no power reference parsed");
+        assert!(scopes.iter().all(|scope| *scope == source), "{name}: {scopes:?}");
+        assert!(!types.iter().any(|t| t == "ClampMin"), "{name}: {types:?}");
+    }
+}
+
+/// #7851 preservation, CR 608.2k + CR 608.2h: where the trigger's "it" is the
+/// ability's own object (self-departure and phase triggers), "its power" keeps
+/// reading the source (its LKI); "equal to its power" in Death Watch keeps its
+/// own anaphoric binding. Verbatim Oracle text.
+#[test]
+fn where_x_its_characteristic_keeps_source_on_self_and_phase_triggers() {
+    let source = serde_json::to_value(ObjectScope::Source).unwrap();
+    for (name, text, types, subtypes) in [
+        (
+            "Bloated Processor",
+            "Sacrifice another Phyrexian: Put a +1/+1 counter on this creature.\nWhen this creature dies, incubate X, where X is its power. (Create an Incubator token with X +1/+1 counters on it and \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact creature.)",
+            &["Creature"][..],
+            &["Phyrexian"][..],
+        ),
+        (
+            "Elenda's Hierophant",
+            "Flying\nWhenever you gain life, put a +1/+1 counter on this creature.\nWhen this creature dies, create X 1/1 white Vampire creature tokens with lifelink, where X is its power.",
+            &["Creature"][..],
+            &["Vampire", "Cleric"][..],
+        ),
+        (
+            "Ukkima, Stalking Shadow",
+            "Partner with Cazur, Ruthless Stalker (When this creature enters, target player may put Cazur into their hand from their library, then shuffle.)\nUkkima can't be blocked.\nWhen Ukkima leaves the battlefield, it deals X damage to target player and you gain X life, where X is its power.",
+            &["Creature"][..],
+            &["Whale", "Wolf"][..],
+        ),
+        (
+            "Rip, Spawn Hunter",
+            "Survival — At the beginning of your second main phase, if Rip is tapped, reveal the top X cards of your library, where X is its power. Put any number of creature and/or Vehicle cards with different powers from among them into your hand. Put the rest on the bottom of your library in a random order.",
+            &["Creature"][..],
+            &["Human", "Survivor"][..],
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        let (scopes, _) = serialized_characteristic_scopes_and_types(&parsed);
+        assert!(!scopes.is_empty(), "{name}: no power reference parsed");
+        assert!(scopes.iter().all(|scope| *scope == source), "{name}: {scopes:?}");
+    }
+
+    let death_watch = parse_oracle_text(
+        "Enchant creature\nWhen enchanted creature dies, its controller loses life equal to its power and you gain life equal to its toughness.",
+        "Death Watch",
+        &[],
+        &strings(&["Enchantment"]),
+        &strings(&["Aura"]),
+    );
+    let (scopes, _) = serialized_characteristic_scopes_and_types(&death_watch);
+    let anaphoric = serde_json::to_value(ObjectScope::Anaphoric).unwrap();
+    assert_eq!(scopes.len(), 2, "{scopes:?}");
+    assert!(scopes.iter().all(|scope| *scope == anaphoric), "{scopes:?}");
+}
+
+/// #7851 containment, CR 107.1b: the zero clamp is confined to an X the
+/// characteristic rung bound. A signed pump whose X is a count (Altar of the
+/// Goyf) or a difference (Doran, Besieged by Time) under a non-self attack
+/// trigger is nonnegative already and gains no `ClampMin`. Verbatim Oracle text.
+#[test]
+fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
+    for (name, text, types, subtypes, expected_node) in [
+        (
+            "Altar of the Goyf",
+            "Whenever a creature you control attacks alone, it gets +X/+X until end of turn, where X is the number of card types among cards in all graveyards.\nLhurgoyf creatures you control have trample.",
+            &["Kindred", "Artifact"][..],
+            &["Lhurgoyf"][..],
+            "Ref",
+        ),
+        (
+            "Doran, Besieged by Time",
+            "Each creature spell you cast with toughness greater than its power costs {1} less to cast.\nWhenever a creature you control attacks or blocks, it gets +X/+X until end of turn, where X is the difference between its power and toughness.",
+            &["Creature"][..],
+            &["Treefolk", "Druid"][..],
+            "Difference",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        assert!(
+            parsed.triggers.iter().any(|trigger| matches!(
+                trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+                Some(Effect::Pump {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                })
+            )),
+            "{name}: {:#?}",
+            parsed.triggers
+        );
+        let mut slots = Vec::new();
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_deref() {
+                assert!(!has_unimplemented(execute), "{name}: {execute:#?}");
+                where_x_consumer_slots(execute, &mut slots);
+            }
+        }
+        // Reach guard: the pump amount was found and bound to a dynamic quantity.
+        assert_eq!(slots.len(), 2, "{name}: {slots:?}");
+        for (label, value) in &slots {
+            let mut types = Vec::new();
+            walk_serialized_types(
+                &serde_json::to_value(value).unwrap(),
+                &mut Vec::new(),
+                &mut types,
+            );
+            assert!(
+                types.iter().any(|t| t == expected_node),
+                "{name} {label}: {value:?}"
+            );
+            assert!(
+                !types.iter().any(|t| t == "ClampMin"),
+                "{name} {label}: {value:?}"
+            );
+        }
+    }
 }
 
 /// CR 603.2 + CR 508.3d/e: the "you attack" head classifies its whole tail.
