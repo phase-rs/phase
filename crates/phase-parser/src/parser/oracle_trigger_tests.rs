@@ -8,6 +8,7 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagn
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
@@ -17734,18 +17735,6 @@ fn find_effect_boundary_skips_number_list_commas() {
     }
 }
 
-/// Every `FilterProp` held anywhere in a spell filter, through `And` / `Or`
-/// wrappers.
-fn spell_filter_props(filter: &TargetFilter) -> Vec<&FilterProp> {
-    match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().collect(),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().flat_map(spell_filter_props).collect()
-        }
-        _ => Vec::new(),
-    }
-}
-
 /// CR 208.1 + CR 603.1: Sarkhan's Unsealing's first trigger reads "power 4,
 /// 5, or 6" whole — an `AnyOf` of three power EQ comparisons — and its effect
 /// is the plain 4 damage to any target, with no `Unimplemented` link.
@@ -17764,7 +17753,7 @@ fn sarkhans_unsealing_power_value_list_trigger() {
     };
     let valid_card = trigger.valid_card.as_ref().expect("spell filter");
     assert!(
-        spell_filter_props(valid_card).contains(&&expected),
+        filter_contains_filter_prop(valid_card, &|prop| *prop == expected),
         "valid_card must hold the power value list, got {valid_card:?}"
     );
     let execute = trigger.execute.as_deref().expect("trigger body");
@@ -17787,12 +17776,13 @@ fn sarkhans_unsealing_power_value_list_trigger() {
     assert_eq!(seven.mode, TriggerMode::SpellCast);
     let seven_card = seven.valid_card.as_ref().expect("spell filter");
     assert!(
-        spell_filter_props(seven_card).contains(&&FilterProp::PtComparison {
-            stat: PtStat::Power,
-            scope: PtValueScope::Current,
-            comparator: Comparator::GE,
-            value: QuantityExpr::Fixed { value: 7 },
-        }),
+        filter_contains_filter_prop(seven_card, &|prop| *prop
+            == FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            }),
         "7+ line must keep power GE 7, got {seven_card:?}"
     );
 }
@@ -17813,7 +17803,7 @@ fn kozileks_unsealing_mana_value_list_trigger() {
     };
     let valid_card = trigger.valid_card.as_ref().expect("spell filter");
     assert!(
-        spell_filter_props(valid_card).contains(&&expected),
+        filter_contains_filter_prop(valid_card, &|prop| *prop == expected),
         "valid_card must hold the mana value list, got {valid_card:?}"
     );
     let execute = trigger.execute.as_deref().expect("trigger body");
@@ -17829,10 +17819,11 @@ fn kozileks_unsealing_mana_value_list_trigger() {
     assert_eq!(seven.mode, TriggerMode::SpellCast);
     let seven_card = seven.valid_card.as_ref().expect("spell filter");
     assert!(
-        spell_filter_props(seven_card).contains(&&FilterProp::Cmc {
-            comparator: Comparator::GE,
-            value: QuantityExpr::Fixed { value: 7 },
-        }),
+        filter_contains_filter_prop(seven_card, &|prop| *prop
+            == FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            }),
         "7+ line must keep mana value GE 7, got {seven_card:?}"
     );
 }
