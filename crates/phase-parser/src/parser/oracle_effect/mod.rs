@@ -5066,7 +5066,7 @@ fn try_parse_global_damage_modification_replacement(text: &str) -> Option<Effect
     {
         return None;
     }
-    // CR 615.1a: fail closed on an unreadable antecedent subject (Jeska,
+    // CR 614.1a: fail closed on an unreadable antecedent subject (Jeska,
     // Thrice Reborn's anaphoric "that creature"). `parse_replacement_line`
     // collapses `DamageSourceScope::Unrecognized` to no filter — the same
     // absence a genuinely unscoped "a source" carries — so lifting here
@@ -52908,7 +52908,7 @@ fn parse_effect_chain_ir_body(
             } else if let Some((scope, filter, body)) =
                 strip_each_scope_who_didnt_verb_filter_this_way_subject(&text)
             {
-                // CR 701.9a + CR 701.17a + CR 608.2c + CR 109.5: subject-only
+                // CR 701.9a + CR 701.21a + CR 608.2c + CR 109.5: subject-only
                 // mandatory-FILTERED decline-tail (Kroxa, Titan of Death's Hunger:
                 // "each opponent discards a card, then each opponent who didn't
                 // discard a nonland card this way loses 3 life."; Only Blood Ends

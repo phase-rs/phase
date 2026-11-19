@@ -569,7 +569,7 @@ fn redundancy_delta(
         // onto the bottom of its owner's scheme deck — no target and no
         // static redundancy signal.
         | Effect::AbandonScheme
-        // CR 904.10: SetSchemeInMotion re-fires a face-up scheme's abilities —
+        // CR 701.32b: SetSchemeInMotion re-fires a face-up scheme's abilities —
         // no static redundancy signal (whether it is redundant depends on the
         // scheme's own text).
         | Effect::SetSchemeInMotion { .. }

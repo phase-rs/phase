@@ -11592,7 +11592,7 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         .or_else(|| parse_damage_source_filter_passive(norm_lower))
 }
 
-/// CR 615.1a: fail-closed reader for the chain-position damage-modification
+/// CR 614.1a: fail-closed reader for the chain-position damage-modification
 /// lift (`try_parse_global_damage_modification_replacement`). Reports whether
 /// the antecedent's damage-source subject is printed but unreadable
 /// (`DamageSourceScope::Unrecognized` — e.g. Jeska, Thrice Reborn's anaphoric
@@ -17947,7 +17947,7 @@ mod tests {
         }
     }
 
-    /// CR 615.1a: the chain-position damage-modification lift's fail-closed
+    /// CR 614.1a: the chain-position damage-modification lift's fail-closed
     /// gate. An anaphoric active-voice subject ("that creature" — Jeska,
     /// Thrice Reborn's duration-stripped `[0]` clause) reads unrecognized so
     /// the lift declines and records the honest gap, instead of emitting an

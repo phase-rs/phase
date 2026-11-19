@@ -1329,7 +1329,7 @@ fn parse_exiled_this_way_count(input: &str) -> OracleResult<'_, StaticCondition>
     ))
 }
 
-/// CR 608.2c + CR 701.6a: "you created fewer than/more than <N> token[s] this
+/// CR 608.2c + CR 701.7a: "you created fewer than/more than <N> token[s] this
 /// way" — a resolution-context comparison gating a follow-up effect on how
 /// many tokens the immediately preceding creation effect produced (Your Own
 /// Face Mocks You's "If you created fewer than two tokens this way, …"). Twin

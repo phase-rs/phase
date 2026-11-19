@@ -8,7 +8,7 @@
 //!
 //! CR 115.1d + CR 601.2c: "choose up to two target" declares two optional
 //! slots; "for each one" distributes the copy over the chosen targets.
-//! CR 608.2c + CR 701.6a: the tail gates on how many tokens the copy step
+//! CR 608.2c + CR 701.7a: the tail gates on how many tokens the copy step
 //! created and tops up to two with Scarecrows.
 //!
 //! Revert-to-red: drop the "for each one" strip — sentence 2 gaps
