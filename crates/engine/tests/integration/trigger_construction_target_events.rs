@@ -99,7 +99,7 @@ const IVORY_MASK: &str = "You have shroud. (You can't be the target of spells or
 const FATES_REVERSAL: &str = "Return up to one target creature card from your graveyard to your hand. Venture into the dungeon. (Enter the first room or advance to the next room.)";
 
 // ---------------------------------------------------------------------------
-// Typed observers (phase 1's D1 shapes; copied from `ability_triggered_observer.rs`)
+// Typed observers (copied from `ability_triggered_observer.rs`)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -145,8 +145,8 @@ fn add_observer(scenario: &mut GameScenario, player: PlayerId, observer: Observe
     }
 }
 
-/// Replace the observer line the parser cannot yet produce with its D1 shape,
-/// keeping the parsed effect half (phase 1's `install_observer`).
+/// Replace the observer line the parser cannot yet produce with its typed shape,
+/// keeping the parsed effect half (as in `ability_triggered_observer.rs`).
 fn install_observer(state: &mut GameState, id: ObjectId, observer: Observer) {
     let obj = state.objects.get_mut(&id).expect("observer exists");
     let defs = std::sync::Arc::make_mut(&mut obj.base_trigger_definitions);
@@ -1179,7 +1179,7 @@ fn n1b_in_window_random_mode_collects_the_nested_target_once() {
 }
 
 // ---------------------------------------------------------------------------
-// PE-3: windows on the action buffer
+// Drain windows on the action buffer (`triggers::drain_on_action_buffer`)
 // ---------------------------------------------------------------------------
 
 /// W-1: CR 603.2c: the finisher's drain dispatches the goad in a window on the
@@ -1262,9 +1262,10 @@ fn w2_released_context_window_is_collected_once() {
     assert_eq!(count, 1, "Count(Tar Pit) = {count}");
 }
 
-/// W-4: CR 603.2c (each ability that targets it is its own trigger event): two each make Tar Pit a target — two
-/// trigger events. The `DistributeAmong` arm's drain dispatches the goad in a
-/// window on the action buffer.
+/// W-4: CR 603.2c (each ability that targets it is its own trigger event): two
+/// abilities each make Tar Pit a target, so there are two trigger events. The
+/// `DistributeAmong` arm's drain dispatches the goad in a window on the action
+/// buffer.
 #[test]
 fn w4_distribute_among_arm_drain_is_collected_once() {
     let mut scenario = GameScenario::new();
