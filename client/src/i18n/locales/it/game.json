@@ -2452,6 +2452,9 @@
     "optionalTriggers": "Abilità innescate facoltative ({{count, number}})",
     "replacementChoices": "Scelte di sostituzione ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Tieni premuto per vedere la carta intera"
+  },
   "optionalEffect": {
     "sourceFallback": "Effetto",
     "title": "{{name}} - Effetto facoltativo",
