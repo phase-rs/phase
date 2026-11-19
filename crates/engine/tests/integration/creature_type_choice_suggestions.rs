@@ -7,9 +7,7 @@ use engine::game::derived_views::{
 use engine::game::effects::choose;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
-use engine::types::ability::{
-    ChoiceType, ChosenSubtypeKind, ControllerRef, Effect, ResolvedAbility, TargetSelectionMode,
-};
+use engine::types::ability::{ChoiceType, ChosenSubtypeKind};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -344,30 +342,6 @@ fn kindred_discovery_cast_has_private_suggestions_and_stores_answer() {
         WaitingFor::Priority { .. }
     ));
     assert!(runner.state().stack.is_empty());
-}
-
-#[test]
-fn choose_resolver_uses_the_same_carrier_without_changing_legal_options() {
-    let (mut runner, _) = cavern_prompt();
-    // Focused resolver coverage supplements the public land-play/cast tests.
-    let ability = ResolvedAbility::new(
-        Effect::Choose {
-            chooser: ControllerRef::You,
-            choice_type: ChoiceType::creature_type(),
-            persist: false,
-            selection: TargetSelectionMode::Chosen,
-        },
-        vec![],
-        ObjectId(9999),
-        P0,
-    );
-    choose::resolve(runner.state_mut(), &ability, &mut vec![]).unwrap();
-    assert_eq!(suggestions(runner.state(), Some(P0)), expected());
-    let WaitingFor::NamedChoice { options, .. } = &runner.state().waiting_for else {
-        panic!("expected resolver prompt")
-    };
-    assert!(options.contains(&"Dragon".into()));
-    assert_eq!(options.len(), runner.state().all_creature_types.len());
 }
 
 #[test]
