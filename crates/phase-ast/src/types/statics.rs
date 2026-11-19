@@ -2096,6 +2096,11 @@ pub enum StaticMode {
     /// regenerated." one-shot) — this is the standalone, until-end-of-turn form
     /// (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
     CantBeRegenerated,
+    /// CR 701.32a + CR 904.9: "Schemes can't be set in motion" (All in Good
+    /// Time). A rule-mod marker, not a layer modification; enforcement lives
+    /// in `archenemy.rs`'s set-in-motion gate. Always transient (the extra
+    /// turn), installed via `Effect::GenericEffect`.
+    CantSetSchemeInMotion,
     /// CR 702.34: Flashback — allows casting from graveyard, exiled after resolution.
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -2592,6 +2597,7 @@ pub enum StaticModeKind {
     Indestructible,
     CantBeDestroyed,
     CantBeRegenerated,
+    CantSetSchemeInMotion,
     FlashBack,
     Shroud,
     Hexproof,
@@ -2761,6 +2767,7 @@ impl StaticMode {
             StaticMode::Indestructible => StaticModeKind::Indestructible,
             StaticMode::CantBeDestroyed => StaticModeKind::CantBeDestroyed,
             StaticMode::CantBeRegenerated => StaticModeKind::CantBeRegenerated,
+            StaticMode::CantSetSchemeInMotion => StaticModeKind::CantSetSchemeInMotion,
             StaticMode::FlashBack => StaticModeKind::FlashBack,
             StaticMode::Shroud => StaticModeKind::Shroud,
             StaticMode::Hexproof => StaticModeKind::Hexproof,
@@ -2969,6 +2976,7 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::CantSetSchemeInMotion
             | StaticMode::Other(_) => None,
         }
     }
@@ -3354,6 +3362,7 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::CantSetSchemeInMotion
             | StaticMode::Other(_) => None,
         }
     }
@@ -3696,6 +3705,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
             StaticMode::CantBeRegenerated => write!(f, "CantBeRegenerated"),
+            StaticMode::CantSetSchemeInMotion => write!(f, "CantSetSchemeInMotion"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
             StaticMode::Hexproof => write!(f, "Hexproof"),
@@ -4255,6 +4265,8 @@ impl FromStr for StaticMode {
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
             // CR 701.19c: "[Permanent] can't be regenerated."
             "CantBeRegenerated" => StaticMode::CantBeRegenerated,
+            // CR 701.32a + CR 904.9: "Schemes can't be set in motion."
+            "CantSetSchemeInMotion" => StaticMode::CantSetSchemeInMotion,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
             "Hexproof" => StaticMode::Hexproof,

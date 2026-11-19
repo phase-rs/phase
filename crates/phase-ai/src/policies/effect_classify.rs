@@ -508,6 +508,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // bottom of its owner's scheme deck — whether that is good depends on
         // the scheme (ongoing pressure vs. cycling to the next scheme).
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing a face-up scheme's abilities — whether that is
+        // good depends on the scheme being set in motion again.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -1060,7 +1063,11 @@ fn type_filter_domain(tf: &TypeFilter) -> TypeDomain {
         // combines Instant or Sorcery with Creature, and this engine's
         // `core_types` set does not carry both at once for any live object.
         // Provably creature-excluding, unlike the permanent types below.
-        TypeFilter::Instant | TypeFilter::Sorcery => TypeDomain::NON_CREATURE_ONLY,
+        // CR 314.1: schemes are nontraditional command-zone cards, never
+        // creatures — provably creature-excluding for the same reason.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => {
+            TypeDomain::NON_CREATURE_ONLY
+        }
 
         // These five permanent types are NOT structurally creature-excluding
         // — real printed cards double them with Creature (Dryad Arbor is a

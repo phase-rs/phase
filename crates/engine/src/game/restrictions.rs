@@ -683,7 +683,10 @@ fn entry_type_filter_matches(
         // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
         // than silently join this arm while `ledger_filter_is_evaluable`
         // keeps reporting type filters evaluable.
-        TypeFilter::Instant | TypeFilter::Sorcery => false,
+        // CR 314.1: scheme cards are nontraditional cards that are never
+        // permanents and never enter the battlefield, so a battlefield-entry
+        // record is never a scheme either.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => false,
     }
 }
 

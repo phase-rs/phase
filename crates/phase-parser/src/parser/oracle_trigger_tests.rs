@@ -546,6 +546,7 @@ fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
         AbilityKind::Spell,
         Effect::Token {
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -27053,6 +27054,166 @@ fn trigger_one_of_your_opponents_is_attacked() {
 }
 
 #[test]
+fn trigger_chosen_player_attacked() {
+    // CR 508.1a + CR 607.2d: "the chosen player is attacked" — the linked
+    // choice as defending player (Imprison This Insolent Wretch).
+    let def = parse_trigger_line(
+        "When the chosen player is attacked, abandon this scheme.",
+        "Imprison This Insolent Wretch",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::SourceChosenPlayer));
+    // CR 508.3b: only fires when the player themselves is attacked.
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    let execute = def.execute.as_ref().expect("abandon effect");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn trigger_chosen_player_becomes_target() {
+    // CR 603.2e + CR 607.2d: "the chosen player becomes the target of a spell
+    // or ability" (Imprison This Insolent Wretch). Pure player subject: the
+    // filter rides in `valid_target` with no `valid_card`, which is what the
+    // matcher's player-target arm requires.
+    let def = parse_trigger_line(
+        "When the chosen player becomes the target of a spell or ability, abandon this scheme.",
+        "Imprison This Insolent Wretch",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesTarget);
+    assert_eq!(def.valid_target, Some(TargetFilter::SourceChosenPlayer));
+    assert_eq!(def.valid_card, None);
+    let execute = def.execute.as_ref().expect("abandon effect");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn trigger_chosen_player_casts_spell() {
+    // CR 607.2d building-block win: the chosen-player subject arm also binds
+    // "the chosen player casts a spell" (Sewer Nemesis), which previously
+    // parsed with no caster scope at all.
+    let def = parse_trigger_line(
+        "Whenever the chosen player casts a spell, that player mills a card.",
+        "Sewer Nemesis",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(def.valid_target, Some(TargetFilter::SourceChosenPlayer));
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_creature_put_onto_battlefield_with_scheme_dies() {
+    // CR 700.4 + CR 603.6c: "dies" is battlefield-to-graveyard, and the
+    // "put onto the battlefield with this scheme" subject qualifier is
+    // ability-placement provenance (CR 603.6a + CR 400.7), read from the
+    // departing incarnation's last known information at fire time (CR 608.2h).
+    // (My Undead Horde Awakens.)
+    let def = parse_trigger_line(
+        "When a creature put onto the battlefield with this scheme dies, abandon this scheme.",
+        "My Undead Horde Awakens",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(def.condition, Some(TriggerCondition::PlacedByAbilitySource));
+    let execute = def.execute.as_deref().expect("abandon effect");
+    assert_no_unimplemented(execute);
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
+fn trigger_creature_put_onto_battlefield_with_enchantment_dies() {
+    // CR 700.4 + CR 603.6c: the same provenance qualifier on a "this
+    // enchantment" self-ref (Diabolic Servitude) — the self axis is the full
+    // self-reference vocabulary, not the scheme word.
+    let def = parse_trigger_line(
+        "When the creature put onto the battlefield with this enchantment dies, exile it and return this enchantment to its owner's hand.",
+        "Diabolic Servitude",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(def.condition, Some(TriggerCondition::PlacedByAbilitySource));
+    let execute = def.execute.as_deref().expect("exile-and-return body");
+    assert_no_unimplemented(execute);
+}
+
+#[test]
+fn trigger_creature_put_onto_battlefield_with_card_name_leaves() {
+    // CR 603.6c: the qualifier also scopes leaves-the-battlefield triggers,
+    // and a card-name self-ref binds through `~` normalization (Havengul
+    // Mystery).
+    let def = parse_trigger_line(
+        "When the creature put onto the battlefield with Havengul Mystery leaves the battlefield, transform Havengul Mystery.",
+        "Havengul Mystery",
+    );
+    assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+    assert_eq!(def.condition, Some(TriggerCondition::PlacedByAbilitySource));
+    let execute = def.execute.as_deref().expect("transform body");
+    assert_no_unimplemented(execute);
+}
+
+#[test]
+fn trigger_whenever_you_set_nonongoing_scheme_in_motion_watches() {
+    // CR 904.9 + CR 603.2: "whenever you set a non-ongoing scheme in
+    // motion" (My Laughter Echoes) watches ANOTHER scheme — the same
+    // SetInMotion mode as the self trigger, scoped by valid_card instead of
+    // source identity. CR 118.12: "you may abandon this scheme. If you do,
+    // set that scheme in motion again" is an optional instruction plus an
+    // effect-performed followup re-firing the triggering event's scheme.
+    let def = parse_trigger_line(
+        "Whenever you set a non-ongoing scheme in motion, you may abandon this scheme. If you do, set that scheme in motion again.",
+        "My Laughter Echoes",
+    );
+    assert_eq!(def.mode, TriggerMode::SetInMotion);
+    let TargetFilter::Typed(tf) = def.valid_card.as_ref().expect("scheme filter") else {
+        panic!("expected Typed valid_card, got {:?}", def.valid_card);
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Scheme),
+        "watch filter must name Scheme, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::NotSupertype {
+            value: Supertype::Ongoing
+        }),
+        "watch filter must exclude ongoing schemes, got {:?}",
+        tf.properties
+    );
+    let execute = def.execute.as_deref().expect("optional abandon");
+    assert!(execute.optional);
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AbandonScheme),
+        "expected optional AbandonScheme, got {:?}",
+        execute.effect
+    );
+    let followup = execute.sub_ability.as_deref().expect("If you do re-fire");
+    assert_eq!(
+        followup.condition,
+        Some(AbilityCondition::effect_performed())
+    );
+    assert_eq!(
+        followup.effect.as_ref(),
+        &Effect::SetSchemeInMotion {
+            target: TargetFilter::TriggeringSource
+        }
+    );
+    assert_no_unimplemented(execute);
+}
+
+#[test]
 fn karazikar_attack_trigger_scopes_both_opponents() {
     let def = parse_trigger_line(
         "Whenever an opponent attacks another one of your opponents, you and the attacking player each draw a card and lose 1 life.",
@@ -42309,6 +42470,135 @@ fn assert_copies_triggering_source(def: &TriggerDefinition, label: &str) {
     assert!(!has_unimplemented(execute), "{label}: {execute:?}");
 }
 
+/// CR 603.12 + CR 701.20a + CR 608.2c + CR 202.3: A Premonition of Your
+/// Demise, verbatim Oracle. Sentence 1 reveals the top two and puts them into
+/// hand; sentence 2 is a reflexive trigger over that reveal — a `WhenYouDo`
+/// creation marker guarded by "at least one revealed card is a nonland"
+/// (counted off the chain tracked set), dealing damage equal to the revealed
+/// set's total mana value to any target. Lands contribute MV 0 (CR 202.3a),
+/// so the unfiltered sum is exactly the nonlands' total.
+#[test]
+fn premonition_of_your_demise_full_oracle_parses_reveal_damage_reflexive() {
+    const TEXT: &str = "When you set this scheme in motion, reveal the top two cards of your library and put them into your hand. When you reveal one or more nonland cards this way, this scheme deals damage equal to their total mana value to any target.";
+    let parsed = parse_oracle_text(
+        TEXT,
+        "A Premonition of Your Demise",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::SetInMotion)
+        .expect("set-in-motion trigger must parse");
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("trigger must carry its reveal/damage chain");
+    assert!(
+        !has_unimplemented(execute),
+        "Premonition must parse with no gaps, got {execute:?}"
+    );
+    // Sentence 1: reveal the top two.
+    let Effect::RevealTop { player, count } = execute.effect.as_ref() else {
+        panic!("sentence 1 must be RevealTop, got: {:?}", execute.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(*count, 2);
+    // … and put them into hand.
+    let into_hand = execute.sub_ability.as_ref().expect("into-hand must chain");
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = into_hand.effect.as_ref()
+    else {
+        panic!("into-hand must be ChangeZone, got: {:?}", into_hand.effect);
+    };
+    assert_eq!(*destination, Zone::Hand);
+    assert_eq!(*target, TargetFilter::ParentTarget);
+    // Sentence 2: the reflexive damage body.
+    let reflexive = into_hand
+        .sub_ability
+        .as_ref()
+        .expect("reflexive must chain");
+    let Effect::DealDamage { amount, target, .. } = reflexive.effect.as_ref() else {
+        panic!("reflexive must be DealDamage, got: {:?}", reflexive.effect);
+    };
+    assert_eq!(*target, TargetFilter::Any, "damage goes to any target");
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(aggregate),
+    } = amount
+    else {
+        panic!("damage amount must be a property aggregate, got: {amount:?}");
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+    assert!(
+        matches!(
+            aggregate.source(),
+            CardTypeSetSource::TrackedSet {
+                set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+                filter: None,
+            }
+        ),
+        "'their' must re-anchor to the revealed chain set, got {:?}",
+        aggregate.source()
+    );
+    // The creation gate: WhenYouDo plus at-least-one-nonland-revealed.
+    let condition = reflexive
+        .condition
+        .as_ref()
+        .expect("reflexive must carry its creation gate");
+    assert!(
+        condition.has_when_you_do_marker(),
+        "reflexive must carry the WhenYouDo marker, got {condition:?}"
+    );
+    let AbilityCondition::And { conditions } = condition else {
+        panic!("gate must be the marker plus its guard, got: {condition:?}");
+    };
+    let guard = conditions
+        .iter()
+        .find_map(|member| match member {
+            AbilityCondition::QuantityCheck {
+                lhs,
+                comparator,
+                rhs,
+            } => Some((lhs, comparator, rhs)),
+            _ => None,
+        })
+        .expect("gate must carry the nonland-count guard");
+    assert_eq!(*guard.1, Comparator::GE);
+    assert_eq!(
+        *guard.2,
+        QuantityExpr::Fixed { value: 1 },
+        "one or more means >= 1"
+    );
+    let QuantityExpr::Ref {
+        qty:
+            QuantityRef::FilteredTrackedSetSize {
+                filter,
+                caused_by: None,
+                destination: None,
+            },
+    } = guard.0
+    else {
+        panic!(
+            "guard must count the revealed chain set, got: {:?}",
+            guard.0
+        );
+    };
+    assert_eq!(
+        filter.as_ref(),
+        &TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(
+            TypeFilter::Land
+        )))),
+        "guard must count nonland cards"
+    );
+}
+
 /// CR 107.3a + CR 202.1 / CR 602.1a: one combinator recognizes both printed
 /// `{X}`-in-cost grammars for each cost slot, and a spell qualifier never
 /// accepts the activation slot (nor the reverse).
@@ -44752,4 +45042,76 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
         let legs = parse_trigger_lines(line, name);
         assert_eq!(legs[0].description.as_deref(), Some(first_leg), "{name}");
     }
+}
+
+/// CR 508.5 + CR 603.4: "if you're the defending player" (Nature Shields
+/// Its Own) is an intervening-if — the trigger only fires when its
+/// controller is the player the triggering creature is attacking.
+#[test]
+fn nature_shields_defending_player_guard_is_intervening_if() {
+    let def = parse_trigger_line(
+        "Whenever a creature attacks and isn't blocked, if you're the defending player, create a 0/1 green Plant creature token that's blocking that creature.",
+        "Nature Shields Its Own",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttackUnblocked);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::IsDefendingPlayer {
+            player: PlayerScope::Controller
+        })
+    );
+    let execute = def.execute.as_deref().expect("token body");
+    assert_no_unimplemented(execute);
+}
+
+/// CR 508.1 + CR 603.2c: "four or more creatures attack you" (Nature
+/// Shields Its Own) is a count-conditional attack trigger; "at end of
+/// combat" defers the abandon past combat damage.
+#[test]
+fn nature_shields_count_attack_head_defers_abandon_to_end_of_combat() {
+    use crate::types::ability::AttackersDeclaredCountSubject;
+    use crate::types::triggers::AttackTargetFilter;
+    let def = parse_trigger_line(
+        "When four or more creatures attack you, abandon this scheme at end of combat.",
+        "Nature Shields Its Own",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(def.batched, "one firing per attack declaration");
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::AttackTarget {
+                    controller: ControllerRef::You,
+                    attacked: AttackTargetFilter::Player,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 4,
+            }),
+        })
+    );
+    // CR 603.7a: "at end of combat" schedules a delayed trigger abandoning
+    // the scheme (Wall of Tears shape).
+    let execute = def.execute.as_deref().expect("abandon body");
+    match execute.effect.as_ref() {
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => {
+            assert_eq!(
+                *condition,
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: crate::types::phase::Phase::EndCombat
+                }
+            );
+            assert!(
+                matches!(effect.effect.as_ref(), Effect::AbandonScheme),
+                "delayed body must abandon the scheme, got {:?}",
+                effect.effect
+            );
+        }
+        other => panic!("expected CreateDelayedTrigger, got {other:?}"),
+    }
+    assert_no_unimplemented(execute);
 }

@@ -144,6 +144,9 @@ pub(crate) struct TokenDescription {
     /// CR 508.4: the defender named by an inline "attacking that player".
     #[serde(skip_serializing_if = "TokenAttackDestination::is_controller_chooses")]
     pub(crate) attack_destination: TokenAttackDestination,
+    /// CR 509.1h + CR 506.3e: the attacker named by an inline "that's
+    /// blocking that creature" clause. `None` = no blocking rider.
+    pub(crate) enters_blocking: Option<TargetFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -1114,6 +1117,13 @@ pub(crate) enum ImperativeFamilyAst {
     /// sourced it (ongoing-scheme "abandon this scheme" clauses). No-op unless
     /// the source is a face-up ongoing scheme.
     AbandonScheme,
+    /// CR 701.32b: An ability sets a scheme in motion again (My Laughter
+    /// Echoes: "set that scheme in motion again"). The referent is
+    /// event-context (`TriggeringSource`) or the ability source (`SelfRef`),
+    /// never a chosen target.
+    SetSchemeInMotion {
+        target: TargetFilter,
+    },
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -3404,6 +3414,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals

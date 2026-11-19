@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_while1};
 use nom::character::complete::{multispace0, one_of, satisfy, space1};
-use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -3350,6 +3350,15 @@ fn rewrite_other_as_parent_target_exclusion(
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter_mut()
             .for_each(|leg| rewrite_other_as_parent_target_exclusion(leg, applies)),
+        // CR 608.2c: the sweep's member filter nests inside the tracked-set
+        // wrapper ("all other cards revealed this way" — the Marionette
+        // sweep), so descend through it (and through negation) to reach the
+        // typed legs. The subject-led caller has no such nesting today, so it
+        // is unaffected; the contract ("every typed leg's other") reads the
+        // same from its side.
+        TargetFilter::TrackedSetFiltered { filter, .. } | TargetFilter::Not { filter } => {
+            rewrite_other_as_parent_target_exclusion(filter, applies)
+        }
         _ => {}
     }
 }
@@ -5293,6 +5302,28 @@ fn classify_negation(negated: &str) -> NegationResult {
     {
         return NegationResult::Prop(FilterProp::NotHistoric);
     }
+    // CR 205.4a + CR 314.1: "non-ongoing scheme" (My Laughter Echoes).
+    // CR 903.3: "noncommander" (You Will Know True Suffering, Subjugate the
+    // Hobbits, Shield Broker, Become the Pilot) — commander is a
+    // deck-construction designation, not a subtype, so it must not fall
+    // through to the vacuous `Non(Subtype("Commander"))` below (no object
+    // carries that subtype, so the exclusion would match everything).
+    if let Ok((_, result)) = all_consuming(alt((
+        map(tag::<_, _, OracleError<'_>>("ongoing"), |_| {
+            NegationResult::Prop(FilterProp::NotSupertype {
+                value: Supertype::Ongoing,
+            })
+        }),
+        map(tag("commander"), |_| {
+            NegationResult::Prop(FilterProp::Not {
+                prop: Box::new(FilterProp::IsCommander),
+            })
+        }),
+    )))
+    .parse(negated)
+    {
+        return result;
+    }
 
     match negated {
         // Color negation — parallel to HasColor
@@ -6355,6 +6386,8 @@ fn type_filter_guarantees_creature(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: Scheme pins a noncreature card type.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -6386,7 +6419,9 @@ fn is_noncreature_core_type_pin(tf: &TypeFilter) -> bool {
         | TypeFilter::Instant
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
-        | TypeFilter::Battle => true,
+        | TypeFilter::Battle
+        // CR 205.2a: "scheme" is in the quoted card-type list above.
+        | TypeFilter::Scheme => true,
         // CR 208.3 names "noncreature" directly: a NONCREATURE permanent has no
         // power or toughness. A `Non(Creature)` pin is exactly that subject.
         TypeFilter::Non(inner) => **inner == TypeFilter::Creature,
@@ -6511,6 +6546,8 @@ fn type_filter_anchors_creature(tf: &TypeFilter) -> bool {
         // `Permanent`/`Card`/`Any` are type-open quantifiers.
         TypeFilter::Non(_)
         | TypeFilter::Kindred
+        // CR 314.1: Scheme alone names no creature.
+        | TypeFilter::Scheme
         | TypeFilter::Land
         | TypeFilter::Artifact
         | TypeFilter::Enchantment
@@ -8130,6 +8167,8 @@ fn type_filter_includes_card(filter: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 109.2a: Scheme is a specific card type, not the generic `Card` leg.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => false,
@@ -11997,6 +12036,8 @@ pub(crate) fn scan_zone_phrase_span(
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
 /// - Target player's: "from target player's graveyard" → `[Owned{TargetPlayer}, InZone]`
 ///   so the card selection is constrained by the companion player target.
+/// - Target opponent's: "from target opponent's graveyard" → `[Owned{TargetOpponent}, InZone]`
+///   (Hypnox, Into the Earthen Maw) — same companion-target scoping, opponent-restricted.
 /// - "Their": "from their graveyard" → `[Owned{ScopedPlayer}, InZone]` so in an
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
@@ -12037,7 +12078,9 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
         return None;
     }
     match qualifier {
-        ZoneQual::OtherPoss | ZoneQual::Owner(ControllerRef::TargetPlayer) => return None,
+        ZoneQual::OtherPoss
+        | ZoneQual::Owner(ControllerRef::TargetPlayer)
+        | ZoneQual::Owner(ControllerRef::TargetOpponent) => return None,
         ZoneQual::Plain => {
             // This adapter admits only the singular unowned object form. The
             // shared grammar still owns adjective/plural/selection spellings.
@@ -12195,6 +12238,12 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
         value(
             ZoneQual::Owner(ControllerRef::TargetPlayer),
             tag("target player's "),
+        ),
+        // CR 115.1: "target opponent's" declares a stack target slot, unlike the
+        // untargeted "an opponent's".
+        value(
+            ZoneQual::Owner(ControllerRef::TargetOpponent),
+            tag("target opponent's "),
         ),
         value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
         // CR 508.5a: "defending player's" binds one specific defending player.

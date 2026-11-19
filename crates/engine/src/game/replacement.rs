@@ -21828,6 +21828,7 @@ mod tests {
             state.command_zone.push_back(host);
 
             let spec = TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Soldier".to_string(),
                     power: Some(1),
@@ -23788,6 +23789,7 @@ mod tests {
     ) -> TokenSpec {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Test Token".to_string(),
                 power: Some(1),
@@ -28171,6 +28173,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let chatterfang = ObjectId(500);
         let squirrel_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -28200,6 +28203,7 @@ mod tests {
         let mut events = Vec::new();
 
         let plant_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Plant".to_string(),
                 power: Some(0),
@@ -28275,6 +28279,7 @@ mod tests {
         fn artifact_spec(name: &str) -> TokenSpec {
             use crate::types::proposed_event::TokenCharacteristics;
             TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -28366,6 +28371,7 @@ mod tests {
         use crate::types::proposed_event::TokenCharacteristics;
         let creature = core == CoreType::Creature;
         TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: creature.then_some(1),
@@ -28593,6 +28599,7 @@ mod tests {
         state.battlefield.push_back(primal_vigor);
 
         let food_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Food".to_string(),
                 power: None,
@@ -28736,6 +28743,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(power),
                     toughness: PtValue::Fixed(toughness),
@@ -28861,6 +28869,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Beast".to_string(),
                     power: PtValue::Fixed(3),
                     toughness: PtValue::Fixed(3),
@@ -28932,6 +28941,7 @@ mod tests {
     fn token_spec_of(name: &str, core: CoreType, subtype: &str) -> TokenSpec {
         use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: (core == CoreType::Creature).then_some(1),
@@ -29183,6 +29193,7 @@ mod tests {
         state.battlefield.push_back(halving_season);
 
         let soldier_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(1),
@@ -29718,6 +29729,7 @@ mod tests {
 
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -29839,6 +29851,7 @@ mod tests {
 
         fn artifact_spec(name: &str) -> TokenSpec {
             TokenSpec {
+                blocking_attacker: None,
                 characteristics: TokenCharacteristics {
                     display_name: name.to_string(),
                     power: None,
@@ -30022,6 +30035,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
+                blocking_attacker: None,
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
                     display_name: "Token".to_string(),
                     power: None,
@@ -30839,6 +30853,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),

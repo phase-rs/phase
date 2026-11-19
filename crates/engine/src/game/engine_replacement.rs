@@ -8935,6 +8935,7 @@ mod tests {
         install_optional_replacement(&mut state, ReplacementEvent::CreateToken);
 
         let spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Soldier".to_string(),
                 power: Some(2),
@@ -9027,6 +9028,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),
@@ -9066,6 +9068,7 @@ mod tests {
         state.battlefield.push_back(replacement_source);
 
         let treasure_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -9175,6 +9178,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),
@@ -9231,6 +9235,7 @@ mod tests {
         state.battlefield.push_back(replacement_source);
 
         let treasure_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -9357,6 +9362,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),
@@ -9412,6 +9418,7 @@ mod tests {
         state.battlefield.push_back(replacement_source);
 
         let treasure_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -9569,6 +9576,7 @@ mod tests {
         // A substitute token proposed while the seed is live inherits the
         // originating id, so the same token-choice replacement cannot match it.
         let dog_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Dog".to_string(),
                 power: Some(2),
@@ -9651,6 +9659,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: name.to_string(),
                     power: PtValue::Fixed(2),
                     toughness: PtValue::Fixed(2),
@@ -9713,6 +9722,7 @@ mod tests {
         state.battlefield.push_back(jinnie_source);
 
         let treasure_spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,

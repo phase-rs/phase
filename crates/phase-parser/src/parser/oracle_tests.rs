@@ -33694,6 +33694,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         attach_to: None,
         enters_attacking: false,
         attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![token_static],
         enter_with_counters: vec![],

@@ -783,6 +783,7 @@ mod tests {
     fn make_if_you_do_token_rider(source_id: ObjectId) -> ResolvedAbility {
         let mut rider = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Destroy Rider Token".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),

@@ -126,12 +126,34 @@ pub fn resolve(
         })
         .ok_or(EffectError::MissingParam("target player".to_string()))?;
 
-    let full_hand: Vec<_> = state
-        .players
-        .iter()
-        .find(|p| p.id == target_player)
-        .map(|p| p.hand.iter().copied().collect())
-        .unwrap_or_default();
+    // CR 608.2c + CR 109.5: union-pool choice — an UNSCOPED look/choose-only
+    // step (`reveal: false`, no fan-out iteration, so `scoped_player` is
+    // unset) whose target names several players pools every named hand
+    // (My Wish Is Your Command: "You may choose a noncreature, nonland card
+    // revealed this way" after each opponent revealed). Scoped iterations
+    // keep the single iterating player's hand, and public reveals keep the
+    // first-opponent fallback above, so only the new union-choice shape —
+    // unreachable by any previously supported parse, and identical to
+    // first-only in two-player — takes this branch.
+    let union_players: Vec<PlayerId> = if !is_reveal && ability.scoped_player.is_none() {
+        crate::game::ability_utils::collect_player_targets(state, ability, &target)
+    } else {
+        Vec::new()
+    };
+    let full_hand: Vec<_> = if union_players.len() > 1 {
+        union_players
+            .iter()
+            .filter_map(|pid| state.players.iter().find(|p| p.id == *pid))
+            .flat_map(|p| p.hand.iter().copied())
+            .collect()
+    } else {
+        state
+            .players
+            .iter()
+            .find(|p| p.id == target_player)
+            .map(|p| p.hand.iter().copied().collect())
+            .unwrap_or_default()
+    };
 
     // CR 107.1c + CR 701.20a: "reveal any number of [filter] cards in your
     // hand" — the revealing player chooses which matching cards (zero or more)

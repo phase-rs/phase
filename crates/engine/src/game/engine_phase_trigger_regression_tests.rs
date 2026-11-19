@@ -3404,6 +3404,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
     let token_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            enters_blocking: None,
             name: "b_3_3_a_dalek_menace".to_string(),
             power: crate::types::ability::PtValue::Fixed(0),
             toughness: crate::types::ability::PtValue::Fixed(0),

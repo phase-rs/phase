@@ -248,6 +248,7 @@ pub mod seek;
 pub mod separate_piles;
 pub mod set_class_level;
 pub mod set_room_door_lock;
+pub mod set_scheme_in_motion;
 pub mod shuffle;
 pub mod skip_next_step;
 pub mod skip_next_turn;
@@ -6191,6 +6192,9 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         // not a co-entry ContinuationStep: abandoning turns a scheme face
         // down (or returns it to the scheme deck), never onto the battlefield.
         Effect::AbandonScheme => false,
+        // not a co-entry ContinuationStep: re-firing a face-up scheme's
+        // abilities moves nothing onto the battlefield.
+        Effect::SetSchemeInMotion { .. } => false,
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
@@ -6977,6 +6981,7 @@ impl MovedObjectsSource {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -7463,6 +7468,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -7768,6 +7774,7 @@ fn node_with_entry_modifications(
         // `entry_observation_deferred`) is `GenericEffect`, `Animate`, `ReturnAsAura` and
         // `ApplyPerpetual`. Exhaustive, so a new `Effect` variant must be classified here.
         Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::Adapt { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }
@@ -10072,6 +10079,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             attach_to,
             enters_attacking: _,
             attack_destination,
+            enters_blocking,
             supertypes: _,
             static_abilities,
             enter_with_counters,
@@ -10086,10 +10094,15 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                 && static_abilities.is_empty()
                 && enter_with_counters.is_empty()
                 && attack_destination.is_controller_chooses())
-            .then(|| std::iter::once(owner).chain(attach_to.as_ref()).collect()),
-            match attach_to {
-                None => ParentTargetHandling::NamesNoObject,
-                Some(_) => ParentTargetHandling::NotAudited,
+            .then(|| {
+                std::iter::once(owner)
+                    .chain(attach_to.as_ref())
+                    .chain(enters_blocking.as_ref())
+                    .collect()
+            }),
+            match (attach_to, enters_blocking) {
+                (None, None) => ParentTargetHandling::NamesNoObject,
+                _ => ParentTargetHandling::NotAudited,
             },
         ),
         Effect::AdditionalPhase {
@@ -10319,6 +10332,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -11611,6 +11625,7 @@ fn effect_fields_read_filter_population(
         Effect::GiveControl { target, recipient } => has_filter(target) || has_filter(recipient),
         Effect::RemoveFromCombat { target } => has_filter(target),
         Effect::BecomeBlocked { target } => has_filter(target),
+        Effect::SetSchemeInMotion { target } => has_filter(target),
         Effect::ApplyPerpetual {
             target,
             modification,
@@ -11922,6 +11937,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: a player-counter predicate carries no filter or counted
         // population, like the monarch arm above.
@@ -12390,6 +12406,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::HasMaxSpeed
         | TriggerCondition::IsMonarch { .. }
         | TriggerCondition::IsPoisoned { .. }
+        | TriggerCondition::IsDefendingPlayer { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -12667,6 +12684,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof
@@ -15778,6 +15796,7 @@ fn resolve_legacy_effect(
         Effect::ArrangePlanarDeckTop { .. } => arrange_planar_deck::resolve(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
         Effect::AbandonScheme => abandon_scheme::resolve(state, ability, events),
+        Effect::SetSchemeInMotion { .. } => set_scheme_in_motion::resolve(state, ability, events),
         Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
         Effect::ReverseTurnOrder => reverse_turn_order::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
@@ -16181,6 +16200,69 @@ fn branch_references_tracked_set(node: Option<&ResolvedAbility>) -> bool {
 /// sites serve today.
 pub(crate) fn chain_references_tracked_set(ability: &ResolvedAbility) -> bool {
     branch_references_tracked_set(Some(ability))
+}
+
+/// CR 608.2c: the non-recursive half of [`chain_references_tracked_set`] —
+/// whether THIS node (effect plus condition, no children) reads a tracked
+/// set. The interactive-choice answer handler uses it to decide whether a
+/// forced complement forward would corrupt the sub: a sub that reads a set
+/// computes its own population (with its own pick-exclusion) and must keep
+/// its inherited pick targets, never the offered-pool complement.
+pub(crate) fn ability_node_references_tracked_set(ability: &ResolvedAbility) -> bool {
+    effect_references_tracked_set(&ability.effect)
+        || ability.condition.as_ref().is_some_and(|condition| {
+            condition.any_quantity_expr(&quantity_expr_references_tracked_set)
+                || condition.any_filter_grammar(&filter_grammar_node_consumes_tracked_set)
+        })
+}
+
+/// CR 608.2c: does this parked continuation take the interactive pick by
+/// TARGET (`ParentTarget`) — i.e. is the pick delivered through
+/// `apply_parent_chain_context` rather than (only) through the tracked set?
+///
+/// The interactive `ChooseFromZoneChoice` answer handler uses this alongside
+/// [`chain_references_tracked_set`]: when the continuation takes the pick by
+/// target AND references a set, the set names an EARLIER population, not the
+/// pick — Dance, Pathetic Marionette's sweep reads the reveal set while its
+/// reanimate takes the pick — so the pick must not be fresh-published over
+/// it. A continuation that reads ONLY the set (Breach the Multiverse, End-Blaze
+/// Epiphany) still gets its fresh pick set; the pick is delivered by target
+/// either way (`set_unpinned_targets` is unconditional).
+///
+/// Coverage mirrors the tracked-set walk: the primary target slot (where the
+/// pick flows) plus condition gates, over the sub-chain with the same modal
+/// stop. Declared (stack-time) targets are not the pick and never count.
+pub(crate) fn chain_takes_pick_by_target(ability: &ResolvedAbility) -> bool {
+    branch_takes_pick_by_target(Some(ability))
+}
+
+fn branch_takes_pick_by_target(node: Option<&ResolvedAbility>) -> bool {
+    node.is_some_and(|n| !crosses_modal_boundary(n) && node_or_branch_takes_pick_by_target(n))
+}
+
+fn node_or_branch_takes_pick_by_target(ability: &ResolvedAbility) -> bool {
+    // `Effect::target_filter`, not `extract_target_filter_from_effect`: the
+    // extractor's context-ref guard exists to suppress stack-time slots, but
+    // the pick flows exactly through the resolution-time `ParentTarget` slot.
+    let takes = ability.effect.target_filter().is_some_and(|filter| {
+        matches!(
+            filter,
+            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+        )
+    }) || ability.condition.as_ref().is_some_and(|condition| {
+        condition.any_filter_grammar(&|grammar_node| {
+            matches!(
+                grammar_node,
+                crate::types::ability::FilterGrammarNode::Filter(
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                )
+            )
+        })
+    });
+    takes
+        || ability
+            .child_links()
+            .any(|(_, child)| branch_takes_pick_by_target(Some(child)))
 }
 
 /// CR 608.2c + CR 611.2c: An event-less producer publishes the population its
@@ -26006,6 +26088,18 @@ fn resolve_chain_body(
                     source_id: ability.source_id,
                     subject: None,
                 });
+                // CR 608.2c: zero targets still publish the (empty) clause span
+                // so a tail "this way" count reads zero, not a stale earlier set
+                // (Your Plans Mean Nothing with an empty pick).
+                publish_tracked_set_for_resolution(
+                    state,
+                    ability,
+                    TrackedSetPublicationInput::ResolvedEvents {
+                        ability: &per_target,
+                        events: &[],
+                        selection: &[],
+                    },
+                );
                 if let Some(after_fanout) = after_fanout {
                     progress = resolve_ability_chain_step(state, &after_fanout, events, depth + 1)?;
                 }
@@ -26069,7 +26163,29 @@ fn resolve_chain_body(
                 let mut narrowed = per_target.clone();
                 narrowed.set_unpinned_targets(vec![TargetRef::Player(*pid)]);
                 narrowed.multi_target = None;
+                let seat_events_start = events.len();
                 progress = resolve_ability_chain_step(state, &narrowed, events, depth + 1)?;
+                // CR 608.2c: the narrowed seat resolves WITHOUT the detached
+                // tail, so its own publication gate sees no consumer and stays
+                // shut — publish this seat's span into the clause's chain set
+                // here (`publish_tracked_set` unions across seats) so a tail
+                // "this way" consumer reads EVERY seat's objects, not none (Your
+                // Plans Mean Nothing: each opponent draws off their own
+                // discards). The gate reads the OUTER ability's intact chain —
+                // the true consumer test — via the Normal-mode arm's own check.
+                // Complete seats only: a parked seat resumes with the
+                // consumer-ended continuation chain and self-publishes.
+                if progress == ResolutionProgress::Complete {
+                    publish_tracked_set_for_resolution(
+                        state,
+                        ability,
+                        TrackedSetPublicationInput::ResolvedEvents {
+                            ability: &narrowed,
+                            events: &events[seat_events_start..],
+                            selection: &[],
+                        },
+                    );
+                }
 
                 // CR 608.2c: If an inner effect paused on a player choice (e.g.
                 // `WaitingFor::DiscardChoice` when a targeted player must pick
@@ -42472,6 +42588,7 @@ mod tests {
         };
         assert!(effect_has_iteration_bound_recipient(&draw_scoped));
         let token_original = Effect::Token {
+            enters_blocking: None,
             name: "Treasure".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -43935,6 +44052,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Zombie".to_string(),
                 power: tracked_pt.clone(),
                 toughness: tracked_pt,
@@ -44077,6 +44195,7 @@ mod tests {
     fn token_tracked_entry_counter_marks_ability_as_referencing_tracked_set() {
         let ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Zombie".to_string(),
                 power: PtValue::Fixed(2),
                 toughness: PtValue::Fixed(2),
@@ -46323,6 +46442,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Salamander Warrior".to_string(),
                 power: PtValue::Fixed(4),
                 toughness: PtValue::Fixed(3),
@@ -50805,6 +50925,7 @@ mod tests {
 
             let token_sub = ResolvedAbility::new(
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Treasure".to_string(),
                     power: PtValue::Fixed(0),
                     toughness: PtValue::Fixed(0),
@@ -51262,6 +51383,7 @@ mod tests {
 
         let token_sub = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Spirit".to_string(),
                 power: PtValue::Fixed(3),
                 toughness: PtValue::Fixed(2),
@@ -56316,6 +56438,7 @@ mod tests {
         let make_chain = |child_effect: Effect, link: SubAbilityLink| {
             let mut token = ResolvedAbility::new(
                 Effect::Token {
+                    enters_blocking: None,
                     attack_destination:
                         crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Fractal".to_string(),
@@ -56870,6 +56993,7 @@ mod tests {
     #[test]
     fn mark_co_scoped_created_referent_consumer_requires_the_matching_producer() {
         let token = || Effect::Token {
+            enters_blocking: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
@@ -56972,6 +57096,7 @@ mod tests {
             end_cost: None,
         };
         let elemental = || Effect::Token {
+            enters_blocking: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Elemental".to_string(),
             power: PtValue::Fixed(1),
@@ -57400,6 +57525,7 @@ mod tests {
             }))
         };
         let token = |static_abilities: Vec<StaticDefinition>| Effect::Token {
+            enters_blocking: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
@@ -57764,6 +57890,7 @@ mod tests {
             end_cost: None,
         };
         let token = |static_def: StaticDefinition| Effect::Token {
+            enters_blocking: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
@@ -58406,6 +58533,7 @@ mod tests {
             target: TargetFilter::LastCreated,
         };
         let token_attached = Effect::Token {
+            enters_blocking: None,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Aura".to_string(),
             power: PtValue::Fixed(0),
@@ -59148,6 +59276,7 @@ mod tests {
             (
                 "Token keyword Protection(Filter)",
                 effect_row(Box::new(move |filter| Effect::Token {
+                    enters_blocking: None,
                     attack_destination:
                         crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".to_string(),
@@ -61543,6 +61672,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
                     qty: QuantityRef::PropertyAggregate(
@@ -61703,6 +61833,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
                     qty: QuantityRef::PropertyAggregate(
@@ -63090,6 +63221,7 @@ mod tests {
 
         let token_rider = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -65406,6 +65538,7 @@ mod tests {
 
         let token = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Myr".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -67400,6 +67533,7 @@ mod tests {
         );
 
         let make_cat = || Effect::Token {
+            enters_blocking: None,
             name: "Cat".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -72134,6 +72268,7 @@ mod resolution_progress_contract_tests {
             );
             let effect = if token {
                 Effect::Token {
+                    enters_blocking: None,
                     attack_destination:
                         crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".into(),

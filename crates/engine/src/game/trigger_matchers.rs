@@ -6034,6 +6034,13 @@ pub(super) fn match_planeswalked(
 /// CR 904.9 / CR 701.32b: "When you set this scheme in motion" — fires for the
 /// scheme set in motion; "you" resolves to the archenemy via the scheme's
 /// controller (stamped in `archenemy::set_in_motion`).
+///
+/// Watching form (My Laughter Echoes: "whenever you set a non-ongoing scheme
+/// in motion") — when `valid_card` is set (self-triggers never set it), the
+/// trigger fires for any set-in-motion event whose scheme passes the filter,
+/// mirroring `ChangesZone`: no source-identity check, so the filter alone
+/// decides self-inclusion (Laughter Echoes' own ongoing scheme fails its own
+/// `NotSupertype{Ongoing}` leg).
 pub(super) fn match_set_in_motion(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -6041,9 +6048,20 @@ pub(super) fn match_set_in_motion(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    matches!(event, GameEvent::SchemeSetInMotion { scheme_id, player_id }
-        if *scheme_id == source_id
-        && valid_player_matches(trigger, state, *player_id, source_context))
+    match event {
+        GameEvent::SchemeSetInMotion {
+            scheme_id,
+            player_id,
+        } if valid_player_matches(trigger, state, *player_id, source_context) => {
+            match &trigger.valid_card {
+                // Self form: the event names this scheme.
+                None => *scheme_id == source_id,
+                // Watching form: the event names a scheme passing the filter.
+                Some(_) => valid_card_matches(trigger, state, *scheme_id, source_context),
+            }
+        }
+        _ => false,
+    }
 }
 
 /// CR 701.33b: "When you abandon this scheme" — fires for the abandoned scheme.
