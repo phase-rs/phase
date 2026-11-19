@@ -193,3 +193,66 @@ fn a_taken_loop_journal_reloads_through_the_restore() {
         "the reload derives the same journal and index"
     );
 }
+
+/// CR 800.4a: a take whose repetitions make every opponent lose (Exquisite Blood, "Whenever an
+/// opponent loses life, you gain that much life.", with Enduring Tenacity, "Whenever you gain
+/// life, target opponent loses that much life.", in a four-player game) still retires its
+/// repetitions' action-scoped entries, but keeps each leave and every command of its sweep, so
+/// `records_player_leave_move` still finds the sweep's zone changes.
+#[test]
+fn a_take_that_eliminates_players_keeps_each_leaves_sweep() {
+    use engine::types::resolved_commands::RulesExecutionNodeRef;
+
+    let offer = super::three_opponent_drain_shortcut::load_fc();
+    let taken = super::three_opponent_drain_shortcut::accept_suggested(&offer);
+    assert_eq!(
+        taken.waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "reach: the take eliminates every opponent"
+    );
+    let start = offer.resolved_rules_journal.entries().len();
+    let journal = &taken.resolved_rules_journal;
+    let take_entries = journal.entries().skip(start);
+    assert!(
+        journal.next_command_ordinal().0 as usize - journal.entries().len()
+            > offer.resolved_rules_journal.next_command_ordinal().0 as usize
+                - offer.resolved_rules_journal.entries().len(),
+        "reach: the take retired its repetitions' action-scoped entries"
+    );
+    assert!(
+        take_entries
+            .iter()
+            .all(|entry| entry.retention() == JournalRetention::Turn),
+        "no action-scoped entry survives the take"
+    );
+
+    let leaves: Vec<_> = take_entries
+        .iter()
+        .filter(|entry| matches!(entry.command, Some(ResolvedRulesCommand::PlayerLeave(_))))
+        .collect();
+    assert_eq!(leaves.len(), 3, "each opponent's leave is kept");
+    let sweep_moves: Vec<_> = take_entries
+        .iter()
+        .filter(|entry| matches!(entry.node, RulesExecutionNodeRef::PlayerLeave(_)))
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::ZoneChange(change)) => Some(change),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !sweep_moves.is_empty(),
+        "reach: the leaves' sweeps moved the departing players' objects"
+    );
+    for change in sweep_moves {
+        assert!(
+            journal.records_player_leave_move(&engine::types::resolved_commands::PlayerLeaveMove {
+                object_id: change.object.object_id,
+                from: change.from,
+                to: change.to,
+                turn_zone_change_index: change.turn_zone_change_index,
+            }),
+            "CR 800.4a: the kept sweep move of {:?} is still found as a leave's",
+            change.object
+        );
+    }
+}
