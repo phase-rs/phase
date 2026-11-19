@@ -206,9 +206,10 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy | TriggerMode::SpellCopy => {
             push(TriggerEventKey::SpellCast(narrow));
         }
+        // CR 603.2 + CR 603.3b: an observer of another ability triggering.
+        TriggerMode::AbilityTriggered { .. } => push(TriggerEventKey::AbilityTriggered),
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::AbilityActivated
@@ -555,6 +556,8 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::XValueChosen { .. } => {}
         GameEvent::AbilityActivated { .. } => push(TriggerEventKey::AbilityOrCopyActivated),
+        // CR 603.2 + CR 603.3b: a triggered ability triggered.
+        GameEvent::AbilityTriggered { .. } => push(TriggerEventKey::AbilityTriggered),
         GameEvent::ZoneChanged {
             from,
             to,
@@ -822,6 +825,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChangeSpeed
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
+        | EffectKind::ResumeDamageBatch
         | EffectKind::EachDealsDamageEqualToPower
         | EffectKind::EachSourceDealsDamage
         | EffectKind::Draw
@@ -1222,6 +1226,20 @@ pub fn ensure_ready(state: &mut GameState) {
     }
 }
 
+/// CR 603.2: whether the trigger index holds any source under `key`. A phased-out or
+/// stale entry is not filtered here, so a caller may only use the answer as an
+/// over-approximation. Reads only the keyed bucket: `unclassified` holds objects
+/// whose definitions could not be keyed or that carry a synthetic keyword trigger,
+/// and a definition whose mode maps to `key` is always in that key's bucket.
+pub(crate) fn has_keyed_trigger_source(state: &mut GameState, key: &TriggerEventKey) -> bool {
+    ensure_ready(state);
+    state
+        .trigger_index
+        .by_key
+        .get(key)
+        .is_some_and(|bucket| !bucket.is_empty())
+}
+
 /// CR 603.2: Public consult helper. Returns the union of buckets the event
 /// keys hit, plus the `unclassified` bucket. Caller dedups against the
 /// per-event `registered_this_event` set as usual.
@@ -1386,6 +1404,47 @@ mod tests {
         let (keys, route) = keys_from_trigger_def(&def);
         assert!(keys.contains(&TriggerEventKey::EnterBattlefield(Some(CoreType::Creature))));
         assert!(!route);
+    }
+
+    /// CR 603.2 + CR 603.3b: each printed observer shape registers under
+    /// `AbilityTriggered` and never in `unclassified`, so the keyed bucket is
+    /// exactly the set of observers (`has_keyed_trigger_source`'s premise).
+    #[test]
+    fn ability_triggered_shapes_key_only_their_own_bucket() {
+        use crate::types::statics::TriggerCause;
+        use crate::types::triggers::CausedAbilitySource;
+        for (cause, source) in [
+            (
+                TriggerCause::CreatureAttacking,
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield { core_types: vec![] },
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield { core_types: vec![] },
+                CausedAbilitySource::Any,
+            ),
+        ] {
+            let def = TriggerDefinition::new(TriggerMode::AbilityTriggered { cause, source })
+                .valid_card(TargetFilter::Typed(TypedFilter::creature()));
+            let (keys, route) = keys_from_trigger_def(&def);
+            assert_eq!(keys.as_slice(), [TriggerEventKey::AbilityTriggered]);
+            assert!(!route);
+        }
+        let event = GameEvent::AbilityTriggered {
+            stack_entry: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            origin: crate::types::events::TriggeredAbilityOrigin::SourceAbility,
+            causes: Vec::new(),
+        };
+        let state = GameState::new_two_player(42);
+        assert_eq!(
+            keys_from_event(&event, &state).as_slice(),
+            [TriggerEventKey::AbilityTriggered]
+        );
     }
 
     #[test]

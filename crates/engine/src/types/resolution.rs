@@ -135,6 +135,16 @@ pub struct OptionalEffectFrame {
     /// prompt, including save/reload before its named result is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    /// CR 614.6 + CR 615.5 + CR 608.2c + CR 608.2d: `Some` when this "may" was reached inside a
+    /// replacement's own action that owns an amount. The answer resumes that action, so its
+    /// "that much" is still the amount the replacement replaced or prevented (Channel Harm: "If
+    /// damage is prevented this way, you may have Channel Harm deal that much damage to target
+    /// creature."). Captured when the offer is made (`quantity::current_replacement_action`),
+    /// like `PendingContinuation::replacement_action`. Re-entered by every resolution of this
+    /// frame's ability. Serde-defaulted: a save taken at the prompt before this field existed
+    /// resumes outside the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_action: Option<crate::types::game_state::ReplacementActionScope>,
     /// `Some` when this frame is a parked any-player poll cursor rather than a
     /// live offer: it owns no prompt, so its gate is [`FrameGate::AfterChild`]
     /// and it arms in `resume_resolution_frames` once the frames above it are
@@ -144,6 +154,36 @@ pub struct OptionalEffectFrame {
     /// default to `None`, i.e. an ordinary live offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_poll: Option<Box<ParkedOpponentMayPoll>>,
+}
+
+impl OptionalEffectFrame {
+    /// CR 608.2d: a live offer of `ability`'s "may", carrying the resolution context its answer
+    /// resumes in. Mirrors `PendingContinuation::new`, which captures its own.
+    pub(crate) fn live_offer(ability: ResolvedAbility, state: &GameState) -> Self {
+        Self {
+            ability: Box::new(ability),
+            // CR 608.2: capture the triggering event in lockstep with the stashed ability while
+            // `current_trigger_event` is still live (we are inside `execute_effect`). Restored
+            // when the optional decision resumes so an optional ("may") trigger's effect
+            // resolves `TriggeringPlayer` and other event-context refs exactly as a
+            // non-optional trigger would.
+            trigger_event: state.current_trigger_event.clone(),
+            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a "you may"
+            // reproduction (Captain Marvel, Apex Avenger) folds every `CounterAdded` occurrence
+            // when the decision resumes.
+            trigger_events: state.current_trigger_events.clone(),
+            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a "you may"
+            // sub-ability of a batched trigger (Ur-Dragon's optional permanent-from-hand
+            // sub-effect) resumes with the same `EventContextAmount` the pre-pause resolution
+            // observed.
+            trigger_match_count: state.current_trigger_match_count,
+            return_result_occurrence: state.active_return_result_occurrence,
+            // CR 614.6 + CR 615.5: the replacement action this offer is made in, if it owns an
+            // amount.
+            replacement_action: crate::game::quantity::current_replacement_action(),
+            parked_poll: None,
+        }
+    }
 }
 
 /// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
@@ -1307,6 +1347,28 @@ impl IdentifiedPostReplacementDispatch {
     }
 }
 
+/// How much resolution work is left: the stack depth, then the drain count of the active
+/// post-replacement frame (or its paired parent), compared lexicographically. Positional on
+/// purpose: a resume loop only needs a measure that strictly decreases while it makes progress,
+/// not the subtree's identity (that is `ReplacementSubtreeBoundary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionPosition {
+    resolution_depth: usize,
+    active_post_replacement_drains: usize,
+}
+
+impl ResolutionPosition {
+    /// Strictly less work remains than at `before`: the stack is lower, or as high with fewer
+    /// drains in the active post-replacement frame (lexicographic on ℕ×ℕ).
+    pub(crate) fn is_strictly_inside(&self, before: &Self) -> bool {
+        (self.resolution_depth, self.active_post_replacement_drains)
+            < (
+                before.resolution_depth,
+                before.active_post_replacement_drains,
+            )
+    }
+}
+
 impl ResolutionStack {
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
@@ -1422,6 +1484,19 @@ impl ResolutionStack {
             ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
             _ => None,
         })
+    }
+
+    /// The ability continuations from the top of the stack down, mutably.
+    pub(crate) fn ability_continuations_from_top_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut PendingContinuation> {
+        self.frames
+            .iter_mut()
+            .rev()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::AbilityContinuation(frame) => Some(&mut frame.pending),
+                _ => None,
+            })
     }
 
     pub(crate) fn next_draw_sequence_frame_id(&self) -> u64 {
@@ -4067,6 +4142,16 @@ impl ResolutionStack {
         }
     }
 
+    /// How much resolution work is left (see [`ResolutionPosition`]).
+    pub(crate) fn position(&self) -> ResolutionPosition {
+        ResolutionPosition {
+            resolution_depth: self.len(),
+            active_post_replacement_drains: self
+                .active_post_replacement_or_paired_parent()
+                .map_or(0, PostReplacementDrainStack::len),
+        }
+    }
+
     /// Mutably accesses the active general drain or its exact immediate parent.
     pub fn active_post_replacement_or_paired_parent_mut(
         &mut self,
@@ -4210,6 +4295,19 @@ impl ResolutionStack {
     ) -> Option<usize> {
         self.post_replacement_frame(id)
             .map(PostReplacementDrainStack::len)
+    }
+
+    /// CR 615.5 + CR 608.2c: queue `drain` behind the paused resident of the frame `id` names.
+    /// Identity-addressed, like the dispatcher's own cleanup.
+    pub(crate) fn install_post_replacement_drain_behind_paused(
+        &mut self,
+        id: PostReplacementFrameId,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        match self.post_replacement_frame_mut(id) {
+            Some(drains) => drains.install_behind_paused_resident(drain),
+            None => Some(drain),
+        }
     }
 
     /// The mutable twin of [`Self::post_replacement_frame`].
@@ -4872,6 +4970,22 @@ impl ResolutionStack {
         let stack_len = self.frames.len();
         if stack_len == 0 {
             return Err(ResolutionStackError::NoActiveChild);
+        }
+        // CR 608.2c: a paused post-replacement frame and its multi-draw child are one pair. A
+        // drain that joined a post-replacement frame below the boundary raises only its draw
+        // above it, so the parent goes outside the pair, never between its halves.
+        if let Some(child) = self.frames.slot_at_captured_depth(child_stack_start) {
+            if let (Some(ResolutionFrame::MultiDraw(_)), Some(parent)) =
+                (self.frames.get(child), self.frames.below(child))
+            {
+                if matches!(
+                    self.frames.get(parent),
+                    Some(ResolutionFrame::PostReplacement(_))
+                ) {
+                    self.frames.insert_below(parent, frame);
+                    return Ok(());
+                }
+            }
         }
         if !self
             .frames
@@ -7471,6 +7585,8 @@ impl LegacyOptionalEffectWire {
             trigger_events: Vec::new(),
             trigger_match_count: self.pending_optional_trigger_match_count,
             return_result_occurrence: None,
+            // v1 wire predates the replacement-action carrier.
+            replacement_action: None,
         }))
     }
 }
@@ -9419,6 +9535,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         optional_effect
             .validate(&WaitingFor::OpponentMayChoice {
@@ -9509,6 +9626,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         let optional_payload = v2_fixture_with_frames(optional_state, optional_frames);
         let restored: ResolutionStateWire = serde_json::from_value(optional_payload)
@@ -9596,6 +9714,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         })
     }
 
@@ -10165,6 +10284,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             })
         };
         let opponent_may = WaitingFor::OpponentMayChoice {
@@ -10297,6 +10417,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             },
         );
         apply_as_current(
@@ -11548,6 +11669,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
                 source: None,
@@ -11572,7 +11694,6 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         });
         spell.waiting_for =
@@ -11724,6 +11845,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         buried_optional_frames.push_inner(continuation_frame(151));
         assert!(

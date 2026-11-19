@@ -3,10 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::counters;
 use crate::game::effects::player_counter;
-use crate::game::effects::{
-    append_to_pending_continuation, mark_pending_continuation_parent,
-    push_each_source_tail_continuation, push_ownerless_tail_continuation,
-};
+use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
 use crate::game::filter;
 use crate::game::keywords;
 use crate::game::quantity::{
@@ -16,22 +13,24 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
-    DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
-    TargetFilter, TargetRef,
+    DamageSource, DeferredDamageChoice, EachDamageRecipient, Effect, EffectError, EffectKind,
+    EventOutcomes, ExcessRecipient, ParkedDamageBatch, PlayerFilter, QuantityExpr,
+    RawDamagePortion, ReplacedDamagePortion, ResolvedAbility, SplitDamagePortion, SubAbilityLink,
+    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatPreventionTally, DamageRecord, DistributionScope, EachSourceBatchFrame, GameState,
-    PendingDamagePostCounter, PreventedDamageEntry, TriggerSourceContext, TriggerSourceRead,
-    WaitingFor,
+    CombatPreventionTally, DamageBatchKind, DamageBatchLedger, DamageRecord, DistributionScope,
+    EventLosses, GameState, HeldBatchRider, PendingContinuation, PendingDamagePostCounter,
+    PreventedDamageEntry, ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind, MatchedProtectionQuality};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::{CounterCause, ProposedEvent};
+use crate::types::resolution::ChildStackDepth;
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
@@ -539,6 +538,12 @@ pub(crate) fn pre_replacement_damage_gate(
     amount: u32,
     is_combat: bool,
 ) -> DamageGateOutcome {
+    // CR 104.1: "A game ends immediately when a player wins": once an earlier recipient of the
+    // same instruction ended the game (Flame Rift's 4 to its caster under Nefarious Lich, "If
+    // you can't, you lose the game"), no later damage event exists to replace or deal.
+    if state.game_end.is_some() {
+        return DamageGateOutcome::Gated;
+    }
     // CR 120.8: If a source would deal 0 damage, it does not deal damage at all.
     if amount == 0 {
         return DamageGateOutcome::Gated;
@@ -660,25 +665,12 @@ pub(crate) fn apply_damage_to_target(
                 // can resolve against the prevented event's damage source. Clear
                 // after the call to prevent leakage into unrelated later
                 // replacements.
-                //
-                // CR 616.1g: the continuation — a prevention rider, or a damage
-                // substitution's substitute (Soul-Scar Mage's counters) — can
-                // raise a prompt of its own (two counter replacements to order).
-                // This event is settled; the prompt is surfaced, and a caller
-                // with more recipients pauses behind it
-                // (`pause_behind_continuation_prompt`).
-                if let Some(waiting_for) =
-                    crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    )
-                {
-                    state.waiting_for = waiting_for;
-                }
+                crate::game::replacement::drain_damage_rider(state, events);
             }
             Ok(DamageResult::Applied(0))
         }
         ReplacementResult::NeedsChoice(player) => {
-            // Only set waiting_for for non-combat damage; combat pauses via the parked batch, not this arm (no production caller passes `is_combat`).
+            // Only set waiting_for for non-combat damage; combat damage cannot pause mid-resolution.
             if !is_combat {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             }
@@ -1666,23 +1658,13 @@ pub(crate) fn drain_pending_damage_post_counter(
 /// to the original damage-source id so `DamageContext::from_source` reproduces the
 /// original source's keywords at resume time; `amount` is captured as `Fixed` so
 /// it does not re-resolve against mutated state.
-/// CR 113.7a + CR 608.2h: `trigger_source` selects the resume read. Single-source
-/// continuations pass the parent's latch (the same source continuing, so a
-/// departed source is still evaluated by its last known information).
-/// Each-source batch members pass the parent latch filtered to the member
-/// (`trigger_latch_for_member`): kept when the latch names the member (its LKI
-/// is the member's LKI, e.g. a dead Clone dealing its own trigger's damage),
-/// dropped otherwise (the latch names a different object and the resume
-/// authority prefers it over the node's own id — inheriting it would rebuild
-/// the member with the trigger object's keywords instead of its own, CR 120.1).
 fn build_remaining_damage_node(
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     target: TargetRef,
     amount: u32,
-    trigger_source: Option<TriggerSourceContext>,
 ) -> ResolvedAbility {
-    let mut node = ResolvedAbility::new(
+    ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed {
                 value: amount as i32,
@@ -1699,90 +1681,7 @@ fn build_remaining_damage_node(
         vec![target],
         damage_source_id,
         ability.controller,
-    );
-    carry_instruction_context(&mut node, ability);
-    node.trigger_source = trigger_source;
-    node
-}
-
-/// CR 608.2c: a remaining-recipient node continues the paused instruction, so
-/// it carries that instruction's casting-time context (cast origin, paid
-/// costs, …). The tail stashed after it is handed this context when the last
-/// node resolves; a fresh context there would make "if this spell was cast
-/// from exile" (Ultimate Magic: Meteor) read false.
-fn carry_instruction_context(node: &mut ResolvedAbility, ability: &ResolvedAbility) {
-    node.context = ability.context.clone();
-}
-
-/// CR 120.4b: Build a one-shot continuation that applies an already-replaced
-/// damage event. Unlike `build_remaining_damage_node`, this does not route back
-/// through the replacement pipeline.
-fn build_post_replacement_damage_node(
-    ability: &ResolvedAbility,
-    ctx: &DamageContext,
-    event: &ProposedEvent,
-) -> Option<ResolvedAbility> {
-    let ProposedEvent::Damage {
-        target,
-        amount,
-        is_combat,
-        ..
-    } = event
-    else {
-        return None;
-    };
-
-    let mut node = ResolvedAbility::new(
-        Effect::ApplyPostReplacementDamage {
-            context: DamageContextSnapshot::from(ctx),
-            target: target.clone(),
-            amount: *amount,
-            is_combat: *is_combat,
-        },
-        Vec::new(),
-        ctx.source_id,
-        ctx.controller,
-    );
-    carry_instruction_context(&mut node, ability);
-    Some(node)
-}
-
-/// CR 120.4b + CR 616.1e: Stash remaining already-replaced damage survivors so
-/// a nested life/lifelink replacement choice can resolve before Phase C
-/// continues, without re-running damage replacement/prevention selection.
-fn stash_remaining_post_replacement_damage(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    remaining: &[(&DamageContext, ProposedEvent)],
-) {
-    let mut iter = remaining
-        .iter()
-        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ability, ctx, event));
-    let Some(mut head) = iter.next() else {
-        if let Some(sub) = ability.sub_ability.as_ref() {
-            let tail = stashed_tail(state, sub, ability);
-            append_to_pending_continuation(state, Some(Box::new(tail)));
-        }
-        return;
-    };
-
-    for node in iter {
-        append_to_sub_chain(&mut head, node);
-    }
-    if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, stashed_tail(state, sub, ability));
-    }
-    append_to_pending_continuation(state, Some(Box::new(head)));
-}
-
-/// CR 616.1g + CR 608.2c: after one recipient's damage settled, its replacement
-/// continuation (a prevention rider, or a damage substitution's substitute) may
-/// have left a prompt open — Soul-Scar Mage's counters meeting two counter
-/// replacements to order. When the effect still has recipients to damage, it
-/// must stop behind that prompt exactly as it does for a `NeedsChoice` pause:
-/// going on would raise the next recipient's prompt over the open one.
-fn pause_behind_continuation_prompt(state: &GameState, has_remaining: bool) -> bool {
-    has_remaining && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+    )
 }
 
 /// CR 608.2c: who owns the parent's next instruction (`sub_ability`) after a
@@ -1801,12 +1700,14 @@ pub(crate) enum DamageTail {
     Stashed,
 }
 
-/// CR 608.2c: the damage instructions that deal damage to, or from, several
-/// objects or players one event at a time and can therefore pause between two
-/// of their events — exactly the effects [`resolve_instruction`] dispatches.
-/// When one of them returns [`DamageTail::Caller`] with child work pending
-/// (its last recipient's substitute raised a prompt), `resolve_ability_chain`
-/// places the tail outside the whole child stack.
+/// CR 608.2c: every instruction that deals damage through the replacement
+/// pipeline, including a fight's two directions (CR 701.14a), a parked
+/// two-phase batch (`ResumeDamageBatch`, a carrier with no tail rule of its
+/// own) and an already-replaced portion — exactly the effects
+/// [`resolve_instruction`] dispatches. When one of them returns
+/// [`DamageTail::Caller`] with child work pending (its last recipient's
+/// substitute raised a prompt, its rider paused, or its batch parked),
+/// `resolve_ability_chain` places the tail outside the whole child stack.
 pub(crate) fn is_multi_event_damage_instruction(effect: &Effect) -> bool {
     multi_event_damage_resolver(effect).is_some()
 }
@@ -1814,7 +1715,11 @@ pub(crate) fn is_multi_event_damage_instruction(effect: &Effect) -> bool {
 type DamageInstructionResolver =
     fn(&mut GameState, &ResolvedAbility, &mut Vec<GameEvent>) -> Result<DamageTail, EffectError>;
 
-/// The single list of multi-event damage instructions and their resolvers.
+/// The single list of multi-event damage instructions and their resolvers:
+/// every instruction that deals damage through the replacement pipeline,
+/// including a fight's two directions (CR 701.14a), a parked two-phase batch
+/// (`ResumeDamageBatch`, a carrier with no tail rule of its own) and an
+/// already-replaced portion.
 fn multi_event_damage_resolver(effect: &Effect) -> Option<DamageInstructionResolver> {
     match effect {
         Effect::DealDamage { .. } => Some(|state, ability, events| {
@@ -1829,6 +1734,11 @@ fn multi_event_damage_resolver(effect: &Effect) -> Option<DamageInstructionResol
         Effect::DamageEachPlayer { .. } => Some(resolve_each_player_damage),
         Effect::EachDealsDamageEqualToPower { .. } => Some(resolve_each_deals_power_damage),
         Effect::EachSourceDealsDamage { .. } => Some(resolve_each_source_damage),
+        Effect::Fight { .. } => Some(super::fight::resolve_fight_damage),
+        Effect::ResumeDamageBatch { .. } => Some(resolve_resume_damage_batch),
+        Effect::ApplyPostReplacementDamage { .. } => Some(|state, ability, events| {
+            resolve_post_replacement(state, ability, events).map(|()| DamageTail::Caller)
+        }),
         _ => None,
     }
 }
@@ -1859,22 +1769,1182 @@ fn stash_remaining_damage_chain(
     }
 }
 
+/// CR 608.2c + CR 616.1: a rider of this instruction left its prompt standing (Nefarious
+/// Lich's exile, Dralnu, Lich Lord's sacrifice), so the instruction's remaining recipients wait
+/// behind that answer instead of raising a prompt over it ("If two or more players have to
+/// make these choices at the same time, choices are made in APNAP order."). Each remaining
+/// portion keeps its own damage source (CR 120.1). They wait beneath
+/// the paused rider's frames, the child stack raised since `boundary` (captured as the
+/// instruction began), and ahead of the spell's later instructions, which the chain parks
+/// beneath them. Each recipient waits in its own frame, so a rider one of them pauses waits
+/// beneath that recipient's frame and ahead of the next recipient's. The instruction's
+/// `EffectResolved` follows the last. `false` when no recipient is left.
+fn park_recipients_behind_paused_rider(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
+    boundary: ChildStackDepth,
+) -> Result<bool, EffectError> {
+    let nodes: Vec<ResolvedAbility> = remaining
+        .into_iter()
+        .filter_map(|(damage_source_id, target, amount)| {
+            remaining_damage_chain(
+                state,
+                ability,
+                damage_source_id,
+                std::iter::once((target, amount)),
+            )
+        })
+        .collect();
+    park_portions_behind_paused_rider(state, ability, nodes, boundary)
+}
+
+/// [`park_recipients_behind_paused_rider`] for portions already built: a two-phase batch's
+/// already-replaced portions (`ApplyPostReplacementDamage`) as well as its raw ones.
+fn park_portions_behind_paused_rider(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    nodes: Vec<ResolvedAbility>,
+    boundary: ChildStackDepth,
+) -> Result<bool, EffectError> {
+    let last = nodes.len().checked_sub(1);
+    for (index, node) in nodes.into_iter().enumerate() {
+        let mut pending = PendingContinuation::new(Box::new(node), state);
+        if Some(index) == last {
+            pending.parent_kind = Some(EffectKind::from(&ability.effect));
+        }
+        // Each insert lands beneath the frames already parked here, so the first portion
+        // stays on top.
+        state
+            .insert_ability_continuation_parent_at_child_boundary(pending, boundary)
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+    }
+    Ok(last.is_some())
+}
+
+/// One portion of a two-phase damage batch before its replacement (CR 120.4b): already
+/// through the pre-replacement gate, or not yet.
+enum BatchPortion {
+    Gated {
+        ctx: DamageContext,
+        event: ProposedEvent,
+    },
+    Ungated {
+        ctx: DamageContext,
+        target: TargetRef,
+        amount: u32,
+    },
+}
+
+impl BatchPortion {
+    /// CR 120.1: the portion's own source, recipient and amount, as a parked batch keeps it.
+    fn raw(&self) -> Option<RawDamagePortion> {
+        match self {
+            BatchPortion::Gated {
+                event:
+                    ProposedEvent::Damage {
+                        source_id,
+                        target,
+                        amount,
+                        ..
+                    },
+                ..
+            } => Some(RawDamagePortion {
+                source: *source_id,
+                target: target.clone(),
+                amount: *amount,
+            }),
+            BatchPortion::Gated { .. } => None,
+            BatchPortion::Ungated {
+                ctx,
+                target,
+                amount,
+            } => Some(RawDamagePortion {
+                source: ctx.source_id,
+                target: target.clone(),
+                amount: *amount,
+            }),
+        }
+    }
+}
+
+/// CR 120.4b + CR 120.4c + CR 608.2c: run a two-phase damage batch, each source to its
+/// recipient (Rakdos Charm's "Each creature deals 1 damage to its controller.", Master of the
+/// Wild Hunt's Wolves). Every portion goes through replacement and prevention first ("as
+/// modified by replacement and prevention effects that interact with damage"), then every
+/// survivor is delivered and processed into its results, and the instruction's
+/// `EffectResolved` (`kind`) follows the last. When a player's answer is needed (a rider's
+/// prompt or a CR 616.1 order choice in replacement, a choice in delivery) the rest of the batch
+/// is parked as one `Effect::ResumeDamageBatch` that resumes here, so the phases keep their
+/// order through every pause.
+///
+/// CR 608.2c: reports who places the instruction's tail (`DamageTail`): the park decides it,
+/// and completion leaves it to the chain.
+fn run_damage_batch(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    kind: EffectKind,
+    replaced: Vec<(DamageContext, ProposedEvent)>,
+    portions: Vec<BatchPortion>,
+    parked: ParkedDamageBatch,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    // CR 104.4a: this batch owns how an effect-stated loss settles while it runs; an enclosing
+    // batch's answer is restored when it returns.
+    let enclosing = state.damage_event_losses.replace(EventLosses::Immediate);
+    // CR 615.13: so does its prevention tally (opened in Phase B); a batch nested in this one
+    // (a rider's damage) aggregates on its own, and the enclosing tally is restored.
+    let enclosing_tally = state.combat_prevention_tally.take();
+    let enclosing_tally_batch = state.prevention_tally_batch.take();
+    let result = run_damage_batch_phases(state, ability, kind, replaced, portions, parked, events);
+    state.combat_prevention_tally = enclosing_tally;
+    state.prevention_tally_batch = enclosing_tally_batch;
+    state.damage_event_losses = enclosing;
+    result
+}
+
+/// CR 615.13: open a noncombat batch's prevention tally on what it has prevented so far.
+fn open_batch_prevention_tally(state: &mut GameState, entries: &[PreventedDamageEntry]) {
+    state.combat_prevention_tally = Some(tally_map_from_record_entries(entries));
+    state.prevention_tally_batch = Some(DamageBatchKind::Noncombat);
+}
+
+/// CR 615.13: close the batch's prevention tally, as the entries a park carries or the
+/// publication fires.
+fn take_batch_prevention_tally(state: &mut GameState) -> Vec<PreventedDamageEntry> {
+    state.prevention_tally_batch = None;
+    state
+        .combat_prevention_tally
+        .take()
+        .map(crate::game::combat_damage::sorted_prevention_entries)
+        .unwrap_or_default()
+}
+
+/// CR 615.13: fold parked entries back into a live tally, summing duplicate pairs. A resumed
+/// batch re-accumulates onto its parked prefix through this.
+pub(crate) fn tally_map_from_record_entries(
+    entries: &[PreventedDamageEntry],
+) -> CombatPreventionTally {
+    let mut map = HashMap::new();
+    for entry in entries {
+        *map.entry((entry.key, entry.recipient.clone())).or_insert(0) += entry.amount;
+    }
+    map
+}
+
+/// The phases of [`run_damage_batch`].
+fn run_damage_batch_phases(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    kind: EffectKind,
+    mut replaced: Vec<(DamageContext, ProposedEvent)>,
+    portions: Vec<BatchPortion>,
+    parked: ParkedDamageBatch,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    let ParkedDamageBatch {
+        mut deferred,
+        held,
+        split,
+        outcomes,
+        prevention_tally,
+    } = parked;
+    let mut split: std::collections::VecDeque<SplitDamagePortion> = split.into();
+    // CR 104.1: "A game ends immediately when a player wins": a batch resumed after the game
+    // ended has nothing left to replace, deal or complete.
+    if state.game_end.is_some() {
+        return Ok(DamageTail::Caller);
+    }
+    let boundary = state.resolution_stack.capture_child_boundary();
+    // CR 615.13 + CR 120.3: a prevention effect applying to the batch's simultaneous damage is
+    // one application, so Phase B accumulates what each shield prevents for each recipient
+    // instead of publishing it per portion. A resumed batch reopens the tally it parked.
+    open_batch_prevention_tally(state, &prevention_tally);
+    // CR 614.6 + CR 615.5 + CR 616.1: while the batch settles its original replacement choices,
+    // a replacement's action or rider is held in the batch's ledger, not run between them.
+    if let Some(ledger) = state.damage_batch_ledger.as_mut() {
+        ledger.held_riders = Some(held);
+    }
+    let order = crate::game::players::apnap_order(state);
+    let mut portions: std::collections::VecDeque<BatchPortion> =
+        in_apnap_order(state, portions).into();
+    // CR 615.7 + CR 616.1: portions waiting for an outstanding choice whose shield they would
+    // otherwise spend first (`replacement::damage_event_shares_spendable_shield`).
+    let mut waiting: std::collections::VecDeque<(DamageContext, ProposedEvent)> =
+        std::collections::VecDeque::new();
+    // Phase B: replacement (CR 120.4b + CR 614 + CR 615). CR 616.1 + CR 101.4: every portion
+    // is first carried through its automatic replacements (a sole Pariah's redirect) up to the
+    // choice it needs, which waits in `deferred`; only then is a choice asked, the outstanding
+    // one whose player comes first in APNAP order. So who chooses is known for every portion
+    // before anyone is asked.
+    loop {
+        // CR 614.9: a capped redirect's split-off part (`SplitDamagePortion`) is a portion too,
+        // carried through its automatic replacements before any choice is asked.
+        let next = match portions.pop_front() {
+            Some(portion) => Some(portion),
+            None => match split.pop_front() {
+                Some(part) => match split_portion(state, ability, part) {
+                    Some(portion) => Some(portion),
+                    // CR 702.16e: the new recipient's protection prevented it.
+                    None => continue,
+                },
+                None => None,
+            },
+        };
+        let (portion, asking) = match next {
+            Some(portion) => (portion, false),
+            None => match deferred
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, choice)| player_rank(&order, choice.chooser))
+                .map(|(index, _)| index)
+            {
+                Some(index) => (
+                    deferred_portion(state, ability, deferred.remove(index)),
+                    true,
+                ),
+                // Every choice is made: what waited for one goes on.
+                None => match waiting.pop_front() {
+                    Some((ctx, event)) => (BatchPortion::Gated { ctx, event }, false),
+                    None => break,
+                },
+            },
+        };
+        // CR 800.4a: damage to a player who left the game, or to an object that is gone, is not
+        // dealt; the batch goes on for the rest.
+        if portion
+            .raw()
+            .is_some_and(|raw| !recipient_present(state, &raw.target))
+        {
+            continue;
+        }
+        let awaiting = portion.raw();
+        let (ctx, proposed) = match portion {
+            BatchPortion::Gated { ctx, event } => (ctx, event),
+            BatchPortion::Ungated {
+                ctx,
+                target,
+                amount,
+            } => {
+                // CR 120.8 / CR 702.16: the per-portion pre-replacement gate.
+                // CR 702.16e + CR 615.13 (Matt F4, R14-MED): protections propose
+                // into the pipeline, whose applier joins the live batch tally.
+                let proposed =
+                    match pre_replacement_damage_gate(state, &ctx, &target, amount, false) {
+                        DamageGateOutcome::Proposed(proposed) => proposed,
+                        DamageGateOutcome::Gated => continue,
+                    };
+                (ctx, proposed)
+            }
+        };
+        // CR 615.7 + CR 616.1: the player chooses which damage a shield prevents. A portion that
+        // would spend a limited shield (Mending Hands' "the next 4 damage") on its own waits while
+        // a choice could still pick that shield for another portion of the batch: a choice
+        // already outstanding, or a portion still to be replaced that will ask one.
+        if !asking && shield_is_still_choosable(state, &proposed, &deferred, &portions, &split) {
+            waiting.push_back((ctx, proposed));
+            continue;
+        }
+        let result = replacement::replace_event(state, proposed, events);
+        split.extend(take_split_portions(state));
+        // CR 104.1: a replacement that ended the game (Nefarious Lich's "If you can't, you lose
+        // the game") ends the batch: nothing later is replaced or dealt.
+        if state.game_end.is_some() {
+            return Ok(DamageTail::Caller);
+        }
+        match result {
+            ReplacementResult::Execute(event) => replaced.push((ctx, event)),
+            ReplacementResult::Prevented => {
+                // CR 615.5: a prevention rider resolves immediately afterward.
+                if state.has_post_replacement_drain() {
+                    crate::game::replacement::drain_damage_rider(state, events);
+                }
+                // CR 104.1: so does a rider that ended it.
+                if state.game_end.is_some() {
+                    return Ok(DamageTail::Caller);
+                }
+                // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the rest of
+                // the batch behind its answer.
+                if replacement::damage_batch_has_paused_rider(state) {
+                    let remaining = park_waiting(&portions, waiting, &mut split);
+                    let held = take_held_riders(state);
+                    let prevention_tally = take_batch_prevention_tally(state);
+                    return park_damage_batch(
+                        state,
+                        ability,
+                        kind,
+                        &replaced,
+                        remaining,
+                        None,
+                        ParkedDamageBatch {
+                            deferred,
+                            held,
+                            split: split.into(),
+                            outcomes: None,
+                            prevention_tally,
+                        },
+                        boundary,
+                    );
+                }
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                if let Some(pending) = state.pending_replacement.as_mut() {
+                    pending.excess_recipient = ctx.excess_recipient;
+                    pending.lifelink_bonus = ctx.lifelink_bonus;
+                }
+                // CR 616.1 + CR 101.4: a choice found while carrying portions through their
+                // automatic replacements waits until every portion's chooser is known.
+                if !asking {
+                    if let Some(choice) = take_pending_damage_choice(state, player) {
+                        deferred.push(choice);
+                        continue;
+                    }
+                }
+                // CR 616.1e: this portion's replacements need an order. The answer hands its
+                // replaced event back to the parked batch (`return_answered_portion_to_batch`),
+                // which finishes the other portions' replacement before any delivery.
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                let remaining = park_waiting(&portions, waiting, &mut split);
+                let held = take_held_riders(state);
+                let prevention_tally = take_batch_prevention_tally(state);
+                return park_damage_batch(
+                    state,
+                    ability,
+                    kind,
+                    &replaced,
+                    remaining,
+                    awaiting,
+                    ParkedDamageBatch {
+                        deferred,
+                        held,
+                        split: split.into(),
+                        outcomes: None,
+                        prevention_tally,
+                    },
+                    boundary,
+                );
+            }
+        }
+    }
+    // CR 616.1: every original choice is made; what the batch held runs after its damage.
+    let held = take_held_riders(state);
+    // CR 615.13 + CR 614.6: the tally stays open through delivery and the substitution actions,
+    // which are the modified event itself (Jade Monolith's "that source deals that damage to you
+    // instead"), and closes before the prevention riders that follow the event (CR 615.5).
+    // CR 104.4a + CR 614.6 + CR 120.4: the damage and the substitution actions are one
+    // simultaneous event, so a player who loses to an effect in it (a lifelink gain drawn into
+    // Laboratory Maniac's win, Nefarious Lich's "If you can't, you lose the game") is recorded and
+    // eliminated with the event's other losers when it ends (`elimination::lose_by_effect`).
+    state.damage_event_losses = Some(EventLosses::Recording(outcomes.unwrap_or_default()));
+    // Phase C: delivery (CR 120.4c). A delivery that waits on a choice (a lifelink gain's
+    // replacements) parks the survivors after it; the parked batch still owns the completion.
+    for (index, (ctx, event)) in replaced.iter().enumerate() {
+        if let ProposedEvent::Damage { target, .. } = event {
+            if !recipient_present(state, target) {
+                continue;
+            }
+        }
+        let delivered = apply_damage_after_replacement(state, ctx, event.clone(), false, events);
+        // CR 104.1: a delivery that ended the game ends the batch.
+        if state.game_end.is_some() {
+            return Ok(DamageTail::Caller);
+        }
+        if matches!(delivered, DamageResult::NeedsChoice) {
+            let outcomes = take_event_outcomes(state);
+            let prevention_tally = take_batch_prevention_tally(state);
+            return park_damage_batch(
+                state,
+                ability,
+                kind,
+                &replaced[index + 1..],
+                Vec::new(),
+                None,
+                ParkedDamageBatch {
+                    held,
+                    outcomes,
+                    prevention_tally,
+                    ..ParkedDamageBatch::default()
+                },
+                boundary,
+            );
+        }
+    }
+    // Phase D: the held work, after the damage. CR 614.6: a substitution's action is the
+    // modified event (Dralnu, Lich Lord's sacrifice), so the substitution actions come first, in
+    // the event; CR 615.5: a prevention's additional effect follows "immediately afterward"
+    // (Test of Faith's counters), once the event has settled. Within each, CR 101.4: APNAP order
+    // of the affected player.
+    let mut held: std::collections::VecDeque<HeldBatchRider> = {
+        let mut held = held;
+        held.sort_by_key(|rider| (rider.timing, player_rank(&order, rider.authority)));
+        held.into()
+    };
+    let mut settled = false;
+    // CR 615.13: what the batch prevented, once its event is complete.
+    let mut prevention: Option<Vec<PreventedDamageEntry>> = None;
+    while let Some(rider) = held.pop_front() {
+        if rider.timing == RiderTiming::AfterEvent && !settled {
+            settled = true;
+            prevention = Some(take_batch_prevention_tally(state));
+            if settle_event_losses(state, events) {
+                return Ok(DamageTail::Caller);
+            }
+        }
+        state.install_post_replacement_drain(rider.drain, ResidentDrainPolicy::KeepResident);
+        replacement::drain_damage_rider(state, events);
+        // CR 104.1: a rider that ended the game ends the batch.
+        if state.game_end.is_some() {
+            return Ok(DamageTail::Caller);
+        }
+        // CR 608.2c: the rider left its prompt standing; the rest of the batch waits beneath it.
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let outcomes = take_event_outcomes(state);
+            let prevention_tally = prevention
+                .take()
+                .unwrap_or_else(|| take_batch_prevention_tally(state));
+            return park_damage_batch(
+                state,
+                ability,
+                kind,
+                &[],
+                Vec::new(),
+                None,
+                ParkedDamageBatch {
+                    held: held.into(),
+                    outcomes,
+                    prevention_tally,
+                    ..ParkedDamageBatch::default()
+                },
+                boundary,
+            );
+        }
+    }
+    let prevention = prevention.unwrap_or_else(|| take_batch_prevention_tally(state));
+    if !settled && settle_event_losses(state, events) {
+        return Ok(DamageTail::Caller);
+    }
+    // CR 615.13 + CR 615.5: the batch's prevention publishes once, after its damage: one
+    // `DamagePrevented` per (shield, recipient), and each shield's rider once, against what it
+    // prevented across the batch.
+    if !prevention.is_empty() {
+        let outcome = crate::game::combat_damage::fire_batch_prevention_riders(
+            state,
+            &prevention,
+            events,
+            true,
+        );
+        // CR 104.1: a rider that ended the game ends the batch.
+        if state.game_end.is_some() {
+            return Ok(DamageTail::Caller);
+        }
+        // CR 608.2c: a rider left its prompt standing; the later shields wait beneath it.
+        if let crate::game::combat_damage::BatchRiderDrainOutcome::Paused { published_entries } =
+            outcome
+        {
+            let mut remainder = prevention;
+            remainder.drain(..published_entries.min(remainder.len()));
+            return park_damage_batch(
+                state,
+                ability,
+                kind,
+                &[],
+                Vec::new(),
+                None,
+                ParkedDamageBatch {
+                    prevention_tally: remainder,
+                    ..ParkedDamageBatch::default()
+                },
+                boundary,
+            );
+        }
+    }
+    events.push(GameEvent::EffectResolved {
+        kind,
+        source_id: ability.source_id,
+        subject: None,
+    });
+    Ok(DamageTail::Caller)
+}
+
+/// CR 104.4a: the outcomes the batch's simultaneous event has recorded so far, to park with it
+/// while the event is under way (`None` once it has settled). Effect-stated wins and losses then
+/// happen at once until the batch resumes.
+fn take_event_outcomes(state: &mut GameState) -> Option<EventOutcomes> {
+    match state.damage_event_losses.replace(EventLosses::Immediate) {
+        Some(EventLosses::Recording(outcomes)) => Some(outcomes),
+        Some(EventLosses::Immediate) | None => None,
+    }
+}
+
+/// CR 104.3f + CR 104.4a: the batch's simultaneous event is over, so its effect-stated wins and
+/// losses settle together (`elimination::settle_event_outcomes`). `true` when that ended the game.
+fn settle_event_losses(state: &mut GameState, events: &mut Vec<GameEvent>) -> bool {
+    if let Some(outcomes) = take_event_outcomes(state) {
+        crate::game::elimination::settle_event_outcomes(state, outcomes, events);
+    }
+    state.game_end.is_some()
+}
+
+/// CR 615.7 + CR 616.1: whether a limited shield this automatic portion would spend can still be
+/// picked by a choice for another portion of the batch: one already deferred (its candidates), or
+/// a portion still to be replaced whose affected player will choose among it and another effect.
+fn shield_is_still_choosable(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    deferred: &[DeferredDamageChoice],
+    portions: &std::collections::VecDeque<BatchPortion>,
+    split: &std::collections::VecDeque<SplitDamagePortion>,
+) -> bool {
+    let shields = replacement::spendable_shields_for(state, proposed);
+    // A portion that itself asks a choice among the shield and another effect is one of those
+    // choices; only a portion that would take the shield on its own waits.
+    if shields.is_empty() || replacement::damage_event_chooses_among(state, proposed, &shields) {
+        return false;
+    }
+    deferred
+        .iter()
+        .any(|choice| choice.candidates.iter().any(|rid| shields.contains(rid)))
+        || portions
+            .iter()
+            .map(portion_event)
+            .chain(split.iter().map(split_event))
+            .any(|other| replacement::damage_event_chooses_among(state, &other, &shields))
+}
+
+/// CR 120.1: the damage event a queued portion proposes, before its gate.
+fn portion_event(portion: &BatchPortion) -> ProposedEvent {
+    match portion {
+        BatchPortion::Gated { event, .. } => event.clone(),
+        BatchPortion::Ungated {
+            ctx,
+            target,
+            amount,
+        } => ProposedEvent::Damage {
+            source_id: ctx.source_id,
+            target: target.clone(),
+            amount: *amount,
+            is_combat: false,
+            source_name: ctx.source_name.clone(),
+            source_incarnation: ctx.source_incarnation,
+            applied: HashSet::new(),
+        },
+    }
+}
+
+/// CR 614.9 + CR 614.5: a split-off part's damage event, keeping its applied replacements.
+fn split_event(part: &SplitDamagePortion) -> ProposedEvent {
+    ProposedEvent::Damage {
+        source_id: part.source,
+        target: part.target.clone(),
+        amount: part.amount,
+        is_combat: part.is_combat,
+        source_name: None,
+        source_incarnation: None,
+        applied: part.applied.iter().copied().collect(),
+    }
+}
+
+/// CR 608.2c: the raw portions a pausing batch parks: its remaining portions, then those waiting
+/// for a choice (`waiting`), which meet that check again when the batch resumes. A waiting part a
+/// capped redirect split off keeps its applied replacements among the split parts (CR 614.5).
+fn park_waiting(
+    portions: &std::collections::VecDeque<BatchPortion>,
+    waiting: std::collections::VecDeque<(DamageContext, ProposedEvent)>,
+    split: &mut std::collections::VecDeque<SplitDamagePortion>,
+) -> Vec<RawDamagePortion> {
+    let mut remaining: Vec<RawDamagePortion> =
+        portions.iter().filter_map(BatchPortion::raw).collect();
+    for (_, event) in waiting {
+        if let ProposedEvent::Damage {
+            source_id,
+            target,
+            amount,
+            is_combat,
+            applied,
+            ..
+        } = event
+        {
+            if applied.is_empty() {
+                remaining.push(RawDamagePortion {
+                    source: source_id,
+                    target,
+                    amount,
+                });
+            } else {
+                let mut applied: Vec<_> = applied.into_iter().collect();
+                applied.sort_unstable();
+                split.push_back(SplitDamagePortion {
+                    source: source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    applied,
+                });
+            }
+        }
+    }
+    remaining
+}
+
+/// CR 614.9: the portions capped redirects split off into the batch's ledger since the last take.
+fn take_split_portions(state: &mut GameState) -> Vec<SplitDamagePortion> {
+    state
+        .damage_batch_ledger
+        .as_mut()
+        .map(|ledger| std::mem::take(&mut ledger.split_portions))
+        .unwrap_or_default()
+}
+
+/// CR 614.9 + CR 614.5: a split-off part as a portion, dealt by its source as it is now
+/// (CR 608.2h). It meets its new recipient's gate (CR 702.16e: protection from the source prevents
+/// it; `None` then) and keeps the replacements already applied to it.
+fn split_portion(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    part: SplitDamagePortion,
+) -> Option<BatchPortion> {
+    let ctx = DamageContext::from_source(state, part.source)
+        .unwrap_or_else(|| DamageContext::fallback(part.source, ability.controller));
+    let DamageGateOutcome::Proposed(mut event) =
+        pre_replacement_damage_gate(state, &ctx, &part.target, part.amount, part.is_combat)
+    else {
+        return None;
+    };
+    if let ProposedEvent::Damage { applied, .. } = &mut event {
+        *applied = part.applied.into_iter().collect();
+    }
+    Some(BatchPortion::Gated { ctx, event })
+}
+
+/// CR 616.1: the riders the batch's ledger held while its original choices were made, and stop
+/// holding. Empty outside a batch.
+fn take_held_riders(state: &mut GameState) -> Vec<HeldBatchRider> {
+    state
+        .damage_batch_ledger
+        .as_mut()
+        .and_then(|ledger| ledger.held_riders.take())
+        .unwrap_or_default()
+}
+
+/// CR 120.4b + CR 120.4c: run `portions` (each source's context, recipient and amount) as one
+/// two-phase damage batch that completes as `kind` (a fight's two directions, CR 701.14a).
+pub(crate) fn run_object_damage_batch(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    kind: EffectKind,
+    portions: Vec<(DamageContext, TargetRef, u32)>,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    let portions = portions
+        .into_iter()
+        .map(|(ctx, target, amount)| BatchPortion::Ungated {
+            ctx,
+            target,
+            amount,
+        })
+        .collect();
+    run_damage_batch(
+        state,
+        ability,
+        kind,
+        Vec::new(),
+        portions,
+        ParkedDamageBatch::default(),
+        events,
+    )
+}
+
+/// CR 616.1 + CR 614.5: take the parked damage choice for `chooser` out of
+/// `pending_replacement`, keeping the replacements already applied to its event, so the batch
+/// can ask it in its APNAP turn. `None` (and nothing taken) when the parked record isn't a
+/// damage event.
+fn take_pending_damage_choice(
+    state: &mut GameState,
+    chooser: PlayerId,
+) -> Option<DeferredDamageChoice> {
+    let pending = state.pending_replacement.as_ref()?;
+    let ProposedEvent::Damage {
+        source_id,
+        target,
+        amount,
+        is_combat,
+        applied,
+        ..
+    } = &pending.proposed
+    else {
+        return None;
+    };
+    let mut applied: Vec<_> = applied.iter().copied().collect();
+    applied.sort_unstable();
+    let choice = DeferredDamageChoice {
+        chooser,
+        source: *source_id,
+        target: target.clone(),
+        amount: *amount,
+        is_combat: *is_combat,
+        applied,
+        excess_recipient: pending.excess_recipient,
+        lifelink_bonus: pending.lifelink_bonus,
+        candidates: pending.candidates.clone(),
+    };
+    state.pending_replacement = None;
+    Some(choice)
+}
+
+/// CR 616.1 + CR 614.5: a deferred choice's event, back as a portion already through the gate,
+/// keeping the replacements already applied to it.
+fn deferred_portion(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    choice: DeferredDamageChoice,
+) -> BatchPortion {
+    let mut ctx = DamageContext::from_source(state, choice.source)
+        .unwrap_or_else(|| DamageContext::fallback(choice.source, ability.controller));
+    ctx.excess_recipient = choice.excess_recipient;
+    ctx.lifelink_bonus = choice.lifelink_bonus;
+    let event = ProposedEvent::Damage {
+        source_id: choice.source,
+        target: choice.target,
+        amount: choice.amount,
+        is_combat: choice.is_combat,
+        source_name: ctx.source_name.clone(),
+        source_incarnation: ctx.source_incarnation,
+        applied: choice.applied.into_iter().collect(),
+    };
+    BatchPortion::Gated { ctx, event }
+}
+
+/// CR 101.4: a player's place in APNAP order (`players::apnap_order`); a player who left sorts
+/// last.
+fn player_rank(order: &[PlayerId], player: PlayerId) -> usize {
+    order
+        .iter()
+        .position(|seat| *seat == player)
+        .unwrap_or(usize::MAX)
+}
+
+/// CR 616.1: the APNAP rank of the player a damage recipient makes choose: a player recipient,
+/// or an object recipient's controller.
+fn affected_rank(state: &GameState, order: &[PlayerId], target: &TargetRef) -> usize {
+    let affected = match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
+    };
+    affected.map_or(usize::MAX, |player| player_rank(order, player))
+}
+
+/// CR 616.1 + CR 101.4: an order choice a redirect just handed to `chooser` while the parked
+/// batch it belongs to still has an outstanding choice for a player earlier in APNAP order
+/// (Pariah sending P1's damage to P3's creature while P2's choice is outstanding). The choice
+/// waits in the batch, which asks the earlier players first ("If a choice made by a nonactive
+/// player causes the active player, or a different nonactive player earlier in the turn order,
+/// to have to make a choice, APNAP order is restarted for all outstanding choices."). So does a
+/// choice behind a part a capped redirect split off (CR 614.9): whose choice that part needs is
+/// found only by carrying it through its replacements, so the batch does that first. `false`
+/// when no outstanding choice comes earlier and nothing is split off, so the choice is asked now.
+pub(crate) fn defer_choice_behind_earlier_players(
+    state: &mut GameState,
+    chooser: PlayerId,
+) -> bool {
+    let order = crate::game::players::apnap_order(state);
+    let chooser_rank = player_rank(&order, chooser);
+    let Some(ProposedEvent::Damage { source_id, .. }) = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| &pending.proposed)
+    else {
+        return false;
+    };
+    let Some(frame) = state.active_ability_continuation() else {
+        return false;
+    };
+    let Effect::ResumeDamageBatch {
+        remaining,
+        awaiting,
+        ..
+    } = &frame.chain.effect
+    else {
+        return false;
+    };
+    if !awaiting
+        .as_ref()
+        .is_some_and(|portion| portion.source == *source_id)
+    {
+        return false;
+    }
+    let earliest_outstanding = remaining
+        .iter()
+        .map(|portion| affected_rank(state, &order, &portion.target))
+        .chain(
+            frame
+                .chain
+                .context
+                .parked_damage_batch
+                .iter()
+                .flat_map(|parked| parked.deferred.iter())
+                .map(|choice| player_rank(&order, choice.chooser)),
+        )
+        .min();
+    let split_outstanding = frame
+        .chain
+        .context
+        .parked_damage_batch
+        .as_ref()
+        .is_some_and(|parked| !parked.split.is_empty());
+    if !split_outstanding && !earliest_outstanding.is_some_and(|rank| rank < chooser_rank) {
+        return false;
+    }
+    let Some(choice) = take_pending_damage_choice(state, chooser) else {
+        return false;
+    };
+    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+        return false;
+    };
+    if let Effect::ResumeDamageBatch { awaiting, .. } = &mut frame.pending.chain.effect {
+        *awaiting = None;
+    }
+    frame
+        .pending
+        .chain
+        .context
+        .parked_damage_batch
+        .get_or_insert_with(Default::default)
+        .deferred
+        .push(choice);
+    true
+}
+
+/// CR 800.4a: whether a damage recipient is still in the game: a player who hasn't left, or an
+/// object still on the battlefield.
+fn recipient_present(state: &GameState, target: &TargetRef) -> bool {
+    match target {
+        TargetRef::Player(player) => crate::game::players::is_alive(state, *player),
+        TargetRef::Object(id) => state
+            .objects
+            .get(id)
+            .is_some_and(|object| object.zone == crate::types::zones::Zone::Battlefield),
+    }
+}
+
+/// CR 616.1 + CR 101.4: a batch's portions in APNAP order of the player each one affects (a
+/// player recipient, or an object recipient's controller), so simultaneous replacement choices
+/// are asked in that order ("If two or more players have to make these choices at the same
+/// time, choices are made in APNAP order"). Stable: portions affecting one player keep their
+/// order.
+fn in_apnap_order(state: &GameState, mut portions: Vec<BatchPortion>) -> Vec<BatchPortion> {
+    let order = crate::game::players::apnap_order(state);
+    let rank = |portion: &BatchPortion| {
+        let affected = portion.raw().and_then(|raw| match raw.target {
+            TargetRef::Player(player) => Some(player),
+            TargetRef::Object(id) => state.objects.get(&id).map(|object| object.controller),
+        });
+        affected
+            .and_then(|player| order.iter().position(|seat| *seat == player))
+            .unwrap_or(usize::MAX)
+    };
+    portions.sort_by_key(rank);
+    portions
+}
+
+/// CR 608.2c: park the rest of a paused two-phase batch as one `Effect::ResumeDamageBatch`
+/// that owns its completion. Beneath the frames the pause raised (a rider's), and reports
+/// `Caller`, so the chain parks the instruction's later instructions beneath it; with none
+/// raised (an order choice, a delivery choice), on top, and parks the later instructions
+/// beneath it here and reports `Stashed`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn park_damage_batch(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    kind: EffectKind,
+    replaced: &[(DamageContext, ProposedEvent)],
+    remaining: Vec<RawDamagePortion>,
+    awaiting: Option<RawDamagePortion>,
+    parked: ParkedDamageBatch,
+    boundary: ChildStackDepth,
+) -> Result<DamageTail, EffectError> {
+    let replaced = replaced
+        .iter()
+        .filter_map(|(ctx, event)| match event {
+            ProposedEvent::Damage {
+                target,
+                amount,
+                is_combat,
+                ..
+            } => Some(ReplacedDamagePortion {
+                context: DamageContextSnapshot::from(ctx),
+                target: target.clone(),
+                amount: *amount,
+                is_combat: *is_combat,
+            }),
+            _ => None,
+        })
+        .collect();
+    let node = keep_chain_identity(
+        state,
+        ResolvedAbility::new(
+            Effect::ResumeDamageBatch {
+                kind,
+                replaced,
+                remaining,
+                awaiting,
+            },
+            Vec::new(),
+            ability.source_id,
+            ability.controller,
+        ),
+        ability,
+    );
+    let mut node = node;
+    // CR 113.7a + CR 608.2h: the parked members resume through the parent's latch,
+    // filtered per member (`member_damage_context`), exactly as they were built.
+    node.trigger_source = ability.trigger_source.clone();
+    node.context.parked_damage_batch =
+        (parked != ParkedDamageBatch::default()).then(|| Box::new(parked));
+    let pending = PendingContinuation::new(Box::new(node), state);
+    if state.resolution_stack.capture_child_boundary() > boundary {
+        state
+            .insert_ability_continuation_parent_at_child_boundary(pending, boundary)
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        return Ok(DamageTail::Caller);
+    }
+    if let Some(sub) = ability.sub_ability.as_ref() {
+        let tail = stashed_tail(state, sub, ability);
+        state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+    }
+    state.park_ability_continuation(pending);
+    Ok(DamageTail::Stashed)
+}
+
+/// CR 616.1 + CR 615.5: run `answer` (an order answer resuming the replacement pipeline) holding
+/// riders for the parked two-phase batch awaiting that event's portion: the answer is one of the
+/// batch's original choices, so the chosen replacement's action or rider joins the batch's held
+/// work (run after its damage) instead of running at the answer. Any other answer runs as is.
+pub(crate) fn hold_riders_for_awaited_portion<T>(
+    state: &mut GameState,
+    answer: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    let Some(source) =
+        state
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| match &pending.proposed {
+                ProposedEvent::Damage { source_id, .. } => Some(*source_id),
+                _ => None,
+            })
+    else {
+        return answer(state);
+    };
+    if awaiting_batch(state, source).is_none() {
+        return answer(state);
+    }
+    // CR 608.2f + CR 700.1: the answer re-scans its portion under the guards its batch read
+    // (`replacement::continue_replacement` reads them off the parked record only when no ledger
+    // is open, so this one carries them).
+    let saved = state.damage_batch_ledger.take();
+    let ledger = match saved.clone() {
+        Some(ledger) => *ledger,
+        None => DamageBatchLedger {
+            settled_guards: state
+                .pending_replacement
+                .as_ref()
+                .map(|pending| pending.settled_damage_guards.clone())
+                .unwrap_or_default(),
+            ..DamageBatchLedger::default()
+        },
+    };
+    state.damage_batch_ledger = Some(Box::new(DamageBatchLedger {
+        held_riders: Some(Vec::new()),
+        ..ledger
+    }));
+    // CR 615.13: the answered portion's prevention is part of its batch's one application, so
+    // the answer accumulates onto the tally the batch parked.
+    let parked_tally = awaiting_batch(state, source)
+        .and_then(|batch| batch.context.parked_damage_batch.as_deref())
+        .map(|parked| tally_map_from_record_entries(&parked.prevention_tally))
+        .unwrap_or_default();
+    let enclosing_tally = state.combat_prevention_tally.replace(parked_tally);
+    let enclosing_tally_batch = state
+        .prevention_tally_batch
+        .replace(DamageBatchKind::Noncombat);
+    let result = answer(state);
+    let prevention_tally = take_batch_prevention_tally(state);
+    state.combat_prevention_tally = enclosing_tally;
+    state.prevention_tally_batch = enclosing_tally_batch;
+    let held = take_held_riders(state);
+    // CR 614.9: a capped redirect the answer applied splits a portion off into the batch too.
+    let split = take_split_portions(state);
+    state.damage_batch_ledger = saved;
+    if let Some(batch) = awaiting_batch(state, source) {
+        if batch.context.parked_damage_batch.is_some()
+            || !held.is_empty()
+            || !split.is_empty()
+            || !prevention_tally.is_empty()
+        {
+            let parked = batch
+                .context
+                .parked_damage_batch
+                .get_or_insert_with(Default::default);
+            parked.held.extend(held);
+            parked.split.extend(split);
+            parked.prevention_tally = prevention_tally;
+        }
+    }
+    result
+}
+
+/// CR 120.1: the topmost parked two-phase batch awaiting the portion `source` deals.
+fn awaiting_batch(state: &mut GameState, source: ObjectId) -> Option<&mut ResolvedAbility> {
+    state
+        .resolution_stack
+        .ability_continuations_from_top_mut()
+        .map(|pending| pending.chain.as_mut())
+        .find(|chain| {
+            matches!(
+                &chain.effect,
+                Effect::ResumeDamageBatch {
+                    awaiting: Some(portion),
+                    ..
+                } if portion.source == source
+            )
+        })
+}
+
+/// CR 120.4b + CR 616.1e: an order answer for a portion of a parked two-phase batch. Its
+/// replaced event joins the batch's survivors, delivered after the batch's remaining portions
+/// are replaced, instead of being dealt at once. `false` when the event is not the portion the
+/// active batch awaits, so the caller delivers it.
+///
+/// The portion is known by its source (CR 120.1): a replacement may change its recipient
+/// (Pariah: "All damage that would be dealt to you is dealt to enchanted creature instead.")
+/// and its amount, never the object dealing it. One choice stands at a time, so the topmost
+/// batch awaiting that source is the one the answer belongs to.
+pub(crate) fn return_answered_portion_to_batch(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    event: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::Damage {
+        source_id,
+        target,
+        amount,
+        is_combat,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    // The batch is the topmost continuation: the answer may have raised a rider's frames
+    // above it (Test of Faith's counters after its shield was chosen).
+    let Some((replaced, awaiting)) = state
+        .resolution_stack
+        .ability_continuations_from_top_mut()
+        .find_map(|pending| match &mut pending.chain.effect {
+            Effect::ResumeDamageBatch {
+                replaced,
+                awaiting: awaiting @ Some(_),
+                ..
+            } if awaiting
+                .as_ref()
+                .is_some_and(|portion| portion.source == *source_id) =>
+            {
+                Some((replaced, awaiting))
+            }
+            _ => None,
+        })
+    else {
+        return false;
+    };
+    *awaiting = None;
+    replaced.push(ReplacedDamagePortion {
+        context: DamageContextSnapshot::from(ctx),
+        target: target.clone(),
+        amount: *amount,
+        is_combat: *is_combat,
+    });
+    true
+}
+
+/// CR 120.4b + CR 120.4c: resume a parked two-phase batch (`Effect::ResumeDamageBatch`): its
+/// remaining portions go through replacement, then every survivor is delivered. The node is a
+/// carrier with no tail rule of its own: the batch runner reports `DamageTail` (CR 608.2c).
+pub(crate) fn resolve_resume_damage_batch(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    let Effect::ResumeDamageBatch {
+        kind,
+        replaced,
+        remaining,
+        awaiting: _,
+    } = &ability.effect
+    else {
+        return Err(EffectError::MissingParam("ResumeDamageBatch".to_string()));
+    };
+    let replaced = replaced
+        .iter()
+        .map(|portion| {
+            let ctx = DamageContext::from(portion.context);
+            let event = ProposedEvent::Damage {
+                source_id: ctx.source_id,
+                target: portion.target.clone(),
+                amount: portion.amount,
+                is_combat: portion.is_combat,
+                source_name: ctx.source_name.clone(),
+                source_incarnation: ctx.source_incarnation,
+                applied: HashSet::new(),
+            };
+            (ctx, event)
+        })
+        .collect();
+    let portions = remaining
+        .iter()
+        .map(|portion| BatchPortion::Ungated {
+            // CR 120.1 + CR 608.2h: a parked member resumes through the same read it
+            // was built with (`member_damage_context`), so batch-time and resume-time
+            // reads agree.
+            ctx: member_damage_context(
+                state,
+                portion.source,
+                ability.controller,
+                &ability.trigger_source,
+            ),
+            target: portion.target.clone(),
+            amount: portion.amount,
+        })
+        .collect();
+    let kind = *kind;
+    let parked = ability
+        .context
+        .parked_damage_batch
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    replacement::with_damage_batch(state, ability, |state| {
+        run_damage_batch(state, ability, kind, replaced, portions, parked, events)
+    })
+}
+
 /// CR 120.3 + CR 608.2c: the linked chain a paused damage batch leaves behind —
 /// one node per remaining (target, amount) pair, in order, followed by the
 /// parent's `sub_ability` tail. With no remaining batch work the chain is just
 /// the tail, so the downstream chain still resumes after the pending
-/// replacement choice. `None` when there is neither.
+/// replacement choice. `None` when there is neither. Each remaining node keeps
+/// the chain's identity and the batch's settled guards
+/// ([`keep_chain_identity`]); the tail takes the chain-context hand-off
+/// ([`stashed_tail`]).
 fn remaining_damage_head(
     state: &mut GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) -> Option<ResolvedAbility> {
+    let head = remaining_damage_chain(state, ability, damage_source_id, remaining);
     let tail = ability
         .sub_ability
         .as_ref()
         .map(|sub| stashed_tail(state, sub, ability));
-    match remaining_damage_chain(ability, damage_source_id, remaining) {
+    match head {
         Some(mut head) => {
             if let Some(tail) = tail {
                 append_to_sub_chain(&mut head, tail);
@@ -1889,18 +2959,15 @@ fn remaining_damage_head(
 /// `sub_ability` chain. Every node keeps the parent's latched trigger source so a
 /// departed source is still evaluated by its last known information.
 fn remaining_damage_chain(
+    state: &GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) -> Option<ResolvedAbility> {
     let node = |target, amount| {
-        build_remaining_damage_node(
-            ability,
-            damage_source_id,
-            target,
-            amount,
-            ability.trigger_source.clone(),
-        )
+        let mut node = build_remaining_damage_node(ability, damage_source_id, target, amount);
+        node.trigger_source = ability.trigger_source.clone();
+        keep_chain_identity(state, node, ability)
     };
     let mut iter = remaining.into_iter();
     let (first_target, first_amount) = iter.next()?;
@@ -1923,6 +2990,11 @@ fn remaining_damage_chain(
 /// false and no object target leaks; for Lady Loki's `CastFromZone
 /// { target: ParentTarget }` tail (empty targets, non-`Resolution` timing) it
 /// returns true and the hit is preserved so the free cast still addresses it.
+///
+/// The tail also takes the same chain-context hand-off as the generic pause path, so
+/// a kicker survives the park (Hurloon Battle Hymn, "If this spell was kicked, you
+/// gain 4 life."). The context object is `None` because `resolve_chain_body` has
+/// already set it recursively on `ability`.
 fn stashed_tail(
     state: &mut GameState,
     sub: &ResolvedAbility,
@@ -1932,86 +3004,127 @@ fn stashed_tail(
     if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
         tail.mirror_targets_from(ability);
     }
-    // CR 608.2c: the tail is handed its context by the REAL parent — the paused
-    // instruction — exactly as the chain driver would hand it on completion
-    // (ability index, chosen players, casting-time facts).
     crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
+    // CR 608.2c: an unswapped "instead" sub's base clause is this node's next instruction, and
+    // the non-pause path binds it against this node (`resolve_chain_body`), not against the
+    // override it is parked under. Bind it here the same way, so the parked base clause meets
+    // the recipient the unpaused one does (Searing Blaze's second clause after a pause in its
+    // first, under Furnace of Rath).
+    if tail
+        .condition
+        .as_ref()
+        .is_some_and(|condition| condition.is_instead_override())
+    {
+        if let Some(base) = tail.else_ability.as_deref_mut() {
+            if crate::game::effects::should_propagate_parent_targets(ability, base) {
+                base.mirror_targets_from(ability);
+            }
+            crate::game::effects::apply_parent_chain_context(base, ability, None, state);
+        }
+    }
     tail
 }
 
-/// CR 120.4b + CR 616.1e: Stash a two-part continuation for an
-/// `EachSourceDealsDamage` Phase-B pause. `already_replaced` sources have
-/// completed Phase B (replacements applied) and are stashed as
-/// `ApplyPostReplacementDamage` nodes (skip re-replacement). `raw_remaining`
-/// sources have not yet entered Phase B and are stashed as `DealDamage` nodes
-/// (full pipeline). The parent's `sub_ability` parks as its OWN ownerless
-/// frame below the stamped remainder (R2-F1 split tails) so downstream
-/// effects fire exactly once, after the batch's own boundary publishes.
-/// Returns whether a DAMAGE tail was parked. A `false` return (no damage
-/// remainder — either nothing at all, or downstream-only per F1) tells the
-/// pause site to stamp the pending prompt itself: the answered member is
-/// this batch's boundary, so the replacement-answer hook publishes it.
-fn stash_each_source_combined_continuation(
-    state: &mut GameState,
+/// CR 608.2c: a node parked for a remaining recipient is the same instruction of the same
+/// spell or ability. `resolve_chain_body` evaluates the next node's gate against this node
+/// and hands this node's context on, so it carries the chain's (Nibelheim Aflame, "If this
+/// spell was cast from a graveyard"; Tannuk, "the second time this ability has resolved").
+/// A drain runs at depth 1, so the index counts no resolution.
+fn keep_chain_identity(
+    state: &GameState,
+    mut node: ResolvedAbility,
     ability: &ResolvedAbility,
-    already_replaced: &[(DamageContext, ProposedEvent)],
-    raw_remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
-    owner: u64,
-) -> bool {
-    // Build the head node: prioritise already-replaced (ApplyPostReplacementDamage)
-    // over raw (DealDamage) so Phase-C application fires before Phase-B for any
-    // remaining-raw sources.
-    let mut head_opt: Option<ResolvedAbility> = None;
+) -> ResolvedAbility {
+    node.context = ability.context.clone();
+    node.ability_index = ability.ability_index;
+    // CR 608.2f + CR 700.1: a remaining portion of a simultaneous batch keeps the guards
+    // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
+    node.context.settled_damage_guards = replacement::settled_damage_guards(state).into();
+    // CR 616.1 + CR 101.4: deferred choices and held riders belong to the batch that parks
+    // them only.
+    node.context.parked_damage_batch = None;
+    node
+}
 
-    for (ctx, event) in already_replaced {
-        if let Some(node) = build_post_replacement_damage_node(ability, ctx, event) {
-            match head_opt.as_mut() {
-                None => head_opt = Some(node),
-                Some(h) => append_to_sub_chain(h, node),
-            }
+/// CR 120.2b: the one object a damage node names as the dealer: `Some(None)` for the
+/// spell or ability itself. `None` for any other effect, and for a node with several
+/// sources.
+fn named_damage_dealer(effect: &Effect) -> Option<Option<DamageSource>> {
+    match effect {
+        Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
+            Some(*damage_source)
         }
+        Effect::DamageEachPlayer { .. } => Some(None),
+        _ => None,
     }
+}
 
-    for (source_id, target, amount) in raw_remaining {
-        // CR 120.1 + CR 608.2h: each parked member keeps the parent latch
-        // only when it names the member itself (see `trigger_latch_for_member`).
-        let latch = trigger_latch_for_member(&ability.trigger_source, source_id);
-        let node = build_remaining_damage_node(ability, source_id, target, amount, latch);
-        match head_opt.as_mut() {
-            None => head_opt = Some(node),
-            Some(h) => append_to_sub_chain(h, node),
+/// CR 608.2c: the node holding this clause's next instruction, when it is unconditional: a
+/// `ContinuationStep` sub, or the base clause of an unswapped "instead" sub (Searing Blaze
+/// lowers its printed second clause to that sub's `else_ability`).
+fn next_damage_clause(node: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let sub = node
+        .sub_ability
+        .as_deref()
+        .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)?;
+    match &sub.condition {
+        None => Some(sub),
+        Some(condition) if condition.is_instead_override() => sub.else_ability.as_deref(),
+        Some(_) => None,
+    }
+}
+
+/// CR 608.2f: does this node's clause and the next one form one simultaneous action? One
+/// dealer, one sentence: Chandra's Outrage, "deals 4 damage to target creature and 2 damage
+/// to that creature's controller." A `SequentialSibling` or a conditioned node is a later
+/// instruction (Misthios's Fury). A different dealer is too: the AST doesn't mark Alpha
+/// Brawl's "then each of those creatures deals damage", and that card's ruling says "The
+/// two parts of Alpha Brawl's effect happen sequentially".
+fn joins_next_damage_clause(node: &ResolvedAbility) -> bool {
+    next_damage_clause(node).is_some_and(|next| {
+        named_damage_dealer(&node.effect).is_some()
+            && named_damage_dealer(&node.effect) == named_damage_dealer(&next.effect)
+    })
+}
+
+/// CR 608.2f + CR 700.1: read the guards once for a joined run of damage clauses
+/// and stamp every clause of the run, so each opens its batch under the same reading
+/// (Undergrowth Champion ruling: "its prevention effect will apply once to all that damage").
+/// `None` when this node starts no run, or when nothing on the board has a guard. The stamp
+/// is the carrier a remaining portion already uses, so a pause inside the run composes.
+/// Boxed and kept out of line: `resolve_chain_body` recurses once per instruction, and the
+/// stamped clone must not sit on each of its frames.
+#[inline(never)]
+pub(super) fn settle_joined_damage_run(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Box<ResolvedAbility>> {
+    if !ability.context.settled_damage_guards.is_empty() || !joins_next_damage_clause(ability) {
+        return None;
+    }
+    let guards = replacement::read_damage_guards(state);
+    if guards.is_empty() {
+        return None;
+    }
+    let mut stamped = Box::new(ability.clone());
+    let mut node = &mut *stamped;
+    loop {
+        node.context.settled_damage_guards = guards.clone().into();
+        if !joins_next_damage_clause(node) {
+            return Some(stamped);
         }
-    }
-
-    if let Some(sub) = ability.sub_ability.as_ref() {
-        match head_opt.as_mut() {
-            None => {
-                // CR 615.13 + CR 608.2c (Matt F1): no damage remainder —
-                // park the genuine downstream chain ownerlessly (stamping it
-                // would merge it into this batch's application) and return
-                // false so the pause site stamps the prompt itself: the
-                // answered member is this batch's boundary, and the
-                // answer-time stamp flush publishes it before the ownerless
-                // downstream drains.
-                let tail = stashed_tail(state, sub, ability);
-                push_ownerless_tail_continuation(state, Some(Box::new(tail)));
-                return false;
-            }
+        // `joins_next_damage_clause` held, so this is `next_damage_clause`'s node. An
+        // unswapped "instead" sub is stamped too: a pause in the head forwards it, and its
+        // else clause resolves under its context (Searing Blaze under Furnace of Rath).
+        let sub = node.sub_ability.as_deref_mut()?;
+        node = match sub.condition {
+            None => sub,
             Some(_) => {
-                // CR 615.13 + CR 616.1e (R2-F1): split tails — the downstream
-                // parks as its OWN ownerless frame BELOW the stamped
-                // remainder, so the remainder's boundary publishes before
-                // downstream drains instead of merging into one application.
-                let tail = stashed_tail(state, sub, ability);
-                push_ownerless_tail_continuation(state, Some(Box::new(tail)));
+                sub.context.settled_damage_guards = guards.clone().into();
+                sub.else_ability.as_deref_mut()?
             }
-        }
+        };
     }
-
-    if let Some(head) = head_opt {
-        return push_each_source_tail_continuation(state, Some(Box::new(head)), owner);
-    }
-    false
 }
 
 /// CR 120.4a + CR 608.2c + CR 702: Resolve an excess-redirect rider against
@@ -2073,6 +3186,10 @@ pub fn resolve(
 /// [`pause_for_resolution_division`]. The chosen portions are stamped into the
 /// stored node's `distribution`; no player receives priority between the choice
 /// and the damage (the division is part of applying the effect).
+///
+/// CR 608.2f + CR 700.1: the chosen portions are one simultaneous batch, opened
+/// here as `resolve` opens one — under the guards the stored node carries, else
+/// a fresh read — because the resume re-enters below `resolve`.
 pub(crate) fn resume_resolution_division(
     state: &mut GameState,
     pending_effect: &ResolvedAbility,
@@ -2137,7 +3254,8 @@ fn pause_for_resolution_division(
         // owns the trailing instruction; a replacement-choice pause inside this
         // recursive resolution must not park a second copy of it.
         stamped.sub_ability = None;
-        return resolve_damage(
+        // CR 608.2f: the division is applied inside the batch its instruction opened.
+        return resolve_with_splice(
             state,
             &stamped,
             RemainingDamageSplice::AfterContinuation,
@@ -2192,7 +3310,23 @@ fn stash_remaining_distribution(
     }
 }
 
+/// CR 608.2f + CR 700.1: one damage instruction as one simultaneous batch, reporting who
+/// places its tail.
 fn resolve_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    splice: RemainingDamageSplice,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_with_splice(state, ability, splice, events)
+    })
+}
+
+/// The body of [`resolve`] and [`resume_resolution_division`], run inside the
+/// damage batch each opens; `splice` says where a pause parks the remaining
+/// portions of a division.
+fn resolve_with_splice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     splice: RemainingDamageSplice,
@@ -2264,12 +3398,27 @@ fn resolve_damage(
 
     // CR 601.2d: If the caster distributed damage among targets at cast time,
     // apply per-target amounts from ability.distribution instead of uniform damage.
+    // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the remaining
+    // recipients behind its answer (`park_recipients_behind_paused_rider`).
+    let boundary = state.resolution_stack.capture_child_boundary();
     if let Some(distribution) = &ability.distribution {
         for (i, (target, amount)) in distribution.iter().enumerate() {
             match apply_damage_to_target(state, &ctx, target.clone(), *amount, false, events)? {
                 DamageResult::Applied(_)
-                    if !pause_behind_continuation_prompt(state, i + 1 < distribution.len()) => {}
-                _ => {
+                    if replacement::damage_batch_has_paused_rider(state)
+                        && park_recipients_behind_paused_rider(
+                            state,
+                            ability,
+                            distribution[i + 1..]
+                                .iter()
+                                .map(|(t, a)| (ctx.source_id, t.clone(), *a)),
+                            boundary,
+                        )? =>
+                {
+                    return Ok(DamageTail::Caller);
+                }
+                DamageResult::Applied(_) => {}
+                DamageResult::NeedsChoice => {
                     // CR 120.3 + CR 616.1e: Remaining distributed targets must resume
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
@@ -2283,11 +3432,20 @@ fn resolve_damage(
         for (i, target) in effective_targets.iter().enumerate() {
             match apply_damage_to_target(state, &ctx, target.clone(), num_dmg, false, events)? {
                 DamageResult::Applied(_)
-                    if !pause_behind_continuation_prompt(
-                        state,
-                        i + 1 < effective_targets.len(),
-                    ) => {}
-                _ => {
+                    if replacement::damage_batch_has_paused_rider(state)
+                        && park_recipients_behind_paused_rider(
+                            state,
+                            ability,
+                            effective_targets[i + 1..]
+                                .iter()
+                                .map(|t| (ctx.source_id, t.clone(), num_dmg)),
+                            boundary,
+                        )? =>
+                {
+                    return Ok(DamageTail::Caller);
+                }
+                DamageResult::Applied(_) => {}
+                DamageResult::NeedsChoice => {
                     // CR 120.3 + CR 616.1e: Remaining targets must resume after the
                     // replacement choice resolves.
                     let remaining = effective_targets[i + 1..]
@@ -2813,15 +3971,26 @@ fn each_target_damage_split(
 /// CR 120.1: each member is an independent damage source, so each builds its own
 /// `DamageContext` (its own deathtouch/wither/infect/lifelink keywords apply).
 ///
-/// SIMULTANEOUS BATCH (CR 120.4a + CR 120.6 + CR 120.10 + CR 615.13). All
-/// sources deal their damage as one event set through the shared owned
-/// noncombat batch (`resolve_noncombat_damage_batch`) — the same authority the
-/// combat batch and `EachSourceDealsDamage` use — so simultaneous prevention
-/// aggregates into ONE application per (shield, recipient) instead of
-/// publishing per source. Per-source power is resolved up front, BEFORE any
-/// damage is marked, so all amounts read the same pre-batch power (CR 608.2);
-/// the batch then gates, replaces, pauses (parking unprocessed members with
-/// per-source identity), and applies, pushing `EffectResolved` itself.
+/// SIMULTANEOUS BATCH (CR 120.4a + CR 120.6 + CR 120.10). All sources deal their
+/// damage as one event set, mirroring the combat simultaneous-damage primitive
+/// (`combat_damage.rs` `apply_combat_damage`, CR 510.2) but for a non-combat
+/// spell effect, reusing its decomposed primitives directly:
+///
+/// - Every source's own-power amount is resolved up front, BEFORE any damage is
+///   marked, so all amounts read the same pre-batch power (CR 608.2).
+/// - **Phase A (Collect):** each source builds its own `DamageContext` and a
+///   `ProposedEvent::Damage` through `pre_replacement_damage_gate` (0-damage,
+///   protection, prohibition gates) without applying anything yet.
+/// - **Phase B (Replace):** each proposed event runs `replacement::replace_event`
+///   (the non-combat pipeline). A `NeedsChoice` here means a replacement on the
+///   recipient needs a player ordering choice — the batch pauses and the
+///   remaining sources (this paused source first) are stashed with PER-SOURCE
+///   identity so each resumes through its OWN source id's keywords/LKI.
+/// - **Phase C (Apply):** each surviving post-replacement event is applied via
+///   `apply_damage_after_replacement` with that source's context. Because all
+///   marks accumulate onto the one recipient before SBAs run (CR 704), combined
+///   marked damage (CR 120.6 lethal) and combined excess (CR 120.10) are
+///   correct, and deathtouch/wither/lifelink/infect apply per source.
 fn resolve_each_target_power_damage(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -2874,15 +4043,40 @@ fn resolve_each_target_power_damage(
         })
         .collect();
 
-    // CR 615.13: hand the collected members to the shared batch with the
-    // single shared recipient. Power was resolved per source above; the batch
-    // owns gating, replacement, pause/resume, application, and the
-    // `EffectResolved` event from here.
-    let entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = batch
+    // --- Phase A: Collect proposed damage events (no application yet). ---
+    // CR 120.8 / CR 702.16: per-source pre-replacement gate. Fully gated sources
+    // (0 damage, prohibition) contribute nothing; protection proposes into the
+    // pipeline, which publishes its prevention with the batch's (CR 615.13).
+    let mut entries: Vec<(usize, &DamageContext)> = Vec::with_capacity(batch.len());
+    let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(batch.len());
+    for (idx, (_, ctx, amt)) in batch.iter().enumerate() {
+        if let DamageGateOutcome::Proposed(proposed) =
+            pre_replacement_damage_gate(state, ctx, &recipient, *amt, false)
+        {
+            entries.push((idx, ctx));
+            proposed_events.push(proposed);
+        }
+    }
+
+    // --- Phases B and C: replacement for every portion, then delivery (CR 120.4b, CR 120.4c),
+    // owned by one runner through every pause. ---
+    let portions = entries
         .iter()
-        .map(|(source_id, ctx, amt)| (*source_id, ctx.clone(), recipient.clone(), *amt))
+        .zip(proposed_events)
+        .map(|(&(_, ctx), event)| BatchPortion::Gated {
+            ctx: ctx.clone(),
+            event,
+        })
         .collect();
-    resolve_noncombat_damage_batch(state, ability, events, &entries)
+    run_damage_batch(
+        state,
+        ability,
+        EffectKind::from(&ability.effect),
+        Vec::new(),
+        portions,
+        ParkedDamageBatch::default(),
+        events,
+    )
 }
 
 /// Deal uniform damage to every matching object and (optionally) every matching
@@ -2897,8 +4091,9 @@ fn resolve_each_target_power_damage(
 /// (CR 609.7, CR 614, CR 615) observe one coherent event across the full set.
 /// CR 120.3e: Non-combat damage from an effect is marked on each matching creature.
 /// CR 120.3a: Damage dealt to a player causes that player to lose that much life.
-/// CR 120.4b + CR 615.13: Each portion uses the replacement pipeline within
-/// one owner-scoped batch, sharing its `DamageContext` and prevention tally.
+/// CR 120.4b: Each per-target damage instance is routed through the replacement
+/// pipeline individually (see `apply_damage_to_target`), but all share the same
+/// `DamageContext` (single source, single set of keywords) and the same effect.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -2907,7 +4102,19 @@ pub fn resolve_all(
     resolve_all_damage(state, ability, events).map(|_| ())
 }
 
+/// CR 608.2f + CR 700.1: the instruction as one simultaneous batch, reporting who places its
+/// tail.
 fn resolve_all_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_all_portions(state, ability, events)
+    })
+}
+
+fn resolve_all_portions(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -3053,9 +4260,9 @@ fn resolve_all_damage(
     recipients.extend(matching_objects.iter().map(|&id| TargetRef::Object(id)));
     recipients.extend(matching_players.iter().map(|&pid| TargetRef::Player(pid)));
 
-    let entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = recipients
+    let recipient_amounts: Vec<(TargetRef, u32)> = recipients
         .into_iter()
-        .filter_map(|target| {
+        .map(|target| {
             let dmg = match (shared_num_dmg, &target) {
                 (Some(dmg), _) => dmg,
                 (None, TargetRef::Object(id)) => {
@@ -3066,11 +4273,61 @@ fn resolve_all_damage(
                     resolve_quantity_with_targets(state, amount, ability).max(0) as u32
                 }
             };
-            (dmg > 0).then_some((ctx.source_id, ctx.clone(), target, dmg))
+            (target, dmg)
         })
         .collect();
 
-    resolve_noncombat_damage_batch(state, ability, events, &entries)
+    let boundary = state.resolution_stack.capture_child_boundary();
+    for (i, (target, num_dmg)) in recipient_amounts.iter().enumerate() {
+        match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
+            // CR 608.2c + CR 616.1: a rider that left its prompt standing (Dralnu, Lich Lord's
+            // sacrifice) holds the remaining recipients behind its answer.
+            DamageResult::Applied(_)
+                if replacement::damage_batch_has_paused_rider(state)
+                    && park_recipients_behind_paused_rider(
+                        state,
+                        ability,
+                        recipient_amounts[i + 1..]
+                            .iter()
+                            .map(|(t, a)| (ctx.source_id, t.clone(), *a)),
+                        boundary,
+                    )? =>
+            {
+                return Ok(DamageTail::Caller);
+            }
+            DamageResult::Applied(_) => {}
+            DamageResult::NeedsChoice => {
+                // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
+                // the replacement choice resolves — chain them as DealDamage
+                // continuations keyed to the same damage-source id.
+                let remaining = recipient_amounts[i + 1..].iter().cloned();
+                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
+                // drain re-emits the parent event the non-pause tail fires.
+                mark_pending_continuation_parent(state, EffectKind::DamageAll);
+                return Ok(DamageTail::Stashed);
+            }
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(DamageTail::Caller)
+}
+
+/// CR 101.4 + CR 616.1: the living players in APNAP order, starting with the active player.
+/// Simultaneous replacement choices across players are made in that order ("If two or more
+/// players have to make these choices at the same time, choices are made in APNAP order").
+fn players_in_apnap_order(
+    state: &GameState,
+) -> impl Iterator<Item = &crate::types::player::Player> + '_ {
+    crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter_map(move |id| state.players.iter().find(|player| player.id == id))
 }
 
 /// CR 120.3: Collect non-eliminated players matching the filter for simultaneous
@@ -3083,9 +4340,8 @@ fn collect_matching_players(
     source_id: crate::types::identifiers::ObjectId,
     granting_object: Option<crate::types::identifiers::ObjectIncarnationRef>,
 ) -> Vec<PlayerId> {
-    state
-        .players
-        .iter()
+    // CR 616.1: in APNAP order, as `resolve_each_player` collects them.
+    players_in_apnap_order(state)
         .filter(|p| {
             !p.is_eliminated
                 && match player_filter {
@@ -3359,7 +4615,19 @@ pub fn resolve_each_player(
     resolve_each_player_damage(state, ability, events).map(|_| ())
 }
 
+/// CR 608.2f + CR 700.1: the instruction as one simultaneous batch, reporting who places its
+/// tail.
 fn resolve_each_player_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_player_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_player_portions(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -3391,10 +4659,9 @@ fn resolve_each_player_damage(
         _ => Vec::new(),
     };
 
-    // Collect matching player IDs first to avoid borrow issues.
-    let player_ids: Vec<PlayerId> = state
-        .players
-        .iter()
+    // Collect matching player IDs first to avoid borrow issues. CR 616.1: in APNAP order, so
+    // the players' simultaneous replacement choices are asked in that order.
+    let player_ids: Vec<PlayerId> = players_in_apnap_order(state)
         .filter(|p| {
             !p.is_eliminated
                 && match &player_filter {
@@ -3647,6 +4914,7 @@ fn resolve_each_player_damage(
         .map(|p| p.id)
         .collect();
 
+    let boundary = state.resolution_stack.capture_child_boundary();
     for (i, pid) in player_ids.iter().enumerate() {
         // CR 120.3: Resolve quantity scoped to this player. Thread the ability's
         // object targets so an `ObjectManaValue { scope: Target }` leaf (Lady
@@ -3660,49 +4928,55 @@ fn resolve_each_player_damage(
             &ability.targets,
         )
         .max(0) as u32;
-        if dmg == 0 {
-            continue;
+        if dmg > 0 {
+            let result =
+                apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?;
+            let rider_paused = crate::game::replacement::damage_batch_has_paused_rider(state);
+            if matches!(result, DamageResult::NeedsChoice) || rider_paused {
+                // CR 120.3 + CR 616.1e: Remaining players must resume after the
+                // replacement choice resolves. Pre-resolve per-player amounts now
+                // so each continuation node carries a Fixed quantity.
+                let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
+                    .iter()
+                    .filter_map(|&next_pid| {
+                        // Thread `ability.targets` here too — otherwise every
+                        // opponent AFTER the first (once a replacement pause
+                        // occurs) would pre-resolve an `ObjectManaValue
+                        // { scope: Target }` leaf to 0.
+                        let next_dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
+                            state,
+                            amount_expr,
+                            ability.source_id,
+                            next_pid,
+                            &ability.targets,
+                        )
+                        .max(0) as u32;
+                        (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
+                    })
+                    .collect();
+                // CR 608.2c + CR 616.1: this player's rider left its prompt standing; the
+                // remaining players wait behind it. With none left, the chain already
+                // parks the spell's later instructions behind the paused rider.
+                if !matches!(result, DamageResult::NeedsChoice) {
+                    if park_recipients_behind_paused_rider(
+                        state,
+                        ability,
+                        remaining
+                            .into_iter()
+                            .map(|(target, amount)| (ctx.source_id, target, amount)),
+                        boundary,
+                    )? {
+                        return Ok(DamageTail::Caller);
+                    }
+                    continue;
+                }
+                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
+                // so the drain re-emits the parent event the non-pause tail fires.
+                mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
+                return Ok(DamageTail::Stashed);
+            }
         }
-        let result =
-            apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?;
-        if matches!(result, DamageResult::Applied(_))
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        {
-            continue;
-        }
-        // CR 120.3 + CR 616.1e: Remaining players must resume after the
-        // replacement choice resolves. Pre-resolve per-player amounts now so
-        // each continuation node carries a Fixed quantity.
-        let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
-            .iter()
-            .filter_map(|&next_pid| {
-                // Thread `ability.targets` here too — otherwise every opponent
-                // AFTER the first (once a replacement pause occurs) would
-                // pre-resolve an `ObjectManaValue { scope: Target }` leaf to 0.
-                let next_dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
-                    state,
-                    amount_expr,
-                    ability.source_id,
-                    next_pid,
-                    &ability.targets,
-                )
-                .max(0) as u32;
-                (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
-            })
-            .collect();
-        // CR 608.2c + CR 616.1g: behind an open continuation prompt only damage
-        // still to be dealt is stashed; with none left the instruction is
-        // complete and the chain places its next instruction after the prompt.
-        if matches!(result, DamageResult::Applied(_))
-            && !pause_behind_continuation_prompt(state, !remaining.is_empty())
-        {
-            break;
-        }
-        stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
-        // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
-        // so the drain re-emits the parent event the non-pause tail fires.
-        mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
-        return Ok(DamageTail::Stashed);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -3738,7 +5012,19 @@ pub fn resolve_each_deals_equal_to_power(
     resolve_each_deals_power_damage(state, ability, events).map(|_| ())
 }
 
+/// CR 608.2f + CR 700.1: the instruction as one simultaneous batch, reporting who places its
+/// tail.
 fn resolve_each_deals_power_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_deals_equal_to_power_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_deals_equal_to_power_portions(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -3772,36 +5058,37 @@ fn resolve_each_deals_power_damage(
         return Ok(DamageTail::Caller);
     };
 
-    // CR 615.13: hand the collected members to the shared owned noncombat
-    // batch so simultaneous prevention aggregates into ONE application per
-    // (shield, recipient). Power is read per source (live, LKI fallback) and
-    // non-positive members contribute nothing, exactly as before; the batch
-    // owns gating, replacement, pause/resume, application, and EffectResolved.
-    let mut entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> =
-        Vec::with_capacity(source_ids.len());
-    for &source_id in source_ids {
-        // CR 113.7a + CR 208.3: power from the live object, falling back to LKI
-        // when the source left the battlefield after targets were chosen.
-        let power = object_power_with_lki(state, source_id);
-        if power <= 0 {
-            continue;
-        }
-        // CR 120.1: each source creature is the source of its own damage
-        // (latch-derived when the trigger latch names the source).
-        let ctx = member_damage_context(
-            state,
-            source_id,
-            ability.controller,
-            &ability.trigger_source,
-        );
-        entries.push((
-            source_id,
-            ctx,
-            TargetRef::Object(recipient_id),
-            power as u32,
-        ));
-    }
-    resolve_noncombat_damage_batch(state, ability, events, &entries)
+    // CR 120.1 + CR 608.2: each source deals damage equal to its own power, read for every
+    // source before any is dealt (CR 113.7a + CR 208.3: from the live object, falling back to
+    // LKI when it left the battlefield after targets were chosen). The portions are one
+    // simultaneous batch: replacement for all, then delivery (CR 120.4b, CR 120.4c).
+    let portions = source_ids
+        .iter()
+        .filter_map(|&source_id| {
+            let power = object_power_with_lki(state, source_id);
+            (power > 0).then(|| BatchPortion::Ungated {
+                // CR 120.1: each source creature is the source of its own damage
+                // (latch-derived when the trigger latch names the source).
+                ctx: member_damage_context(
+                    state,
+                    source_id,
+                    ability.controller,
+                    &ability.trigger_source,
+                ),
+                target: TargetRef::Object(recipient_id),
+                amount: power as u32,
+            })
+        })
+        .collect();
+    run_damage_batch(
+        state,
+        ability,
+        EffectKind::from(&ability.effect),
+        Vec::new(),
+        portions,
+        ParkedDamageBatch::default(),
+        events,
+    )
 }
 
 /// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated at
@@ -3814,246 +5101,7 @@ fn resolve_each_deals_power_damage(
 /// (CR 109.4 + CR 120.3a). Marks accumulate before any priority/SBA check (CR
 /// 704.3) so combined lethal (CR 120.6) / excess (CR 120.10) on a shared recipient
 /// are computed across the whole batch; a replacement pause mid-batch resumes the
-/// remaining sources with PER-SOURCE identity preserved
-/// (`stash_each_source_combined_continuation`).
-/// CR 615.13: drain the shared simultaneous-batch prevention tally accumulated
-/// during a noncombat Phase B, emitting one aggregate `DamagePrevented` per
-/// (shield, recipient) and firing each `All` rider once — the same authority
-/// the combat batch uses (`fire_batch_prevention_riders`). No-op when the
-/// tally is absent or empty. Takes (deactivates) the tally; callers restore
-/// the surrounding value on the completed path.
-///
-/// CR 615.5 + CR 616.1e (Matt F2): a rider that parks a fresh choice stops
-/// the drainage (stop mode, like the framed flush below) instead of letting
-/// later groups overwrite it. Published groups stay published; the
-/// unpublished remainder re-parks as this batch's frame for the answer-time
-/// cascade, and the fresh choice returns so the caller can park its own
-/// Phase-C/downstream tail and stop. The transient stays deactivated — a
-/// live one would absorb rider-created prevention into the popped batch.
-fn flush_noncombat_prevention_tally(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    owner: u64,
-    restore_tally: &Option<CombatPreventionTally>,
-) -> Option<WaitingFor> {
-    use crate::game::combat_damage::BatchRiderDrainOutcome;
-    let tally = state.combat_prevention_tally.take()?;
-    if tally.is_empty() {
-        return None;
-    }
-    let entries = crate::game::combat_damage::sorted_prevention_entries(tally);
-    match crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events, true) {
-        BatchRiderDrainOutcome::Completed => None,
-        BatchRiderDrainOutcome::Paused {
-            waiting_for,
-            published_entries,
-        } => {
-            let mut remainder = entries;
-            remainder.drain(..published_entries.min(remainder.len()));
-            // A nonempty remainder re-parks as this batch's frame (same
-            // owner/restore shape as a Phase-B pause record). An empty one
-            // parks nothing: top-level there is no scope to restore, and
-            // nested the still-parked scope frame below already carries the
-            // surrounding restore for the cascade.
-            if !remainder.is_empty() {
-                state
-                    .pending_each_source_batches
-                    .push(EachSourceBatchFrame {
-                        tally: remainder,
-                        restore_tally: restore_tally.as_ref().map(tally_entries_for_record),
-                        owner,
-                    });
-            }
-            state.combat_prevention_tally = None;
-            let waiting_for = *waiting_for;
-            state.waiting_for = waiting_for.clone();
-            Some(waiting_for)
-        }
-    }
-}
-
-/// CR 615.13: canonical entry encoding of a live prevention tally for pause
-/// records — saves cannot key JSON maps on pairs, and entries are exactly
-/// what the aggregate drain consumes. Sorted, so records compare canonically.
-pub(crate) fn tally_entries_for_record(tally: &CombatPreventionTally) -> Vec<PreventedDamageEntry> {
-    crate::game::combat_damage::sorted_prevention_entries(tally.clone())
-}
-
-/// CR 615.13: fold parked entries back into a live tally, summing duplicate
-/// pairs. A resumed batch re-accumulates onto its parked prefix through this.
-pub(crate) fn tally_map_from_record_entries(
-    entries: &[PreventedDamageEntry],
-) -> CombatPreventionTally {
-    let mut map = HashMap::new();
-    for entry in entries {
-        *map.entry((entry.key, entry.recipient.clone())).or_insert(0) += entry.amount;
-    }
-    map
-}
-
-/// CR 615.13 + CR 616.1e (Matt M1): the topmost parked frame owned by `owner`
-/// — the running tail's own record. The stack holds at most a few frames, so
-/// the linear scan costs nothing; topmost-first keeps a batch's own re-pause
-/// frames shadowing its older ones exactly like the legacy top did.
-pub(crate) fn top_owned_each_source_frame(
-    state: &GameState,
-    owner: u64,
-) -> Option<&EachSourceBatchFrame> {
-    state
-        .pending_each_source_batches
-        .iter()
-        .rev()
-        .find(|frame| frame.owner == owner)
-}
-
-/// CR 615.13 + CR 616.1e (Matt M1): mutable twin of
-/// `top_owned_each_source_frame`, for the applier write-through.
-pub(crate) fn top_owned_each_source_frame_mut(
-    state: &mut GameState,
-    owner: u64,
-) -> Option<&mut EachSourceBatchFrame> {
-    state
-        .pending_each_source_batches
-        .iter_mut()
-        .rev()
-        .find(|frame| frame.owner == owner)
-}
-
-/// CR 615.13 + CR 616.1e: publish every suspended prevention batch, innermost
-/// first, once the resumed drain completes. Called from
-/// `drain_pending_continuation` when a chain drains with batch frames present,
-/// no further choice pending, and no continuation still queued: each frame's
-/// tally is one CR 615.13 application (its shield/recipient groups), and each
-/// pop restores the surrounding transient that frame suspended, so nesting
-/// unwinds exactly. Empty frames (a scope whose tally already published
-/// inline) restore without publishing.
-///
-/// CR 615.5 (Matt C1): a frame's riders dispatch SCOPELESS — the completed
-/// batch's transient is deactivated first (the popped record is authoritative
-/// for publishing), and the remaining outer frames are suspended aside for
-/// the dispatch, exactly like combat Phase-D dispatch. Rider-created
-/// prevention therefore owns a fresh scope (per-event emission, or a fresh
-/// top-level batch scope of its own) instead of being absorbed into the dead
-/// batch and discarded on restore, or written through into an outer frame.
-/// Rider-created frames are restored above the outers, so the cascade still
-/// unwinds innermost-first.
-///
-/// CR 616.1e + CR 117.2e (Matt C2): returns the FRESH rider-created choice
-/// when a rider pauses mid-drainage, with parent frames left parked (the
-/// unpublished remainder re-parks below any rider frames, so the rider
-/// subtree drains first on resume). Returns `None` when every frame unwound.
-/// Callers propagate the fresh choice instead of any cached Priority.
-///
-/// CR 615.13 + CR 616.1e (Matt M1): each frame carries its owning batch's id.
-/// The drain hook publishes a completed batch's frames through
-/// `flush_owned_each_source_batches` at that batch's boundary — before outer
-/// instructions resume — while frames of any other owner stay parked for
-/// their own boundary. This quiescent all-flush remains for ownerless chains
-/// and the answer/boundary backstops.
-pub(crate) fn flush_pending_each_source_batches(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    while !state.pending_each_source_batches.is_empty() {
-        if let Some(waiting_for) = flush_top_each_source_frame(state, events) {
-            return Some(waiting_for);
-        }
-    }
-    None
-}
-
-/// CR 615.13 + CR 616.1e (Matt M1): publish the topmost contiguous run of
-/// frames owned by `owner` — the batch whose tail just drained — innermost
-/// first, stopping at the first frame of any other owner (those stay parked
-/// for their own boundary). Same per-frame semantics as the quiescent
-/// all-flush above, including the fresh-choice stop.
-pub(crate) fn flush_owned_each_source_batches(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    owner: u64,
-) -> Option<WaitingFor> {
-    while state
-        .pending_each_source_batches
-        .last()
-        .is_some_and(|frame| frame.owner == owner)
-    {
-        if let Some(waiting_for) = flush_top_each_source_frame(state, events) {
-            return Some(waiting_for);
-        }
-    }
-    None
-}
-
-/// Pop the top parked frame and dispatch it. Returns the fresh rider-created
-/// choice when the frame's drainage pauses (the remainder re-parks; the
-/// caller stops unwinding), or `None` when the frame unwound. Single
-/// per-frame authority shared by the all-flush and the owner-scoped flush.
-fn flush_top_each_source_frame(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    use crate::game::combat_damage::BatchRiderDrainOutcome;
-    let frame = state.pending_each_source_batches.pop()?;
-    // Matt C1: deactivate the completed batch's transient BEFORE its
-    // riders dispatch — a live transient here would absorb rider-created
-    // prevention into the already-popped batch.
-    state.combat_prevention_tally = None;
-    if frame.tally.is_empty() {
-        state.combat_prevention_tally = frame
-            .restore_tally
-            .map(|entries| tally_map_from_record_entries(&entries));
-        return None;
-    }
-    // Matt C1: suspend the surrounding scope for the dispatch, so a
-    // rider cannot hydrate from or write through into an outer frame.
-    let suspended = std::mem::take(&mut state.pending_each_source_batches);
-    let map = tally_map_from_record_entries(&frame.tally);
-    let entries = crate::game::combat_damage::sorted_prevention_entries(map);
-    let outcome =
-        crate::game::combat_damage::fire_batch_prevention_riders(state, &entries, events, true);
-    let rider_frames = std::mem::take(&mut state.pending_each_source_batches);
-    match outcome {
-        BatchRiderDrainOutcome::Completed => {
-            state.pending_each_source_batches = suspended;
-            state.pending_each_source_batches.extend(rider_frames);
-            state.combat_prevention_tally = frame
-                .restore_tally
-                .map(|entries| tally_map_from_record_entries(&entries));
-            None
-        }
-        BatchRiderDrainOutcome::Paused {
-            waiting_for,
-            published_entries,
-        } => {
-            // Matt C2: stop unwinding parent frames. The unpublished
-            // remainder re-parks with the same surrounding restore, BELOW
-            // the rider frames (the rider subtree owns the live prompt
-            // and drains first); the surrounding value survives only in
-            // the records until their frames unwind. An empty remainder
-            // still re-parks when it carries a surrounding restore —
-            // otherwise the outer scope would be dropped silently.
-            debug_assert!(published_entries <= entries.len());
-            let mut remainder = entries;
-            remainder.drain(..published_entries.min(remainder.len()));
-            state.pending_each_source_batches = suspended;
-            if !remainder.is_empty() || frame.restore_tally.is_some() {
-                state
-                    .pending_each_source_batches
-                    .push(EachSourceBatchFrame {
-                        tally: remainder,
-                        restore_tally: frame.restore_tally,
-                        owner: frame.owner,
-                    });
-            }
-            state.pending_each_source_batches.extend(rider_frames);
-            state.combat_prevention_tally = None;
-            let waiting_for = *waiting_for;
-            state.waiting_for = waiting_for.clone();
-            Some(waiting_for)
-        }
-    }
-}
-
+/// remaining sources with PER-SOURCE identity preserved (`run_damage_batch`).
 pub fn resolve_each_source_deals_damage(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -4062,7 +5110,19 @@ pub fn resolve_each_source_deals_damage(
     resolve_each_source_damage(state, ability, events).map(|_| ())
 }
 
+/// CR 608.2f + CR 700.1: the instruction as one simultaneous batch, reporting who places its
+/// tail.
 fn resolve_each_source_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_source_deals_damage_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_source_deals_damage_portions(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -4209,257 +5269,27 @@ fn resolve_each_source_damage(
         }
     }
 
-    resolve_noncombat_damage_batch(state, ability, events, &entries)
-}
-
-/// CR 615.13 + CR 616.1: all portions of one simultaneous noncombat damage
-/// instruction share a prevention application, including across choices.
-fn resolve_noncombat_damage_batch(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-    entries: &[(ObjectId, DamageContext, TargetRef, u32)],
-) -> Result<DamageTail, EffectError> {
-    // CR 615.13: a batch nested inside a suspended batch pushes a scope frame
-    // so its accumulations attribute to itself (never to the outer frame via
-    // write-through). Top-level batches push nothing — the common path stays
-    // allocation-free.
-    //
-    // CR 615.13 + CR 616.1e (Matt M1): every batch mints an owning id for the
-    // frames it parks and the tail it stashes, so a nested batch never shares
-    // attribution with its outer. The counter starts at 1; `0` stays the
-    // legacy-unowned sentinel.
-    let batch_id = state.next_each_source_batch_id.max(1);
-    state.next_each_source_batch_id = batch_id.saturating_add(1).max(1);
-    let entry_len = state.pending_each_source_batches.len();
-    let pushed_scope = !state.pending_each_source_batches.is_empty();
-    if pushed_scope {
-        state
-            .pending_each_source_batches
-            .push(EachSourceBatchFrame {
-                tally: Vec::new(),
-                restore_tally: None,
-                owner: batch_id,
-            });
-    }
-    // CR 615.13 + CR 616.1e (Matt F3): bind accumulation to the executing
-    // batch for the synchronous window (save/restore, like the tail drain).
-    // A child that opens inside an already-owned outer tail would otherwise
-    // write its snapshot through the ambient outer owner into the outer
-    // persisted record — which later republishes the child's amount while
-    // the outer application is lost. Top-level and answer-hook nesting are
-    // unaffected (no owned frame exists yet, or the child scope is topmost).
-    let prior_batch_owner = state.resolving_each_source_batch_owner.replace(batch_id);
-    let result = resolve_noncombat_damage_batch_inner(state, ability, events, entries, batch_id);
-    state.resolving_each_source_batch_owner = prior_batch_owner;
-    // A pause in this invocation (or deeper) pushed above our scope: the
-    // frames stay for the completion cascade. Otherwise this batch completed
-    // synchronously — pop and discard our scope (its tally already published
-    // by the inline flush, or is empty).
-    if pushed_scope && state.pending_each_source_batches.len() == entry_len + 1 {
-        state.pending_each_source_batches.pop();
-    }
-    result
-}
-
-fn resolve_noncombat_damage_batch_inner(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-    entries: &[(ObjectId, DamageContext, TargetRef, u32)],
-    batch_id: u64,
-) -> Result<DamageTail, EffectError> {
     // CR 616.1 + CR 120.3: Two-phase batch application preserving the
     // simultaneous-damage guarantee (CR 120.6 + CR 120.10): marks accumulate
     // on a shared recipient before any Phase-C consequence (lifelink, excess)
-    // is resolved.
-    //
-    // Phase B — apply replacements for every source, collecting
-    // (DamageContext, ProposedEvent) pairs for Phase C. If any source's
-    // replacement needs a player choice, the sources already collected in
-    // `replaced` (Phase B complete) are stashed as `ApplyPostReplacementDamage`
-    // continuations and the remaining raw entries are stashed as `DealDamage`
-    // continuations (they still need the full replacement pipeline).
-    let mut replaced: Vec<(DamageContext, ProposedEvent)> = Vec::new();
-    let mut phase_b_pause: Option<(usize, WaitingFor)> = None;
-    // CR 615.13: activate the shared simultaneous-batch prevention tally so
-    // multi-source damage to one recipient aggregates into ONE prevention
-    // application (one aggregate event + one rider firing), exactly like the
-    // combat batch. Save/restore the surrounding value: a nested batch (e.g. a
-    // rider that deals damage) aggregates separately.
-    let restore_tally = state.combat_prevention_tally.take();
-    // CR 615.13: a nested batch suspends the outer scope — the surrounding
-    // transient rides in our scope frame (top of stack at this point, pushed
-    // by the wrapper) so the completion cascade restores it.
-    if let Some(top) = state.pending_each_source_batches.last_mut() {
-        top.restore_tally = restore_tally.as_ref().map(tally_entries_for_record);
-    }
-    state.combat_prevention_tally = Some(HashMap::new());
-    for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
-        // CR 702.16e + CR 615.13 (Matt F4, R14-MED): protections propose
-        // into the per-event pipeline below, whose applier joins the live
-        // batch tally through the shared helper; other gates skip.
-        let proposed = match pre_replacement_damage_gate(state, ctx, target, *dmg, false) {
-            DamageGateOutcome::Proposed(proposed) => proposed,
-            DamageGateOutcome::Gated => continue,
-        };
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => {
-                replaced.push((ctx.clone(), event));
-            }
-            ReplacementResult::Prevented => {
-                // CR 615.5: fire any prevention rider (e.g. Phyrexian Hydra
-                // "-1/-1 counter for each 1 damage prevented") inline so it
-                // resolves "immediately afterward" as the rule requires.
-                if state.has_post_replacement_drain() {
-                    if let Some(waiting_for) =
-                        crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                            state, None, None, None, events,
-                        )
-                    {
-                        state.waiting_for = waiting_for.clone();
-                        // CR 616.1g: the rider or a damage substitution's
-                        // substitute raised its own prompt. Source `i` is
-                        // settled; with sources left, pause Phase B behind it
-                        // exactly as for a `NeedsChoice`.
-                        if pause_behind_continuation_prompt(state, i + 1 < entries.len()) {
-                            phase_b_pause = Some((i, waiting_for));
-                            break;
-                        }
-                    }
-                }
-            }
-            ReplacementResult::NeedsChoice(player) => {
-                // CR 616.1e: replacement for source `i` needs a player choice —
-                // pause Phase B. Stash pre-Phase-B tail as `DealDamage` nodes
-                // (they still need replacement). The `replace_event` call already
-                // registered the pending replacement in state; we just set
-                // `waiting_for` and return.
-                phase_b_pause = Some((
-                    i,
-                    replacement::replacement_choice_waiting_for(player, state),
-                ));
-                break;
-            }
-        }
-    }
-
-    if let Some((pause_at, waiting_for)) = phase_b_pause {
-        // CR 615.13 + CR 616.1e: a replacement choice pauses Phase B mid-batch.
-        // Park the completed prefix in a pause-owned record — the transient
-        // tally cannot span the player-visible pause — INSTEAD of publishing
-        // it: the resumed drain republishes the WHOLE batch (prefix, resumed
-        // entry, and stashed tail) as one CR 615.13 application. The
-        // surrounding tally rides in the record too (restored when the batch
-        // completes). Clear our scope copy (if nested) so the completion
-        // cascade publishes the prefix once, from this record.
-        let prefix_tally = state
-            .combat_prevention_tally
-            .take()
-            .map(|tally| tally_entries_for_record(&tally))
-            .unwrap_or_default();
-        if let Some(top) = state.pending_each_source_batches.last_mut() {
-            top.tally.clear();
-        }
-        state
-            .pending_each_source_batches
-            .push(EachSourceBatchFrame {
-                tally: prefix_tally,
-                restore_tally: restore_tally.as_ref().map(tally_entries_for_record),
-                owner: batch_id,
-            });
-        state.waiting_for = waiting_for;
-        // Source `pause_at` is either mid-Phase-B (replacement choice in flight
-        // via `waiting_for`; `handle_replacement_choice` will call
-        // `apply_damage_after_replacement` for it directly after resolution) or
-        // already settled with its continuation's prompt open (CR 616.1g).
-        // Stash `replaced` (Phase-B-complete) as `ApplyPostReplacementDamage`
-        // and `entries[pause_at+1..]` (Phase-B-incomplete) as `DealDamage` in
-        // a single combined chain — one `sub_ability` tail so downstream fires
-        // exactly once.
-        let raw_remaining = entries[pause_at + 1..]
-            .iter()
-            .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
-        let parked_tail = stash_each_source_combined_continuation(
-            state,
-            ability,
-            &replaced,
-            raw_remaining,
-            batch_id,
-        );
-        // CR 615.13 + CR 616.1e (Matt M1): an empty tail parks no continuation
-        // and no drain will ever run for this batch — stamp the pending
-        // prompt itself so the replacement-answer hook publishes this batch's
-        // boundary on the fresh outcome (before any outer tail resumes). A
-        // queued tail owns its boundary through its stamped continuation.
-        if !parked_tail {
-            if let Some(pending) = state.pending_replacement.as_mut() {
-                pending.each_source_batch_owner = Some(batch_id);
-            }
-        }
-        mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
-        return Ok(DamageTail::Stashed);
-    }
-
-    // CR 615.13: Phase B completed without pause — flush the whole batch as
-    // one application per (shield, recipient) BEFORE Phase C applies marks, so
-    // aggregate riders fire and `last_effect_count` carries the batch total
-    // while no further replacement can overwrite it. (Phase C pauses stash
-    // post-replacement survivors that bypass the pipeline, so flushing here
-    // is unaffected by them.) The inline flush consumed the batch tally —
-    // clear our scope copy (if nested) so the completion cascade never
-    // republishes it; our normal exit then pops and discards the spent scope.
-    // The scope clears BEFORE the flush: on a rider pause the remainder parks
-    // above it and must survive.
-    if let Some(top) = state.pending_each_source_batches.last_mut() {
-        top.tally.clear();
-    }
-    if let Some(fresh) = flush_noncombat_prevention_tally(state, events, batch_id, &restore_tally) {
-        // CR 615.5 + CR 616.1e (Matt F2): a rider parked a fresh choice
-        // mid-drainage. Published groups stay published; the unpublished
-        // remainder already re-parked as this batch's frame inside the flush.
-        // Park Phase-C survivors plus downstream as the tail (they bypass the
-        // pipeline on resume — replacements already applied in Phase B), then
-        // stop: the answer-time cascade resumes after the first choice.
-        let remaining_refs: Vec<(&DamageContext, ProposedEvent)> =
-            replaced.iter().map(|(ctx, ev)| (ctx, ev.clone())).collect();
-        stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
-        mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
-        state.waiting_for = fresh;
-        return Ok(DamageTail::Stashed);
-    }
-    state.combat_prevention_tally = restore_tally;
-
-    // Phase C — apply all already-replaced damage events. If any source's
-    // Phase C needs a choice (e.g. life-gain or lifelink replacement per CR
-    // 614.7), stash the remaining already-replaced sources as
-    // `ApplyPostReplacementDamage` so they bypass the replacement pipeline
-    // (replacements have already been applied in Phase B).
-    for (i, (ctx, event)) in replaced.iter().enumerate() {
-        match apply_damage_after_replacement(state, ctx, event.clone(), false, events) {
-            DamageResult::Applied(_) => {}
-            DamageResult::NeedsChoice => {
-                // CR 120.4b + CR 616.1e: stash remaining Phase-B-complete sources
-                // as `ApplyPostReplacementDamage` continuations (skip re-running
-                // replacement), then mark the parent kind for drain bookkeeping.
-                let remaining_refs: Vec<(&DamageContext, ProposedEvent)> = replaced[i + 1..]
-                    .iter()
-                    .map(|(ctx, ev)| (ctx, ev.clone()))
-                    .collect();
-                stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
-                mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
-                return Ok(DamageTail::Stashed);
-            }
-        }
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(DamageTail::Caller)
+    // is resolved. One runner owns both phases through every pause.
+    let portions = entries
+        .into_iter()
+        .map(|(_, ctx, target, amount)| BatchPortion::Ungated {
+            ctx,
+            target,
+            amount,
+        })
+        .collect();
+    run_damage_batch(
+        state,
+        ability,
+        EffectKind::from(&ability.effect),
+        Vec::new(),
+        portions,
+        ParkedDamageBatch::default(),
+        events,
+    )
 }
 
 /// CR 208.3 + CR 113.7a: A creature's power from current state, falling back to
@@ -4984,17 +5814,37 @@ mod tests {
         let cont = state
             .active_ability_continuation()
             .expect("remaining source must be stashed while first source waits");
+        // CR 120.4b + CR 616.1: the batch owns the rest. Both sources were carried to their
+        // choices before either was asked; the one asked is awaited back from the answer, and
+        // the other waits with its own source id.
+        let Effect::ResumeDamageBatch {
+            kind,
+            replaced,
+            remaining,
+            awaiting,
+        } = &cont.chain.effect
+        else {
+            panic!("expected the parked batch, got {:?}", cont.chain.effect);
+        };
+        assert_eq!(*kind, EffectKind::EachSourceDealsDamage);
+        assert!(replaced.is_empty());
+        assert!(remaining.is_empty());
+        let deferred: Vec<ObjectId> = cont
+            .chain
+            .context
+            .parked_damage_batch
+            .iter()
+            .flat_map(|parked| parked.deferred.iter().map(|choice| choice.source))
+            .collect();
+        let asked = awaiting.as_ref().map(|portion| portion.source);
+        let mut both: Vec<ObjectId> = deferred.iter().copied().chain(asked).collect();
+        both.sort_by_key(|id| id.0);
         assert_eq!(
-            cont.parent_kind,
-            Some(EffectKind::EachSourceDealsDamage),
-            "drain must re-emit the EachSourceDealsDamage parent event"
+            both,
+            vec![source_a, source_b],
+            "each source keeps its own source id: one asked, one waiting"
         );
-        let summary = collect_chain_summary(&cont.chain);
-        assert_eq!(
-            summary,
-            vec![(source_b, TargetRef::Object(recipient), 1)],
-            "remaining raw Phase-B source must resume with its own source id"
-        );
+        assert_eq!(cont.parent_kind, None, "the batch emits its own completion");
 
         let mut parent_event_seen = false;
         let mut replacement_choices = 0;
@@ -5584,29 +6434,34 @@ mod tests {
         let cont = state
             .active_ability_continuation()
             .expect("remaining post-replacement survivor must be stashed");
+        // CR 120.4c: the parked batch delivers the remaining survivor, replaced already, so
+        // Phase B is not run again.
         match &cont.chain.effect {
-            Effect::ApplyPostReplacementDamage {
-                context,
-                target,
-                amount,
-                is_combat,
+            Effect::ResumeDamageBatch {
+                replaced,
+                remaining,
+                ..
             } => {
-                assert_eq!(context.source_id, source_b);
-                assert_eq!(context.controller, PlayerId(0));
-                assert!(context.has_lifelink);
-                assert_eq!(*target, TargetRef::Object(recipient));
-                assert_eq!(*amount, 3);
-                assert!(!*is_combat);
+                assert!(remaining.is_empty());
+                let [portion] = replaced.as_slice() else {
+                    panic!("expected one survivor, got {replaced:?}");
+                };
+                assert_eq!(portion.context.source_id, source_b);
+                assert_eq!(portion.context.controller, PlayerId(0));
+                assert!(portion.context.has_lifelink);
+                assert_eq!(portion.target, TargetRef::Object(recipient));
+                assert_eq!(portion.amount, 3);
+                assert!(!portion.is_combat);
             }
-            other => panic!("expected post-replacement damage continuation, got {other:?}"),
+            other => panic!("expected the parked damage batch, got {other:?}"),
         }
     }
 
     /// CR 120.3f + CR 120.4b + CR 616.1e: `EachSourceDealsDamage` uses the same
     /// Phase-C survivor parking as the `EachTarget` source batch. A lifelink
     /// life-gain replacement can pause after the first source's damage is
-    /// already marked; the remaining already-replaced source must resume as
-    /// `ApplyPostReplacementDamage`, not as fresh damage that would re-run Phase B.
+    /// already marked; the remaining already-replaced source must resume as a replaced
+    /// portion of the parked batch, not as fresh damage that would re-run Phase B.
     #[test]
     fn each_source_deals_damage_phase_c_lifelink_pause_resumes_post_replacement_survivors() {
         use crate::game::engine::apply_as_current;
@@ -5705,26 +6560,28 @@ mod tests {
         let cont = state
             .active_ability_continuation()
             .expect("remaining post-replacement source must be stashed");
-        assert_eq!(
-            cont.parent_kind,
-            Some(EffectKind::EachSourceDealsDamage),
-            "drain must preserve the EachSourceDealsDamage parent kind"
-        );
+        // CR 120.4c: the parked batch keeps the instruction's kind for its single completion
+        // and delivers the remaining survivor without running Phase B again.
         match &cont.chain.effect {
-            Effect::ApplyPostReplacementDamage {
-                context,
-                target,
-                amount,
-                is_combat,
+            Effect::ResumeDamageBatch {
+                kind,
+                replaced,
+                remaining,
+                ..
             } => {
-                assert_eq!(context.source_id, source_b);
-                assert_eq!(context.controller, PlayerId(0));
-                assert!(context.has_lifelink);
-                assert_eq!(*target, TargetRef::Object(recipient));
-                assert_eq!(*amount, 2);
-                assert!(!*is_combat);
+                assert_eq!(*kind, EffectKind::EachSourceDealsDamage);
+                assert!(remaining.is_empty());
+                let [portion] = replaced.as_slice() else {
+                    panic!("expected one survivor, got {replaced:?}");
+                };
+                assert_eq!(portion.context.source_id, source_b);
+                assert_eq!(portion.context.controller, PlayerId(0));
+                assert!(portion.context.has_lifelink);
+                assert_eq!(portion.target, TargetRef::Object(recipient));
+                assert_eq!(portion.amount, 2);
+                assert!(!portion.is_combat);
             }
-            other => panic!("expected post-replacement damage continuation, got {other:?}"),
+            other => panic!("expected the parked damage batch, got {other:?}"),
         }
 
         let mut parent_event_seen = false;
@@ -6742,14 +7599,14 @@ mod tests {
         );
     }
 
-    /// CR 615.5: Crumbling Sanctuary-class prevention follow-ups resolve "that
-    /// player" from the prevented damage event's target and "that many" from
-    /// the prevented damage amount.
+    /// CR 614.1a: Crumbling Sanctuary's substitution resolves "that player" from
+    /// the replaced damage event's target and "that many" from the amount that
+    /// would have been dealt. Nothing is prevented.
     #[test]
     fn damage_to_player_prevention_exiles_from_that_players_library() {
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, DamageTargetFilter, DamageTargetPlayerScope,
-            PreventionAmount, QuantityExpr, QuantityRef, ReplacementDefinition,
+            QuantityExpr, QuantityRef, ReplacementDefinition,
         };
         use crate::types::replacements::ReplacementEvent;
 
@@ -6768,7 +7625,6 @@ mod tests {
             .replacement_definitions
             .push(
                 ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                    .prevention_shield(PreventionAmount::All)
                     .damage_target_filter(DamageTargetFilter::Player {
                         player: DamageTargetPlayerScope::Any,
                     })
@@ -6784,7 +7640,7 @@ mod tests {
                             actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                         },
                     ))
-                    .description("Crumbling Sanctuary prevention shield".to_string()),
+                    .description("Crumbling Sanctuary substitution".to_string()),
             );
 
         let first = create_object(
@@ -6828,16 +7684,9 @@ mod tests {
             state.objects.get(&third).map(|obj| obj.zone),
             Some(Zone::Library)
         );
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                GameEvent::DamagePrevented {
-                    target: TargetRef::Player(PlayerId(1)),
-                    amount: 2,
-                    ..
-                }
-            )
-        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamagePrevented { .. })));
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::DamageDealt { .. })));
@@ -10657,6 +11506,7 @@ mod attacked_referent_recipient_tests {
         ability.trigger_source = Some(latched);
 
         let head = remaining_damage_chain(
+            &state,
             &ability,
             token,
             [

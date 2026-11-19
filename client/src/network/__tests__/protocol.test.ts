@@ -358,6 +358,43 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     expect(waiting.data.options[0].authority?.announcement.grant_digest).toBe(digest);
   });
 
+  // CR 113.2c + CR 601.2b: each option names the keyword instance it pays, and
+  // the elected instance travels with the paused cast.
+  it("round-trips the alternative-cost keyword instance", async () => {
+    const lierFlashback = { Flashback: { type: "Mana", data: { type: "SelfManaCost" } } };
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "CastingVariantChoice",
+          data: {
+            player: 0,
+            object_id: 7,
+            card_id: 7,
+            options: [
+              {
+                variant: { type: "Flashback" },
+                face: "Current",
+                mana_cost: { type: "Cost", shards: ["Blue"], generic: 3 },
+                alternative_cost_keyword: lierFlashback,
+              },
+            ],
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "CastingVariantChoice") throw new Error("menu lost");
+    expect(waiting.data.options[0].alternative_cost_keyword).toEqual(lierFlashback);
+  });
+
   it("round-trips monarch-bounded exile links", async () => {
     const msg: P2PMessage = {
       type: "state_update",

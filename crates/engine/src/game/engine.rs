@@ -24,10 +24,10 @@ use crate::types::game_state::{
     DistributionScope, DistributionUnit, GameState, LandPlayRecord, ManaAbilityResume,
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
     PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
-    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, UntapStepProgress, WaitingFor,
+    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
+    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
+    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+    StackResolutionSession, UntapStepProgress, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -36,7 +36,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::{ResolutionFrame, ResolutionStack};
+use crate::types::resolution::ResolutionFrame;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -2775,31 +2775,6 @@ fn finish_action_boundary_with_lifecycle(
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    // CR 615.13 + CR 616.1e: backstop for suspended prevention batches. The
-    // drain hook (ordered, mid-action) and the replacement-answer hook cover
-    // every known completion; this covers exotic no-drain completions through
-    // other answer handlers (lifelink/execute/downstream choices with empty
-    // remainders) so a batch can never strand unpublished on a settled
-    // action. Settled Priority with nothing queued implies the batch chain (if
-    // any) drained — a still-queued chain or any prompt defers. Pop-once
-    // makes overlap with the earlier hooks idempotent. Journal-order caveat:
-    // aggregate events here append after the action's other events (trigger
-    // SET always correct; order among same-priority triggers can differ from
-    // an unpaused batch in these exotic paths only).
-    if !state.pending_each_source_batches.is_empty()
-        && matches!(result.waiting_for, WaitingFor::Priority { .. })
-        && state.active_ability_continuation().is_none()
-    {
-        // Matt C2: propagate a fresh rider-created choice onto the result —
-        // the cached Priority is stale once drainage pauses. The flush
-        // already synced `state.waiting_for`.
-        if let Some(fresh) = super::effects::deal_damage::flush_pending_each_source_batches(
-            state,
-            &mut result.events,
-        ) {
-            result.waiting_for = fresh;
-        }
-    }
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it
     // must not let a standing auto-pass consume the restored priority, resolve
@@ -4089,7 +4064,14 @@ pub(crate) fn pinned_decisions_to_points(
                 let mut tappable: Vec<crate::types::identifiers::ObjectId> = state
                     .objects
                     .values()
-                    .filter(|o| o.is_convoke_eligible(controller))
+                    .filter(|o| {
+                        super::casting::tap_payment_eligible(
+                            state,
+                            o,
+                            controller,
+                            ConvokeMode::Convoke,
+                        )
+                    })
                     .map(|o| o.id)
                     .collect();
                 tappable.sort_by_key(|id| id.0);
@@ -8911,9 +8893,9 @@ pub(super) fn resume_pending_continuation_if_priority(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     loop {
-        let before = SubtreePosition::at(&state.resolution_stack);
+        let before = state.resolution_stack.position();
         resume_pending_continuation_pass(state, events)?;
-        let after = SubtreePosition::at(&state.resolution_stack);
+        let after = state.resolution_stack.position();
         // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
         // leaves a copy owner or a post-replacement drain on top has exposed it (a
         // substitute's drain retired, or an inner copy owner completed). The work
@@ -8954,38 +8936,6 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
             return Ok(());
         }
-    }
-}
-
-/// The loop's progress measure: stack depth, then the drain count of the active
-/// post-replacement frame. Positional on purpose: it only has to be
-/// well-founded, not to name the subtree (that is `ReplacementSubtreeBoundary`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SubtreePosition {
-    resolution_depth: usize,
-    enclosing_post_replacement_drains: usize,
-}
-
-impl SubtreePosition {
-    fn at(stack: &ResolutionStack) -> Self {
-        Self {
-            resolution_depth: stack.len(),
-            enclosing_post_replacement_drains: stack
-                .active_post_replacement_or_paired_parent()
-                .map_or(0, PostReplacementDrainStack::len),
-        }
-    }
-
-    /// Strictly less of the subtree remains: the stack is lower, or as high
-    /// with fewer drains in the enclosing frame (lexicographic on ℕ×ℕ).
-    fn is_strictly_inside(&self, before: &Self) -> bool {
-        (
-            self.resolution_depth,
-            self.enclosing_post_replacement_drains,
-        ) < (
-            before.resolution_depth,
-            before.enclosing_post_replacement_drains,
-        )
     }
 }
 
@@ -13504,6 +13454,7 @@ fn apply_non_priority_pass_action(
                             *mode,
                             choices,
                             &chosen,
+                            paid_cost,
                             &mut events,
                         )?
                     }
@@ -15101,9 +15052,9 @@ fn apply_non_priority_pass_action(
                 .get(&object_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
             let is_eligible = match mode {
-                ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
-                ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
-                ConvokeMode::Improvise => obj.is_improvise_eligible(*player),
+                mode @ (ConvokeMode::Convoke | ConvokeMode::Waterbend | ConvokeMode::Improvise) => {
+                    super::casting::tap_payment_eligible(state, obj, *player, mode)
+                }
                 // CR 702.66a: delve has a dedicated handler arm below (exile, not tap).
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
@@ -23988,6 +23939,7 @@ mod stage2_injector_tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: asked,

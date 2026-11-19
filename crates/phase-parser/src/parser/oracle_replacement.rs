@@ -55,6 +55,7 @@ use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
     CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
@@ -6323,7 +6324,7 @@ enum EntersWithGate {
 /// Returns the unless-free head plus the outcome. Routing order matters: the
 /// "you've cast another spell" route must precede the generic static-condition
 /// route, because the generic route would parse the same tail as a plain
-/// `SpellsCastThisTurn >= 2` WITHOUT the own-cast exclusion marker that
+/// `SpellsCast >= 2` WITHOUT the own-cast exclusion marker that
 /// "another" requires (per Gatherer ruling — a permanent's own cast does not
 /// count as "another spell").
 fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
@@ -6345,9 +6346,10 @@ fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
                 head,
                 EntersWithGate::Parsed(ReplacementCondition::UnlessQuantity {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -7952,6 +7954,15 @@ fn replacement_condition_from_static(
             GatePolarity::OnlyIf => Some(ReplacementCondition::HasMaxSpeed),
             GatePolarity::Unless => None,
         },
+        // CR 725.1 + CR 301.5a: read live by the static-condition authority.
+        condition @ (StaticCondition::IsMonarch { .. } | StaticCondition::SourceIsEquipped) => {
+            match polarity {
+                GatePolarity::OnlyIf => Some(ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(condition),
+                }),
+                GatePolarity::Unless => None,
+            }
+        }
         StaticCondition::ClassLevelGE { level } => match polarity {
             GatePolarity::OnlyIf => Some(ReplacementCondition::ClassLevelGE { level }),
             GatePolarity::Unless => None,
@@ -7999,7 +8010,6 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -8027,7 +8037,6 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
-        | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceIsHarnessed
@@ -9173,11 +9182,11 @@ fn parse_graveyard_redirect_replacement(
                 ),
             ))
             .parse(i)?;
-            // CR 400.1 + CR 700.4: the optional stated origin. `Some(None)` is
-            // "from anywhere" (no narrowing); `Some(Some(zone))` narrows the
-            // affected-object filter to that zone below.
+            // CR 400.1 + CR 700.4: the optional stated origin. `None` = no "from"
+            // clause; `Some(None)` = "from anywhere" (explicit, no narrowing, but
+            // sets active_zones to all zones per CR 113.6b); `Some(Some(zone))`
+            // = specific zone (narrows filter AND sets active_zones to that zone).
             let (i, origin) = opt(parse_graveyard_move_origin).parse(i)?;
-            let origin = origin.flatten();
             // CR 614.1a + CR 611.2a + CR 514.2: a stated window may sit INSIDE
             // the antecedent — "if a card would be put into your graveyard from
             // anywhere THIS TURN, exile that card instead" (Yawgmoth's Will /
@@ -9276,12 +9285,13 @@ fn parse_graveyard_redirect_replacement(
     // host and admits no type phrase; every other subject is read by
     // `graveyard_replacement_subject_filter`, which declines the bare card/token
     // nouns the token axis already owns.
-    let subject_filter = (!graveyard_replacement_subject_is_self_referential(subject))
+    let is_self_replacement = graveyard_replacement_subject_is_self_referential(subject);
+    let subject_filter = (!is_self_replacement)
         .then(|| graveyard_replacement_subject_filter(subject))
         .flatten();
     let props_filter =
         (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
-    let valid_card = if graveyard_replacement_subject_is_self_referential(subject) {
+    let valid_card = if is_self_replacement {
         Some(TargetFilter::SelfRef)
     } else {
         match (subject_filter, props_filter) {
@@ -9294,8 +9304,10 @@ fn parse_graveyard_redirect_replacement(
         }
     };
     // CR 400.1 + CR 700.4: fold the stated origin in last, so it applies to
-    // whichever shape the subject/ownership axes produced.
-    let valid_card = match origin {
+    // whichever shape the subject/ownership axes produced. `origin.flatten()`
+    // converts `Some(None)` ("from anywhere") to `None` (no filter narrowing),
+    // while preserving `Some(Some(zone))` as `Some(zone)`.
+    let valid_card = match origin.flatten() {
         Some(zone) => Some(constrain_filter_to_origin_zone(valid_card, zone)),
         None => valid_card,
     };
@@ -9397,6 +9409,45 @@ fn parse_graveyard_redirect_replacement(
         .description(original_text.to_string());
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
+    }
+
+    // CR 113.6b: "An ability that states which zones it functions in functions
+    // only from those zones." When the antecedent explicitly states a "from"
+    // clause, the replacement functions only from the stated zone(s).
+    // - `origin == Some(None)` = explicit "from anywhere" → all zones except Graveyard
+    // - `origin == Some(Some(zone))` = explicit "from <zone>" → only that zone
+    // - `origin == None` = no "from" clause → default (battlefield/command)
+    //
+    // CR 113.6b + Rest in Peace ruling: `active_zones` gates the object that HOSTS
+    // the ability. The antecedent's "from" clause describes the object MOVING to the
+    // graveyard. These are the same object for printed self-replacements (Darksteel
+    // Colossus, Nexus of Fate), but NOT for printed replacements affecting other
+    // objects (Rest in Peace, Leyline of the Void). For the latter, the host's
+    // default functioning zones (battlefield/command) are preserved, and the named
+    // origin is applied only to the affected-card filter (done above via
+    // `constrain_filter_to_origin_zone`).
+    if let Some(inner) = origin {
+        if is_self_replacement {
+            match inner {
+                None => {
+                    // "from anywhere" — functions from all zones except Graveyard
+                    def = def.active_zones(
+                        crate::types::zones::Zone::ALL
+                            .iter()
+                            .copied()
+                            .filter(|z| *z != crate::types::zones::Zone::Graveyard)
+                            .collect(),
+                    );
+                }
+                Some(zone) => {
+                    // "from <specific zone>" — functions only from that zone
+                    def = def.active_zones(vec![zone]);
+                }
+            }
+        }
+        // For non-self replacements (Rest in Peace, etc.), preserve the host's
+        // default functioning zones. The origin is already applied to the affected-
+        // card filter via `constrain_filter_to_origin_zone` above.
     }
 
     // CR 514.2 + CR 611.2a + CR 604.2: stamp the stated antecedent window onto
@@ -13120,29 +13171,7 @@ enum WhileAntecedent {
 /// twice that much life instead." → `Parsed(OnlyIfQuantity { lhs: LifeTotal,
 /// comparator: LE, rhs: Fixed{5}, active_player_req: None })`.
 fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
-    // Locate the antecedent's "while " clause: it appears between
-    // " {verb_anchor} while " and the comma terminating the antecedent.
-    // Single nom combinator chain — locate verb anchor, consume gate marker,
-    // capture condition body in one pass.
-    let Ok((after_verb, _)) = (
-        take_until::<_, _, OracleError<'_>>(verb_anchor),
-        tag::<_, _, OracleError<'_>>(verb_anchor),
-    )
-        .parse(lower)
-    else {
-        return WhileAntecedent::Absent;
-    };
-    // The " while " gate need not be flush against the verb anchor: for damage
-    // replacements the recipient clause ("noncombat damage to a permanent or
-    // player") sits between the anchor and the gate, so scan forward to the gate
-    // marker. The life-gain caller's flush case is the empty-prefix match.
-    let Ok((_, (_, _, condition_text))) = (
-        take_until::<_, _, OracleError<'_>>(" while "),
-        tag::<_, _, OracleError<'_>>(" while "),
-        take_until::<_, _, OracleError<'_>>(","),
-    )
-        .parse(after_verb)
-    else {
+    let Some(condition_text) = while_antecedent_clause(lower, verb_anchor) else {
         return WhileAntecedent::Absent;
     };
     // A guard clause IS present from here on; every failure path below must fail
@@ -13170,6 +13199,33 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
         rhs,
         active_player_req: None,
     })
+}
+
+/// CR 614.1a: the text of a "while <condition>" antecedent: after `verb_anchor`, up to the
+/// comma that ends the antecedent.
+fn while_antecedent_clause<'a>(lower: &'a str, verb_anchor: &str) -> Option<&'a str> {
+    // Locate the verb anchor, then take the antecedent: everything after the
+    // anchor up to the comma that ends it.
+    let (_, (_, _, antecedent)) = (
+        take_until::<_, _, OracleError<'_>>(verb_anchor),
+        tag::<_, _, OracleError<'_>>(verb_anchor),
+        take_until::<_, _, OracleError<'_>>(","),
+    )
+        .parse(lower)
+        .ok()?;
+    // The " while " gate need not be flush against the verb anchor: for damage
+    // replacements the recipient clause ("noncombat damage to a permanent or
+    // player") sits between the anchor and the gate, so scan forward to the gate
+    // marker. The life-gain caller's flush case is the empty-prefix match. The
+    // scan runs only inside the antecedent, so a " while " after its comma is
+    // not this antecedent's guard.
+    let (condition_text, _) = (
+        take_until::<_, _, OracleError<'_>>(" while "),
+        tag::<_, _, OracleError<'_>>(" while "),
+    )
+        .parse(antecedent)
+        .ok()?;
+    Some(condition_text)
 }
 
 /// CR 604.2 + CR 614.1a: Result of splitting a leading "As long as <state>, "
@@ -15106,6 +15162,10 @@ fn parse_damage_heal_self_replacement(
     )
 }
 
+/// CR 614.1a + CR 614.6: "If damage would be dealt to ~ / you, <effect> that many …
+/// instead" replaces the damage event with `<effect>` (Phytohydra, Force Bubble). This is
+/// a substitution, not a prevention effect (CR 615.1a), so damage that can't be prevented
+/// is still replaced.
 fn parse_damage_to_self_instead_followup_with_provenance(
     norm_lower: &str,
     normalized: &str,
@@ -15174,10 +15234,14 @@ fn parse_damage_to_self_instead_followup_with_provenance(
         &mut ctx,
     );
 
-    let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
-        .prevention_shield(PreventionAmount::All)
+    // `DamageDone`, not `DealtDamage`: `dealt_damage_applier` returns the event unchanged,
+    // so on that event these lines replaced nothing.
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
         .execute(followup.value)
         .description(original_text.to_string());
+    if recipient_scope.is_none() {
+        def = def.damage_target_filter(damage_target_controller());
+    }
     if let Some(scope) = recipient_scope {
         // CR 614.1: scope the replacement to damage dealt TO the source's own
         // object (the "shield around whatever it's affecting"). The runtime
@@ -15230,7 +15294,6 @@ fn parse_damage_to_player_instead_followup(
 
     Some(Lowered {
         value: ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .prevention_shield(PreventionAmount::All)
             .damage_target_filter(damage_target_any_player())
             .execute(followup.value)
             .description(original_text.to_string()),
@@ -15732,6 +15795,10 @@ pub(crate) enum PreventionFailClosed {
     SourceScope,
     /// A coordinated "and it <verb> …" clause after the prevention clause.
     CoordinatedConjunct,
+    /// Additional effects listed after a comma.
+    ListedRider,
+    /// A printed "while <state>" guard that does not lift to a `ReplacementCondition`.
+    WhileGuard,
 }
 
 impl PreventionFailClosed {
@@ -15740,6 +15807,8 @@ impl PreventionFailClosed {
         match self {
             Self::SourceScope => "prevention_source_scope",
             Self::CoordinatedConjunct => "prevention_conjunct",
+            Self::ListedRider => "prevention_listed_rider",
+            Self::WhileGuard => "prevention_while_guard",
         }
     }
 }
@@ -15870,6 +15939,16 @@ fn parse_damage_prevention_replacement_with_provenance(
     if has_coordinated_predicate_conjunct(working_lower) {
         return Err(PreventionDecline::FailsClosed(
             PreventionFailClosed::CoordinatedConjunct,
+        ));
+    }
+
+    // CR 615.5: "prevent that damage, remove that many …, then …" lists additional
+    // effects this parser can't carry (Bloatfly Swarm, Sekki, Seasons' Guide). Fail
+    // closed: a shield without them reads as supported, and a gate quantity on the
+    // same line would discharge the swallow audit.
+    if nom_primitives::scan_contains(working_lower, "prevent that damage, ") {
+        return Err(PreventionDecline::FailsClosed(
+            PreventionFailClosed::ListedRider,
         ));
     }
 
@@ -16199,12 +16278,36 @@ fn parse_damage_prevention_replacement_with_provenance(
     // because a `valid_card`-less pure-event shield is neither self- nor object-
     // scoped and must not take the self-scoped branch.
     let recipient_is_self_scoped = matches!(&valid_card_filter, Some(TargetFilter::SelfRef));
+    // CR 604.2 + CR 611.3a: a "while <state>" antecedent gates the shield itself, so the
+    // effect isn't applicable (CR 615.12) while the state doesn't hold: Jared Carthalion
+    // outside the monarchy takes the damage and gains nothing. `valid_card` scopes the
+    // pronoun: "it" is the source only on a self-scoped shield. An uncarriable guard
+    // must not become an unconditional shield, here or in a later route: it fails
+    // closed, and the route lands the line as `Effect::unimplemented`.
+    let while_condition = while_antecedent_clause(working_lower, "would ")
+        .map(|clause| {
+            crate::parser::oracle_static::parse_affected_scoped_static_condition(
+                clause,
+                valid_card_filter.as_ref(),
+            )
+            .and_then(|condition| {
+                replacement_condition_from_static(condition, GatePolarity::OnlyIf)
+            })
+            .ok_or(PreventionDecline::FailsClosed(
+                PreventionFailClosed::WhileGuard,
+            ))
+        })
+        .transpose()?;
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
-    if let Some(cond) = prefix_condition {
-        def = def.condition(cond);
-    }
+    def = match (prefix_condition, while_condition) {
+        (Some(prefix), Some(guard)) => def.condition(ReplacementCondition::And {
+            conditions: vec![prefix, guard],
+        }),
+        (Some(condition), None) | (None, Some(condition)) => def.condition(condition),
+        (None, None) => def,
+    };
 
     // CR 615.5: A prevention effect may include an additional effect referring to
     // the prevented amount ("Put a -1/-1 counter on ~ for each 1 damage prevented
@@ -18132,13 +18235,14 @@ mod tests {
         let rep = parsed
             .replacements
             .iter()
-            .find(|r| matches!(r.event, ReplacementEvent::DealtDamage))
+            .find(|r| matches!(r.event, ReplacementEvent::DamageDone))
             .expect("damage-substitution replacement must exist (was inert on main)");
-        assert!(
-            matches!(rep.shield_kind, ShieldKind::Prevention { .. }),
-            "the substituted damage must be prevented, got {:?}",
-            rep.shield_kind
+        assert_eq!(
+            rep.shield_kind,
+            ShieldKind::None,
+            "CR 614.1a: the damage is replaced, not prevented"
         );
+        assert!(rep.damage_modification.is_none());
         let execute = rep
             .execute
             .as_ref()
@@ -18734,9 +18838,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(filter),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -19677,13 +19782,9 @@ mod tests {
         )
         .expect("damage-to-self counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -19705,7 +19806,9 @@ mod tests {
         )
         .expect("damage-to-controller counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -19728,12 +19831,8 @@ mod tests {
         .expect("damage-to-player exile-top replacement should parse");
 
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         let execute = def.execute.as_ref().expect("execute present");
         assert!(
@@ -19749,9 +19848,128 @@ mod tests {
                     actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 }
             ),
-            "expected ExileTop against prevented damage recipient, got {:?}",
+            "expected ExileTop against replaced damage recipient, got {:?}",
             execute.effect
         );
+    }
+
+    /// CR 614.1a + CR 615.1a: every "...instead" damage line is a substitution on
+    /// `DamageDone`, whatever the recipient. A line with "prevent" and no "instead"
+    /// stays a prevention effect.
+    #[test]
+    fn damage_instead_lines_are_substitutions_scoped_to_their_recipient() {
+        for (name, text) in [
+            (
+                "Phytohydra",
+                "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            ),
+            (
+                "Lichenthrope",
+                "If damage would be dealt to this creature, put that many -1/-1 counters on it instead.",
+            ),
+            (
+                "Dralnu, Lich Lord",
+                "If damage would be dealt to Dralnu, sacrifice that many permanents instead.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("object line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+            assert_eq!(def.damage_target_filter, None, "{name}");
+        }
+        for (name, text) in [
+            (
+                "Force Bubble",
+                "If damage would be dealt to you, put that many depletion counters on this enchantment instead.",
+            ),
+            (
+                "Delaying Shield",
+                "If damage would be dealt to you, put that many delay counters on this enchantment instead.",
+            ),
+            (
+                "Nefarious Lich",
+                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("player line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
+            assert_eq!(def.valid_card, None, "{name}");
+            assert_eq!(
+                def.damage_target_filter,
+                Some(damage_target_controller()),
+                "{name}"
+            );
+        }
+
+        // Phantom Centaur's line says "prevent", so it stays a CR 615 prevention effect.
+        let def = parse_replacement_line(
+            "If damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+            "Phantom Centaur",
+        )
+        .expect("prevention line should parse");
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+    }
+
+    /// CR 301.5a + CR 701.21a: "sacrifice an Equipment attached to ~" names a population,
+    /// in replacement and triggered text alike.
+    #[test]
+    fn sacrifice_attached_to_source_on_an_effect_keeps_the_relation() {
+        fn has_attached_to_source(target: &TargetFilter) -> bool {
+            matches!(
+                target,
+                TargetFilter::Typed(typed) if typed.properties.contains(&FilterProp::AttachedTo {
+                    to: crate::types::ability::AttachmentReferent::Source,
+                })
+            )
+        }
+
+        let jouster = parse_oracle_text(
+            "If damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = jouster.replacements[0]
+            .execute
+            .as_ref()
+            .expect("rider present");
+        assert!(
+            matches!(&*execute.effect, Effect::Sacrifice { target, .. } if has_attached_to_source(target)),
+            "got {:?}",
+            execute.effect
+        );
+
+        let three_dog = parse_oracle_text(
+            "Whenever you attack, you may pay {2} and sacrifice an Aura attached to Three Dog. When you sacrifice an Aura this way, for each other attacking creature you control, create a token that's a copy of that Aura attached to that creature.",
+            "Three Dog, Galaxy News DJ",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut found = false;
+        for trigger in &three_dog.triggers {
+            let Some(execute) = trigger.execute.as_deref() else {
+                continue;
+            };
+            let mut node = Some(execute);
+            while let Some(ability) = node {
+                if let Effect::Sacrifice { target, .. } = &*ability.effect {
+                    found |= has_attached_to_source(target);
+                }
+                node = ability.sub_ability.as_deref();
+            }
+        }
+        assert!(found, "got {:?}", three_dog.triggers);
     }
 
     #[test]
@@ -21688,6 +21906,68 @@ mod tests {
         );
     }
 
+    /// CR 113.6b: "An ability that states which zones it functions in functions
+    /// only from those zones." When the antecedent explicitly says "from
+    /// anywhere", the replacement's `active_zones` must include all zones (except
+    /// Graveyard) so it functions from Library (mill), Hand (discard), Stack
+    /// (counter), Exile, Command, and Battlefield.
+    #[test]
+    fn replacement_from_anywhere_sets_active_zones() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from anywhere, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-anywhere shuffle-back must parse");
+
+        // Verify active_zones is set to all zones except Graveyard
+        let expected_zones: Vec<Zone> = Zone::ALL
+            .iter()
+            .copied()
+            .filter(|z| *z != Zone::Graveyard)
+            .collect();
+        assert_eq!(
+            def.active_zones, expected_zones,
+            "from anywhere must set active_zones to all zones except Graveyard"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_battlefield_sets_active_zones_to_battlefield() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from the battlefield, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-battlefield shuffle-back must parse");
+
+        // Verify active_zones is set to only Battlefield
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Battlefield],
+            "from the battlefield must set active_zones to only Battlefield"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_library_sets_active_zones_to_library() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from a library, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-library shuffle-back must parse");
+
+        // Verify active_zones is set to only Library
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Library],
+            "from a library must set active_zones to only Library"
+        );
+    }
+
     /// CR 608.2n + CR 614.1a (issue #2897): card-name subjects normalize to `~`
     /// and must carry `valid_card: SelfRef`, not an absent filter that the
     /// stack-self-move gate would reject.
@@ -23564,10 +23844,10 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn { .. },
+                            qty: QuantityRef::LifeLost { .. },
                         }
                     ),
-                    "count should use LifeLostThisTurn, got {count:?}"
+                    "count should use LifeLost, got {count:?}"
                 );
             }
             other => panic!("Expected PutCounter, got {other:?}"),
@@ -26536,6 +26816,10 @@ mod tests {
         // The unfiltered `Any` scope includes tokens and currently also admits spell
         // copies, which the printed "a card or token" subject excludes.
         assert!(def.valid_card.is_none());
+        assert!(
+            def.active_zones.is_empty(),
+            "non-self 'from anywhere' replacement must keep default active_zones (CR 113.6b)"
+        );
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -26555,6 +26839,10 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        assert!(
+            def.active_zones.is_empty(),
+            "non-self 'from anywhere' replacement must keep default active_zones (CR 113.6b)"
+        );
         // valid_card should scope to opponent-owned cards AND admit only objects
         // represented by a card: CR 108.2 + CR 108.2b — "a card" (no "or token")
         // excludes tokens, so a dying token reaches the graveyard (dies-triggers
@@ -34100,6 +34388,302 @@ mod tests {
             .any(|p| matches!(p, FilterProp::Attacking { .. })));
     }
 
+    /// The one `DamageDone` definition a printed prevention line produced.
+    fn damage_done_definition(
+        text: &str,
+        name: &str,
+        keywords: &[&str],
+    ) -> Option<ReplacementDefinition> {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+        let mut damage = parsed
+            .replacements
+            .into_iter()
+            .filter(|r| r.event == ReplacementEvent::DamageDone);
+        let definition = damage.next();
+        assert!(damage.next().is_none(), "{name}: one DamageDone definition");
+        definition
+    }
+
+    /// CR 604.2 + CR 611.3a: a printed "while <state>" antecedent gates the shield
+    /// itself. The four "while it has a +1/+1 counter on it" cards carry a counter
+    /// gate on the host; Jared Carthalion's "while you're the monarch" and Outfitted
+    /// Jouster's "while it's equipped" carry the static condition. Every one keeps
+    /// its unconditional-amount, self-scoped shield.
+    #[test]
+    fn printed_while_guards_gate_their_prevention_shields() {
+        let counter_gate = ReplacementCondition::OnlyIfQuantity {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Source,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+            active_player_req: None,
+        };
+        let cases = [
+            (
+                "Undergrowth Champion",
+                "If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from this creature.\nLandfall — Whenever a land you control enters, put a +1/+1 counter on this creature.",
+                counter_gate.clone(),
+            ),
+            (
+                "Oathsworn Knight",
+                "This creature enters with four +1/+1 counters on it.\nThis creature attacks each combat if able.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from it.",
+                counter_gate.clone(),
+            ),
+            (
+                "Polukranos, Unchained",
+                "Polukranos enters with six +1/+1 counters on it. It escapes with twelve +1/+1 counters on it instead.\nIf damage would be dealt to Polukranos while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it.\n{1}{B}{G}: Polukranos fights another target creature.\nEscape—{4}{B}{G}, Exile six other cards from your graveyard.",
+                counter_gate.clone(),
+            ),
+            (
+                "Ugin's Conjurant",
+                "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from this creature.",
+                counter_gate,
+            ),
+            (
+                "Jared Carthalion, True Heir",
+                "When Jared Carthalion enters, target opponent becomes the monarch. You can't become the monarch this turn.\nIf damage would be dealt to Jared Carthalion while you're the monarch, prevent that damage and put that many +1/+1 counters on it.",
+                ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(StaticCondition::IsMonarch {
+                        player: PlayerScope::Controller,
+                    }),
+                },
+            ),
+            (
+                "Outfitted Jouster",
+                "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+                ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(StaticCondition::SourceIsEquipped),
+                },
+            ),
+        ];
+        for (name, text, guard) in cases {
+            let def = damage_done_definition(text, name, &[])
+                .unwrap_or_else(|| panic!("{name}: the prevention shield must parse"));
+            assert_eq!(def.condition, Some(guard), "{name}");
+            assert_eq!(
+                def.shield_kind,
+                ShieldKind::Prevention {
+                    amount: PreventionAmount::All
+                },
+                "{name}"
+            );
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        }
+
+        // Negatives: the same shield shape with no "while" stays ungated.
+        for (name, text) in [
+            (
+                "Protean Hydra",
+                "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage and remove that many +1/+1 counters from it.\nWhenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+            ),
+            (
+                "Ironscale Hydra",
+                "If a creature would deal combat damage to this creature, prevent that damage and put a +1/+1 counter on this creature.",
+            ),
+            (
+                "Gloom Surgeon",
+                "If combat damage would be dealt to this creature, prevent that damage and exile that many cards from the top of your library.",
+            ),
+        ] {
+            let def = damage_done_definition(text, name, &[])
+                .unwrap_or_else(|| panic!("{name}: the prevention shield must parse"));
+            assert_eq!(def.condition, None, "{name}");
+        }
+        let centaur = damage_done_definition(
+            "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+            "Phantom Centaur",
+            &["Protection"],
+        )
+        .expect("Phantom Centaur: the prevention shield must parse");
+        assert_eq!(centaur.condition, None);
+
+        // Sanwell's prefix gate is still the line's only condition.
+        let sanwell = damage_done_definition(
+            "As long as an artifact creature you control is attacking, prevent all damage that would be dealt to Sanwell.\nWhenever Sanwell becomes tapped, exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.",
+            "Sanwell, Avenger Ace",
+            &[],
+        )
+        .expect("Sanwell: the prevention shield must parse");
+        assert!(
+            matches!(
+                &sanwell.condition,
+                Some(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    },
+                    ..
+                })
+            ),
+            "got {:?}",
+            sanwell.condition
+        );
+
+        // Magma Pummeler declines before the shield route: its "When one or more
+        // counters are removed … this way" sentence keeps it a static gap.
+        let pummeler = parse_oracle_text(
+            "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it. When one or more counters are removed from this creature this way, it deals that much damage to any target.",
+            "Magma Pummeler",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(pummeler
+            .replacements
+            .iter()
+            .all(|r| r.event != ReplacementEvent::DamageDone));
+        assert!(pummeler.abilities.iter().any(|a| matches!(
+            &*a.effect,
+            Effect::Unimplemented { name, .. } if name == "static_structure"
+        )));
+    }
+
+    /// `while_antecedent_clause` returns the guard text between the verb anchor's
+    /// " while " and the comma, and nothing for a line with no such guard.
+    #[test]
+    fn while_antecedent_clause_reads_only_a_guard_after_the_anchor() {
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~ while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from ~.",
+                "would ",
+            ),
+            Some("it has a +1/+1 counter on it")
+        );
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~, prevent that damage and remove that many +1/+1 counters from it.",
+                "would ",
+            ),
+            None
+        );
+        // A " while " before the anchor is not this antecedent's guard.
+        assert_eq!(
+            while_antecedent_clause(
+                "while ~ is tapped, damage that would be dealt to ~ is prevented, then",
+                "would "
+            ),
+            None
+        );
+        // No comma ends the antecedent.
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~ while it's equipped prevent that damage.",
+                "would ",
+            ),
+            None
+        );
+    }
+
+    /// `while_antecedent_clause` reads a guard only inside the antecedent: a
+    /// " while " after the comma that ends it is not the shield's guard. No
+    /// printed Oracle line has " while " after the antecedent's comma, so this is
+    /// a building-block test on a phrase. The nearest printed card carries its
+    /// guard inside the antecedent: Undergrowth Champion, "If damage would be
+    /// dealt to this creature while it has a +1/+1 counter on it, prevent that
+    /// damage and remove a +1/+1 counter from this creature." (CR 614.1a).
+    #[test]
+    fn while_antecedent_clause_ignores_a_while_after_the_antecedent_comma() {
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~, prevent that damage while it's untapped, then draw a card.",
+                "would ",
+            ),
+            None
+        );
+    }
+
+    /// CR 615.5: additional effects listed after "prevent that damage," fail closed
+    /// as a line-owned gap, not a shield missing its riders. Bloatfly Swarm and
+    /// Sekki, Seasons' Guide are the printed cards with that list.
+    #[test]
+    fn prevention_listed_riders_fail_closed() {
+        for (name, text, keywords, line) in [
+            (
+                "Bloatfly Swarm",
+                "Flying\nThis creature enters with five +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters from it, then give each player a rad counter for each +1/+1 counter removed this way.",
+                vec!["Flying".to_string()],
+                "If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters from it, then give each player a rad counter for each +1/+1 counter removed this way.",
+            ),
+            (
+                "Sekki, Seasons' Guide",
+                "Sekki enters with eight +1/+1 counters on it.\nIf damage would be dealt to Sekki, prevent that damage, remove that many +1/+1 counters from Sekki, and create that many 1/1 colorless Spirit creature tokens.\nSacrifice eight Spirits: Return this card from your graveyard to the battlefield.",
+                Vec::new(),
+                "If damage would be dealt to Sekki, prevent that damage, remove that many +1/+1 counters from Sekki, and create that many 1/1 colorless Spirit creature tokens.",
+            ),
+        ] {
+            assert_eq!(
+                damage_prevention_fails_closed(line, name),
+                Some(PreventionFailClosed::ListedRider),
+                "{name}"
+            );
+            let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .all(|r| r.event != ReplacementEvent::DamageDone),
+                "{name}: no shield may stand in for the listed riders: {:?}",
+                parsed.replacements
+            );
+            assert!(
+                parsed.abilities.iter().any(|a| matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "prevention_listed_rider"
+                )),
+                "{name}: {:?}",
+                parsed.abilities
+            );
+            // Reach guard: the line's neighbour, "enters with … +1/+1 counters", still
+            // parses through the same pass.
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .any(|r| r.event == ReplacementEvent::Moved),
+                "{name}: {:?}",
+                parsed.replacements
+            );
+        }
+    }
+
+    /// CR 604.2 + CR 611.3a: a "while <state>" guard that does not lift to a
+    /// `ReplacementCondition` fails closed as a line-owned gap, never an unconditional
+    /// shield. Every printed guarded prevention line lifts its guard (Jared Carthalion,
+    /// "If damage would be dealt to Jared Carthalion while you're the monarch, prevent that
+    /// damage and put that many +1/+1 counters on it.", in
+    /// `printed_while_guards_gate_their_prevention_shields`), so this building-block test
+    /// uses a guard no printed card has.
+    #[test]
+    fn an_uncarriable_while_guard_fails_closed() {
+        const LINE: &str =
+            "If damage would be dealt to this creature while it's attacking, prevent that damage.";
+        assert_eq!(
+            damage_prevention_fails_closed(LINE, "Probe Card"),
+            Some(PreventionFailClosed::WhileGuard)
+        );
+        let parsed = parse_oracle_text(LINE, "Probe Card", &[], &["Creature".to_string()], &[]);
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "{:?}",
+            parsed.replacements
+        );
+        assert!(
+            parsed.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_while_guard"
+            )),
+            "{:?}",
+            parsed.abilities
+        );
+    }
+
     /// CR 604.2 + CR 611.3a: an unbridgeable "as long as" gate on a replacement
     /// line lands as a line-owned `Effect::unimplemented` instead of the static
     /// chain's modification-less fallback.
@@ -34351,10 +34935,11 @@ mod tests {
             def.condition,
             Some(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Opponent {
                             aggregate: crate::types::ability::AggregateFunction::Sum,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,

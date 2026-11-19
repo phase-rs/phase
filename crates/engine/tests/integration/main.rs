@@ -76,6 +76,7 @@ mod curse_of_predation_attacks_enchanted_player_4744;
 mod cybership_combat_damage_manifest;
 mod dack_fayden_helping_hand;
 mod dalkovan_encampment_attack_trigger;
+mod damage_substitution_replacements;
 mod dandan_custom_pile;
 mod dandan_filter_owner_axis;
 mod dandan_hand_entry_ownership;
@@ -293,6 +294,7 @@ mod total_war_attacking_player_scope;
 mod types_ability;
 mod types_statics;
 mod ultimate_spider_man_mass_counter_double;
+mod unpreventable_damage_prevention_effects;
 mod unstoppable_slasher_half_life;
 mod ureni_attack_trigger;
 mod vengeful_ancestor_goaded_attack_trigger;
@@ -365,6 +367,7 @@ mod controller_anaphor_binds_through_context;
 mod through_the_forest_gate;
 
 mod resolution_progress_contract;
+mod reveal_hand_choose_single_prompt_9841;
 
 mod ignite_memories_random_reveal;
 mod issue_8115_temporal_extortion_extra_turn;

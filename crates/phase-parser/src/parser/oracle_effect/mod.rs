@@ -121,6 +121,7 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
     effect_parent_ref_slot_count, effect_requires_parent_target_object,
@@ -6619,7 +6620,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 ///
 /// The static-line authority (`parse_static_line`) already lowers the entire
 /// `ModifyCost` payload (color-disjunction `spell_filter`, dynamic-X
-/// `LifeLostThisTurn`/`LifeGainedThisTurn` `dynamic_count`); we delegate to it
+/// `LifeLost`/`LifeGainedThisTurn` `dynamic_count`); we delegate to it
 /// rather than re-implementing cost-modifier parsing. The resulting static is
 /// then granted onto the resolving source for one turn via `GrantStaticAbility`
 /// on `SelfRef` (mirroring `try_parse_combat_tax_effect_clause`), so layer-6
@@ -9737,8 +9738,9 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
         input,
         PlayerFilter::PlayerAttribute {
             relation,
-            attr: Box::new(QuantityRef::LifeLostThisTurn {
+            attr: Box::new(QuantityRef::LifeLost {
                 player: PlayerScope::ScopedPlayer,
+                window: TurnWindow::ThisTurn,
             }),
             comparator: Comparator::GE,
             value: Box::new(QuantityExpr::Fixed { value: threshold }),
@@ -14065,8 +14067,10 @@ fn parse_effect_clause_inner_with_damage_context(
     }
 
     // Digital-only: "conjure a card named X into/onto zone" — Conjure keyword action.
-    if let Some(effect) = try_parse_conjure(tp) {
-        return parsed_clause(effect);
+    if let Some((effect, attach)) = try_parse_conjure(tp) {
+        let mut clause = parsed_clause(effect);
+        clause.sub_ability = attach.map(Box::new);
+        return clause;
     }
 
     // CR 707.13 + CR 201.4: "create a copy of the card with the chosen name".
@@ -15885,7 +15889,7 @@ fn try_parse_conjure_named_group(tp: TextPair) -> Option<Effect> {
 /// - "conjure X cards named Y onto the battlefield"
 ///
 /// Uses nom combinators exclusively for dispatch and structure recognition.
-fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
+fn try_parse_conjure(tp: TextPair) -> Option<(Effect, Option<AbilityDefinition>)> {
     // Gate: must start with "conjure " (nom tag dispatch).
     let (rest, _) = tag::<_, _, OracleError<'_>>("conjure ")
         .parse(tp.lower)
@@ -15937,17 +15941,193 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
         parse_conjure_zone(zone_rest)?;
 
     // Parse optional "tapped" suffix.
-    let tapped = tag::<_, _, OracleError<'_>>(" tapped")
-        .parse(zone_rest)
-        .is_ok();
+    let (zone_rest, tapped) = match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
+        Ok((rest, _)) => (rest, true),
+        Err(_) => (zone_rest, false),
+    };
 
-    Some(Effect::Conjure {
-        cards,
-        destination,
-        tapped,
-        library_position,
-        library_players,
-    })
+    // CR 701.3a + CR 608.2c: "and attach them to ~" names exactly what this conjure just
+    // created, so the operand is the determined set `LastCreated` publishes (Outfitted
+    // Jouster: "conjure a card named Steelclaw Lance and a card named Brawler's Plate onto
+    // the battlefield and attach them to Outfitted Jouster").
+    let attach = (destination == Zone::Battlefield)
+        .then(|| {
+            tag::<_, _, OracleError<'_>>(" and attach them to ~")
+                .parse(zone_rest)
+                .ok()
+        })
+        .flatten()
+        .map(|_| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Attach {
+                    attachment: TargetFilter::LastCreated,
+                    target: TargetFilter::SelfRef,
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::All,
+                    },
+                },
+            )
+        });
+
+    Some((
+        Effect::Conjure {
+            cards,
+            destination,
+            tapped,
+            library_position,
+            library_players,
+        },
+        attach,
+    ))
+}
+
+#[cfg(test)]
+mod conjure_attach_parser_tests {
+    use super::*;
+
+    /// The trigger body of a card's first triggered ability.
+    fn first_trigger_body(text: &str, name: &str) -> AbilityDefinition {
+        let parsed =
+            crate::parser::oracle::parse_oracle_text(text, name, &[], &["Creature".into()], &[]);
+        *parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.clone())
+            .unwrap_or_else(|| panic!("{name}: a triggered ability with a body"))
+    }
+
+    /// CR 701.3a + CR 608.2c: Outfitted Jouster's "and attach them to Outfitted
+    /// Jouster" attaches exactly the two conjured Equipment to the Jouster, so the
+    /// conjure carries an `Attach` over `LastCreated` onto `SelfRef`, and the
+    /// result is not forwarded (no later instruction reads the conjured cards).
+    #[test]
+    fn outfitted_jouster_conjure_attaches_what_it_created_to_itself() {
+        let body = first_trigger_body(
+            "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+        );
+        let Effect::Conjure {
+            cards, destination, ..
+        } = &*body.effect
+        else {
+            panic!("expected Conjure, got {:?}", body.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(
+            cards.iter().map(|c| c.named_name()).collect::<Vec<_>>(),
+            vec![Some("Steelclaw Lance"), Some("Brawler's Plate")]
+        );
+        assert!(!body.forward_result);
+        let sub = body.sub_ability.as_deref().expect("the attach clause");
+        assert_eq!(
+            *sub.effect,
+            Effect::Attach {
+                attachment: TargetFilter::LastCreated,
+                target: TargetFilter::SelfRef,
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::All,
+                },
+            }
+        );
+        assert!(sub.sub_ability.is_none());
+    }
+
+    /// CR 400.7j + CR 608.2c: the "attach them to ~" exemption covers only the attach's
+    /// own `~` recipient. A later instruction it carries that names the conjured card is
+    /// still found, so the conjure forwards its result, and the attach keeps what it
+    /// attaches and its `~` host (the runtime forward leaves that recipient on the source).
+    /// No printed card has this composite shape; the nearest is Outfitted Jouster, whose
+    /// parsed body is extended here with a `Destroy { ParentTarget }` after its attach.
+    #[test]
+    fn conjure_attach_tail_still_forwards_for_a_nested_moved_card_reader() {
+        let mut body = first_trigger_body(
+            "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+        );
+        assert!(!body.forward_result);
+        let attach = body.sub_ability.as_deref_mut().expect("the attach clause");
+        attach.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        )));
+
+        lower::rewire_result_anchored_subchain(&mut body);
+
+        assert!(body.forward_result, "got {body:?}");
+        let attach = body.sub_ability.as_deref().expect("the attach clause");
+        assert_eq!(
+            *attach.effect,
+            Effect::Attach {
+                attachment: TargetFilter::LastCreated,
+                target: TargetFilter::SelfRef,
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::All,
+                },
+            }
+        );
+        assert!(!attach.forward_result);
+    }
+
+    /// Conjures with no "and attach them to ~" tail keep no `Attach` sub. Perforator
+    /// Crocodile's "for each creature your opponents control, conjure a card named Stab
+    /// Wound onto the battlefield attached to that creature" is a different shape: a Stab
+    /// Wound conjure repeated per opponent's creature, with no `Attach` (its attachment is
+    /// not parsed yet, Command Zone #177).
+    #[test]
+    fn conjure_without_an_attach_tail_has_no_attach_sub() {
+        let crocodile = first_trigger_body(
+            "When Perforator Crocodile enters, for each creature your opponents control, conjure a card named Stab Wound onto the battlefield attached to that creature.\nCycling {1}{B}",
+            "Perforator Crocodile",
+        );
+        let Effect::Conjure {
+            cards, destination, ..
+        } = &*crocodile.effect
+        else {
+            panic!("expected Conjure, got {:?}", crocodile.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(
+            cards.iter().map(|c| c.named_name()).collect::<Vec<_>>(),
+            vec![Some("Stab Wound")]
+        );
+        assert!(
+            matches!(
+                &crocodile.repeat_for,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                })
+            ),
+            "the conjure repeats for each creature your opponents control: {:?}",
+            crocodile.repeat_for
+        );
+        let mut node = Some(&crocodile);
+        while let Some(ability) = node {
+            assert!(
+                !matches!(
+                    &*ability.effect,
+                    Effect::Unimplemented { .. }
+                        | Effect::Attach {
+                            attachment: TargetFilter::LastCreated,
+                            ..
+                        }
+                ),
+                "got {crocodile:?}"
+            );
+            node = ability.sub_ability.as_deref();
+        }
+
+        let (effect, attach) = try_parse_conjure(TextPair::new(
+            "conjure a card named Regal Force onto the battlefield",
+            "conjure a card named regal force onto the battlefield",
+        ))
+        .expect("a bare conjure parses");
+        assert!(matches!(effect, Effect::Conjure { .. }));
+        assert!(attach.is_none());
+    }
 }
 
 /// CR 707.13 + CR 201.4: "Create a copy of the card with the chosen name."
@@ -17093,14 +17273,14 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         // instruction set, not a chain-local effect result; the object-scoped
         // form reads the object's stickers.
         | QuantityRef::NameStickerLetterCount { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
@@ -17123,7 +17303,6 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -25055,6 +25234,30 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 201.2 + CR 608.2c: Same-name mass exile continuations ("exile target X
+    // and all other Xs with the same name as that X") must exclude the parent
+    // target, not the source. The "all other" quantifier adds FilterProp::Another
+    // (source exclusion), but for same-name continuations we need target-relative
+    // exclusion via DistinctFrom { ParentTarget }.
+    crate::parser::oracle_effect::each_target_filter_mut(&mut sub_clause.effect, &mut |target| {
+        if let TargetFilter::Typed(tf) = target {
+            let has_same_name = tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::SameNameAsParentTarget));
+            let has_another = tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another));
+            if has_same_name && has_another {
+                tf.properties.retain(|p| !matches!(p, FilterProp::Another));
+                tf.properties.push(FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                });
+            }
+        }
+    });
+
     // CR 608.2c + CR 701.8a: Self-reference carry-forward for compound actions.
     // "destroy that creature and ~" splits on " and " into sub-text "~" which
     // lacks a verb. Prepend the primary verb so it becomes "destroy ~" — parsed
@@ -26064,7 +26267,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::ExiledFromHandThisResolution
             | QuantityRef::PreviousEffectAmount { .. }
             | QuantityRef::PreviousEffectCount
-            | QuantityRef::LifeLostThisTurn { .. }
+            | QuantityRef::LifeLost { .. }
             | QuantityRef::PartySize { .. }
             | QuantityRef::UnspentMana { .. }
             | QuantityRef::Speed { .. }
@@ -26073,7 +26276,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::AttachmentsOnLeavingObject { .. }
             | QuantityRef::EventContextSourceCostX
             | QuantityRef::EventContextSourceModesChosen
-            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCast { .. }
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::SacrificedThisTurn { .. }
@@ -26096,7 +26299,6 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::AttackedThisTurn { .. }
             | QuantityRef::DescendedThisTurn
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-            | QuantityRef::SpellsCastLastTurn
             | QuantityRef::SpellsCastThisGame { .. }
             | QuantityRef::CounterAddedThisTurn { .. }
             | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -44485,6 +44687,7 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
+        Effect::DestroyAll { target, .. } => f(target),
         // CR 608.2c: the move's named performer is rewritten with the moved
         // objects, so a rebind of "that player" (a replaced draw's drawer, a
         // scoped seat) reaches who performs the move as well as what moves.
@@ -44572,7 +44775,7 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::LifeTotal { player }
             | QuantityRef::HandSize { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if *player == PlayerScope::Controller =>
@@ -44820,11 +45023,17 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             // purely targeted clause (Blitzwing — no `player_scope`) never
             // reaches this walker, so its `Target` survives to read the
             // targeted opponent's own life lost.
-            QuantityRef::LifeLostThisTurn {
+            //
+            // CR 500: the rebuild carries the window across the rebind; a literal
+            // `ThisTurn` would silently reset a last-turn payload to this turn.
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window,
             } => {
-                *qty = QuantityRef::LifeLostThisTurn {
+                let window = *window;
+                *qty = QuantityRef::LifeLost {
                     player: PlayerScope::ScopedPlayer,
+                    window,
                 }
             }
             // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
@@ -45007,7 +45216,7 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
         match qty {
             QuantityRef::LifeTotal { player }
             | QuantityRef::HandSize { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if matches!(
@@ -45062,7 +45271,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
         match qty {
             QuantityRef::LifeTotal { player }
             | QuantityRef::HandSize { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if *player == PlayerScope::Target =>
@@ -45132,7 +45341,7 @@ pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefi
             | QuantityRef::HandSize { player }
             | QuantityRef::GraveyardSize { player }
             | QuantityRef::StartingLifeTotal { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if *player == PlayerScope::Target =>
@@ -45494,6 +45703,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }

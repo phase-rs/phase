@@ -152,7 +152,8 @@
     "loading": "Cargando {{name}}",
     "unimplemented": "Sin implementar: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Girada"
+    "tapped": "Girada",
+    "reloadArt": "Toca para recargar la ilustración"
   },
   "preview": {
     "holdCtrlBack": "Mantén Ctrl para la cara trasera",
@@ -162,6 +163,7 @@
     "report": "Informar de un problema",
     "reported": "Informado ✓",
     "reportNotSent": "No enviado",
+    "reloadArt": "Recargar ilustración",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
@@ -1553,6 +1555,7 @@
     },
     "search": {
       "title": "Buscar en la biblioteca",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Elige {{count}} carta",
       "subtitleExact_other": "Elige {{count}} cartas",
       "subtitleUpTo_one": "Elige hasta {{count}} carta",
@@ -1857,6 +1860,13 @@
       "titleExact_one": "Descarta una carta",
       "titleExact_other": "Descarta {{count}} cartas",
       "titleWard": "Guarda — Descarta una carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Guarda",
+        "connive": "Conspirar",
+        "additionalCost": "Coste adicional",
+        "manaAbility": "Habilidad de maná"
+      },
       "subtitleUpTo_one": "Elige hasta {{count}} carta para descartar",
       "subtitleUpTo_other": "Elige hasta {{count}} cartas para descartar",
       "subtitleUnless": "Elige {{count}} cartas o 1 carta que coincida para descartar",

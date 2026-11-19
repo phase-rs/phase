@@ -273,6 +273,21 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return false;
     }
 
+    // CR 608.2c: "If <condition>, <imperative instruction>. [Otherwise, …]" on an
+    // instant or sorcery is a conditional instruction of the spell's effect, even
+    // when a later sentence carries a static marker ("They have \"…\"", Brood
+    // Birthing). Only an imperative body defers; a self-static body ("If X is 5 or
+    // more, this spell can't be countered", Banefire) keeps its routing.
+    if split_leading_conditional(lower).is_some_and(|(_, body)| {
+        EFFECT_IMPERATIVE_PREFIXES.iter().any(|prefix| {
+            tag::<_, _, OracleError<'_>>(*prefix)
+                .parse(body.as_str())
+                .is_ok()
+        })
+    }) {
+        return true;
+    }
+
     // CR 111.3 + CR 604.3a: "Create a … token. Its power is equal to … and its
     // toughness is equal to …" defines the created token's power and toughness.
     // A spell's characteristic-defining ability can't define another object's
@@ -1463,10 +1478,33 @@ mod tests {
 
     #[test]
     fn masked_brood_birthing_stays_static() {
-        // Brood Birthing invariant: the "have " grant marker is OUTSIDE the quote,
-        // so masking the quoted span must NOT flip the line off static.
+        // Fragment shape only: the bare "they have" grant marker is OUTSIDE the
+        // quote, so masking the quoted span must NOT flip this fragment off
+        // static. Routing of Brood Birthing's whole spell line is decided by
+        // `should_defer_spell_to_effect` (see
+        // `spell_if_imperative_line_defers_to_effect`).
         let line = "they have \"sacrifice this token: add {c}.\"";
         assert!(is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    /// CR 608.2c: an "If <condition>, <imperative>" spell line is a conditional
+    /// instruction of the spell; a self-static If-line keeps its routing.
+    #[test]
+    fn spell_if_imperative_line_defers_to_effect() {
+        assert!(should_defer_spell_to_effect(
+            "if you control an eldrazi spawn, create three 0/1 colorless eldrazi spawn \
+             creature tokens. they have \"sacrifice this token: add {c}.\" otherwise, \
+             create one of those tokens."
+        ));
+        for self_static in [
+            "if x is 5 or more, this spell can't be countered and the damage can't be prevented.",
+            "if this spell was kicked, it has split second.",
+            "if you revealed a dragon card or controlled a dragon as you cast this spell, \
+             this spell can't be countered.",
+            "if you weren't the starting player, this spell costs {1} less to cast.",
+        ] {
+            assert!(!should_defer_spell_to_effect(self_static), "{self_static}");
+        }
     }
 
     #[test]

@@ -152,7 +152,8 @@
     "loading": "Carregando {{name}}",
     "unimplemented": "Não implementado: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Virada"
+    "tapped": "Virada",
+    "reloadArt": "Toque para recarregar a arte"
   },
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",
@@ -162,6 +163,7 @@
     "report": "Relatar um problema",
     "reported": "Relatado ✓",
     "reportNotSent": "Não enviado",
+    "reloadArt": "Recarregar arte",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -1553,6 +1555,7 @@
     },
     "search": {
       "title": "Procurar no Grimório",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Escolha {{count}} carta",
       "subtitleExact_other": "Escolha {{count}} cartas",
       "subtitleUpTo_one": "Escolha até {{count}} carta",
@@ -1857,6 +1860,13 @@
       "titleExact_one": "Descarte uma carta",
       "titleExact_other": "Descarte {{count}} cartas",
       "titleWard": "Vigilância — Descarte uma carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Vigilância",
+        "connive": "Conluiar",
+        "additionalCost": "Custo adicional",
+        "manaAbility": "Habilidade de mana"
+      },
       "subtitleUpTo_one": "Escolha até {{count}} carta para descartar",
       "subtitleUpTo_other": "Escolha até {{count}} cartas para descartar",
       "subtitleUnless": "Escolha {{count}} cartas ou 1 carta correspondente para descartar",

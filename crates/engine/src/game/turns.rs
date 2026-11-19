@@ -2048,8 +2048,22 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.lands_played_this_turn = 0;
     // CR 901.9 / CR 116.2i: planar die special-action costs reset each turn.
     state.planar_die_actions_this_turn.clear();
-    // CR 603.4: Snapshot spell count for werewolf "last turn" conditions before resetting.
-    state.spells_cast_last_turn = Some(state.spells_cast_this_turn);
+    // CR 601.2i + CR 603.4 + CR 800.4i: Latch each player's own spell count for
+    // "a player cast two or more spells last turn" (werewolf transform clause)
+    // from the per-player cast journal, BEFORE `spells_cast_this_turn_by_player`
+    // is cleared below. Every player is latched, including one who has left the
+    // game: CR 800.4i lets an effect find actions a departed player took. Both
+    // turn-skip early returns precede this statement, so a skipped turn
+    // (CR 614.10) never begins and is never latched as a zero-cast turn, and an
+    // extra turn (CR 500.7) overwrites the snapshot like any other turn.
+    for player in &mut state.players {
+        player.spells_cast_last_turn = state
+            .spells_cast_this_turn_by_player
+            .get(&player.id)
+            .map_or(0, |records| {
+                u32::try_from(records.len()).unwrap_or(u32::MAX)
+            });
+    }
     // CR 500.1: Reset per-turn spell cast counters.
     state.spells_cast_this_turn = 0;
     // CR 700.13: crimes are a per-turn player record.

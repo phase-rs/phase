@@ -324,7 +324,7 @@ expression: "&ir"
               "amount": {
                 "type": "Ref",
                 "qty": {
-                  "type": "SpellsCastThisTurn",
+                  "type": "SpellsCast",
                   "scope": "Controller",
                   "filter": {
                     "type": "Or",

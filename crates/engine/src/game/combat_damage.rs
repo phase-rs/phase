@@ -289,6 +289,15 @@ fn finish_combat_damage_sub_step(
     damage_events: &[GameEvent],
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    // CR 104.1: a rider ended the game inside the batch ("A game ends immediately when a player
+    // wins"), so nothing after the batch happens: no sub-step bookkeeping, no state-based
+    // actions, no ability put on the stack, and no later combat damage step. A rider's drain
+    // restored the caller's wait over the batch's `GameOver`, so restore it from `game_end`.
+    if state.game_end.is_some() {
+        crate::game::elimination::ensure_game_over_if_terminal(state, events);
+        return pending_combat_damage_waiting(state);
+    }
+
     // CR 500.6: "at the beginning of that step" abilities trigger when the step
     // begins. `process_combat_damage_triggers` synthesizes the PhaseChanged
     // marker for that batch, so the FIRST-STRIKE sub-step always carries it, and
@@ -2181,7 +2190,8 @@ pub(crate) fn apply_combat_damage(
         replacement: None,
         phase_c_remnant: None,
     };
-    let pass = replacement::CombatDamageReplacementPass::new(proposed_events);
+    // CR 608.2f + CR 700.1: the pass reads the printed guards once, as the batch opens.
+    let pass = replacement::CombatDamageReplacementPass::new(state, proposed_events);
     run_combat_damage_replacements(state, record, entries, pass, None)
 }
 
@@ -2209,6 +2219,11 @@ fn run_combat_damage_replacements(
         resume,
     ) {
         replacement::CombatDamageReplacementOutcome::Complete => {
+            // CR 104.1: a game that ended inside the pass ends the batch: nothing is dealt,
+            // gained or prevented after it.
+            if state.game_end.is_some() {
+                return CombatDamageBatch::Complete(record.batch_events);
+            }
             apply_combat_damage_survivors(state, record, entries, pass)
         }
         replacement::CombatDamageReplacementOutcome::Paused { waiting_for } => {
@@ -2217,13 +2232,16 @@ fn run_combat_damage_replacements(
             // and reinstalled on resume. CR 615.8: the one-shot application
             // ledger is parked with it, so a "next time" shield that already
             // applied to an earlier portion still covers the source's portions
-            // proposed after the pause. The tally is sorted so a parked state
+            // proposed after the pause, and the printed guards' reading the pass
+            // opened with is parked too, so every later portion meets that one
+            // reading (CR 608.2f). The tally is sorted so a parked state
             // serializes identically however the map iterated.
             record.prevention_tally = sorted_prevention_entries(pass.tally);
             record.replacement = Some(PendingCombatDamageReplacement {
                 entries,
                 resolved: pass.resolved,
                 one_shot_applications: pass.one_shot_applications,
+                settled_guards: pass.settled_guards,
             });
             state.waiting_for = (*waiting_for).clone();
             let events = record.batch_events.clone();
@@ -2253,6 +2271,7 @@ fn resume_combat_damage_replacements(
         resolved: parked.resolved,
         tally: tally_map_from_record_entries(&std::mem::take(&mut record.prevention_tally)),
         one_shot_applications: parked.one_shot_applications,
+        settled_guards: parked.settled_guards,
     };
     run_combat_damage_replacements(state, record, parked.entries, pass, Some(resume))
 }
@@ -2393,7 +2412,13 @@ fn drain_combat_lifelink(
     mut record: PendingCombatLifelink,
 ) -> CombatDamageBatch {
     let waiting_before = state.waiting_for.clone();
-    while let Some(gain) = record.remaining.pop_front() {
+    // CR 104.1: "A game ends immediately when a player wins". An earlier gain's
+    // replacement (Nefarious Lich's draw, then Laboratory Maniac's win) can end
+    // the game inside the batch; no later source's gain is applied after that.
+    while state.game_end.is_none() {
+        let Some(gain) = record.remaining.pop_front() else {
+            break;
+        };
         match crate::game::effects::life::apply_life_gain(
             state,
             gain.controller,
@@ -2430,25 +2455,39 @@ fn drain_combat_lifelink(
             // `mark_phase_transition_awaiting_post_replacement` only for the
             // substitution variant), so the divergence here is deliberate, not an
             // oversight.
+            //
+            // CR 104.1: a substitute that ended the game (Laboratory Maniac's win)
+            // left `GameOver`; the earlier wait is never restored over it.
             Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
-                state.waiting_for = waiting_before.clone();
+                if state.game_end.is_some() {
+                    crate::game::elimination::ensure_game_over_if_terminal(
+                        state,
+                        &mut record.batch_events,
+                    );
+                } else {
+                    state.waiting_for = waiting_before.clone();
+                }
             }
         }
     }
     // CR 510.2: the per-player aggregate, emitted after the gains exactly as it
-    // is on a batch that never paused.
+    // is on a batch that never paused. It records damage already dealt in Phase
+    // C, before any gain could end the game, so it is kept on a terminal batch.
     record.batch_events.append(&mut record.damage_to_players);
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
     // Fire-all: combat keeps its standing shape (see the `stop_on_fresh_choice`
     // contract on `fire_batch_prevention_riders`).
-    let _ = fire_batch_prevention_riders(
-        state,
-        &record.prevention_tally,
-        &mut record.batch_events,
-        false,
-    );
+    // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
+    if state.game_end.is_none() {
+        let _ = fire_batch_prevention_riders(
+            state,
+            &record.prevention_tally,
+            &mut record.batch_events,
+            false,
+        );
+    }
     CombatDamageBatch::Complete(record.batch_events)
 }
 
@@ -2499,18 +2538,15 @@ pub(crate) fn sorted_prevention_entries(
     entries
 }
 
-/// CR 615.13 + CR 616.1e (Matt C2): what one aggregate drainage produced.
-/// Either every group dispatched, or a rider parked a FRESH choice mid-frame:
+/// CR 615.13 + CR 608.2c (Matt C2): what one aggregate drainage produced.
+/// Either every group dispatched, or a rider left its prompt standing:
 /// `published_entries` is the leading entry count fully resolved (events
-/// pushed, riders dispatched-or-skipped), so the caller can re-park the
-/// unpublished remainder and stop unwinding instead of firing later groups
-/// ahead of the pending choice.
+/// pushed, riders dispatched-or-skipped), so the caller can park the
+/// unpublished remainder beneath the prompt instead of firing later groups
+/// ahead of it.
 pub(crate) enum BatchRiderDrainOutcome {
     Completed,
-    Paused {
-        waiting_for: Box<WaitingFor>,
-        published_entries: usize,
-    },
+    Paused { published_entries: usize },
 }
 
 /// CR 615.5 + CR 615.13: After a simultaneous damage batch (combat or
@@ -2532,10 +2568,11 @@ pub(crate) enum BatchRiderDrainOutcome {
 /// "for each 1 damage prevented this way") resolves against the whole batch
 /// total.
 ///
-/// `stop_on_fresh_choice` (Matt C2, parked-frame drainage only): stop after
-/// the first rider that parks a fresh choice and report it, so later groups
-/// do not execute ahead of the pending prompt. The combat and unpaused-inline
-/// callers pass `false` and keep the standing fire-all shape.
+/// `stop_on_fresh_choice` (Matt C2, the noncombat batch's Phase D): stop after
+/// the first rider that leaves its prompt standing and report it, so later
+/// groups do not execute ahead of the pending prompt; the batch parks the
+/// unpublished remainder. Combat passes `false` and settles every rider pause
+/// in the batch (`replacement::drain_combat_damage_rider`).
 pub(crate) fn fire_batch_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[PreventedDamageEntry],
@@ -2552,13 +2589,13 @@ pub(crate) fn fire_batch_prevention_riders(
     // recipient, carrying the amount prevented FOR THAT RECIPIENT — which is what
     // a trigger scoped to "damage that would be dealt to you" (Selfless Squire)
     // must read for its "that many" to be right.
-    // Matt C2: the caller's prompt restored on completion, so any
-    // non-Priority deviation after a dispatch is a fresh rider-created choice
-    // (covers dispatches whose return is dropped on a nested path too).
-    // Snapshotted only in stop mode; the fire-all callers never read it.
-    let pre_drain_waiting = stop_on_fresh_choice.then(|| state.waiting_for.clone());
     let mut published_entries = 0usize;
     for group in prevention_tally.chunk_by(|a, b| a.key == b.key) {
+        // CR 104.1: a rider that ended the game (New Way Forward's damage meeting an empty
+        // Nefarious Lich graveyard) ends the batch; no later shield's rider runs.
+        if state.game_end.is_some() {
+            break;
+        }
         // Every group counts exactly once — resolved means events pushed (or
         // standing-behavior skipped), whether or not a rider dispatched.
         published_entries += group.len();
@@ -2664,24 +2701,17 @@ pub(crate) fn fire_batch_prevention_riders(
                 drain.event_source = Some(source);
             }
         }
-        let dispatch_wait = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-            state, None, None, None, events,
-        );
-        // Matt C2: in stop mode a fresh rider-created choice ends the frame
-        // here — later groups must not execute ahead of the pending prompt.
-        if stop_on_fresh_choice {
-            let fresh_choice = dispatch_wait.or_else(|| {
-                let pre = pre_drain_waiting.as_ref()?;
-                (!matches!(state.waiting_for, WaitingFor::Priority { .. })
-                    && state.waiting_for != *pre)
-                    .then(|| state.waiting_for.clone())
-            });
-            if let Some(waiting_for) = fresh_choice {
-                return BatchRiderDrainOutcome::Paused {
-                    waiting_for: Box::new(waiting_for),
-                    published_entries,
-                };
-            }
+        // CR 510.2: in fire-all mode (combat Phase D) every pause the rider
+        // raises is settled, as the per-portion drain does.
+        if !stop_on_fresh_choice {
+            replacement::drain_combat_damage_rider(state, events);
+            continue;
+        }
+        replacement::drain_damage_rider(state, events);
+        // CR 608.2c (Matt C2): in stop mode a rider that left its prompt standing
+        // ends the drain here — later groups must not execute ahead of it.
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return BatchRiderDrainOutcome::Paused { published_entries };
         }
     }
     BatchRiderDrainOutcome::Completed

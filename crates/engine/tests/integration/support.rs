@@ -88,8 +88,10 @@ fn fixture_path() -> PathBuf {
 fn load_fixture(path: &Path) -> CardDatabase {
     let file = File::open(path).expect("fixture should open");
     let reader = BufReader::new(file);
-    let decoder = GzDecoder::new(reader);
-    CardDatabase::from_export_reader(decoder).expect("fixture should load")
+    CardDatabase::from_compressed_export_cached(reader, |gz| {
+        std::io::read_to_string(GzDecoder::new(gz))
+    })
+    .expect("fixture should load")
 }
 
 /// Returns the shared, process-wide card database, loading it on first use.
@@ -203,4 +205,44 @@ pub fn advance_until_stack_empty_and_collect_events(runner: &mut GameRunner) -> 
         events.extend(result.events);
     }
     events
+}
+
+/// CR 615.13: what one parked two-phase damage batch has prevented so far — its
+/// `ParkedDamageBatch::prevention_tally`, published once when the batch completes.
+pub struct ParkedBatchView {
+    pub tally: Vec<engine::types::game_state::PreventedDamageEntry>,
+}
+
+/// The parked damage batches on the resolution stack (each an
+/// `Effect::ResumeDamageBatch` carrier), bottom first.
+pub trait ParkedBatchViews {
+    fn parked_batch_views(&self) -> Vec<ParkedBatchView>;
+}
+
+impl ParkedBatchViews for engine::types::game_state::GameState {
+    fn parked_batch_views(&self) -> Vec<ParkedBatchView> {
+        self.resolution_stack
+            .iter()
+            .filter_map(|frame| match frame {
+                engine::types::resolution::ResolutionFrame::AbilityContinuation(frame)
+                    if matches!(
+                        frame.pending.chain.effect,
+                        engine::types::ability::Effect::ResumeDamageBatch { .. }
+                    ) =>
+                {
+                    Some(ParkedBatchView {
+                        tally: frame
+                            .pending
+                            .chain
+                            .context
+                            .parked_damage_batch
+                            .as_deref()
+                            .map(|parked| parked.prevention_tally.clone())
+                            .unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }

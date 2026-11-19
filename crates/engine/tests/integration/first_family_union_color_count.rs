@@ -2,7 +2,7 @@
 //! spells you've cast this turn" is a SET UNION over two populations, resolved
 //! through the real cast pipeline.
 //!
-//! Pre-fix, both quantity slots bound `QuantityRef::SpellsCastThisTurn` — a
+//! Pre-fix, both quantity slots bound `QuantityRef::SpellsCast` — a
 //! COUNT OF SPELLS — silently dropping both the colour aggregation (CR 105.1)
 //! and the "permanents you control" population, with no parse warning. Every
 //! assertion below flips if that binding is restored:

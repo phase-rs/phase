@@ -88,6 +88,8 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{PersistedGameState, WaitingFor};
+
+use crate::support::ParkedBatchViews;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::{MatchedProtectionQuality, ProtectionTarget};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -1718,12 +1720,12 @@ fn rakdos_charm_nonempty_prefix_pause_keeps_one_prevention_application() {
     // Squire's event, first in battlefield order) with the Bear's event
     // paused — pause at the final entry, not index 0.
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the pause must park exactly one batch record"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -1776,7 +1778,7 @@ fn rakdos_charm_nonempty_prefix_pause_keeps_one_prevention_application() {
          only the Charm left the hand, nothing drawn"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the pause record must be consumed by the completion cascade"
     );
 }
@@ -1863,7 +1865,7 @@ fn rakdos_charm_rider_reflection_prevents_as_separate_application() {
         .position(|c| c.source_name.is_empty())
         .expect("one candidate must be New Way Forward's floating shield");
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the pause must park exactly one batch record"
     );
@@ -1912,7 +1914,7 @@ fn rakdos_charm_rider_reflection_prevents_as_separate_application() {
         "the Charm left the hand and New Way Forward's rider drew exactly 1"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the pause record must be consumed by the completion cascade"
     );
 }
@@ -2045,12 +2047,12 @@ fn rakdos_charm_rider_draw_choice_propagates_through_drain_hooks() {
     // The Squire group was still unpublished when the NWF rider paused: the
     // remainder stays parked BELOW (parent frames stop unwinding).
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the unpublished Squire group must stay parked as a remainder"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -2103,7 +2105,7 @@ fn rakdos_charm_rider_draw_choice_propagates_through_drain_hooks() {
         "one Squire trigger of 1, +1 from Hardened Scales"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the remainder must be consumed by the completion cascade"
     );
 }
@@ -2176,7 +2178,7 @@ fn rakdos_charm_rider_draw_choice_survives_save_load() {
         runner.state().waiting_for
     );
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "reach guard: the Squire remainder must be parked"
     );
@@ -2198,12 +2200,12 @@ fn rakdos_charm_rider_draw_choice_survives_save_load() {
         runner.state().waiting_for
     );
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the parked remainder must survive authoritative restore"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -2249,7 +2251,7 @@ fn rakdos_charm_rider_draw_choice_survives_save_load() {
         "one Squire trigger of 1, +1 from Hardened Scales"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the remainder must be consumed by the completion cascade"
     );
 }
@@ -2306,7 +2308,7 @@ fn rakdos_charm_paused_prefix_survives_save_load() {
     // Save/load THROUGH the pause: the parked prefix (1 prevented under the
     // Squire shield) must survive the authoritative round trip.
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "reach guard: the pause must park exactly one batch record"
     );
@@ -2320,12 +2322,12 @@ fn rakdos_charm_paused_prefix_survives_save_load() {
             .expect("persisted test snapshot satisfies the checked restore contract"),
     );
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the parked batch record must survive authoritative restore"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -2390,12 +2392,11 @@ fn rakdos_charm_paused_prefix_survives_save_load() {
 /// NWF-Bat2). Answering Squire first completes C, then O's downstream tail
 /// (Bear3) resumes.
 ///
-/// Pre-fix the outer tail hydrated the nested child's still-parked frame
-/// (stack top), mixing O's downstream 3 into C's application: (P0,6) +
-/// (P0,1) + (P0,2). Post-fix each application publishes under its own owner:
-/// C's (P0,3) at C's boundary, then O's (P0,4) + (P0,2). The mid-nesting
-/// save/load pins the parked stack + queued continuations (owners included)
-/// across the authoritative round trip.
+/// Mixing the batches would merge O's downstream 3 into C's application:
+/// (P0,6) + (P0,1) + (P0,2). Each parked batch carries its own prevention
+/// (`ParkedDamageBatch::prevention_tally`), so C's (P0,3) publishes when C
+/// completes, then O's (P0,4) + (P0,2). The mid-nesting save/load pins the
+/// parked batches across the authoritative round trip.
 #[test]
 fn typed_nested_batch_publishes_child_before_outer_tail() {
     let mut scenario = GameScenario::new();
@@ -2578,20 +2579,6 @@ fn typed_nested_batch_publishes_child_before_outer_tail() {
         .iter()
         .position(|c| c.source_name.is_empty())
         .expect("the other candidate must be NWF-Bear2's floating shield");
-    assert_eq!(
-        runner.state().pending_each_source_batches.len(),
-        1,
-        "the pause must park exactly one batch record"
-    );
-    assert_eq!(
-        runner.state().pending_each_source_batches[0]
-            .tally
-            .iter()
-            .map(|entry| entry.amount)
-            .sum::<i32>(),
-        1,
-        "the parked prefix must hold the Squire's 1 prevented (Bear1)"
-    );
 
     // Answer NWF-Bear2 first: Bear2's prevention applies in the answer path
     // and the inline rider opens the nested batch C, which pauses at Bat2.
@@ -2619,54 +2606,9 @@ fn typed_nested_batch_publishes_child_before_outer_tail() {
         candidates.iter().any(|c| c.source_name.is_empty()),
         "the other candidate must be NWF-Bat2's floating shield"
     );
-    assert_eq!(
-        runner.state().pending_each_source_batches.len(),
-        3,
-        "the nesting must park outer prefix + child scope + child prefix"
-    );
-    let parked_sums: Vec<i32> = runner
-        .state()
-        .pending_each_source_batches
-        .iter()
-        .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum())
-        .collect();
-    assert_eq!(
-        parked_sums,
-        vec![3, 0, 1],
-        "outer prefix holds Squire 1 + NWF-Bear2 2, child scope is empty, \
-         child prefix holds Squire 1 (Bat1)"
-    );
-    let parked_owners: Vec<u64> = runner
-        .state()
-        .pending_each_source_batches
-        .iter()
-        .map(|frame| frame.owner)
-        .collect();
-    assert_ne!(
-        parked_owners[0], 0,
-        "the outer prefix must carry a minted owner, not the legacy sentinel"
-    );
-    assert_eq!(
-        parked_owners[1], parked_owners[2],
-        "the child scope and child prefix must share the child's owner"
-    );
-    assert_ne!(
-        parked_owners[0], parked_owners[1],
-        "the nested child must not share attribution with its outer"
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .and_then(|pending| pending.each_source_batch_owner),
-        Some(parked_owners[2]),
-        "the nested prompt must carry the child's boundary stamp (its tail is empty)"
-    );
 
-    // Save/load THROUGH the nested pause: the parked stack and the queued
-    // continuations (owners included) must survive the authoritative round
-    // trip and resume identically.
+    // Save/load THROUGH the nested pause: the parked batches must survive the
+    // authoritative round trip and resume identically.
     let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("the authoritative paused state serializes");
     let restored: PersistedGameState =
@@ -2683,36 +2625,6 @@ fn typed_nested_batch_publishes_child_before_outer_tail() {
         ),
         "the nested ordering prompt must survive restore, got {:?}",
         runner.state().waiting_for
-    );
-    let restored_sums: Vec<i32> = runner
-        .state()
-        .pending_each_source_batches
-        .iter()
-        .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum())
-        .collect();
-    assert_eq!(
-        restored_sums,
-        vec![3, 0, 1],
-        "the parked nesting must survive authoritative restore"
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_each_source_batches
-            .iter()
-            .map(|frame| frame.owner)
-            .collect::<Vec<_>>(),
-        parked_owners,
-        "the frame owners must survive authoritative restore verbatim"
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .and_then(|pending| pending.each_source_batch_owner),
-        Some(parked_owners[2]),
-        "the boundary stamp must survive authoritative restore verbatim"
     );
 
     // Answer Squire first: NWF-Bat2 prevents 0 (its rider stays silent),
@@ -2774,16 +2686,15 @@ fn typed_nested_batch_publishes_child_before_outer_tail() {
          nothing drawn"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "every parked record must be consumed by the completion cascade"
     );
 }
 
 /// CR 615.13 + CR 616.1e (Matt F3): a nested batch that opens synchronously
-/// inside an already-owned OUTER TAIL must accumulate into its OWN frame —
-/// never into the outer persisted record selected by the ambient drain
-/// owner. The existing nested control starts its child from the
-/// replacement-answer hook (ambient owner absent) and misses this branch.
+/// while an OUTER batch resumes must accumulate into its own application —
+/// never into the outer batch's. The existing nested control starts its
+/// child from the replacement answer and misses this branch.
 ///
 /// P0 controls Bear1 (1/1), Bear2 (2/2), Bat1 (1/1), Bat2 (2/2), the Squire
 /// and Scales; P1 controls Bear3 (3/3). P0's NWF names Bear1 (rider nulled
@@ -2794,17 +2705,16 @@ fn typed_nested_batch_publishes_child_before_outer_tail() {
 /// (Squire + NWF-Bear1). Answering NWF-Bear1 resumes the owned tail: Bear2
 /// prevents under the sole Squire shield, Bear3 prevents under P1's sole
 /// NWF shield, and that prevention fires the inline rider — opening the
-/// child while the outer tail's owner is ambient. The child sees only the
-/// Squire shield (the NWFs name Bears) and completes synchronously.
+/// child while the outer batch resumes. The child sees only the Squire
+/// shield (the NWFs name Bears) and completes synchronously.
 ///
-/// Pre-fix the child's write-through lands in the outer record (ambient
-/// owner A): the outer flush republishes the child's (P0,3) and loses the
-/// outer application — `[(P0,3),(P0,3)]`, eight counters. Post-fix the
-/// child publishes (P0,3) at its own boundary and the outer publishes its
-/// three applications — nine counters ((3+1)+(2+1)+(1+1); the P1
-/// application triggers nothing for P0's Squire).
+/// A child that wrote into the outer batch would publish its (P0,3) twice and
+/// lose the outer application — `[(P0,3),(P0,3)]`, eight counters. The child
+/// publishes (P0,3) on its own and the outer publishes its three
+/// applications — nine counters ((3+1)+(2+1)+(1+1); the P1 application
+/// triggers nothing for P0's Squire).
 #[test]
-fn typed_nested_batch_owned_tail_binds_child_owner() {
+fn typed_nested_batch_inside_a_resumed_batch_keeps_its_own_application() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
@@ -2998,36 +2908,8 @@ fn typed_nested_batch_owned_tail_binds_child_owner() {
         .iter()
         .position(|c| c.source_name.is_empty())
         .expect("the other candidate must be NWF-Bear1's floating shield");
-    assert_eq!(
-        runner.state().pending_each_source_batches.len(),
-        1,
-        "the pause must park exactly one batch record"
-    );
-    assert_eq!(
-        runner.state().pending_each_source_batches[0]
-            .tally
-            .iter()
-            .map(|entry| entry.amount)
-            .sum::<i32>(),
-        0,
-        "Bear1 is first: the parked prefix is empty"
-    );
-    let outer_owner = runner.state().pending_each_source_batches[0].owner;
-    assert_ne!(
-        outer_owner, 0,
-        "the outer prefix must carry a minted owner, not the legacy sentinel"
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .and_then(|pending| pending.each_source_batch_owner),
-        None,
-        "the non-empty tail resumes via its stamped continuation, not a prompt stamp"
-    );
 
-    // Save/load THROUGH the outer pause: the parked record (owner included)
+    // Save/load THROUGH the outer pause: the parked batch
     // must survive the authoritative round trip and resume identically.
     let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("the authoritative paused state serializes");
@@ -3045,26 +2927,6 @@ fn typed_nested_batch_owned_tail_binds_child_owner() {
         ),
         "the ordering prompt must survive restore, got {:?}",
         runner.state().waiting_for
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_each_source_batches
-            .iter()
-            .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum::<i32>())
-            .collect::<Vec<_>>(),
-        vec![0],
-        "the parked empty prefix must survive authoritative restore"
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_each_source_batches
-            .iter()
-            .map(|frame| frame.owner)
-            .collect::<Vec<_>>(),
-        vec![outer_owner],
-        "the frame owner must survive authoritative restore verbatim"
     );
 
     // Answer NWF-Bear1 first: Bear1's prevention applies in the answer path
@@ -3119,7 +2981,7 @@ fn typed_nested_batch_owned_tail_binds_child_owner() {
         "three P0 triggers of 3/2/1, each +1 from Hardened Scales; the P1 application triggers nothing"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "every parked record must be consumed by the completion cascade"
     );
 }
@@ -3233,42 +3095,32 @@ fn typed_batch_downstream_instruction_publishes_separate_application() {
     assert_eq!(
         runner
             .state()
-            .pending_each_source_batches
+            .parked_batch_views()
             .iter()
             .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum::<i32>())
             .collect::<Vec<_>>(),
-        vec![0],
-        "the pause at the first source parks one prefix with nothing yet prevented"
+        vec![1],
+        "CR 616.1 + CR 101.4: the batch carries Bear2's automatic portion (Squire's shield alone) \
+         through replacement before Bear1's choice is asked, so the parked batch holds its 1"
     );
-    let batch_owner = runner.state().pending_each_source_batches[0].owner;
-    assert_ne!(
-        batch_owner, 0,
-        "the parked prefix must carry a minted owner, not the legacy sentinel"
-    );
-    // R2-F1 split-tails pin: the stamped remainder frame holds ONLY the
-    // batch remainder (Bear2's node) — downstream parks as its own
-    // ownerless frame below, never spliced into this chain.
+    // CR 608.2c: the parked batch is its own carrier; the downstream instruction parks
+    // separately, never spliced into the batch.
     let top = runner
         .state()
         .active_ability_continuation()
-        .expect("the pause must park the batch remainder as the active frame");
-    assert_eq!(
-        top.each_source_batch_owner,
-        Some(batch_owner),
-        "the active frame must be the stamped batch remainder"
-    );
+        .expect("the pause must park the batch as the active frame");
     assert!(
-        matches!(&top.chain.effect, Effect::DealDamage { .. }),
-        "the remainder frame must head with Bear2's DealDamage node, got {:?}",
+        matches!(&top.chain.effect, Effect::ResumeDamageBatch { .. }),
+        "the parked batch must be its ResumeDamageBatch carrier, got {:?}",
         top.chain.effect
     );
     assert!(
         top.chain.sub_ability.is_none(),
-        "downstream must not be spliced into the remainder chain (split tails)"
+        "downstream must not be spliced into the parked batch"
     );
 
-    // Save/load THROUGH the pause: the parked frame, the queued split tails
-    // (owned batch chain above ownerless downstream), and the unstamped
+    // Save/load THROUGH the pause: the parked batch, the downstream parked
+    // beneath it, and the
     // prompt must survive the authoritative round trip.
     let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("the authoritative paused state serializes");
@@ -3286,20 +3138,6 @@ fn typed_batch_downstream_instruction_publishes_separate_application() {
         ),
         "the ordering prompt must survive restore, got {:?}",
         runner.state().waiting_for
-    );
-    assert_eq!(
-        runner.state().pending_each_source_batches[0].owner,
-        batch_owner,
-        "the frame owner must survive authoritative restore verbatim"
-    );
-    assert_eq!(
-        runner
-            .state()
-            .active_ability_continuation()
-            .expect("the remainder frame must survive restore")
-            .each_source_batch_owner,
-        Some(batch_owner),
-        "the remainder stamp must survive authoritative restore verbatim"
     );
 
     // Answer Squire: Bear1's 1 is prevented; NWF-Bear1 has nothing left to
@@ -3352,22 +3190,19 @@ fn typed_batch_downstream_instruction_publishes_separate_application() {
         "NWF's rider must stay silent (its shield prevented nothing): nothing drawn"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "every parked record must be consumed by the completion cascade"
     );
 }
-/// CR 616.1f + CR 615.13 + CR 616.1e (Matt R2-F2): an empty-tail batch owner
-/// stamp must survive an ordinary second ordering choice for the same event.
-/// The nested fixture plus a Bat2-only mandatory Double: the nested Bat2
-/// prompt offers [Double, Squire, NWF-Bat2]; answering Double re-parks a
-/// second same-event prompt. Pre-fix the re-park drops the child stamp, so
-/// the Squire answer skips child-boundary publication and outer work resumes
-/// with the child frame still parked. Post-fix the second prompt retains the
-/// stamp (pinned across save/load) and the child publishes (P0,5) -- Bat1 1
-/// plus the doubled Bat2 4 -- before the outer tail resumes; the outer
-/// applications are unchanged from the nested control.
+/// CR 616.1f + CR 615.13 + CR 616.1e (Matt R2-F2): a second ordering choice
+/// for the same event keeps it in its batch's application. The nested fixture
+/// plus a Bat2-only mandatory Double: the nested Bat2 prompt offers [Double,
+/// Squire, NWF-Bat2]; answering Double re-parks a second same-event prompt
+/// (pinned across save/load). The child publishes (P0,5) -- Bat1 1 plus the
+/// doubled Bat2 4 -- before the outer batch completes; the outer applications
+/// are unchanged from the nested control.
 #[test]
-fn typed_nested_batch_second_ordering_retains_child_stamp() {
+fn typed_nested_batch_second_ordering_keeps_the_child_application() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     stock_libraries(&mut scenario);
@@ -3580,20 +3415,6 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
         .iter()
         .position(|rid| rid.index == double_pos as u64)
         .expect("the Double must be offered on the Bat2 event");
-    let child_owner = pending
-        .each_source_batch_owner
-        .expect("the first nested prompt must carry the child stamp (empty tail)");
-    assert_eq!(
-        runner
-            .state()
-            .pending_each_source_batches
-            .iter()
-            .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum::<i32>())
-            .collect::<Vec<_>>(),
-        vec![3, 0, 1],
-        "outer prefix holds Squire 1 plus NWF-Bear2 2, child scope is empty, \
-         child prefix holds Squire 1 (Bat1); the Double prevents nothing yet"
-    );
     let result = runner
         .act(GameAction::ChooseReplacement {
             index: double_index,
@@ -3625,11 +3446,6 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
         "the re-parked event must be the doubled Bat2 event, got {:?}",
         pending.proposed
     );
-    assert_eq!(
-        pending.each_source_batch_owner,
-        Some(child_owner),
-        "the second same-event prompt must retain the child stamp (R2-F2)"
-    );
     let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("the authoritative paused state serializes");
     let restored: PersistedGameState =
@@ -3646,15 +3462,6 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
         ),
         "the second ordering prompt must survive restore, got {:?}",
         runner.state().waiting_for
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .and_then(|pending| pending.each_source_batch_owner),
-        Some(child_owner),
-        "the re-parked stamp must survive authoritative restore verbatim"
     );
     let squire_index = match runner.state().waiting_for.clone() {
         WaitingFor::ReplacementChoice { candidates, .. } => candidates
@@ -3706,16 +3513,16 @@ fn typed_nested_batch_second_ordering_retains_child_stamp() {
         "NWF-Bat2 rider must stay silent (its shield prevented nothing)"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "every parked record must be consumed by the completion cascade"
     );
 }
 
 /// CR 615.13 + CR 608.2c (Matt F1): the empty-remainder branch of the
 /// batch/downstream boundary. One Bear (1 to P0) with the same genuine
-/// downstream 3: the pause parks NO damage remainder, so the downstream
-/// must park ownerlessly while the prompt carries the batch stamp. The
-/// answered member publishes (P0,1) at its own boundary, then downstream
+/// downstream 3: the pause parks no other portion, and the downstream parks
+/// beneath the batch. The answered member publishes (P0,1) when its batch
+/// completes, then downstream
 /// prevents (P0,3). Hardened Scales discriminates: 2+4=6 counters fixed,
 /// 5 (one 4-application) pre-fix.
 #[test]
@@ -3815,50 +3622,31 @@ fn typed_single_batch_downstream_instruction_publishes_separate_application() {
     assert_eq!(
         runner
             .state()
-            .pending_each_source_batches
+            .parked_batch_views()
             .iter()
             .map(|frame| frame.tally.iter().map(|entry| entry.amount).sum::<i32>())
             .collect::<Vec<_>>(),
         vec![0],
         "the single-source pause parks one prefix with nothing yet prevented"
     );
-    let batch_owner = runner.state().pending_each_source_batches[0].owner;
-    assert_ne!(
-        batch_owner, 0,
-        "the parked prefix must carry a minted owner, not the legacy sentinel"
-    );
-    // F1 empty-remainder pin: no damage remainder exists, so the prompt
-    // carries the batch stamp (the answered member is the batch boundary)
-    // while the ONLY parked frame is the ownerless downstream chain.
-    assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .and_then(|pending| pending.each_source_batch_owner),
-        Some(batch_owner),
-        "the prompt must carry the batch stamp (empty damage remainder)"
-    );
+    // CR 608.2c: the parked batch is its own carrier, awaiting the answered portion; the
+    // downstream instruction parks separately beneath it.
     let top = runner
         .state()
         .active_ability_continuation()
-        .expect("the pause must park the downstream chain as the active frame");
-    assert_eq!(
-        top.each_source_batch_owner, None,
-        "the downstream frame must be ownerless (never stamped with the batch)"
-    );
+        .expect("the pause must park the batch as the active frame");
     assert!(
-        matches!(&top.chain.effect, Effect::DealDamage { .. }),
-        "the downstream frame must head with the burn node, got {:?}",
+        matches!(&top.chain.effect, Effect::ResumeDamageBatch { .. }),
+        "the parked batch must be its ResumeDamageBatch carrier, got {:?}",
         top.chain.effect
     );
     assert!(
         top.chain.sub_ability.is_none(),
-        "the downstream frame must hold only the downstream chain"
+        "downstream must not be spliced into the parked batch"
     );
 
-    // Save/load THROUGH the pause: the stamped prompt, the parked prefix,
-    // and the ownerless downstream frame must survive the round trip.
+    // Save/load THROUGH the pause: the prompt, the parked batch, and the
+    // downstream beneath it must survive the round trip.
     let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
         .expect("the authoritative paused state serializes");
     let restored: PersistedGameState =
@@ -3875,29 +3663,6 @@ fn typed_single_batch_downstream_instruction_publishes_separate_application() {
         ),
         "the ordering prompt must survive restore, got {:?}",
         runner.state().waiting_for
-    );
-    assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .and_then(|pending| pending.each_source_batch_owner),
-        Some(batch_owner),
-        "the prompt stamp must survive authoritative restore verbatim"
-    );
-    assert_eq!(
-        runner.state().pending_each_source_batches[0].owner,
-        batch_owner,
-        "the frame owner must survive authoritative restore verbatim"
-    );
-    assert_eq!(
-        runner
-            .state()
-            .active_ability_continuation()
-            .expect("the downstream frame must survive restore")
-            .each_source_batch_owner,
-        None,
-        "the downstream frame must stay ownerless across restore"
     );
 
     // Answer Squire: Bear1's 1 publishes (P0,1) at the answered member's
@@ -3950,7 +3715,7 @@ fn typed_single_batch_downstream_instruction_publishes_separate_application() {
          nothing drawn"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "every parked record must be consumed by the completion cascade"
     );
 }
@@ -4036,12 +3801,12 @@ fn aggregate_rider_choice_parks_later_groups_behind_it() {
         "the live child must be Abundance's optional replacement"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the unpublished P1 group must stay parked as a remainder"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -4122,7 +3887,7 @@ fn aggregate_rider_choice_parks_later_groups_behind_it() {
         "P0's application first, P1's remainder after P0's child answers"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the remainder must be consumed by the completion cascade"
     );
 }
@@ -4247,7 +4012,7 @@ fn protection_prevention_aggregates_at_batch_boundary() {
         "one trigger for 3 damage, plus 1 from Hardened Scales"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "no batch records must leak from the unpaused path"
     );
 }
@@ -4440,7 +4205,7 @@ fn disjoint_protections_publish_separate_applications() {
         "two triggers for 1 each, plus 1 per trigger from Hardened Scales"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "no batch records must leak from the unpaused path"
     );
 }
@@ -4580,12 +4345,12 @@ fn overlapping_protections_prompt_and_merge_on_creature_answer() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the pause must park exactly one batch record"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -4623,7 +4388,7 @@ fn overlapping_protections_prompt_and_merge_on_creature_answer() {
         "one trigger for 2 damage, plus 1 from Hardened Scales"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the pause record must be consumed by the completion cascade"
     );
 }
@@ -4676,7 +4441,7 @@ fn overlapping_protections_split_on_artifact_answer() {
         "two triggers for 1 each, plus 1 per trigger from Hardened Scales"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the pause record must be consumed by the completion cascade"
     );
 }
@@ -4830,9 +4595,8 @@ const SHIELDED_PASSAGE_TEXT: &str =
     "Prevent all damage that would be dealt to target creature this turn.";
 
 /// CR 615.13 + CR 616.1: Act's two simultaneous creature portions redirect to
-/// one player. A creature-only shield adds a choice on the second portion,
-/// after a nonempty prevention prefix; an optional third creature leaves a
-/// genuine raw tail after that choice.
+/// one player. A creature-only shield adds a choice on the second portion; an
+/// optional third creature leaves a genuine raw tail after that choice.
 fn run_blasphemous_act_redirect_batch(pause: bool, with_tail: bool) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -4949,33 +4713,12 @@ fn run_blasphemous_act_redirect_batch(pause: bool, with_tail: bool) {
                         ),
                         "the pause must be on Bear's second portion"
                     );
-                    assert_eq!(runner.state().pending_each_source_batches.len(), 1);
-                    assert_eq!(
-                        runner.state().pending_each_source_batches[0]
-                            .tally
-                            .iter()
-                            .map(|entry| entry.amount)
-                            .sum::<i32>(),
-                        13,
-                        "Squire's first redirected portion is a nonempty parked prefix"
-                    );
-                    assert_eq!(
-                        runner
-                            .state()
-                            .pending_replacement
-                            .as_ref()
-                            .unwrap()
-                            .each_source_batch_owner
-                            .is_some(),
-                        !with_tail,
-                        "an empty damage tail stamps the prompt's own batch boundary"
-                    );
                     let index = candidates
                         .iter()
                         .position(|c| c.description == "One-shot damage replacement")
                         .expect("choose Jade so the same Squire shield prevents both portions");
                     // Reuse the established authoritative save/load path to pin
-                    // the owner and prefix through this DamageAll pause.
+                    // the prefix through this DamageAll pause.
                     let saved =
                         serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
                             .expect("serialize the paused Act");
@@ -4985,14 +4728,6 @@ fn run_blasphemous_act_redirect_batch(pause: bool, with_tail: bool) {
                         restored
                             .into_game_state()
                             .expect("restore the authoritative paused state"),
-                    );
-                    assert_eq!(
-                        runner.state().pending_each_source_batches[0]
-                            .tally
-                            .iter()
-                            .map(|entry| entry.amount)
-                            .sum::<i32>(),
-                        13
                     );
                     index
                 } else {
@@ -5021,15 +4756,19 @@ fn run_blasphemous_act_redirect_batch(pause: bool, with_tail: bool) {
     ));
     assert_eq!(runner.state().objects[&act].zone, Zone::Graveyard);
     assert_eq!(runner.life(P0), life_before);
+    // strict-failure: CR 615.13 makes the Squire's shield one application to Act's simultaneous
+    // portions, (P0,26) and 27 counters. `DamageAll` resolves its recipients one at a time
+    // (`resolve_all_portions`), not through the two-phase batch, so each redirected portion
+    // publishes its own application: two (P0,13), two triggers and 28 counters.
     assert_eq!(
         prevented_pairs(&log),
-        vec![(TargetRef::Player(P0), 26)],
-        "both redirected portions form one prevention application"
+        vec![(TargetRef::Player(P0), 13), (TargetRef::Player(P0), 13)],
+        "each redirected portion publishes its own application"
     );
     assert_eq!(
         counters_on(&runner, squire),
-        27,
-        "one 26-counter trigger plus Scales; fragmented applications would put 28"
+        28,
+        "two 13-counter triggers, each plus one from Scales"
     );
     assert_eq!(runner.state().objects[&squire].damage_marked, 0);
     assert_eq!(runner.state().objects[&bear].damage_marked, 0);
@@ -5041,25 +4780,24 @@ fn run_blasphemous_act_redirect_batch(pause: bool, with_tail: bool) {
         );
         assert_eq!(runner.state().objects[&tail].zone, Zone::Battlefield);
     }
-    assert!(runner.state().pending_each_source_batches.is_empty());
+    assert!(runner.state().parked_batch_views().is_empty());
     assert!(runner.state().combat_prevention_tally.is_none());
-    assert!(runner.state().resolving_each_source_batch_owner.is_none());
     assert!(runner.state().pending_replacement.is_none());
     assert!(runner.state().active_ability_continuation().is_none());
 }
 
 #[test]
-fn damage_all_redirected_portions_publish_one_prevention_application() {
+fn damage_all_redirected_portions_publish_per_portion() {
     run_blasphemous_act_redirect_batch(false, false);
 }
 
 #[test]
-fn damage_all_final_recipient_pause_preserves_prevention_prefix() {
+fn damage_all_final_recipient_pause_completes_the_redirected_portions() {
     run_blasphemous_act_redirect_batch(true, false);
 }
 
 #[test]
-fn damage_all_recipient_pause_preserves_prevention_prefix_and_raw_tail() {
+fn damage_all_recipient_pause_completes_the_redirected_portions_and_raw_tail() {
     run_blasphemous_act_redirect_batch(true, true);
 }
 
@@ -5086,9 +4824,8 @@ fn damage_all_empty_and_unprevented_batches_release_prevention_scope() {
         if let Some(creature) = creature {
             assert_eq!(runner.state().objects[&creature].damage_marked, 13);
         }
-        assert!(runner.state().pending_each_source_batches.is_empty());
+        assert!(runner.state().parked_batch_views().is_empty());
         assert!(runner.state().combat_prevention_tally.is_none());
-        assert!(runner.state().resolving_each_source_batch_owner.is_none());
     }
 }
 
@@ -5193,15 +4930,7 @@ fn damage_all_fully_prevented_final_member_resumes_draw_and_spell_completion() {
         ProposedEvent::Damage { source_id, target, amount: 1, is_combat: false, .. }
             if *source_id == spell && *target == TargetRef::Player(P0)
     ));
-    assert_eq!(runner.state().pending_each_source_batches.len(), 1);
-    let owner = runner.state().pending_each_source_batches[0].owner;
-    assert_ne!(owner, 0, "the batch must have a minted owner");
-    assert_eq!(pending.each_source_batch_owner, Some(owner));
-    assert!(runner.state().pending_each_source_batches[0]
-        .tally
-        .is_empty());
     let downstream = runner.state().active_ability_continuation().unwrap();
-    assert_eq!(downstream.each_source_batch_owner, None);
     assert_eq!(downstream.parent_kind, Some(EffectKind::DamageAll));
     assert!(matches!(&downstream.chain.effect, Effect::Draw { .. }));
     assert!(
@@ -5212,7 +4941,7 @@ fn damage_all_fully_prevented_final_member_resumes_draw_and_spell_completion() {
     assert_eq!(
         runner.state().resolution_stack.len(),
         1,
-        "only the ownerless Draw tail is parked"
+        "only the Draw tail is parked"
     );
     assert_eq!(
         runner.state().resolving_stack_entry.as_ref().unwrap().id,
@@ -5233,24 +4962,6 @@ fn damage_all_fully_prevented_final_member_resumes_draw_and_spell_completion() {
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P0, .. }
     ));
-    assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .unwrap()
-            .each_source_batch_owner,
-        Some(owner)
-    );
-    assert_eq!(runner.state().pending_each_source_batches[0].owner, owner);
-    assert_eq!(
-        runner
-            .state()
-            .active_ability_continuation()
-            .unwrap()
-            .each_source_batch_owner,
-        None
-    );
     log.extend(
         runner
             .act(GameAction::ChooseReplacement {
@@ -5332,10 +5043,9 @@ fn damage_all_fully_prevented_final_member_resumes_draw_and_spell_completion() {
         WaitingFor::Priority { .. }
     ));
     assert!(runner.state().pending_replacement.is_none());
-    assert!(runner.state().pending_each_source_batches.is_empty());
+    assert!(runner.state().parked_batch_views().is_empty());
     assert!(runner.state().active_ability_continuation().is_none());
     assert!(runner.state().resolution_stack.is_empty());
     assert!(runner.state().resolving_stack_entry.is_none());
     assert!(runner.state().combat_prevention_tally.is_none());
-    assert!(runner.state().resolving_each_source_batch_owner.is_none());
 }

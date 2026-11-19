@@ -2700,6 +2700,7 @@ mod paused_search_audience_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: original.clone(),
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -2716,7 +2717,6 @@ mod paused_search_audience_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         });
 

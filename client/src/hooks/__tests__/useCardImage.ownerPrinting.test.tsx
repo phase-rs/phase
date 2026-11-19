@@ -483,6 +483,151 @@ describe("owner printing non-gating overlay", () => {
     expect(remount.result.current.src).toBe("/viewer.jpg");
   });
 
+  // #11008: the owner ladder keeps its own failed sources, so a reload must
+  // reach its cache too, not only the normal hook's.
+  it("offers an exhausted owner ladder a reload that loads its first source again", async () => {
+    const env = await setup();
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/owner-a.jpg");
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/owner-a.jpg"));
+    await waitFor(() => expect(hook.result.current.source?.kind).toBe("remote"));
+    act(() => hook.result.current.advanceFailedSource?.("https://img.example/11111111-1111-4111-8111-111111111111-front.jpg"));
+    expect(hook.result.current).toMatchObject({ src: null, isLoading: false, source: { kind: "fallback" } });
+
+    // The exhaustion holds on its own; only the reload starts the ladder over.
+    await settle();
+    expect(hook.result.current.src).toBeNull();
+    act(() => hook.result.current.reload?.());
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    expect(hook.result.current.source?.kind).toBe("installed");
+  });
+
+  // The owner's oracle id can differ from the one the normal lookup resolves,
+  // so the normal hook's re-render can't be what restarts the owner ladder.
+  it("reloads owner art whose oracle id differs from the normal lookup's", async () => {
+    const env = await setup();
+    env.installPrinting(O1, "/owner-a.jpg");
+    const hook = renderHook(() => env.useCardImage("Beta", {
+      oracleId: B, ownerPrinting: owner, ownerPrintedRef: { oracle_id: A, face_name: "Alpha" },
+    }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/owner-a.jpg"));
+    await waitFor(() => expect(hook.result.current.source?.kind).toBe("remote"));
+    act(() => hook.result.current.advanceFailedSource?.("https://img.example/11111111-1111-4111-8111-111111111111-front.jpg"));
+    expect(hook.result.current).toMatchObject({ src: null, isLoading: false, source: { kind: "fallback" } });
+
+    act(() => hook.result.current.reload?.());
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+  });
+
+  // Only the player's reload restarts owner art: the per-card invalidation a
+  // printings fetch sends leaves it on screen.
+  it("keeps owner art on screen when a printings fetch invalidates the card", async () => {
+    const env = await setup();
+    env.installPrinting(O1, "/owner-a.jpg");
+    const printings = deferred<PrintingEntry[]>();
+    const getCardPrintings = vi.spyOn(env.service, "getCardPrintings").mockReturnValue(printings.promise);
+    const seen: Array<string | null> = [];
+    const hook = renderHook(() => {
+      const image = env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner });
+      seen.push(image.src);
+      return image;
+    });
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    // Reach guard: the normal lookup asked for the card's printings, whose
+    // arrival invalidates the card.
+    await waitFor(() => expect(getCardPrintings).toHaveBeenCalledWith(A));
+    const ownerCallCount = env.ownerCalls().length;
+    seen.length = 0;
+
+    await act(async () => { printings.resolve(env.data.catalog[A]); });
+    await settle();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((src) => src === "/owner-a.jpg")).toBe(true);
+    expect(env.ownerCalls()).toHaveLength(ownerCallCount);
+  });
+
+  it("reloads failed installed owner art offline", async () => {
+    const env = await setup({ offline: true });
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/owner-a.jpg");
+    vi.stubGlobal("caches", {
+      match: vi.fn(async (url: string) => json(url.includes("printings") ? env.data.catalog : env.data.main)),
+    });
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/owner-a.jpg"));
+    // The owner ladder is what ended on the fallback; the normal lookup alone
+    // would show the viewer's printing.
+    expect(hook.result.current).toMatchObject({ src: null, isLoading: false, source: { kind: "fallback" } });
+    expect(hook.result.current.reload).toBeTypeOf("function");
+
+    act(() => hook.result.current.reload?.());
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+  });
+
+  it("offers owner art's reload offline when another surface of the card failed", async () => {
+    const env = await setup({ offline: true });
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/owner-a.jpg");
+    env.installPrinting(O1, "/owner-art.jpg", 0, "art_crop");
+    vi.stubGlobal("caches", {
+      match: vi.fn(async (url: string) => json(url.includes("printings") ? env.data.catalog : env.data.main)),
+    });
+    const preview = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    const tile = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner, size: "art_crop" }));
+    await waitFor(() => expect(preview.result.current.src).toBe("/owner-a.jpg"));
+    await waitFor(() => expect(tile.result.current.src).toBe("/owner-art.jpg"));
+    // Reach guard: offline, with nothing failed, the preview offers no reload.
+    expect(preview.result.current.reload).toBeUndefined();
+
+    act(() => tile.result.current.advanceFailedSource?.("/owner-art.jpg"));
+    await waitFor(() => expect(preview.result.current.cardArtFailed).toBe(true));
+    expect(preview.result.current.src).toBe("/owner-a.jpg");
+    expect(preview.result.current.reload).toBeTypeOf("function");
+  });
+
+  it("releases a failed default printing once owner art covers it", async () => {
+    const env = await setup({ holdCatalog: true });
+    // No art override, so the normal lookup never fetches printings: nothing
+    // but owner art arriving can change what this surface shows.
+    env.preferences.setState({ artOverrides: {} });
+    env.installPrinting(O1, "/owner-a.jpg");
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+
+    // The default printing shows while owner art waits on its catalog, and
+    // its image fails.
+    await waitFor(() => expect(hook.result.current.src).toBe("/default-front.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/default-front.jpg"));
+    await waitFor(() => expect(hook.result.current.cardArtFailed).toBe(true));
+    expect(hook.result.current.src).toBeNull();
+
+    // Owner art arrives over it: the surface shows art, so the card holds no
+    // failure for it any more.
+    await act(async () => { env.gate.resolve(json(env.data.catalog)); });
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    await waitFor(() => expect(hook.result.current.cardArtFailed).toBe(false));
+  });
+
+  it("offers no reload offline for owner art that has no source to retry", async () => {
+    const env = await setup({ offline: true });
+    env.installPrinting(P, "/viewer.jpg");
+    vi.stubGlobal("caches", {
+      match: vi.fn(async (url: string) => json(url.includes("printings") ? env.data.catalog : env.data.main)),
+    });
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+
+    // Reach guard: the admitted owner printing, with no installed art offline,
+    // ends on its fallback; the normal lookup alone would show the viewer's
+    // printing.
+    await waitFor(() => expect(hook.result.current).toMatchObject({
+      src: null, isLoading: false, source: { kind: "fallback" },
+    }));
+    expect(hook.result.current.reload).toBeUndefined();
+  });
+
   it.each([false, true])("discards stale repository completions before publication, cache, and remote continuation; unmount=%s", async (unmount) => {
     const env = await setup();
     env.installPrinting(P, "/viewer.jpg");
@@ -887,6 +1032,25 @@ describe("owner authority invalidation", () => {
     expect(env.ownerCalls().some((request) => request.allowRemote && request.remote === null)).toBe(true);
     hook.rerender({ pair: secondOwner });
     await waitFor(() => expect(hook.result.current.src).toBe("/second-owner.jpg"));
+  });
+
+  // #11008: an admitted printing with no image has nothing to reload, so it
+  // offers none and counts as no failure for the card's other surfaces.
+  it("offers no reload and holds no failure for an admitted printing with no image", async () => {
+    const env = await setup();
+    env.installPrinting(P, "/viewer.jpg");
+    env.data.catalog[A][0].faces = [{ normal: "https://errors.scryfall.com/soon.jpg" }];
+    const tile = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    const other = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: secondOwner }));
+
+    // Reach guard: the printing with no image ends on its fallback, and the
+    // other surface's printing shows art and listens for the card's failures.
+    await waitFor(() => expect(tile.result.current).toMatchObject({ src: null, isLoading: false, source: { kind: "fallback" } }));
+    await waitFor(() => expect(other.result.current.src).toBe("https://img.example/22222222-2222-4222-8222-222222222222-front.jpg"));
+    await settle();
+    expect(tile.result.current.reload).toBeUndefined();
+    expect(other.result.current.cardArtFailed).toBe(false);
+    expect(other.result.current.reload).toBeUndefined();
   });
 
   it("does not route an old owner's callback into a new owner with the same URL", async () => {

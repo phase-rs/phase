@@ -34,6 +34,8 @@ use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
+use crate::support::ParkedBatchViews;
+
 /// Verbatim Statecraft (MMQ).
 const STATECRAFT_TEXT: &str =
     "Prevent all combat damage that would be dealt to and dealt by creatures you control.";
@@ -1331,9 +1333,9 @@ fn shield_counters_on(runner: &GameRunner, object: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
-/// CR 122.1c + CR 615.13 + CR 616.1e (Matt C3): the parked batch scope must
-/// hydrate before the shield-counter applier runs, through the shared
-/// accumulation/write-through authority.
+/// CR 122.1c + CR 615.13 + CR 616.1e (Matt C3): the answer to a parked batch's
+/// choice reopens the batch's prevention before the shield-counter applier
+/// runs, so the answered portion joins the batch's application.
 ///
 /// P0 controls two Bears, the second enchanted with a real-cast Defang;
 /// P1's Ogre carries two shield counters. Pack Onslaught's first source
@@ -1412,12 +1414,12 @@ fn gateway_express_pause_consumes_exactly_one_shield_counter() {
         .position(|c| !c.source_name.contains("Defang"))
         .expect("the other candidate must be the shield-counter prevention");
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the pause must park exactly one batch record"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -1455,7 +1457,7 @@ fn gateway_express_pause_consumes_exactly_one_shield_counter() {
         "both damage must be prevented (none dealt through)"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the pause record must be consumed by the completion cascade"
     );
 }
@@ -1514,7 +1516,7 @@ fn gateway_express_pause_survives_save_load() {
 
     // Save/load THROUGH the pause: the shield-prevented prefix must survive.
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "reach guard: the pause must park exactly one batch record"
     );
@@ -1536,12 +1538,12 @@ fn gateway_express_pause_survives_save_load() {
         runner.state().waiting_for
     );
     assert_eq!(
-        runner.state().pending_each_source_batches.len(),
+        runner.state().parked_batch_views().len(),
         1,
         "the parked batch record must survive authoritative restore"
     );
     assert_eq!(
-        runner.state().pending_each_source_batches[0]
+        runner.state().parked_batch_views()[0]
             .tally
             .iter()
             .map(|entry| entry.amount)
@@ -1584,7 +1586,7 @@ fn gateway_express_pause_survives_save_load() {
         "both damage must be prevented (none dealt through)"
     );
     assert!(
-        runner.state().pending_each_source_batches.is_empty(),
+        runner.state().parked_batch_views().is_empty(),
         "the pause record must be consumed by the completion cascade"
     );
 }

@@ -1,5 +1,6 @@
 use crate::database::legality::LegalityFormat;
 use crate::database::CardDatabase;
+use crate::game::effects::candidate_scalar_reads_spell_attr;
 use crate::game::effects::token::{
     materialize_token_ability_payload, TokenAbilityMaterialization, TokenAbilitySource,
 };
@@ -20,23 +21,24 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
     AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceAssignmentSide, ChoiceType,
-    CoinFlipResult, CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator,
-    ContinuousEffectOnset, ContinuousModification, ControllerRef, CountScope, CounterKindChooser,
-    CounterKindDomain, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
-    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, LibraryShuffleMode,
-    ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    CoinFlipResult, CoinFlipRun, CombatDamageScope, CombatHistoryScope, CommanderOwnership,
+    Comparator, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountScope,
+    CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
+    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
+    LibraryShuffleMode, ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity, PtStat,
     PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
     SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
@@ -58,7 +60,6 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
-use std::sync::LazyLock;
 use strum::IntoEnumIterator;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
@@ -643,8 +644,10 @@ pub struct CoverageSummary {
     pub supported_cards: usize,
     pub coverage_pct: f64,
     pub keyword_count: usize,
-    #[serde(default)]
-    pub token_coverage: TokenCoverageSummary,
+    /// `None` from [`analyze_coverage`]: the token catalog does not depend on the database, so
+    /// only the printed report computes it ([`analyze_token_coverage`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_coverage: Option<TokenCoverageSummary>,
     #[serde(default)]
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     /// Per-set coverage rollup. Each card counts toward every set it was
@@ -2061,17 +2064,30 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("filtered tracked set ({})", fmt_target(filter))
         }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
-        QuantityRef::LifeLostThisTurn { player } => {
-            format!("life lost this turn ({})", fmt_player_scope(player))
+        QuantityRef::LifeLost { player, window } => {
+            format!(
+                "life lost {} ({})",
+                fmt_turn_window(*window),
+                fmt_player_scope(player)
+            )
         }
         QuantityRef::EventContextAmount => "event amount".into(),
-        QuantityRef::SpellsCastThisTurn { scope, filter } => match filter {
+        QuantityRef::SpellsCast {
+            scope,
+            filter,
+            window,
+        } => match filter {
             Some(filter) => format!(
-                "{} spells cast this turn ({})",
+                "{} spells cast {} ({})",
                 fmt_target(filter),
+                fmt_turn_window(*window),
                 fmt_count_scope(scope)
             ),
-            None => format!("spells cast this turn ({})", fmt_count_scope(scope)),
+            None => format!(
+                "spells cast {} ({})",
+                fmt_turn_window(*window),
+                fmt_count_scope(scope)
+            ),
         },
         QuantityRef::SpellsCastBeforeTriggeringSpell { scope, filter } => match filter {
             Some(filter) => format!(
@@ -2187,7 +2203,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             format!("loyalty abilities activated this turn ({player:?})")
         }
-        QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
             (CountScope::Controller, None) => "spells you've cast this game".into(),
             (scope, None) => format!("spells cast this game ({scope:?})"),
@@ -2928,6 +2943,13 @@ fn fmt_characteristic_population_bounded(source: &CardTypeSetSource) -> String {
     parts.join(" and ")
 }
 
+fn fmt_turn_window(window: TurnWindow) -> &'static str {
+    match window {
+        TurnWindow::ThisTurn => "this turn",
+        TurnWindow::LastTurn => "last turn",
+    }
+}
+
 fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
@@ -2968,7 +2990,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::ApplyPostReplacementDamage { .. } | Effect::ResumeDamageBatch { .. } => {}
         Effect::EachDealsDamageEqualToPower {
             sources,
             recipient,
@@ -7337,18 +7359,8 @@ fn token_pt_provenance_has_no_materialization_gap(
     ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
 
-/// The token-catalog coverage summary, computed once per process.
-///
-/// Its only inputs are the compiled-in token catalog ([`known_token_presets`])
-/// and the pure Oracle parser, so the summary is a process-wide constant that
-/// does not depend on the `CardDatabase` being analyzed. Deriving it re-parses
-/// every catalog preset's rules text (~1.5k lines), which dominated each
-/// [`analyze_coverage`] call: ~20s per call in an unoptimized build against
-/// microseconds for a one-card database, so a test that analyzes N one-card
-/// databases paid the catalog parse N times.
-static TOKEN_COVERAGE: LazyLock<TokenCoverageSummary> = LazyLock::new(analyze_token_coverage);
-
-fn analyze_token_coverage() -> TokenCoverageSummary {
+/// Coverage of the compiled-in token catalog ([`known_token_presets`]); re-parses every preset's rules text.
+pub fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
     let mut gap_token_accumulators: BTreeMap<(String, String), (usize, usize, Vec<String>)> =
@@ -8007,7 +8019,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
-        token_coverage: TOKEN_COVERAGE.clone(),
+        token_coverage: None,
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -10463,6 +10475,52 @@ enum StructuralFeature {
     /// target cards from your graveyard into your library", Transcendent
     /// Dragon's ", then you may cast it without paying its mana cost".
     CounterExileRiderTailDropped,
+    /// CR 608.2d + CR 510.2: a damage replacement reachable by combat damage asks its player a
+    /// choice of its own: its "may" (Battletide Alchemist: "you may prevent X of that damage"),
+    /// or a choice its action or rider makes (Dralnu, Lich Lord: "sacrifice that many permanents
+    /// instead"; Channel Harm: "you may have Channel Harm deal that much damage to target
+    /// creature"). A combat damage leg asks these: its CR 616.1 order and "may"
+    /// (`CombatDamageReplacementStep::NeedsChoice`), and a prompt raised by the leg's own rider or
+    /// substitute (`CombatDamageReplacementStep::ContinuationPaused`). Two drains still settle a
+    /// rider's choices inside the combat batch, in the player's place
+    /// (`replacement::drain_combat_damage_rider` → `settle_combat_rider_pauses`): the aggregate
+    /// prevention-rider drain after combat damage (`combat_damage::fire_combat_prevention_riders`,
+    /// CR 615.5: Channel Harm's rider), and the drain of an earlier rider inside a leg, ahead of a
+    /// damage substitution (`replacement::stash_damage_substitute`).
+    ///
+    /// The marker classifies cards conservatively: it is emitted for every combat-reachable damage
+    /// replacement or prevention rider that asks a choice, whichever path runs it, so a card whose
+    /// choice is asked only at the leg (Dralnu's sacrifice, Battletide Alchemist's "may") may still
+    /// carry it. Narrowing it to the two in-batch drains is Command Zone #267. The card parses,
+    /// and outside combat the choice is asked, so nothing else in coverage can see it.
+    DamageReplacementChoiceUnaskedInCombat,
+    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement
+    /// `replacement::is_damage_substitution` selects: Phytohydra, Force Bubble, Nefarious Lich,
+    /// Soul-Scar Mage, Szadek, Lord of Secrets, Undead Alchemist) whose CR 616.1 choice is not
+    /// offered against protection. Protection prevents the damage at the pre-replacement gate,
+    /// before the substitution is offered ("Any damage that would be dealt by sources that have the
+    /// stated quality to a permanent or player with protection is prevented."), so the affected
+    /// player never chooses between them (CR 616.1e): Pyroclasm at a Silver Knight under an
+    /// opposing Soul-Scar Mage, or Szadek's combat damage to a player under Teferi's Protection.
+    /// The card parses. This fence records the missing order choice against protection, so nothing
+    /// else in coverage can see it.
+    DamageSubstitutionChoiceIncomplete,
+    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next 1 damage that would be
+    /// dealt to this creature this turn is dealt to target creature you control instead." —
+    /// Nomads en-Kor) sends its part to a recipient where protection from the source prevents it
+    /// at the pre-replacement gate, ahead of any other prevention shield there (Test of Faith),
+    /// so the recipient's controller is not offered the order CR 616.1 gives them. The card
+    /// parses, and with no competing shield on the recipient it works, so nothing else in
+    /// coverage can see it.
+    CappedRedirectRecipientChoiceIncomplete,
+    /// CR 615.7: several sources of one simultaneous damage instruction can deal damage to one
+    /// recipient (Allies at Last: "each deal damage equal to their power to target creature";
+    /// Rakdos Charm: "Each creature deals 1 damage to its controller"). A limited shield there
+    /// ("Prevent the next 4 damage") may be split among those sources, as the recipient's
+    /// controller chooses; the engine offers which source's damage the shield meets first and
+    /// spends it on that damage in full. The card parses, and with no limited shield on a shared
+    /// recipient it works, so nothing else in coverage can see it.
+    SharedShieldSplitUnoffered,
 }
 
 impl StructuralFeature {
@@ -10487,6 +10545,16 @@ impl StructuralFeature {
             }
             InertProtectionQualityGrant => "structural:inert_protection_quality_grant",
             CounterExileRiderTailDropped => "structural:counter_exile_rider_tail_dropped",
+            DamageReplacementChoiceUnaskedInCombat => {
+                "structural:damage_replacement_choice_unasked_in_combat"
+            }
+            DamageSubstitutionChoiceIncomplete => {
+                "structural:damage_substitution_choice_incomplete"
+            }
+            CappedRedirectRecipientChoiceIncomplete => {
+                "structural:capped_redirect_recipient_choice_incomplete"
+            }
+            SharedShieldSplitUnoffered => "structural:shared_shield_split_unoffered",
         }
     }
 
@@ -10516,7 +10584,449 @@ impl StructuralFeature {
             // `event_source_lift_referent_stops::transcendent_dragon_does_not_run_the_cast_coverage_reports_as_a_gap`
             // (Transcendent Dragon's cast is never offered).
             CounterExileRiderTailDropped => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `unpreventable_damage_prevention_effects`
+            // (`dralnus_sacrifice_choice_is_cleared_inside_the_batch`: nothing is sacrificed;
+            // `channel_harms_may_is_settled_after_the_batch`: the "may" is declined) and
+            // `damage_substitution_replacements::a_parked_may_gets_no_automatic_yes_in_combat`
+            // (Battletide Alchemist: the Ogre's 3 combat damage is neither dealt nor prevented).
+            DamageReplacementChoiceUnaskedInCombat => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `damage_substitution_replacements`
+            // (`protection_prevents_ahead_of_a_substitutions_choice`,
+            // `protection_prevents_ahead_of_soul_scar_mages_choice`,
+            // `protection_prevents_ahead_of_szadeks_choice`: the protected recipient's player is
+            // never asked, and no counters are put).
+            DamageSubstitutionChoiceIncomplete => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `unpreventable_damage_prevention_effects`
+            // (`a_capped_redirects_part_meets_protection_before_a_competing_shield`: the pro-red
+            // Silver Knight's protection prevents the redirected point and Test of Faith is never
+            // offered, so no counter is placed).
+            CappedRedirectRecipientChoiceIncomplete => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `damage_substitution_replacements`
+            // (`a_batch_keeps_a_shared_shield_for_the_players_choice`: Mending Hands meets the
+            // Hill Giant's or the Rumbling Baloth's damage in full, giving 3/20 or 0/23; the
+            // 2-and-2 split, 2/21, is never offered).
+            SharedShieldSplitUnoffered => FeatureSupport::Unhandled,
         }
+    }
+}
+
+/// Where a damage shield's rider gets its targets: CR 601.2c / CR 602.2b announce a prevention
+/// spell's or ability's targets with it (Channel Harm's "target creature", Acolyte's Reward's
+/// "any target"), and a printed replacement's action picks them when it runs.
+#[derive(Clone, Copy)]
+enum RiderTargets {
+    Announced,
+    AtResolution,
+}
+
+/// CR 120.2a + CR 510.2: can combat damage reach this shield? Combat damage is dealt as one
+/// simultaneous batch in the combat damage step, and a shield that watches every damage event
+/// meets it. A noncombat-only one (Purity, Stormwild Capridor) never does.
+fn damage_replacement_reaches_combat(repl: &ReplacementDefinition) -> bool {
+    matches!(
+        repl.event,
+        ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage
+    ) && !matches!(repl.combat_scope, Some(CombatDamageScope::NoncombatOnly))
+}
+
+/// [`StructuralFeature::DamageReplacementChoiceUnaskedInCombat`] for a damage replacement: its
+/// own "may", or a choice in its action.
+fn damage_replacement_asks_a_choice_in_combat(repl: &ReplacementDefinition) -> bool {
+    damage_replacement_reaches_combat(repl)
+        && (!matches!(repl.mode, ReplacementMode::Mandatory)
+            || repl.execute.as_deref().is_some_and(|action| {
+                damage_rider_asks_a_choice(action, RiderTargets::AtResolution)
+            }))
+}
+
+/// [`StructuralFeature::DamageReplacementChoiceUnaskedInCombat`] for a prevention effect whose
+/// rider is its `ContinuationStep` sub (`effects::prevent_damage` installs exactly that sub).
+/// CR 615.5: every `PreventionScope` includes combat damage, so the rider always meets the
+/// combat batch.
+fn prevention_rider_asks_a_choice_in_combat(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::PreventDamage { .. })
+        && def
+            .sub_ability
+            .as_deref()
+            .filter(|rider| rider.sub_link == SubAbilityLink::ContinuationStep)
+            .is_some_and(|rider| damage_rider_asks_a_choice(rider, RiderTargets::Announced))
+}
+
+/// CR 608.2d: does any instruction of this rider ask its player a choice? A target the rider
+/// announced with its spell is already chosen; a population a sacrifice or zone change picks from
+/// (Dralnu's "that many permanents", Nefarious Lich's "that many cards from your graveyard") and a
+/// target a printed replacement's action picks as it runs are chosen when the rider runs, and so
+/// is an "up to" count (`resolution_prompt::quantity_offers_up_to_choice`).
+fn damage_rider_asks_a_choice(rider: &AbilityDefinition, targets: RiderTargets) -> bool {
+    rider.optional
+        || damage_rider_effect_asks_a_choice(&rider.effect, targets)
+        || [rider.sub_ability.as_deref(), rider.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|next| damage_rider_asks_a_choice(next, targets))
+}
+
+/// [`damage_rider_asks_a_choice`] for one instruction. Exhaustive over `Effect` with no wildcard,
+/// like `resolution_prompt::effect_offers_choice`: a new effect fails to compile until it is
+/// classified, and every effect outside the shapes the printed riders use asks a choice (fail
+/// closed). The classified arms destructure every field, so a new field forces a re-audit.
+fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> bool {
+    use crate::game::resolution_prompt::{effect_offers_choice, quantity_offers_up_to_choice};
+    let picks_a_population = |filter: &TargetFilter| !filter.is_context_ref();
+    let picks_a_target = |filter: &TargetFilter| match targets {
+        RiderTargets::Announced => false,
+        RiderTargets::AtResolution => picks_a_population(filter),
+    };
+    match effect {
+        // CR 701.21a + CR 608.2d: the player picks what to sacrifice or move from a population.
+        Effect::Sacrifice {
+            target,
+            count,
+            min_count: _,
+        } => picks_a_population(target) || quantity_offers_up_to_choice(count),
+        Effect::ChangeZone {
+            origin: _,
+            destination: _,
+            target,
+            owner_library: _,
+            enter_transformed: _,
+            enters_under: _,
+            enter_tapped: _,
+            enters_attacking: _,
+            up_to,
+            enter_with_counters: _,
+            conditional_enter_with_counters: _,
+            face_down_profile: _,
+            enters_modified_if: _,
+            library_shuffle: _,
+            actor: _,
+        } => *up_to || picks_a_population(target),
+        // CR 608.2c + CR 701.24a: "that creature's owner shuffles it into their library"
+        // (Weeping Angel) moves the bound object and shuffles; it picks nothing unless its object
+        // is a population. Any other mass move fails closed.
+        Effect::ChangeZoneAll {
+            origin: _,
+            destination: _,
+            target,
+            enters_under: _,
+            enter_tapped: _,
+            enters_attacking: _,
+            enter_with_counters: _,
+            face_down_profile: _,
+            library_position: _,
+            library_shuffle: _,
+            random_order: _,
+            actor: _,
+        } => {
+            !crate::game::effects::is_selected_object_library_move(effect)
+                || picks_a_population(target)
+        }
+        // CR 115.1 + CR 608.2b: the move's declaration node names the same bound object.
+        Effect::TargetOnly { target } => picks_a_target(target),
+        // `effect_offers_choice` already answers the count half of these: its "up to" guard.
+        Effect::GainLife { amount: _, player } => {
+            picks_a_target(player) || effect_offers_choice(effect)
+        }
+        Effect::LoseLife { amount: _, target } => {
+            target.as_ref().is_some_and(picks_a_target) || effect_offers_choice(effect)
+        }
+        Effect::Draw { count: _, target } => picks_a_target(target) || effect_offers_choice(effect),
+        Effect::DealDamage {
+            amount: _,
+            target,
+            damage_source: _,
+            excess: _,
+        } => picks_a_target(target) || effect_offers_choice(effect),
+        Effect::PutCounter {
+            counter_type: _,
+            count: _,
+            target,
+        } => picks_a_target(target) || effect_offers_choice(effect),
+        Effect::Token {
+            name: _,
+            power: _,
+            toughness: _,
+            types: _,
+            colors: _,
+            keywords: _,
+            tapped: _,
+            count: _,
+            owner,
+            attach_to,
+            enters_attacking: _,
+            attack_destination: _,
+            supertypes: _,
+            static_abilities: _,
+            enter_with_counters: _,
+        } => {
+            picks_a_target(owner)
+                || attach_to.as_ref().is_some_and(picks_a_target)
+                || effect_offers_choice(effect)
+        }
+        Effect::Mill {
+            count,
+            target,
+            destination: _,
+            position: _,
+        } => picks_a_target(target) || quantity_offers_up_to_choice(count),
+        Effect::ExileTop {
+            player,
+            count,
+            position: _,
+            face_down: _,
+            actor: _,
+        } => picks_a_target(player) || quantity_offers_up_to_choice(count),
+        Effect::RemoveCounter {
+            counter_type: _,
+            count,
+            target,
+            scope: _,
+        } => picks_a_target(target) || quantity_offers_up_to_choice(count),
+        Effect::PreventDamage {
+            amount: _,
+            amount_dynamic,
+            target,
+            recipient_scope: _,
+            scope: _,
+            damage_source_filter: _,
+            prevention_duration: _,
+        } => {
+            picks_a_target(target)
+                || amount_dynamic
+                    .as_ref()
+                    .is_some_and(quantity_offers_up_to_choice)
+        }
+        Effect::RemoveAllDamage { target } | Effect::Shuffle { target } => picks_a_target(target),
+        Effect::SetTapState {
+            target,
+            scope: _,
+            state: _,
+        } => picks_a_target(target),
+        Effect::LoseTheGame { target } => target.as_ref().is_some_and(picks_a_target),
+        // Every other instruction: fail closed, it asks until classified above.
+        Effect::NoteManaSpent
+        | Effect::CompletePlayerAction { .. }
+        | Effect::NoteNumber { .. }
+        | Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch { .. }
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Discard { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::Choose { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RollDie { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::AbandonScheme
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
+        | Effect::ReverseTurnOrder
+        | Effect::ChooseOneOf { .. }
+        | Effect::Unimplemented { .. } => true,
     }
 }
 
@@ -10537,6 +11047,7 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
         extract_trigger_features(trig, features, TokenStaticTraversal::Include);
     }
     for repl in &face.replacements {
+        extract_damage_replacement_choice_feature(repl, features);
         visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
             extract_ability_features_with_token_statics(payload, features, token_static_traversal);
         });
@@ -10865,6 +11376,41 @@ fn extract_ability_features_with_token_statics(
     if counter_exile_rider_drops_its_tail(def) {
         emit_structural(features, StructuralFeature::CounterExileRiderTailDropped);
     }
+    // CR 615.7: several sources of one instruction can hit one shielded recipient.
+    if matches!(
+        &*def.effect,
+        Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::DealDamage {
+                damage_source: Some(crate::types::ability::DamageSource::EachTarget),
+                ..
+            }
+    ) {
+        emit_structural(features, StructuralFeature::SharedShieldSplitUnoffered);
+    }
+    // CR 614.9: a shield that redirects only the next N damage.
+    if matches!(
+        &*def.effect,
+        Effect::CreateDamageReplacement {
+            redirect_to: Some(_),
+            redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
+            ..
+        }
+    ) {
+        emit_structural(
+            features,
+            StructuralFeature::CappedRedirectRecipientChoiceIncomplete,
+        );
+    }
+    if prevention_rider_asks_a_choice_in_combat(def) {
+        emit_structural(
+            features,
+            StructuralFeature::DamageReplacementChoiceUnaskedInCombat,
+        );
+    }
+    if let Effect::AddTargetReplacement { replacement, .. } = &*def.effect {
+        extract_damage_replacement_choice_feature(replacement, features);
+    }
 
     // Condition
     if let Some(ref cond) = def.condition {
@@ -10997,6 +11543,7 @@ fn extract_modification_features(
             extract_trigger_features(trigger, features, token_static_traversal);
         }
         ContinuousModification::GrantReplacement { replacement } => {
+            extract_damage_replacement_choice_feature(replacement, features);
             visit_replacement_ability_payloads(replacement, |payload_traversal, payload| {
                 extract_ability_features_with_token_statics(payload, features, payload_traversal);
             });
@@ -11005,6 +11552,26 @@ fn extract_modification_features(
             extract_static_features(definition, features, token_static_traversal);
         }
         _ => {}
+    }
+}
+
+fn extract_damage_replacement_choice_feature(
+    repl: &ReplacementDefinition,
+    features: &mut HashMap<String, FeatureSupport>,
+) {
+    if damage_replacement_asks_a_choice_in_combat(repl) {
+        emit_structural(
+            features,
+            StructuralFeature::DamageReplacementChoiceUnaskedInCombat,
+        );
+    }
+    // CR 614.1a: the runtime's own substitution predicate, so the fence and the engine select
+    // the same class.
+    if crate::game::replacement::is_damage_substitution(repl) {
+        emit_structural(
+            features,
+            StructuralFeature::DamageSubstitutionChoiceIncomplete,
+        );
     }
 }
 
@@ -11299,6 +11866,22 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
                 ResolverFeatureFamily::QuantityRef.key(name),
                 support,
             );
+            // The per-candidate attr nested in `PlayerCount { PlayerAttribute }` is read
+            // by `effects::candidate_player_scalar`, not by `resolve_quantity`, and is
+            // invisible to the outer-ref classification above. Record its support under
+            // the same `PlayerCount` key (`record_feature` merges, `Unhandled` winning),
+            // so an attr the per-candidate reader fails closed on cannot be advertised
+            // as supported. No new published feature key.
+            if let QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute { attr, .. },
+            } = qref
+            {
+                record_feature(
+                    features,
+                    ResolverFeatureFamily::QuantityRef.key("PlayerCount"),
+                    window_attr_support(attr),
+                );
+            }
         }
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -11320,6 +11903,129 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
     }
 }
 
+/// Coverage for the windowed history families read by
+/// `effects::candidate_player_scalar`. Both life-loss windows are readable.
+/// A this-turn spell attr or a filtered last-turn spell attr fails closed in
+/// that reader and must remain `Unhandled`. Other attrs are unchanged.
+fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
+    use FeatureSupport::*;
+    match attr {
+        QuantityRef::SpellsCast {
+            scope: _,
+            filter: _,
+            window: _,
+        } if !candidate_scalar_reads_spell_attr(attr) => Unhandled,
+        QuantityRef::SpellsCast {
+            scope: _,
+            filter: _,
+            window: _,
+        }
+        | QuantityRef::LifeLost {
+            player: _,
+            window: TurnWindow::ThisTurn | TurnWindow::LastTurn,
+        } => Handled,
+        // Every other ref is `Handled` here (their classification is unchanged),
+        // enumerated so a new `QuantityRef` variant must be classified at this
+        // support boundary instead of inheriting `Handled`.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::ObjectCount { .. }
+        | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. }
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::PropertyAggregate(..)
+        | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::SharedCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::DistinctColorsAmong { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::VoteCount { .. } => Handled,
+    }
+}
+
 /// Extract QuantityRef variants from effect parameters (DealDamage amount, etc.).
 fn extract_effect_quantity_features(
     effect: &Effect,
@@ -11327,7 +12033,7 @@ fn extract_effect_quantity_features(
 ) {
     match effect {
         Effect::DealDamage { amount, .. } => extract_quantity_features(amount, features),
-        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::ApplyPostReplacementDamage { .. } | Effect::ResumeDamageBatch { .. } => {}
         Effect::Draw { count, .. } => extract_quantity_features(count, features),
         Effect::Mill { count, .. } => extract_quantity_features(count, features),
         Effect::GainLife { amount, .. } => extract_quantity_features(amount, features),
@@ -11800,9 +12506,33 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
-        QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
+        QuantityRef::LifeLost {
+            player: _,
+            window: TurnWindow::ThisTurn,
+        } => ("LifeLostThisTurn", Handled),
+        QuantityRef::LifeLost {
+            player: _,
+            window: TurnWindow::LastTurn,
+        } => ("LifeLostLastTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
-        QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
+        QuantityRef::SpellsCast {
+            window: TurnWindow::ThisTurn,
+            ..
+        } => ("SpellsCastThisTurn", Handled),
+        // CR 601.2i + CR 603.4: the per-player snapshot latched at the turn boundary
+        // (`turns::begin_next_turn`) answers an unfiltered last-turn count, table-wide
+        // ('no spells were cast last turn', 'two or more spells were cast last turn')
+        // or per player ('a player cast N or more spells last turn', read per
+        // candidate by `effects::candidate_player_scalar`). No per-spell data survives
+        // the boundary, so a filtered last-turn count has no reader and is unsupported.
+        QuantityRef::SpellsCast {
+            filter,
+            window: TurnWindow::LastTurn,
+            ..
+        } => (
+            "SpellsCastLastTurn",
+            if filter.is_none() { Handled } else { Unhandled },
+        ),
         QuantityRef::SpellsCastBeforeTriggeringSpell { .. } => {
             ("SpellsCastBeforeTriggeringSpell", Handled)
         }
@@ -11862,12 +12592,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
             ("LoyaltyAbilitiesActivatedThisTurn", Handled)
         }
-        // CR 601.2i: the table-wide count of spells that became cast during the previous turn
-        // (`turns::start_next_turn`'s snapshot). Only table-wide guards ('no spells were cast
-        // last turn', 'two or more spells were cast last turn') lower to it. The per-player
-        // 'a player cast N or more spells last turn' is declined by the condition parser and
-        // fails closed as an `unparsed_condition` gap, so those faces never reach this arm.
-        QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Handled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),
         QuantityRef::CardsDiscardedThisTurn { .. } => ("CardsDiscardedThisTurn", Handled),
@@ -11958,7 +12682,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         // `speed_effects::players_for_filter`.
         PlayerFilter::TargetPlayer => ("TargetPlayer", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
-        PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
+        PlayerFilter::PlayerAttribute { attr, .. } => {
+            ("PlayerAttribute", window_attr_support(attr))
+        }
         // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
         // via both `resolve_player_count` and `matches_player_scope`.
         PlayerFilter::TrackedSetPossessor { .. } => ("TrackedSetPossessor", Handled),
@@ -16301,6 +17027,542 @@ mod tests {
         }
     }
 
+    /// (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types)
+    type DamageSubstitutionCase = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+
+    const DAMAGE_SUBSTITUTION_TAG: &str = "structural:damage_substitution_choice_incomplete";
+
+    /// CR 614.1a + CR 616.1 + CR 702.16e: the protection fence keys on the runtime's substitution
+    /// predicate (`replacement::is_damage_substitution`), so it covers the class uniformly:
+    /// Soul-Scar Mage, Szadek and Undead Alchemist, whose substitution the fence is the only gap
+    /// of, and the "If damage would be dealt to …, … instead" lines (Phytohydra, Force Bubble,
+    /// Nefarious Lich). A prevention shield (Test of Faith, Phantom Centaur) and an amount
+    /// modification (Furnace of Rath) are not substitutions and are not fenced.
+    #[test]
+    fn a_damage_substitution_is_a_coverage_gap() {
+        let fenced_alone: [DamageSubstitutionCase; 3] = [
+            (
+                "Soul-Scar Mage",
+                "Prowess\nIf a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
+                &["Prowess"],
+                &["Creature"],
+            ),
+            (
+                "Szadek, Lord of Secrets",
+                "Flying\nIf Szadek would deal combat damage to a player, instead put that many +1/+1 counters on Szadek and that player mills that many cards.",
+                &["Flying"],
+                &["Creature"],
+            ),
+            (
+                "Undead Alchemist",
+                "If a Zombie you control would deal combat damage to a player, instead that player mills that many cards.\nWhenever a creature card is put into an opponent's graveyard from their library, exile that card and create a 2/2 black Zombie creature token.",
+                &[],
+                &["Creature"],
+            ),
+        ];
+        for (name, oracle, keywords, types) in fenced_alone {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(DAMAGE_SUBSTITUTION_TAG),
+                Some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+            assert_eq!(
+                card_face_gaps(&face),
+                vec![format!("ResolverFeature:{DAMAGE_SUBSTITUTION_TAG}")],
+                "{name}: the fence is the face's only gap"
+            );
+        }
+
+        let fenced: [DamageSubstitutionCase; 3] = [
+            (
+                "Phytohydra",
+                "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+                &[],
+                &["Creature"],
+            ),
+            (
+                "Force Bubble",
+                "If damage would be dealt to you, put that many depletion counters on this enchantment instead.\nWhen there are four or more depletion counters on this enchantment, sacrifice it.\nAt the beginning of each end step, remove all depletion counters from this enchantment.",
+                &[],
+                &["Enchantment"],
+            ),
+            (
+                "Nefarious Lich",
+                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.",
+                &[],
+                &["Enchantment"],
+            ),
+        ];
+        for (name, oracle, keywords, types) in fenced {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(DAMAGE_SUBSTITUTION_TAG),
+                Some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+        }
+
+        let unfenced: [DamageSubstitutionCase; 3] = [
+            (
+                "Test of Faith",
+                "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+                &[],
+                &["Instant"],
+            ),
+            (
+                "Furnace of Rath",
+                "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
+                &[],
+                &["Enchantment"],
+            ),
+            (
+                "Phantom Centaur",
+                "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+                &["Protection"],
+                &["Creature"],
+            ),
+        ];
+        for (name, oracle, keywords, types) in unfenced {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            assert!(
+                !face.abilities.is_empty()
+                    || face
+                        .replacements
+                        .iter()
+                        .any(|repl| repl.event == ReplacementEvent::DamageDone),
+                "{name}: reach guard — the damage line parses"
+            );
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
+        }
+    }
+
+    /// CR 614.1a: Oozeavite and Underdark Beholder are damage substitutions their parse does not
+    /// lower to a replacement, so each stays unsupported through its damage clause, and the
+    /// substitution predicate never selects them (an unparsed line is unimplemented).
+    #[test]
+    fn an_unlowered_damage_substitution_stays_unsupported() {
+        // (name, verbatim Oracle text, the damage clause, its gap's handler)
+        let cases: [(&str, &str, &str, &str); 2] = [
+            (
+                "Oozeavite",
+                "Oozeavite enters with each of a vigilance, reach, trample, and hexproof counter on it. These are also +1/+1 counters.\nIf Oozeavite would be dealt damage, instead create a 0/0 green Ooze creature token and move a counter from Oozeavite onto it. Then if Oozeavite has no counters on it, sacrifice it.\n{3}{G}, {T}: Move any number of counters from other creatures you control onto Oozeavite.",
+                "would be dealt damage, instead create a 0/0 green Ooze creature token",
+                "Effect:static_structure",
+            ),
+            (
+                "Underdark Beholder",
+                "Underdark Beholder enters the battlefield with ten eyestalk counters on it.\nIf Underdark Beholder would be dealt damage, remove that many eyestalk counters from it instead. If you can't, sacrifice it.\nWhenever Underdark Beholder attacks, reveal cards from the top of your library until you reveal an instant, sorcery, or enchantment card with converted mana cost less than the number of eyestalk counters on Underdark Beholder. You may cast it without paying its mana cost. Shuffle your library.",
+                "would be dealt damage, remove that many eyestalk counters from it instead",
+                "Effect:replacement_structure",
+            ),
+        ];
+        for (name, oracle, clause, handler) in cases {
+            let face = counter_rider_face(name, oracle, &[], &["Creature"]);
+            let coverage = card_face_coverage(&face);
+            assert!(
+                coverage.gaps.iter().any(|gap| gap.handler == handler
+                    && gap
+                        .source_text
+                        .as_deref()
+                        .is_some_and(|text| text.contains(clause))),
+                "{name}: the damage clause is a `{handler}` gap: {:?}",
+                coverage.gaps
+            );
+            assert!(
+                !face
+                    .replacements
+                    .iter()
+                    .any(crate::game::replacement::is_damage_substitution),
+                "{name}: no replacement is a damage substitution"
+            );
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
+            assert!(!coverage.is_supported(), "{name}");
+        }
+    }
+
+    /// CR 608.2d: the rider classifier's building block. A player or object the rider picks as it
+    /// runs is a choice only for a printed replacement's action (`AtResolution`); a prevention
+    /// spell announced its targets with it (`Announced`, CR 601.2c). A population a sacrifice picks
+    /// from and an "up to" count are choices either way, and an unclassified instruction asks
+    /// (fail closed).
+    #[test]
+    fn a_damage_riders_instruction_asks_for_a_picked_player_an_up_to_count_or_a_population() {
+        use RiderTargets::{Announced, AtResolution};
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let up_to = |value| QuantityExpr::UpTo {
+            max: Box::new(QuantityExpr::Fixed { value }),
+        };
+        let cases: [(&str, Effect, bool, bool); 12] = [
+            (
+                "you gain",
+                Effect::GainLife {
+                    amount: fixed(2),
+                    player: TargetFilter::Controller,
+                },
+                false,
+                false,
+            ),
+            (
+                "target player gains",
+                Effect::GainLife {
+                    amount: fixed(2),
+                    player: TargetFilter::Player,
+                },
+                false,
+                true,
+            ),
+            (
+                "target player loses",
+                Effect::LoseLife {
+                    amount: fixed(2),
+                    target: Some(TargetFilter::Player),
+                },
+                false,
+                true,
+            ),
+            (
+                "you draw",
+                Effect::Draw {
+                    count: fixed(2),
+                    target: TargetFilter::Controller,
+                },
+                false,
+                false,
+            ),
+            (
+                "target player draws",
+                Effect::Draw {
+                    count: fixed(2),
+                    target: TargetFilter::Player,
+                },
+                false,
+                true,
+            ),
+            (
+                "you draw up to two",
+                Effect::Draw {
+                    count: up_to(2),
+                    target: TargetFilter::Controller,
+                },
+                true,
+                true,
+            ),
+            (
+                "target player mills",
+                Effect::Mill {
+                    count: fixed(2),
+                    target: TargetFilter::Player,
+                    destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
+                },
+                false,
+                true,
+            ),
+            (
+                "deals up to 2 damage",
+                Effect::DealDamage {
+                    amount: up_to(2),
+                    target: TargetFilter::SelfRef,
+                    damage_source: None,
+                    excess: None,
+                },
+                true,
+                true,
+            ),
+            (
+                "target player loses the game",
+                Effect::LoseTheGame {
+                    target: Some(TargetFilter::Player),
+                },
+                false,
+                true,
+            ),
+            (
+                "sacrifice it",
+                Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: fixed(1),
+                    min_count: 0,
+                },
+                false,
+                false,
+            ),
+            (
+                "sacrifice a permanent",
+                Effect::Sacrifice {
+                    target: TargetFilter::Any,
+                    count: fixed(1),
+                    min_count: 0,
+                },
+                true,
+                true,
+            ),
+            (
+                "an unclassified instruction",
+                Effect::Destroy {
+                    target: TargetFilter::SelfRef,
+                    cant_regenerate: false,
+                },
+                true,
+                true,
+            ),
+        ];
+        for (name, effect, announced, at_resolution) in cases {
+            assert_eq!(
+                (
+                    damage_rider_effect_asks_a_choice(&effect, Announced),
+                    damage_rider_effect_asks_a_choice(&effect, AtResolution),
+                ),
+                (announced, at_resolution),
+                "{name}"
+            );
+        }
+    }
+
+    /// CR 608.2d + CR 510.2: a combat-reachable damage replacement that asks its player a choice
+    /// combat can't ask (Command Zone #140) is a resolver gap. Battletide Alchemist's own "may",
+    /// Dralnu's population sacrifice and Channel Harm's "may" carry the tag. Riders that ask
+    /// nothing don't: Phytohydra and Ironscale Hydra (counters on themselves), Test of Faith
+    /// (counters on its announced target), Acolyte's Reward (damage to its announced "any
+    /// target"), Swans of Bryn Argoll (the source's controller draws), Weeping Angel (the creature
+    /// it would damage is shuffled into its owner's library) and Wolverine, Fierce Fighter (its
+    /// other damage is healed). Purity's shield is noncombat-only, so combat never meets it.
+    /// CR 615.7: a damage instruction whose several sources can hit one recipient (Allies at
+    /// Last, Coordinated Clobbering's "They each deal damage", Rakdos Charm's third mode) is fenced as `shared_shield_split_unoffered`; a fight,
+    /// whose two sources each hit the other (Pit Fight), is not.
+    #[test]
+    fn a_shared_recipient_damage_instruction_is_a_coverage_gap() {
+        const TAG: &str = "structural:shared_shield_split_unoffered";
+        type Case = (&'static str, &'static str, &'static [&'static str], bool);
+        let cards: [Case; 4] = [
+            (
+                "Coordinated Clobbering",
+                "Tap one or two target untapped creatures you control. They each deal damage equal to their power to target creature an opponent controls.",
+                &["Sorcery"],
+                true,
+            ),
+            (
+                "Allies at Last",
+                "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)\nUp to two target creatures you control each deal damage equal to their power to target creature an opponent controls.",
+                &["Instant"],
+                true,
+            ),
+            (
+                "Rakdos Charm",
+                "Choose one —\n• Exile target player's graveyard.\n• Destroy target artifact.\n• Each creature deals 1 damage to its controller.",
+                &["Instant"],
+                true,
+            ),
+            (
+                "Pit Fight",
+                "Target creature you control fights another target creature. (Each deals damage equal to its power to the other.)",
+                &["Instant"],
+                false,
+            ),
+        ];
+        for (name, oracle, types, fenced) in cards {
+            let face = counter_rider_face(name, oracle, &[], types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(TAG),
+                fenced.then_some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+        }
+    }
+
+    /// CR 614.9 + CR 616.1: a capped redirect ("The next N damage ... is dealt to ... instead")
+    /// is fenced as `capped_redirect_recipient_choice_incomplete`, as an activated ability
+    /// (Nomads en-Kor), a spell (Harm's Way) and a granted ability (Martyrdom). An uncapped
+    /// redirect (Pariah: "All damage that would be dealt to you is dealt to enchanted creature
+    /// instead.") is not.
+    #[test]
+    fn a_capped_redirect_is_a_coverage_gap() {
+        const TAG: &str = "structural:capped_redirect_recipient_choice_incomplete";
+        type Case = (
+            &'static str,
+            &'static str,
+            &'static [&'static str],
+            &'static [&'static str],
+            bool,
+        );
+        let cards: [Case; 4] = [
+            (
+                "Nomads en-Kor",
+                "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.",
+                &[],
+                &["Creature"],
+                true,
+            ),
+            (
+                "Harm's Way",
+                "The next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead.",
+                &[],
+                &["Instant"],
+                true,
+            ),
+            (
+                "Martyrdom",
+                "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.",
+                &[],
+                &["Instant"],
+                true,
+            ),
+            (
+                "Pariah",
+                "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.",
+                &["Enchant"],
+                &["Enchantment"],
+                false,
+            ),
+        ];
+        for (name, oracle, keywords, types, fenced) in cards {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(TAG),
+                fenced.then_some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_damage_replacement_choice_combat_cant_ask_is_a_coverage_gap() {
+        const TAG: &str = "structural:damage_replacement_choice_unasked_in_combat";
+        type Case = (
+            &'static str,
+            &'static str,
+            &'static [&'static str],
+            &'static [&'static str],
+            bool,
+        );
+        let cards: [Case; 11] = [
+            (
+                "Battletide Alchemist",
+                "If a source would deal damage to a player, you may prevent X of that damage, where X is the number of Clerics you control.",
+                &[],
+                &["Creature"],
+                true,
+            ),
+            (
+                "Dralnu, Lich Lord",
+                "If damage would be dealt to Dralnu, sacrifice that many permanents instead.\n{T}: Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)",
+                &[],
+                &["Creature"],
+                true,
+            ),
+            (
+                "Channel Harm",
+                "Prevent all damage that would be dealt to you and permanents you control this turn by sources you don't control. If damage is prevented this way, you may have Channel Harm deal that much damage to target creature.",
+                &[],
+                &["Instant"],
+                true,
+            ),
+            (
+                "Phytohydra",
+                "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+                &[],
+                &["Creature"],
+                false,
+            ),
+            (
+                "Ironscale Hydra",
+                "If a creature would deal combat damage to this creature, prevent that damage and put a +1/+1 counter on this creature.",
+                &[],
+                &["Creature"],
+                false,
+            ),
+            (
+                "Test of Faith",
+                "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
+                &[],
+                &["Instant"],
+                false,
+            ),
+            (
+                "Acolyte's Reward",
+                "Prevent the next X damage that would be dealt to target creature this turn, where X is your devotion to white. If damage is prevented this way, Acolyte's Reward deals that much damage to any target. (Each {W} in the mana costs of permanents you control counts toward your devotion to white.)",
+                &[],
+                &["Instant"],
+                false,
+            ),
+            (
+                "Swans of Bryn Argoll",
+                "Flying\nIf a source would deal damage to this creature, prevent that damage. The source's controller draws cards equal to the damage prevented this way.",
+                &["Flying"],
+                &["Creature"],
+                false,
+            ),
+            (
+                "Weeping Angel",
+                "Flash\nFirst strike, vigilance\nWhenever an opponent casts a creature spell, this creature isn't a creature until end of turn.\nIf this creature would deal combat damage to a creature, prevent that damage and that creature's owner shuffles it into their library.",
+                &["Flash", "First strike", "Vigilance"],
+                &["Creature"],
+                false,
+            ),
+            (
+                "Wolverine, Fierce Fighter",
+                "Haste\nWhen Wolverine enters, he fights up to one other target creature.\nIf damage would be dealt to Wolverine, instead that damage is dealt, but all other damage already dealt to him is healed.",
+                &["Haste"],
+                &["Creature"],
+                false,
+            ),
+            (
+                "Purity",
+                "Flying\nIf noncombat damage would be dealt to you, prevent that damage. You gain life equal to the damage prevented this way.\nWhen Purity is put into a graveyard from anywhere, shuffle it into its owner's library.",
+                &["Flying"],
+                &["Creature"],
+                false,
+            ),
+        ];
+        for (name, oracle, keywords, types, asks) in cards {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            // Reach guard: the parse holds the shape the predicate classifies: a damage
+            // replacement with an action (or its own "may"), or a prevention effect whose rider
+            // is its `ContinuationStep` sub.
+            let shield = face.replacements.iter().any(|repl| {
+                matches!(
+                    repl.event,
+                    ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage
+                ) && (repl.execute.is_some() || !matches!(repl.mode, ReplacementMode::Mandatory))
+            }) || face.abilities.iter().any(|def| {
+                matches!(&*def.effect, Effect::PreventDamage { .. })
+                    && def
+                        .sub_ability
+                        .as_deref()
+                        .is_some_and(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
+            });
+            assert!(
+                shield,
+                "{name}: reach guard — the parse holds its damage shield"
+            );
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.get(TAG),
+                asks.then_some(&FeatureSupport::Unhandled),
+                "{name}"
+            );
+        }
+    }
+
     /// CR 608.2c + CR 614.1a: the card-level verdict. Transcendent Dragon's
     /// "exile it instead" is represented (the rider), so it reports no swallowed
     /// clause; its ", then you may cast it without paying its mana cost" is a
@@ -18938,6 +20200,7 @@ mod tests {
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
         }));
+        assert_eq!(analyze_token_coverage(), summary);
     }
 
     #[test]
@@ -22285,6 +23548,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let db = CardDatabase::from_json_str(&export).expect("test export should deserialize");
         let summary = analyze_coverage(&db);
 
+        assert!(summary.token_coverage.is_none());
         assert_eq!(
             summary.coverage_by_set.get("SET_A"),
             Some(&SetCoverageSummary {
@@ -24156,7 +25420,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
-    /// V10. D4.4: `game/quantity.rs` resolves `SpellsCastLastTurn` and
+    /// V10. D4.4: `game/quantity.rs` resolves `SpellsCast { window: LastTurn }` and
     /// `DescendedThisTurn` (runtime proofs in `triggers::tests`), so the newly
     /// walked werewolf and descend intervening-ifs stay supported.
     /// REVERT-PROBE: classify either arm `Unhandled` → that card goes red.
@@ -24170,7 +25434,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     &["Intimidate", "Transform"],
                     &["Creature"],
                 ),
-                QuantityRef::SpellsCastLastTurn,
+                QuantityRef::SpellsCast {
+                    scope: CountScope::All,
+                    filter: None,
+                    window: TurnWindow::LastTurn,
+                },
             ),
             (
                 counter_rider_face(
@@ -24209,42 +25477,63 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
     }
 
-    /// CR 603.4: Gatstaf Howler's per-player "a player cast two or more spells
-    /// last turn" guard is not expressible by the table-wide
-    /// `SpellsCastLastTurn` count, so the face must be an honest unsupported
-    /// gap through production `analyze_coverage` — never a supported upkeep
-    /// transform with the guard dropped. Gatstaf Shepherd's table-wide "no
-    /// spells" face (the same card's other side) stays supported.
-    /// REVERT-PROBE: restore the per-player arm in `parse_spells_cast_last_turn`
-    /// → Howler hoists `SpellsCastLastTurn >= 2` and reports supported.
-    #[test]
-    fn per_player_spells_cast_last_turn_face_is_unsupported() {
-        const GATSTAF_HOWLER_ORACLE: &str = "Intimidate (This creature can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nAt the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.";
-        let howler = counter_rider_face(
+    const GATSTAF_HOWLER_ORACLE: &str = "Intimidate (This creature can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nAt the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.";
+
+    fn gatstaf_howler_face() -> CardFace {
+        counter_rider_face(
             "Gatstaf Howler",
             GATSTAF_HOWLER_ORACLE,
             &["Intimidate", "Transform"],
             &["Creature"],
-        );
-        // Reach guard: the upkeep trigger itself parsed (the face is not red
-        // merely because the line was dropped), with no hoisted condition.
+        )
+    }
+
+    /// `PlayerCount { PlayerAttribute { All, attr, GE 2 } } >= 1`, the shape the
+    /// per-player existential lowers to.
+    fn existential_over_attr(attr: QuantityRef) -> TriggerCondition {
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(attr),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Fixed { value: 2 }),
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// CR 603.4 + CR 601.2i: Gatstaf Howler's per-player "a player cast two or
+    /// more spells last turn" guard lowers to the existential over per-player
+    /// last-turn snapshots, which `effects::candidate_player_scalar` reads, so
+    /// the face is supported through production `analyze_coverage` with the
+    /// guard intact. Gatstaf Shepherd's table-wide "no spells" face (the same
+    /// card's other side) stays supported.
+    /// REVERT-PROBE: lower the guard to the table-wide count and the whole
+    /// condition assertion flips (W2 in `werewolf_last_turn_spells` is the
+    /// runtime counterpart).
+    #[test]
+    fn per_player_spells_cast_last_turn_face_is_supported() {
+        let howler = gatstaf_howler_face();
+        // Reach guard: the upkeep trigger parsed with the guard as its condition.
         assert_eq!(howler.triggers.len(), 1, "{:?}", howler.triggers);
         assert_eq!(howler.triggers[0].phase, Some(Phase::Upkeep));
-        let condition = howler.triggers[0].condition.clone();
+        assert_eq!(
+            howler.triggers[0].condition,
+            Some(existential_over_attr(QuantityRef::SpellsCast {
+                scope: CountScope::ScopedPlayer,
+                filter: None,
+                window: TurnWindow::LastTurn,
+            }))
+        );
         let result = coverage_result_for_face(howler);
         assert!(
-            !result.supported,
-            "the per-player guard must leave the face unsupported (condition: {condition:?})"
-        );
-        assert_eq!(
-            condition, None,
-            "nothing may hoist from the per-player guard"
-        );
-        assert!(
-            gap_handlers(&result)
-                .iter()
-                .any(|handler| handler.contains("unparsed_condition")),
-            "the gap must be the dropped condition: {:?}",
+            result.supported,
+            "Gatstaf Howler: {:?}",
             gap_handlers(&result)
         );
 
@@ -24260,6 +25549,63 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             "Gatstaf Shepherd: {:?}",
             gap_handlers(&result)
         );
+    }
+
+    /// C5 (D3): Check coverage at both the top-level quantity and nested
+    /// candidate attr positions. The candidate reader supports both life-loss
+    /// windows, but only the unfiltered last-turn spell count. The unmodified
+    /// Howler face is the positive control for the substituted conditions.
+    #[test]
+    fn windowed_history_coverage_distinguishes_supported_payloads() {
+        let supported_with = |condition: TriggerCondition| {
+            let mut face = gatstaf_howler_face();
+            face.triggers[0].condition = Some(condition);
+            coverage_result_for_face(face).supported
+        };
+        let spell_attr = |filter: Option<TargetFilter>, window: TurnWindow| {
+            existential_over_attr(QuantityRef::SpellsCast {
+                scope: CountScope::ScopedPlayer,
+                filter,
+                window,
+            })
+        };
+        assert!(supported_with(spell_attr(None, TurnWindow::LastTurn)));
+        for window in [TurnWindow::ThisTurn, TurnWindow::LastTurn] {
+            assert!(supported_with(existential_over_attr(
+                QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window,
+                }
+            )));
+            assert!(supported_with(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLost {
+                        player: PlayerScope::Controller,
+                        window,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }));
+        }
+        // Nested attrs the per-candidate reader fails closed on.
+        assert!(!supported_with(spell_attr(
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            TurnWindow::LastTurn
+        )));
+        assert!(!supported_with(spell_attr(None, TurnWindow::ThisTurn)));
+        // Top-level filtered last-turn spell count: no per-spell data survives.
+        assert!(!supported_with(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCast {
+                    scope: CountScope::All,
+                    filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    window: TurnWindow::LastTurn,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        }));
     }
 
     // -----------------------------------------------------------------------

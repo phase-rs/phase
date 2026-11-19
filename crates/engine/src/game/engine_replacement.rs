@@ -405,16 +405,6 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
-    // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
-    // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
-    // tail was empty parks no continuation, so no drain will ever run for it.
-    // Capture the stamp before the inner handler consumes the record; the
-    // hook below publishes exactly this batch's frames on the fresh outcome,
-    // even while an outer continuation remains queued.
-    let parked_batch_owner = state
-        .pending_replacement
-        .as_ref()
-        .and_then(|pending| pending.each_source_batch_owner);
     // CR 616.1 + CR 510.2: the ordering choice of one of the parked batch's OWN
     // damage events. The batch answers it and keeps the event inside the
     // simultaneous batch (Phase C applies the survivor, the substitute runs
@@ -451,43 +441,6 @@ pub(super) fn handle_replacement_choice(
     } else {
         handle_replacement_choice_inner(state, index, events)?
     };
-    // CR 615.13 + CR 616.1e: a resumed prevention batch whose continuation is
-    // empty (single source, no downstream) completes with no drain at all, so
-    // the drain hook never evaluates — publish here on the fresh outcome. A
-    // still-queued chain defers to the drain hook (active check); a nested
-    // pause defers to its own resume (fresh choice check). Pop-once makes the
-    // overlap with the drain hook idempotent.
-    //
-    // CR 615.13 + CR 616.1e (Matt M1): when the answered prompt carries its
-    // batch's stamp, that batch's frames publish at its own boundary — before
-    // any outer tail resumes. Deferring would leave a completed nested child
-    // parked for the outer tail to hydrate. Prompts without a stamp keep the
-    // legacy quiescent flush (their tail owns its boundary through its
-    // stamped continuation).
-    if !state.pending_each_source_batches.is_empty()
-        && matches!(waiting_for, WaitingFor::Priority { .. })
-    {
-        // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses mid-drainage
-        // parks a FRESH choice — it wins over the cached Priority, and the
-        // lifelink tail below must not run while a prompt is open. The flush
-        // already synced `state.waiting_for`.
-        if let Some(owner) = parked_batch_owner {
-            if let Some(fresh) =
-                super::effects::deal_damage::flush_owned_each_source_batches(state, events, owner)
-            {
-                return Ok(fresh);
-            }
-        }
-        if state.active_ability_continuation().is_none()
-            && !state.pending_each_source_batches.is_empty()
-        {
-            if let Some(fresh) =
-                super::effects::deal_damage::flush_pending_each_source_batches(state, events)
-            {
-                return Ok(fresh);
-            }
-        }
-    }
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
@@ -741,32 +694,6 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
-    // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
-    // `EachSourceDealsDamage` batch's own boundary — a Phase-B pause whose
-    // tail was empty parks no continuation, so no drain will ever run for it.
-    // Captured before `continue_replacement` consumes the record; the Execute
-    // epilogue publishes exactly this batch's frames before any queued work
-    // resumes.
-    let parked_batch_owner = state
-        .pending_replacement
-        .as_ref()
-        .and_then(|pending| pending.each_source_batch_owner);
-    // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): same-event identity for the
-    // stamp restore in the NeedsChoice epilogue below. A mandatory modifier
-    // changes the amount, so the (source, recipient, combat) triple
-    // discriminates the repeated event from a nested child event's choice.
-    let parked_damage_identity: Option<(ObjectId, TargetRef, bool)> = state
-        .pending_replacement
-        .as_ref()
-        .and_then(|pending| match &pending.proposed {
-            ProposedEvent::Damage {
-                source_id,
-                target,
-                is_combat,
-                ..
-            } => Some((*source_id, target.clone(), *is_combat)),
-            _ => None,
-        });
     // CR 730.3: the batch or ChangeZone owner that parked this member is the
     // announcing owner of its resumed delivery, so a merged member's component
     // batch links back to it.
@@ -799,6 +726,8 @@ fn handle_replacement_choice_inner(
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::RollDice { .. }))
         .then(|| super::pre_entry_view::PreEntryRulesView::of_pending_roll(state))
         .flatten();
+    // CR 616.1 + CR 615.5: an answer a parked damage batch awaits is one of its original
+    // choices, so the chosen replacement's action or rider waits with the batch's held work.
     let (result, viewed_choice) = if impossible_parked_draw {
         let proposed = state
             .pending_replacement
@@ -821,8 +750,12 @@ fn handle_replacement_choice_inner(
                 );
                 (viewed.result, viewed.choice)
             }
+            // A parked damage batch's answer is never a roll, so only the live
+            // board's re-scan can hold riders.
             None => (
-                super::replacement::continue_replacement(state, index, events),
+                super::effects::deal_damage::hold_riders_for_awaited_portion(state, |state| {
+                    super::replacement::continue_replacement(state, index, events)
+                }),
                 None,
             ),
         }
@@ -1117,7 +1050,14 @@ fn handle_replacement_choice_inner(
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
-                    let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    // CR 120.4b + CR 120.4c: a portion of a parked two-phase batch rejoins the
+                    // batch, which finishes its other portions' replacement before delivering.
+                    if !super::effects::deal_damage::return_answered_portion_to_batch(
+                        state, &ctx, &damage,
+                    ) {
+                        let _ =
+                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
@@ -1735,33 +1675,6 @@ fn handle_replacement_choice_inner(
                 }
             }
 
-            // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
-            // `EachSourceDealsDamage` batch's own boundary (its pause stamped
-            // the prompt because no tail was parked). Its event applied above
-            // and its inline riders settled, so its frames are final: publish
-            // exactly this batch here, before any queue below (batch
-            // delivery, sacrifice, discard, continuation) resumes. Deferring
-            // would leave the completed child parked for an outer tail to
-            // hydrate. A fresh rider choice above skips (the batch completes
-            // on its resume); an unstamped prompt is owned by its queued
-            // tail's stamped continuation instead.
-            if matches!(waiting_for, WaitingFor::Priority { .. }) {
-                if let Some(owner) = parked_batch_owner {
-                    // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses
-                    // mid-drainage parks a FRESH choice — it wins over the
-                    // cached Priority, and the queues below must not run
-                    // while a prompt is open. The flush already synced
-                    // `state.waiting_for`.
-                    if let Some(fresh) =
-                        super::effects::deal_damage::flush_owned_each_source_batches(
-                            state, events, owner,
-                        )
-                    {
-                        waiting_for = fresh;
-                    }
-                }
-            }
-
             // CR 702.143a-c + CR 614.1 + CR 616.1: A Foretell cost move may
             // deliver its card and then surface an interactive post-replacement
             // effect. Complete the special action at the delivery boundary,
@@ -2260,36 +2173,16 @@ fn handle_replacement_choice_inner(
                 if let Some(paused) = parked_zone_change_delivery.as_ref() {
                     pending.inherit_delivery_boundary(&paused.expected_event);
                 }
-                // CR 616.1f + CR 615.13 + CR 616.1e (R2-F2): a SECOND ordering
-                // choice on the same damage event re-parked a fresh record
-                // with `each_source_batch_owner: None` (pipeline_loop
-                // constructs it unstamped). Reapply the stamp captured before
-                // `continue_replacement` consumed the prior record so the
-                // eventual answer still publishes the empty-tail batch at its
-                // own boundary. Same-event gated: a nested child event's
-                // choice (a rider-created reflect names a different source)
-                // must not inherit the stamp.
-                if pending.each_source_batch_owner.is_none() {
-                    let fresh_damage_identity: Option<(ObjectId, TargetRef, bool)> =
-                        match &pending.proposed {
-                            ProposedEvent::Damage {
-                                source_id,
-                                target,
-                                is_combat,
-                                ..
-                            } => Some((*source_id, target.clone(), *is_combat)),
-                            _ => None,
-                        };
-                    if let (Some(owner), Some(parked), Some(fresh)) = (
-                        parked_batch_owner,
-                        parked_damage_identity.clone(),
-                        fresh_damage_identity,
-                    ) {
-                        if parked == fresh {
-                            pending.each_source_batch_owner = Some(owner);
-                        }
-                    }
-                }
+            }
+            // CR 616.1 + CR 101.4: a choice this answer handed to a player later in APNAP order
+            // than another outstanding choice of the same parked damage batch waits in the
+            // batch, which resumes now and asks the earlier player first.
+            if super::effects::deal_damage::defer_choice_behind_earlier_players(state, player) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                return Ok(state.waiting_for.clone());
             }
             // CR 616.1 + CR 603.6d: an as-enters roll's next ordering prompt is
             // rendered from the pre-entry board its re-scan ran on.
@@ -2347,26 +2240,6 @@ fn handle_replacement_choice_inner(
                 )
             {
                 return Ok(state.waiting_for.clone());
-            }
-            // CR 615.13 + CR 616.1e (Matt M1): the answered prompt may be an
-            // `EachSourceDealsDamage` batch's own boundary (its pause stamped
-            // the prompt because no tail was parked; fully-prevented damage
-            // answers land in this arm, not Execute). Its prevention applied
-            // inside `continue_replacement` and no nested prompt is live, so
-            // its frames are final: publish exactly this batch here, before
-            // any queue below resumes. Deferring would leave the completed
-            // child parked for an outer tail to hydrate. An unstamped prompt
-            // is owned by its queued tail's stamped continuation instead.
-            if let Some(owner) = parked_batch_owner {
-                // CR 616.1e + CR 117.2e (Matt C2): a rider that pauses
-                // mid-drainage parks a FRESH choice — surface it instead of
-                // falling through to the queues below. The flush already
-                // synced `state.waiting_for`.
-                if let Some(fresh) = super::effects::deal_damage::flush_owned_each_source_batches(
-                    state, events, owner,
-                ) {
-                    return Ok(fresh);
-                }
             }
             // CR 101.4 + CR 614.6: the answer replaced a life-gain cost
             // recipient's gain outright while the cost is mid-staging. Its
@@ -2668,37 +2541,15 @@ fn handle_replacement_choice_inner(
             // Battlefield-scoped and cannot re-match a →Graveyard move. A
             // board-wide `Moved` graveyard→exile redirect (Rest in Peace /
             // Leyline of the Void) now fires on the discarded spell — the
-            // un-migrated twin of stack.rs's C2 prevented-permanent site. The
-            // dead continuation is cleared BEFORE the move so a CR 616.1
-            // ordering pause (two simultaneous redirects) cannot leave it for
-            // the next resume's epilogue to drain; on a pause, surface the
-            // parked prompt (its resume delivers the chosen event through the
-            // ZoneChange arm above).
+            // un-migrated twin of stack.rs's C2 prevented-permanent site. On a
+            // pause, surface the parked prompt (its resume delivers the chosen
+            // event through the ZoneChange arm above).
             //
-            // CR 615.13 + CR 616.1e (R2-F1): a stamped batch tail is LIVE, not
-            // dead — its prevention applied inside `continue_replacement` and
-            // its parked frames plus downstream instructions still must drain
-            // through the Priority resume below. Clearing it here orphans the
-            // batch (a stub publishes, downstream never runs). Only dead
-            // continuations clear.
-            //
-            // CR 615.13 + CR 608.2c (Matt F1): the empty-remainder pause's
-            // ownerless downstream tail is equally live when the answered
-            // prompt owned the completed batch. Its parent kind records
-            // completion, while the captured prompt stamp keeps it live after
-            // the flush publishes and removes the batch's parked frames.
-            let active_is_live_batch_tail =
-                state.active_ability_continuation().is_some_and(|pending| {
-                    parked_batch_owner.is_some()
-                        || pending.each_source_batch_owner.is_some()
-                        || pending.parent_kind
-                            == Some(crate::types::ability::EffectKind::EachSourceDealsDamage)
-                });
-            if !active_is_live_batch_tail && state.active_ability_continuation().is_some() {
-                let _ = state
-                    .clear_active_ability_continuation()
-                    .expect("replacement cancellation cannot clear a buried continuation");
-            }
+            // CR 608.2c: a prevented or replaced event ends nothing else in what is resolving. The
+            // continuation stays, and `resume_pending_continuation_if_priority` below drains it:
+            // Lightning Helix's "and you gain 3 life" with Mending Hands first under Furnace of Rath,
+            // or the "you draw that many cards" of New Way Forward's reflexive trigger (CR 603.12)
+            // under two Force Bubbles.
             if let Some(ctx) = state.take_active_spell_resolution() {
                 match crate::game::zone_pipeline::move_object(
                     state,
@@ -4762,6 +4613,7 @@ pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool 
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -4930,6 +4782,7 @@ fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -5375,6 +5228,7 @@ fn parked_entry_is_of_incarnation(event: &GameEvent, entrant: ObjectIncarnationR
             | GameEvent::PlayerPhasedIn { .. }
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
+            | GameEvent::AbilityTriggered { .. }
             | GameEvent::StackResolved { .. }
             | GameEvent::Discarded { .. }
             | GameEvent::Milled { .. }
@@ -5858,6 +5712,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
             | GameEvent::PlayerPhasedIn { .. }
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
+            | GameEvent::AbilityTriggered { .. }
             | GameEvent::StackResolved { .. }
             | GameEvent::Discarded { .. }
             | GameEvent::Milled { .. }
@@ -6023,6 +5878,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -6457,13 +6313,25 @@ pub(super) fn apply_post_replacement_effect(
     // a pre-selected sacrifice target.
     //
     // Gated on `event == ReplacementEvent::Moved` so the suppression scopes to
-    // ETB-style replacements (the Devour shape). Non-ETB events that carry
-    // `Sacrifice { Typed }` post-effects — Dralnu, Lich Lord (DealtDamage:
-    // "sacrifice that many permanents") and Outfitted Jouster (DamageDone:
-    // "sacrifice an Equipment") — keep the pre-Devour injection path so their
-    // target-as-pre-selected resolution is unchanged.
+    // ETB-style replacements (the Devour shape). Damage riders with the same shape
+    // take `damage_rider_population` below.
     let sacrifice_typed_scope = is_as_enters_sacrifice_scope_replacement(event, &real_work.effect);
-    let targets = if sacrifice_typed_scope {
+    // CR 614.6 + CR 615.5 + CR 608.2d: a damage rider that picks from a population ("sacrifice that
+    // many permanents", "exile that many cards from your graveyard", "sacrifice an
+    // Equipment attached to Outfitted Jouster") names no pre-selected object; the injected
+    // host would be acted on instead. `event_source` is populated only for damage riders.
+    let damage_rider_population = state.post_replacement_event_source().is_some()
+        && matches!(
+            &*effect_def.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(_),
+                ..
+            } | Effect::ChangeZone {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        );
+    let targets = if sacrifice_typed_scope || damage_rider_population {
         Vec::new()
     } else {
         object_id
@@ -6700,6 +6568,26 @@ pub(crate) fn apply_pending_post_replacement_effect(
     event: Option<ReplacementEvent>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    dispatch_pending_post_replacement_effect(state, object_id, spell_resolution, event, events)
+        .map(|pause| pause.waiting_for)
+}
+
+/// A post-replacement dispatch that left a prompt standing, and the frame its drain sits in.
+pub(crate) struct PostReplacementPause {
+    pub(crate) waiting_for: WaitingFor,
+    /// The frame of the drain whose dispatch this was. Its resident is the paused work: this
+    /// dispatch's own entry, or a nested drain installed into the same frame (CR 616.1g).
+    pub(crate) frame: crate::types::game_state::PostReplacementFrameId,
+}
+
+/// [`apply_pending_post_replacement_effect`], reporting the dispatch's frame when it pauses.
+pub(crate) fn dispatch_pending_post_replacement_effect(
+    state: &mut GameState,
+    object_id: Option<ObjectId>,
+    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    event: Option<ReplacementEvent>,
+    events: &mut Vec<GameEvent>,
+) -> Option<PostReplacementPause> {
     // CR 614.12a (approximation): sacrifice prompt fires after ZoneChange completes,
     // matching Siege/Tribute precedent. A strict reading of 614.12a says the choice
     // is made *before* the permanent enters, but the engine's pipeline applies the
@@ -6732,12 +6620,23 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
+    // CR 614.6 + CR 615.5: the drain carries the amount of the event its replacement replaced or
+    // prevented, bound when the replacement applied (`replacement::replaced_event_amount`), or
+    // when it was queued behind an earlier rider. "That many" reads it, not whatever other work
+    // stamped since.
+    let captured_amount = state
+        .active_post_replacement_drains()
+        .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+        .and_then(|drain| drain.event_amount);
     // CR 614.12a + CR 603.6d: the entrant's delivery already holds its entry
     // when a pause came before this as-enters roll; read before the dispatch
     // takes the continuation.
     let adopts = source.is_some_and(|entrant| entrant_entry_is_pending(state, entrant))
         && as_enters_roll_chain_mut(state).is_some();
     let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
+    if let Some(amount) = captured_amount {
+        state.last_effect_count = Some(crate::game::arithmetic::u32_to_i32_saturating(amount));
+    }
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
     // enters it, and dropped by RAII at every exit — the
@@ -6749,23 +6648,45 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // entry; park that entry while the continuation runs.
     let entry_parking =
         EntryContinuationParking::open(state, adopts, event.as_ref(), source, events);
-    let waiting_for = match continuation {
-        PostReplacementContinuation::Resolved(resolved) => {
-            apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
-        }
-        PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
-            state,
-            &effect_def,
-            ContinuationSubjects {
-                affected: source,
-                controller: replacement_controller,
-            },
-            spell_resolution,
-            event.as_ref(),
-            replacement_applied,
-            events,
-        ),
-    };
+    // CR 614.6 + CR 615.5: the continuation is the replacement's own action, so its "that many"
+    // is the amount the replacement replaced or prevented (the drain's own amount, stamped
+    // above), not anything of the spell or ability resolving around it. The scope binds that
+    // amount ahead of the die result and the enclosing trigger's amount tiers of
+    // `EventContextAmount`, and suppresses those trigger tiers as the reflexive scope does
+    // (CR 603.12). A drain with no amount of its own (an entering object's continuation, an
+    // optional branch) binds none and reads the rest of the cascade. Shockmaw Dragon: "Whenever this creature deals combat damage to a player, it
+    // deals 1 damage to each creature that player controls." After 4 combat damage, Phytohydra
+    // ("put that many +1/+1 counters on it instead") gets 1 counter, not 4. Farideh's Fireball:
+    // "Roll a d20." then "deals 2 damage to each opponent." Delaying Shield ("put that many delay
+    // counters on this enchantment instead") gets 2 counters, not the d20 face.
+    //
+    // Work the action leaves for a later `apply()` (a step after a child prompt) carries this
+    // scope on its `PendingContinuation` and re-enters it when it resumes
+    // (`effects::drain_pending_continuation`).
+    let owned_amount = captured_amount.map(crate::game::arithmetic::u32_to_i32_saturating);
+    let waiting_for =
+        crate::game::quantity::with_replacement_action_scope(owned_amount, || match continuation {
+            PostReplacementContinuation::Resolved(resolved) => {
+                apply_post_replacement_resolved_effect(
+                    state,
+                    &resolved,
+                    replacement_applied,
+                    events,
+                )
+            }
+            PostReplacementContinuation::Template(effect_def) => apply_post_replacement_effect(
+                state,
+                &effect_def,
+                ContinuationSubjects {
+                    affected: source,
+                    controller: replacement_controller,
+                },
+                spell_resolution,
+                event.as_ref(),
+                replacement_applied,
+                events,
+            ),
+        });
     // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
     // by whether the two-deep positional accessor can currently see this frame.
     // The predecessor asked `active_post_replacement_drains()`, which returns None
@@ -6841,7 +6762,10 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // retirement records completion; an inline one unparks it.
     entry_parking.close(state, dispatch, waiting_for.as_ref());
     settle_retired_dispatch_entrants(state, dispatch, retired_entrants, waiting_for.as_ref());
-    waiting_for
+    waiting_for.map(|waiting_for| PostReplacementPause {
+        waiting_for,
+        frame: dispatch.frame(),
+    })
 }
 
 /// CR 614.12a: True when every branch of a `ChooseOneOfBranch` is a self-targeted
@@ -7726,6 +7650,7 @@ mod tests {
         // the terminal Connive survivor through `handle_replacement_choice`.
         let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Connive {
                 object_id: conniver,
                 subject: Box::new(original_subject.snapshot.clone()),
@@ -7749,7 +7674,6 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
-            each_source_batch_owner: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
         });
@@ -8410,6 +8334,7 @@ mod tests {
             .description("Regenerate".to_string())]
         .into();
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
                 source: None,
@@ -8433,7 +8358,6 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
-            each_source_batch_owner: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
         });
@@ -11107,57 +11031,6 @@ mod tests {
             state.active_post_replacement_drains().is_none(),
             "resuming the inner draw retires it without leaving the completed outer drain"
         );
-    }
-
-    /// Issue #575: Non-Moved `Sacrifice { Typed }` post-replacements (Dralnu)
-    /// inject the source as a pre-selected sacrifice target. Re-broadening the
-    /// Devour guard to all events would route this through `EffectZoneChoice`.
-    #[test]
-    fn issue_575_dealt_damage_sacrifice_injects_source_target() {
-        let mut state = GameState::new_two_player(42);
-        let dralnu = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Dralnu, Lich Lord".to_string(),
-            Zone::Battlefield,
-        );
-        let other = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Other Bear".to_string(),
-            Zone::Battlefield,
-        );
-
-        let template = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Sacrifice {
-                target: TargetFilter::Typed(crate::types::ability::TypedFilter::permanent()),
-                count: QuantityExpr::Fixed { value: 1 },
-                min_count: 0,
-            },
-        );
-
-        let mut events = Vec::new();
-        let waiting = apply_post_replacement_effect(
-            &mut state,
-            &template,
-            ContinuationSubjects::affected_only(Some(dralnu)),
-            None,
-            Some(&ReplacementEvent::DealtDamage),
-            Default::default(),
-            &mut events,
-        );
-
-        assert!(
-            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
-            "DealtDamage sacrifice must use injected source target, not a chooser; got {:?}",
-            state.waiting_for
-        );
-        assert!(waiting.is_none());
-        assert_eq!(state.objects[&dralnu].zone, Zone::Graveyard);
-        assert_eq!(state.objects[&other].zone, Zone::Battlefield);
     }
 
     /// Issue #575: Moved (ETB) `Sacrifice { Typed }` post-replacements (Devour)

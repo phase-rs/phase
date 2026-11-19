@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::{Effect, EventOutcomes};
 use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::{
-    ActiveSearchDecisionAuthority, CostResume, GameEnd, GameState, LeavingGameDeparture,
-    PayCostKind, PendingCast, PendingCostMoveResume, PendingSacrificeCostCompletion, WaitingFor,
-    ZoneDeparture,
+    ActiveSearchDecisionAuthority, CostResume, EventLosses, GameEnd, GameState,
+    LeavingGameDeparture, PayCostKind, PendingCast, PendingCostMoveResume,
+    PendingSacrificeCostCompletion, WaitingFor, ZoneDeparture,
 };
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
@@ -148,6 +149,126 @@ pub fn eliminate_player(
     eliminate_players_simultaneously(state, &[player], reason, events);
 }
 
+/// CR 104.3e + CR 104.4a + CR 614.6: players lose the game to an effect ("you lose the game").
+/// Inside a two-phase damage batch's simultaneous event (its damage and substitution actions:
+/// Nefarious Lich's "If you can't, you lose the game") the loss is recorded and settles with the
+/// event's other outcomes (`settle_event_outcomes`); anywhere else the players are eliminated at
+/// once.
+pub(crate) fn lose_by_effect(
+    state: &mut GameState,
+    losers: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) {
+    match event_outcomes(state) {
+        Some(outcomes) => {
+            for loser in losers {
+                if !outcomes.losers.contains(loser) {
+                    outcomes.losers.push(*loser);
+                }
+            }
+        }
+        None => {
+            eliminate_players_simultaneously(state, losers, LossReason::EffectStatedLoss, events)
+        }
+    }
+}
+
+/// CR 104.2b + CR 104.3e: a player wins the game by an effect, so the opponents still in the game
+/// lose. Inside a batch's simultaneous event (a lifelink gain drawn into Laboratory Maniac's win)
+/// the win is recorded and settles with the event's other outcomes, where CR 104.3f can still
+/// make the winner lose.
+pub(crate) fn win_by_effect(state: &mut GameState, winner: PlayerId, events: &mut Vec<GameEvent>) {
+    match event_outcomes(state) {
+        Some(outcomes) => {
+            if !outcomes.winners.contains(&winner) {
+                outcomes.winners.push(winner);
+            }
+        }
+        None => {
+            let opponents = living_opponents(state, winner);
+            eliminate_players_simultaneously(state, &opponents, LossReason::OpponentWon, events);
+        }
+    }
+}
+
+/// CR 104.3e + CR 104.2b + CR 104.3f + CR 104.4a + CR 810.8a: a simultaneous event's
+/// effect-stated outcomes settle together. A player who would both win and lose loses; each
+/// remaining winner's opponents lose; then every loser is eliminated at once, so players who all
+/// lose draw. Each effect loser, and each shared-life teammate added for one, loses with
+/// `EffectStatedLoss`. For each winner who is not an effect loser, insert `OpponentWon` for every
+/// living opponent, including opponents already carrying `EffectStatedLoss`; union both reasons
+/// in the same set.
+pub(crate) fn settle_event_outcomes(
+    state: &mut GameState,
+    outcomes: EventOutcomes,
+    events: &mut Vec<GameEvent>,
+) {
+    let EventOutcomes {
+        mut losers,
+        winners,
+    } = outcomes;
+    // CR 810.8a: "If either player on a team loses the game, the team loses the game": a
+    // shared-life teammate of a loser loses too, before any win is weighed against the losses.
+    for loser in losers.clone() {
+        if super::topology::has_shared_life(state, loser) {
+            for teammate in players::teammates(state, loser) {
+                if players::is_alive(state, teammate) && !losers.contains(&teammate) {
+                    losers.push(teammate);
+                }
+            }
+        }
+    }
+    // CR 104.3e: each effect loser loses because an effect states it.
+    let mut losses: BTreeMap<PlayerId, BTreeSet<LossReason>> = losers
+        .iter()
+        .map(|&player| (player, BTreeSet::from([LossReason::EffectStatedLoss])))
+        .collect();
+    // CR 104.3f: a winner who also lost to an effect in the event loses instead of winning.
+    // CR 104.2b: every other winner's living opponents lose, an effect loser among them for both
+    // reasons.
+    for winner in winners.iter().filter(|winner| !losers.contains(winner)) {
+        for opponent in living_opponents(state, *winner) {
+            losses
+                .entry(opponent)
+                .or_default()
+                .insert(LossReason::OpponentWon);
+        }
+    }
+    if !losses.is_empty() {
+        eliminate_with_reasons(state, &losses, events);
+    }
+}
+
+fn living_opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    players::opponents(state, player)
+        .into_iter()
+        .filter(|&opponent| players::is_alive(state, opponent))
+        .collect()
+}
+
+/// CR 104.4a + CR 614.6: the outcomes of the damage batch event under way, if an effect-stated
+/// win or loss now belongs to one. The running batch says so (`GameState::damage_event_losses`);
+/// with none running (an answer while a batch is parked), the nearest parked batch's
+/// continuation owns the answer.
+fn event_outcomes(state: &mut GameState) -> Option<&mut EventOutcomes> {
+    match state.damage_event_losses.as_mut() {
+        Some(EventLosses::Recording(outcomes)) => Some(outcomes),
+        Some(EventLosses::Immediate) => None,
+        None => state
+            .resolution_stack
+            .ability_continuations_from_top_mut()
+            .find(|pending| matches!(pending.chain.effect, Effect::ResumeDamageBatch { .. }))
+            .and_then(|pending| {
+                pending
+                    .chain
+                    .context
+                    .parked_damage_batch
+                    .as_mut()
+                    .and_then(|parked| parked.outcomes.as_mut())
+            }),
+    }
+}
+
 /// CR 704.3 + CR 104.4a: Eliminate a set of players who lost in the SAME
 /// state-based-action event.
 ///
@@ -167,11 +288,23 @@ pub fn eliminate_players_simultaneously(
         .iter()
         .map(|&player| (player, BTreeSet::from([reason])))
         .collect();
+    eliminate_with_reasons(state, &losses, events);
+}
+
+/// CR 104.4a + CR 800.4a: eliminate players who lose in one event, each with its own reasons,
+/// and collect what their departure triggers. The one tail behind
+/// [`eliminate_players_simultaneously`] and an effect-stated event's settlement
+/// (`settle_event_outcomes`).
+fn eliminate_with_reasons(
+    state: &mut GameState,
+    losses: &BTreeMap<PlayerId, BTreeSet<LossReason>>,
+    events: &mut Vec<GameEvent>,
+) {
     // CR 104.3e / CR 704.5a callers lose players outside a paused zone-change
     // pause (none is live while an effect or an ordinary SBA pass runs), so no
     // resume is owed here; the CR 704.5a safety net uses
     // `sba::check_state_based_actions_reporting_departure` instead.
-    let outcome = eliminate_players(state, &losses, DepartureTriggers::ScannedByCaller, events);
+    let outcome = eliminate_players(state, losses, DepartureTriggers::ScannedByCaller, events);
     // CR 603.2: an effect's loss is no state-based-action batch, so nothing
     // stamps the departure after it: collect it now.
     if let Some(looked_back) = outcome.looked_back {
@@ -2972,6 +3105,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::PayCost {
             player: payer,
@@ -3041,6 +3175,7 @@ mod tests {
 
     fn pending_replacement_for(expected_event: ProposedEvent) -> PendingReplacement {
         PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: expected_event,
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -3057,7 +3192,6 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         }
     }
@@ -4958,6 +5092,7 @@ mod tests {
 
         // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::AddCounter {
                 placement: CounterPlacement::Object {
                     actor: PlayerId(2),
@@ -4983,7 +5118,6 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         });
         // Latched chooser identity — the fix's key. C = P2.
@@ -5113,6 +5247,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -5134,7 +5269,6 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -5175,6 +5309,7 @@ mod tests {
         );
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::SearchFound {
                 searcher: PlayerId(0),
                 library_owner: Some(PlayerId(0)),
@@ -5197,7 +5332,6 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -5231,6 +5365,7 @@ mod tests {
 
         // Chooser C = P0 (survivor). Player-keyed parked Draw.
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -5252,7 +5387,6 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -5316,6 +5450,7 @@ mod tests {
     fn opponent_leaving_preserves_living_choosers_draw_replacement() {
         let mut state = setup_three_player();
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -5337,7 +5472,6 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-            each_source_batch_owner: None,
             unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -5707,6 +5841,58 @@ mod tests {
         assert_eq!(
             player_losses_in(&events),
             [(PlayerId(2), both.clone()), (PlayerId(3), both)]
+        );
+    }
+
+    /// CR 104.3e + CR 104.2b + CR 104.3f + CR 104.4a: an event's effect-stated outcomes settle
+    /// with every reason each loser has. A player an effect makes lose, whose opponent wins in
+    /// the same event, loses for both reasons; a winner who also lost to an effect loses
+    /// instead (CR 104.3f), and so gives no opponent an `OpponentWon` loss.
+    #[test]
+    fn settle_event_outcomes_unions_an_effect_loss_with_an_opponents_win() {
+        let mut state = setup_two_player();
+        let mut events = Vec::new();
+        settle_event_outcomes(
+            &mut state,
+            EventOutcomes {
+                losers: vec![PlayerId(1)],
+                winners: vec![PlayerId(0)],
+            },
+            &mut events,
+        );
+        // Reach-guard: the loser left the game.
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[0].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(1),
+                BTreeSet::from([LossReason::EffectStatedLoss, LossReason::OpponentWon])
+            )]
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+
+        // CR 104.3f: a winner who is also an effect loser loses, and nobody loses to that win.
+        let mut state = setup_two_player();
+        let mut events = Vec::new();
+        settle_event_outcomes(
+            &mut state,
+            EventOutcomes {
+                losers: vec![PlayerId(0)],
+                winners: vec![PlayerId(0)],
+            },
+            &mut events,
+        );
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::EffectStatedLoss]))]
         );
     }
 
