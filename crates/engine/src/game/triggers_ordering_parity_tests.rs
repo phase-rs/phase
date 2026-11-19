@@ -483,7 +483,8 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // Each co-departing member returns ITS OWN tracked exile set, and returned
     // creatures can be Dragons the OTHER member's re-sacrifice then consumes —
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
-    // b2_dotd_member_bound_pin (reads_member_bound refuses batch-T1).
+    // b2_dotd_member_bound_pin on the pre-change ChangeZone{TrackedSet} twin; this
+    // shape sets the same flag via member_bound_target_filter's TrackedSetFiltered arm.
     "day of the dragons",
     // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
     // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST

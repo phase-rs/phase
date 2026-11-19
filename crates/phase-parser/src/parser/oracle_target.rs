@@ -358,7 +358,17 @@ pub(crate) fn parse_exiled_card_anaphor(input: &str) -> OracleResult<'_, Anaphor
     .parse(input)
 }
 
-/// CR 607.2a + CR 406.6 (D8): "the exiled card(s)" in a chain whose prior
+/// CR 607.2a: the members the linked exile instruction put into exile — the
+/// chain's tracked set narrowed to the `Exiled`-caused subset.
+pub(crate) fn exiled_caused_tracked_set() -> TargetFilter {
+    TargetFilter::TrackedSetFiltered {
+        id: TrackedSetId(0),
+        filter: Box::new(TargetFilter::Any),
+        caused_by: Some(ThisWayCause::Exiled),
+    }
+}
+
+/// CR 607.2a + CR 406.6: "the exiled card(s)" in a chain whose prior
 /// publishers are all non-exile departures refers only to cards put in exile by
 /// the linked ability — never to the chain's own sacrificed / library-put
 /// members. Rebinds the bare chain sentinel to the `Exiled`-caused subset.
@@ -375,11 +385,7 @@ pub(crate) fn chain_exiled_cause_binding(
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
             },
-        ) => Some(TargetFilter::TrackedSetFiltered {
-            id: TrackedSetId(0),
-            filter: Box::new(TargetFilter::Any),
-            caused_by: Some(ThisWayCause::Exiled),
-        }),
+        ) => Some(exiled_caused_tracked_set()),
         (ChainPriorPublishers::NonExileOnly, _)
         | (ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile, _) => None,
     }
@@ -1670,11 +1676,7 @@ pub fn parse_target_with_syntax<'a>(
         tag::<_, _, OracleError<'_>>("the rest of the exiled cards").parse(lower.as_str())
     {
         return (
-            TargetFilter::TrackedSetFiltered {
-                id: TrackedSetId(0),
-                filter: Box::new(TargetFilter::Any),
-                caused_by: Some(ThisWayCause::Exiled),
-            },
+            exiled_caused_tracked_set(),
             &text[lower.len() - rest.len()..],
             syntax,
         );

@@ -106,11 +106,11 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    history_clause_subject, parse_anaphoric_target_ref, parse_definite_anaphor,
-    parse_definite_parent_reference, parse_event_context_ref, parse_exiled_card_anaphor,
-    parse_fight_target, parse_parent_target_controller_population, parse_target,
-    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
-    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    exiled_caused_tracked_set, history_clause_subject, parse_anaphoric_target_ref,
+    parse_definite_anaphor, parse_definite_parent_reference, parse_event_context_ref,
+    parse_exiled_card_anaphor, parse_fight_target, parse_parent_target_controller_population,
+    parse_target, parse_target_with_ctx, parse_target_with_disjunctive_restriction,
+    parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
     population_drops_block_history_clause, resolve_singular_exiled_card_target,
     strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
     DefiniteAnaphor, TargetSyntax,
@@ -5845,6 +5845,11 @@ fn try_parse_inline_delayed_trigger(
     // Throwaway (`ChosenColorQualifierScope` rule 1) — the parsed `inner` is
     // kept, `inner_ctx` is dropped.
     let mut inner_ctx = ctx.clone_throwaway();
+    // CR 603.7c: the inline delayed body is its own resolution chain; only the
+    // creating chain's exile-producer fact crosses into it.
+    inner_ctx.chain_prior_publishers = inner_ctx
+        .chain_prior_publishers
+        .across_delayed_trigger_boundary();
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
     inner_ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
     inner_ctx.subject = match &condition {
@@ -43642,13 +43647,7 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
 /// every leaf, mirroring its bare sibling.
 fn rewrite_filter_parent_to_exiled_tracked_set(filter: &mut TargetFilter) {
     match filter {
-        TargetFilter::ParentTarget => {
-            *filter = TargetFilter::TrackedSetFiltered {
-                id: TrackedSetId(0),
-                filter: Box::new(TargetFilter::Any),
-                caused_by: Some(ThisWayCause::Exiled),
-            }
-        }
+        TargetFilter::ParentTarget => *filter = exiled_caused_tracked_set(),
         TargetFilter::Not { filter } => rewrite_filter_parent_to_exiled_tracked_set(filter),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for filter in filters {

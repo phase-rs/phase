@@ -2527,7 +2527,7 @@ pub(super) fn parse_targeted_action_ast(
         if super::target_span_dropped_this_way_anaphor(target_text, &target) {
             return None;
         }
-        // CR 607.2a + CR 406.6 (D8): "the exiled card(s)" over a chain whose
+        // CR 607.2a + CR 406.6: "the exiled card(s)" over a chain whose
         // prior publishers are all non-exile (Day of the Dragons' sacrifice,
         // Timothar's granted sacrifice, The Spot's library put) refers only to
         // the cards the linked exile instruction put into exile, never to the

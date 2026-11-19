@@ -29,6 +29,10 @@ const TIMOTHAR: &str = "Ward\u{2014}Discard a card.\nWhenever another nontoken V
 const THE_SPOT: &str = "When The Spot enters, exile up to one target nonland permanent and up to one target nonland permanent card from a graveyard.\nWhen The Spot dies, put him on the bottom of his owner's library. If you do, return the exiled cards to their owners' hands.";
 const OBLIVION_RING: &str = "When this enchantment enters, exile another target nonland permanent.\nWhen this enchantment leaves the battlefield, return the exiled card to the battlefield under its owner's control.";
 const TIDEHOLLOW_SCULLER: &str = "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card.\nWhen this creature leaves the battlefield, return the exiled card to its owner's hand.";
+/// Synthetic face: a delayed "the exiled cards" return created by a chain whose
+/// earlier clause is a non-exile publisher (the sacrifice), with no exile
+/// producer anywhere in the creating chain.
+const SYNTHETIC_DELAYED_RETURN_AFTER_SACRIFICE: &str = "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Return the exiled cards to the battlefield under your control at the beginning of the next end step.";
 const SUDDEN_DISAPPEARANCE: &str = "Exile all nonland permanents target player controls. Return the exiled cards to the battlefield under their owner's control at the beginning of the next end step.";
 const INDOMITABLE_CREATIVITY: &str = "Destroy X target artifacts and/or creatures. For each permanent destroyed this way, its controller reveals cards from the top of their library until an artifact or creature card is revealed and exiles that card. Those players put the exiled cards onto the battlefield, then shuffle.";
 const DRAGON_HATCHLING: &str = "Flying\n{R}: This creature gets +1/+0 until end of turn.";
@@ -515,5 +519,47 @@ fn tidehollow_sculler_ltb_return_keeps_exiled_by_source() {
             assert_eq!(*target, TargetFilter::ExiledBySource);
         }
         other => panic!("Tidehollow Sculler's LTB is a ChangeZoneAll, not {other:?}"),
+    }
+}
+
+/// R10 — fence: a delayed-trigger payload keeps its bare `TrackedSet` binding
+/// even when the creating chain's earlier clauses are non-exile publishers.
+/// CR 603.7c: a delayed trigger's binding is fixed at creation and the later
+/// obligations (incarnation pins, consumed-set release) key on the bare
+/// `TrackedSet` shape, so the cause-bound return rewrite stays inside the
+/// return's own resolution chain and never crosses into the delayed body.
+///
+/// No printed card exhibits this shape. The nearest printed card is Sudden
+/// Disappearance, whose creating chain has an exile producer (so its delayed
+/// return keeps the bare sentinel, row R6a):
+/// "Exile all nonland permanents target player controls. Return the exiled cards to the battlefield under their owner's control at the beginning of the next end step."
+#[test]
+fn delayed_return_under_non_exile_creating_chain_keeps_bare_sentinel() {
+    let parsed = parse(
+        SYNTHETIC_DELAYED_RETURN_AFTER_SACRIFICE,
+        "Synthetic Delayed Return",
+        &["Enchantment"],
+    );
+    let ltb = trigger_execute(&parsed, "the synthetic face", 0);
+    // Reach guard: the creating chain's first clause is the non-exile sacrifice.
+    assert!(
+        matches!(&*ltb.effect, Effect::Sacrifice { .. }),
+        "the creating chain sacrifices first: {:?}",
+        ltb.effect
+    );
+    let delayed = sub(ltb, "the sacrifice");
+    match &*delayed.effect {
+        Effect::CreateDelayedTrigger { effect, .. } => match &*effect.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert_eq!(*target, bare_sentinel());
+            }
+            other => panic!("the delayed return is a ChangeZone, not {other:?}"),
+        },
+        other => panic!("the return is a delayed trigger, not {other:?}"),
     }
 }
