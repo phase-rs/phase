@@ -3796,6 +3796,506 @@ fn tamiyo_flip_return_transformed_binds_to_self_ref() {
     );
 }
 
+fn parse_printed_card(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> Vec<TriggerDefinition> {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    parse_oracle_text(text, name, &[], &owned(types), &owned(subtypes)).triggers
+}
+
+/// Every effect the trigger reaches, its delayed payloads and modes included.
+fn trigger_effects(trigger: &TriggerDefinition) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    let _ = crate::types::ability_visit::visit_trigger(trigger, &mut |effect: &Effect| {
+        effects.push(effect.clone());
+        std::ops::ControlFlow::Continue(())
+    });
+    effects
+}
+
+const NORIN_THE_WARY: &str = "When a player casts a spell or a creature attacks, exile Norin. Return it to the battlefield under its owner's control at the beginning of the next end step.";
+
+/// CR 608.2c + CR 201.5c: Norin the Wary — "exile Norin. Return it …". The
+/// return's bare "it" names the object the previous instruction named (the
+/// source), on BOTH halves of the compound trigger. On the spell-cast half the
+/// trigger condition also introduced the cast spell (CR 109.2b), which must not
+/// capture the pronoun.
+#[test]
+fn norin_both_delayed_returns_bind_the_source() {
+    let triggers = parse_printed_card(
+        NORIN_THE_WARY,
+        "Norin the Wary",
+        &["Creature"],
+        &["Human", "Warrior"],
+    );
+    let modes: Vec<_> = triggers.iter().map(|t| t.mode.clone()).collect();
+    assert_eq!(modes, vec![TriggerMode::SpellCast, TriggerMode::Attacks]);
+    for trigger in &triggers {
+        // The delayed return still reads Norin's battlefield zone as the firing zone.
+        assert_eq!(
+            trigger.trigger_zones,
+            vec![Zone::Battlefield],
+            "{trigger:?}"
+        );
+        let execute = trigger.execute.as_deref().expect("Norin trigger body");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "head exiles Norin: {:?}",
+            execute.effect
+        );
+        let effects = trigger_effects(trigger);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+            "{effects:?}"
+        );
+        let payloads: Vec<&Effect> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::CreateDelayedTrigger { effect, .. } => Some(&*effect.effect),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(
+                payloads.as_slice(),
+                [Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }]
+            ),
+            "{:?} delayed return must name Norin: {payloads:?}",
+            trigger.mode
+        );
+    }
+}
+
+/// One printed card whose "it" follows an instruction naming the source.
+struct SourceNamedAnaphorRow {
+    name: &'static str,
+    text: &'static str,
+    types: &'static [&'static str],
+    subtypes: &'static [&'static str],
+    /// The effect that binds the source (doubles as the reach guard).
+    bound: fn(&Effect) -> bool,
+    /// The same effect bound to the trigger-condition object instead.
+    misbound: fn(&Effect) -> bool,
+}
+
+fn untaps_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            state: TapStateChange::Untap,
+            ..
+        }
+    )
+}
+
+fn untaps_triggering_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    )
+}
+
+fn source_deals_damage(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            damage_source: None,
+            ..
+        }
+    )
+}
+
+fn triggering_source_deals_damage(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            damage_source: Some(DamageSource::TriggeringSource),
+            ..
+        }
+    )
+}
+
+fn grants_to(effect: &Effect, filter: &TargetFilter) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect { static_abilities, .. }
+            if static_abilities
+                .iter()
+                .any(|grant| grant.affected.as_ref() == Some(filter))
+    )
+}
+
+/// CR 608.2c + CR 201.5: across the class, a bare "it" after an instruction
+/// that names the source (`~` / "this creature") binds the source, not the
+/// object the trigger condition introduced (the cast spell, CR 109.2b) or the
+/// trigger subject. CR 113.7a: the source still deals the damage after it is
+/// sacrificed (Mogg Bombers).
+#[test]
+fn source_named_then_bare_it_binds_the_source_across_the_class() {
+    use crate::types::zones::EtbTapState;
+
+    let rows = [
+        SourceNamedAnaphorRow {
+            name: "Blistercoil Weird",
+            text: "Whenever you cast an instant or sorcery spell, this creature gets +1/+1 until end of turn. Untap it.",
+            types: &["Creature"],
+            subtypes: &["Weird"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Gwenna, Eyes of Gaea",
+            text: "{T}: Add two mana in any combination of colors. Spend this mana only to cast creature spells or activate abilities of creature sources.\nWhenever you cast a creature spell with power 5 or greater, put a +1/+1 counter on Gwenna and untap it.",
+            types: &["Creature"],
+            subtypes: &["Elf", "Druid", "Scout"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Prize Pig",
+            text: "Whenever you gain life, put that many ribbon counters on this creature. Then if there are three or more ribbon counters on this creature, remove those counters and untap it.\n{T}: Add one mana of any color.",
+            types: &["Creature"],
+            subtypes: &["Boar"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Tactical Officer",
+            text: "Whenever you attack while creatures you control have total power 8 or greater, put a +1/+1 counter on this creature. Untap it.",
+            types: &["Creature"],
+            subtypes: &["Human", "Officer"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Primal Amulet",
+            text: "Instant and sorcery spells you cast cost {1} less to cast.\nWhenever you cast an instant or sorcery spell, put a charge counter on this artifact. Then if there are four or more charge counters on it, you may remove those counters and transform it.",
+            types: &["Artifact"],
+            subtypes: &[],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::Transform {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            },
+            misbound: |effect| {
+                matches!(
+                    effect,
+                    Effect::Transform {
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+        SourceNamedAnaphorRow {
+            name: "Hikari, Twilight Guardian",
+            text: "Flying\nWhenever you cast a Spirit or Arcane spell, you may exile Hikari. If you do, return it to the battlefield under its owner's control at the beginning of the next end step.",
+            types: &["Creature"],
+            subtypes: &["Spirit"],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::CreateDelayedTrigger { effect, .. }
+                        if matches!(
+                            &*effect.effect,
+                            Effect::ChangeZone {
+                                destination: Zone::Battlefield,
+                                target: TargetFilter::SelfRef,
+                                ..
+                            }
+                        )
+                )
+            },
+            misbound: |effect| {
+                matches!(
+                    effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::ParentTarget | TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+        SourceNamedAnaphorRow {
+            name: "Mogg Bombers",
+            text: "When another creature enters, sacrifice this creature and it deals 3 damage to target player or planeswalker.",
+            types: &["Creature"],
+            subtypes: &["Goblin"],
+            bound: source_deals_damage,
+            misbound: triggering_source_deals_damage,
+        },
+        SourceNamedAnaphorRow {
+            name: "Aria of Flame",
+            text: "When this enchantment enters, each opponent gains 10 life.\nWhenever you cast an instant or sorcery spell, put a verse counter on this enchantment, then it deals damage equal to the number of verse counters on it to target player or planeswalker.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            bound: source_deals_damage,
+            misbound: triggering_source_deals_damage,
+        },
+        SourceNamedAnaphorRow {
+            name: "Captain Ripley Vance",
+            text: "Whenever you cast your third spell each turn, put a +1/+1 counter on Captain Ripley Vance, then it deals damage equal to its power to any target.",
+            types: &["Creature"],
+            subtypes: &["Human", "Pirate"],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::DealDamage {
+                        damage_source: None,
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Source
+                            }
+                        },
+                        ..
+                    }
+                )
+            },
+            misbound: triggering_source_deals_damage,
+        },
+        SourceNamedAnaphorRow {
+            name: "Estinien Varlineau",
+            text: "Whenever you cast a noncreature spell, put a +1/+1 counter on Estinien Varlineau. It gains flying until end of turn.\nAt the beginning of your second main phase, you draw X cards and lose X life, where X is the number of your opponents who were dealt combat damage by Estinien Varlineau or a Dragon this turn.",
+            types: &["Creature"],
+            subtypes: &["Elf", "Warrior"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Bloodsky Berserker",
+            text: "Whenever you cast your second spell each turn, put two +1/+1 counters on this creature. It gains menace until end of turn. (It can't be blocked except by two or more creatures.)",
+            types: &["Creature"],
+            subtypes: &["Human", "Berserker"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Infernal Pet",
+            text: "Whenever you cast your second spell each turn, put a +1/+1 counter on this creature and it gains flying until end of turn.",
+            types: &["Creature"],
+            subtypes: &["Imp"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Sahagin",
+            text: "Whenever you cast a noncreature spell, if at least four mana was spent to cast it, put a +1/+1 counter on this creature and it can't be blocked this turn.",
+            types: &["Creature"],
+            subtypes: &["Merfolk", "Warrior"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Ojutai Exemplars",
+            text: "Whenever you cast a noncreature spell, choose one \u{2014}\n\u{2022} Tap target creature.\n\u{2022} This creature gains first strike and lifelink until end of turn.\n\u{2022} Exile this creature, then return it to the battlefield tapped under its owner's control.",
+            types: &["Creature"],
+            subtypes: &["Human", "Monk"],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::SelfRef,
+                        enter_tapped: EtbTapState::Tapped,
+                        ..
+                    }
+                )
+            },
+            misbound: |effect| {
+                matches!(
+                    effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+    ];
+    for row in rows {
+        let triggers = parse_printed_card(row.text, row.name, row.types, row.subtypes);
+        let effects: Vec<Effect> = triggers.iter().flat_map(trigger_effects).collect();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+            "{}: {effects:?}",
+            row.name
+        );
+        assert!(
+            effects.iter().any(row.bound),
+            "{}: the effect after the source-naming instruction must bind the source: {effects:?}",
+            row.name
+        );
+        assert!(
+            !effects.iter().any(row.misbound),
+            "{}: \"it\" must not bind the trigger-condition object: {effects:?}",
+            row.name
+        );
+    }
+}
+
+/// One printed card whose spell anaphor must keep naming the cast spell or the
+/// entering creature (CR 109.2b / CR 608.2k).
+struct SpellAnaphorRow {
+    name: &'static str,
+    text: &'static str,
+    types: &'static [&'static str],
+    subtypes: &'static [&'static str],
+    /// Reach guard: the preceding instruction that names the source, so the
+    /// new rung's precondition holds. `None` for a bare "it" with no such clause.
+    names_source_first: Option<fn(&Effect) -> bool>,
+    /// The effect that must keep naming the trigger-condition object.
+    anaphor: fn(&Effect) -> bool,
+}
+
+fn sacrifices_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
+fn counters_cast_spell(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Counter {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    )
+}
+
+fn copies_cast_spell(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CopySpell {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    )
+}
+
+/// CR 109.2b + CR 608.2k: the named-source rung rebinds only a bare object
+/// pronoun. "copy it" with no earlier source-naming instruction keeps the cast
+/// spell, and demonstratives ("that spell", "that creature") keep the
+/// trigger-condition object even directly after an instruction naming the
+/// source.
+#[test]
+fn spell_and_demonstrative_anaphors_keep_the_trigger_condition_object() {
+    let rows = [
+        SpellAnaphorRow {
+            name: "Thousand-Year Storm",
+            text: "Whenever you cast an instant or sorcery spell, copy it for each other instant and sorcery spell you've cast before it this turn. You may choose new targets for the copies.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            names_source_first: None,
+            anaphor: copies_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Hesitation",
+            text: "When a player casts a spell, sacrifice this enchantment and counter that spell.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            names_source_first: Some(sacrifices_source),
+            anaphor: counters_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Lunar Force",
+            text: "When an opponent casts a spell, sacrifice this enchantment and counter that spell.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            names_source_first: Some(sacrifices_source),
+            anaphor: counters_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Ominous Lockbox",
+            text: "As Ominous Lockbox enters, secretly choose a number between 1 and 20.\nWhen an opponent casts a spell with mana value equal to the chosen number, sacrifice Ominous Lockbox. If you do, copy that spell, and you may choose new targets for the copy.\n{2}, Sacrifice Ominous Lockbox: Draw a card.",
+            types: &["Artifact"],
+            subtypes: &["Clue"],
+            names_source_first: Some(sacrifices_source),
+            anaphor: copies_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Verazol, the Split Current",
+            text: "Verazol enters with a +1/+1 counter on it for each mana spent to cast it.\nWhenever you cast a kicked spell, you may remove two +1/+1 counters from Verazol. If you do, copy that spell. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)",
+            types: &["Creature"],
+            subtypes: &["Serpent"],
+            names_source_first: Some(|effect| {
+                matches!(
+                    effect,
+                    Effect::RemoveCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            }),
+            anaphor: copies_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Flame-Kin War Scout",
+            text: "When another creature enters, sacrifice this creature. If you do, this creature deals 4 damage to that creature.",
+            types: &["Creature"],
+            subtypes: &["Elemental", "Scout"],
+            names_source_first: Some(sacrifices_source),
+            anaphor: |effect| {
+                matches!(
+                    effect,
+                    Effect::DealDamage {
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+    ];
+    for row in rows {
+        let triggers = parse_printed_card(row.text, row.name, row.types, row.subtypes);
+        let effects: Vec<Effect> = triggers.iter().flat_map(trigger_effects).collect();
+        if let Some(names_source_first) = row.names_source_first {
+            assert!(
+                effects.iter().any(names_source_first),
+                "{}: reach guard, the source-naming instruction is present: {effects:?}",
+                row.name
+            );
+        }
+        assert!(
+            effects.iter().any(row.anaphor),
+            "{}: the anaphor must keep naming the trigger-condition object: {effects:?}",
+            row.name
+        );
+    }
+}
+
 /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
 /// Syr Konrad's disjunctive zone-change condition into separate triggers.
 #[test]

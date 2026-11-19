@@ -156,6 +156,7 @@ mod sothera_supervoid_edict_reanimate;
 mod soul_scar_mage_damage_to_counters;
 mod soul_tether_heartwood_token;
 mod source_counter_gate_anaphor_8549;
+mod source_named_then_pronoun_anaphor;
 mod source_scoped_loyalty_grant;
 mod sower_phase_out_ends_presence_bound_steal;
 mod spark_double_as_enters;
