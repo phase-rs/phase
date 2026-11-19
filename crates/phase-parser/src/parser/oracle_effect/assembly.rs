@@ -249,8 +249,9 @@ pub(super) enum NodeRole {
     Primary,
     /// Built by a disposition handler out of a clause.
     HandlerProduct,
-    /// Pushed by `apply_clause_continuation` — belongs to NO clause (audit §2).
-    ContinuationProduct,
+    /// Pushed by `apply_clause_continuation`. An intrinsic continuation names
+    /// its owning clause, but is never a primary result of that clause.
+    ContinuationProduct { intrinsic_to: Option<ClauseId> },
     /// Provenance lost because a continuation restructured `defs` in place
     /// (e.g. the Birthing Ritual `DigFromAmong` rebuild). Recorded honestly
     /// rather than guessed.
@@ -384,9 +385,10 @@ impl Arena {
 
     /// Insert a new def beside its selected producer without changing the
     /// identities of any instructions between that producer and this clause.
-    fn insert_after(&mut self, index: usize, def: &AbilityDefinition, clause: ClauseId) {
-        self.push_new(Some(clause), NodeRole::HandlerProduct, def_witness(def));
+    fn insert_after(&mut self, index: usize, def: &AbilityDefinition, clause: ClauseId) -> NodeId {
+        let id = self.push_new(Some(clause), NodeRole::HandlerProduct, def_witness(def));
         self.order[index + 1..].rotate_right(1);
+        id
     }
 
     /// Return a MOVED def to top-level under its ORIGINAL `NodeId`.
@@ -1158,7 +1160,7 @@ impl AssemblyEnv {
                     origin: Some(Zone::Library),
                     ..
                 }
-            ) && provenance.role == NodeRole::ContinuationProduct
+            ) && matches!(provenance.role, NodeRole::ContinuationProduct { .. })
             {
                 self.search_destination_nodes.push(index);
             }
@@ -2427,7 +2429,11 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 // (formerly the absorbed `followup_continuation` path).
                 if let Some(continuation) = clause_ir.disposition.followup() {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
-                    env.observe(&defs, None, NodeRole::ContinuationProduct);
+                    env.observe(
+                        &defs,
+                        None,
+                        NodeRole::ContinuationProduct { intrinsic_to: None },
+                    );
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_binding());
                 }
                 true
@@ -2867,7 +2873,9 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                                 instead_override_body_mut(&mut instead),
                                 *declared_antecedent,
                             );
-                            if let Some(index) = declared_antecedent.and(bound_antecedent) {
+                            if let (Some(producer_clause), Some(index)) =
+                                (declared_antecedent, bound_antecedent)
+                            {
                                 // CR 608.2c, 614.6: the named producer alone is replaced.
                                 // Its intrinsic continuation belongs to the fallback. Leave
                                 // later instructions in source order for the common chain fold.
@@ -2878,11 +2886,29 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                                 );
                                 instead.else_ability = producer.sub_ability.take();
                                 let next = index + 1;
-                                if let Some(sibling) = defs.get_mut(next) {
+                                let override_id =
+                                    env.arena.insert_after(index, &instead, clause_ir.id);
+                                defs.insert(next, instead);
+                                let tail = next + 1;
+                                while env.arena.prov_at(tail).is_some_and(|prov| {
+                                    prov.origin == Some(*producer_clause)
+                                        || prov.role
+                                            == NodeRole::ContinuationProduct {
+                                                intrinsic_to: Some(*producer_clause),
+                                            }
+                                }) {
+                                    let intrinsic = Some(Box::new(defs.remove(tail)));
+                                    if let Some(fallback) = defs[next].else_ability.as_mut() {
+                                        append_to_deepest_sub_ability(fallback, intrinsic);
+                                    } else {
+                                        defs[next].else_ability = intrinsic;
+                                    }
+                                    let id = env.arena.remove_at(tail);
+                                    env.arena.absorb(id, override_id);
+                                }
+                                if let Some(sibling) = defs.get_mut(tail) {
                                     sibling.sub_link = SubAbilityLink::SequentialSibling;
                                 }
-                                env.arena.insert_after(index, &instead, clause_ir.id);
-                                defs.insert(next, instead);
                                 env.observe(&defs, None, NodeRole::Unknown);
                                 break 'instead true;
                             }
@@ -3052,7 +3078,11 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
                 if let Some(continuation) = intrinsic {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
-                    env.observe(&defs, None, NodeRole::ContinuationProduct);
+                    env.observe(
+                        &defs,
+                        None,
+                        NodeRole::ContinuationProduct { intrinsic_to: None },
+                    );
                 }
                 true
             } else if let ClauseDisposition::DrawnThisTurnFollowup { life_payment } =
@@ -3201,7 +3231,11 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         // previous defs before building this clause's def (`Emit.followup`).
         if let Some(continuation) = clause_ir.disposition.followup() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
-            env.observe(&defs, None, NodeRole::ContinuationProduct);
+            env.observe(
+                &defs,
+                None,
+                NodeRole::ContinuationProduct { intrinsic_to: None },
+            );
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_binding());
         }
 
@@ -4394,7 +4428,13 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         // defs (`Emit.intrinsic`).
         if let Some(continuation) = clause_ir.disposition.intrinsic() {
             apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
-            env.observe(&defs, None, NodeRole::ContinuationProduct);
+            env.observe(
+                &defs,
+                None,
+                NodeRole::ContinuationProduct {
+                    intrinsic_to: Some(clause_ir.id),
+                },
+            );
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_binding());
         }
 
@@ -6994,7 +7034,10 @@ mod arena_tests {
                 .as_deref()
                 .expect("draw after the replacement");
             assert_eq!(common.sub_link, SubAbilityLink::SequentialSibling);
-            assert!(matches!(common.effect.as_ref(), Effect::Draw { .. }));
+            assert!(
+                matches!(common.effect.as_ref(), Effect::Draw { .. }),
+                "intrinsic={intrinsic}, replacement: {replacement:#?}"
+            );
             assert!(common.sub_ability.is_none());
             if intrinsic {
                 let fallback = replacement

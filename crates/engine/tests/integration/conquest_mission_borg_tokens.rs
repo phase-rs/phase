@@ -51,11 +51,14 @@ fn borg_count(runner: &GameRunner) -> usize {
 /// Enter a nontoken artifact with `quest` counters already on the enchantment;
 /// returns the runner after the trigger resolves and the enchantment's id.
 fn enter_artifact(quest: u32) -> (GameRunner, ObjectId) {
+    enter_artifact_with_text(quest, "Conquest Mission", CONQUEST_MISSION)
+}
+
+fn enter_artifact_with_text(quest: u32, name: &str, text: &str) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let mission = scenario
-        .add_enchantment_from_oracle(P0, "Conquest Mission", CONQUEST_MISSION)
-        .id();
+    scenario.with_library_top(P0, &["Island", "Plains"]);
+    let mission = scenario.add_enchantment_from_oracle(P0, name, text).id();
     scenario.with_counter(mission, parse_counter_type("quest"), quest);
     let artifact = scenario
         .add_artifact_to_hand_from_oracle(P0, "Bauble", "")
@@ -71,7 +74,7 @@ fn enter_artifact(quest: u32) -> (GameRunner, ObjectId) {
             .execute
             .as_deref()
             .is_some_and(|d| !contains_unimplemented(d))),
-        "Conquest Mission must parse with no Unimplemented effects"
+        "{name} must parse with no Unimplemented effects"
     );
 
     runner.cast(artifact).resolve();
@@ -99,4 +102,27 @@ fn counter_is_added_even_when_override_applies() {
     let (runner, mission) = enter_artifact(9);
     assert_eq!(counters(&runner, mission, parse_counter_type("quest")), 10);
     assert_eq!(borg_count(&runner), 2);
+}
+
+/// Synthetic discriminator: Conquest Mission is the nearest printed card.
+/// Insert an independent Draw between its token producer and its override.
+#[test]
+fn synthetic_draw_after_the_selected_token_runs_on_both_outcomes() {
+    let text = CONQUEST_MISSION.replace(" If ", " Draw a card. If ");
+    for (quest, expected_tokens) in [(2, 1), (5, 2)] {
+        let (runner, mission) = enter_artifact_with_text(quest, "Synthetic token override", &text);
+        assert_eq!(
+            counters(&runner, mission, parse_counter_type("quest")),
+            quest + 1
+        );
+        assert_eq!(borg_count(&runner), expected_tokens);
+        let player = &runner.state().players[0];
+        assert_eq!(
+            player.hand.len(),
+            1,
+            "draw exactly once from {quest} counters"
+        );
+        assert_eq!(runner.state().objects[&player.hand[0]].name, "Island");
+        assert_eq!(runner.state().objects[&player.library[0]].name, "Plains");
+    }
 }
