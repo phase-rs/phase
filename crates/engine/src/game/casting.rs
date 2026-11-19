@@ -15129,9 +15129,11 @@ fn apply_cost_floors(mana_cost: &mut ManaCost, floors: &[u32]) {
     }
 }
 
-/// Check if a spell matches a cost modification filter.
-/// Handles both Typed filters (single type) and Or filters (combined types like instant/sorcery).
-fn spell_matches_cost_filter(
+/// Check whether a prospective spell matches a cost-modification filter or a
+/// spell-scoped mana-payment concession. Both use the live-spell projection,
+/// so filters see the resulting spell's characteristics instead of the
+/// current zone characteristics of a face-down exiled card.
+pub(super) fn spell_matches_cost_filter(
     state: &GameState,
     caster: PlayerId,
     spell_id: ObjectId,

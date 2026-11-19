@@ -5460,7 +5460,11 @@ pub fn matches_target_filter_in_owner_zone(
 /// grants) both route through it, so the two cannot drift on which zones are
 /// owner-scoped.
 pub fn is_owner_scoped_zone(zone: Zone) -> bool {
-    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+    // CR 400.1 + CR 400.3: the owner-scoped zones are exactly the per-player
+    // ones, so `Zone::is_per_player` holds the partition and this function
+    // names what it means here. The parser's zone-possessor grammar reads the
+    // same predicate, which is what keeps the two from drifting.
+    zone.is_per_player()
 }
 
 /// CR 400.3 + CR 109.5 + CR 108.4a: match `object_id` against `filter` using the
@@ -8807,6 +8811,35 @@ pub fn type_filter_matches(
     obj: &GameObject,
     all_creature_types: &[String],
 ) -> bool {
+    // CR 406.3a: A card exiled face down has no characteristics. The card is
+    // still the object a linked effect refers to, so identity and zone
+    // predicates (and `Card`/`Any`, which name no characteristic) keep
+    // matching; every card-type and subtype read in this type authority fails
+    // closed. (`FilterProp::HasSupertype`/`NotSupertype` are a separate
+    // property path and are not part of this fence.)
+    // Negation and disjunction keep their ordinary truth tables over that
+    // characteristic-free reading: "noncreature" matches, and a characteristic-
+    // free disjunct can still match.
+    if obj.zone == Zone::Exile && obj.face_down {
+        return match tf {
+            TypeFilter::Card | TypeFilter::Any => true,
+            TypeFilter::Non(inner) => !type_filter_matches(inner, obj, all_creature_types),
+            TypeFilter::AnyOf(filters) => filters
+                .iter()
+                .any(|inner| type_filter_matches(inner, obj, all_creature_types)),
+            TypeFilter::Creature
+            | TypeFilter::Land
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Instant
+            | TypeFilter::Sorcery
+            | TypeFilter::Planeswalker
+            | TypeFilter::Battle
+            | TypeFilter::Kindred
+            | TypeFilter::Permanent
+            | TypeFilter::Subtype(_) => false,
+        };
+    }
     match tf {
         TypeFilter::Creature => obj.card_types.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => obj.card_types.core_types.contains(&CoreType::Land),
@@ -16012,6 +16045,71 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    /// CR 406.3a: a card exiled face down has no characteristics, so every
+    /// type-line test in this type authority fails closed while identity/zone predicates still
+    /// see the same card. The face-up control proves the status, not exile
+    /// alone, is what hides the type line.
+    #[test]
+    fn face_down_exile_has_no_characteristics_for_type_filters() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let hidden = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Hidden Bear".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&hidden).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Bear".to_string());
+            obj.face_down = true;
+        }
+
+        let creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..TypedFilter::default()
+        });
+        let bear = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Bear".to_string())],
+            ..TypedFilter::default()
+        });
+        let noncreature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
+            ..TypedFilter::default()
+        });
+        let exiled = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::InZone { zone: Zone::Exile }],
+            ..TypedFilter::default()
+        });
+
+        assert!(!matches_target_filter(&state, hidden, &creature, source));
+        assert!(!matches_target_filter(&state, hidden, &bear, source));
+        // Negation keeps its ordinary truth table over the characteristic-free
+        // reading: the card is not a creature, so "noncreature" matches.
+        assert!(matches_target_filter(&state, hidden, &noncreature, source));
+        // Linked/identity references and characteristic-free predicates still
+        // find the card; only characteristic tests fail closed.
+        assert!(matches_target_filter(
+            &state,
+            hidden,
+            &TargetFilter::Any,
+            source
+        ));
+        assert!(matches_target_filter(
+            &state,
+            hidden,
+            &TargetFilter::SpecificObject { id: hidden },
+            source
+        ));
+        assert!(matches_target_filter(&state, hidden, &exiled, source));
+
+        // Face-up control.
+        state.objects.get_mut(&hidden).unwrap().face_down = false;
+        assert!(matches_target_filter(&state, hidden, &creature, source));
     }
 
     /// CR 205.1: the `type_filters` conjunction, pinned at all three arities
