@@ -41,14 +41,20 @@
 //! Kos's "could target" names the copies its resolution makes, not a target of
 //! its own trigger.
 //!
-//! Drain sites not wrapped in `drain_on_action_buffer`, and why: a combat-damage
-//! window cannot be rescanned (a window emission comes with a stack push, so
-//! the `CombatDamage` pass skips its trigger scan, and the damage-assignment
-//! arms process triggers inline). The elimination drain is wrapped inside
-//! `drain_or_clear_deferred_triggers_after_elimination`, so every route to it
-//! (state-based-action losses, a concession, the departure-settled safety net,
-//! the sandbox) claims the drained range; where no later scan of that buffer
-//! follows, the claim is inert (the ledger is cleared at the next action).
+//! Drain sites not wrapped in `drain_on_action_buffer`, and why: no later
+//! ordinary scan reads the range they append. A combat-damage window cannot be
+//! rescanned (a window emission comes with a stack push, so the `CombatDamage`
+//! pass skips its trigger scan, and the damage-assignment arms process triggers
+//! inline). A combat declaration's batch and a resolution choice that returns
+//! `WaitingForWithInlineTriggers` mark the action's triggers processed inline.
+//! A priority boundary's batch (`place_priority_batch`) is placed after that
+//! pass's scan. `process_triggers`, `dispatch_collected_triggers` and the
+//! delayed-trigger dispatch run on a local buffer. The elimination drain is
+//! wrapped inside `drain_or_clear_deferred_triggers_after_elimination`, so
+//! every route to it (state-based-action losses, a concession, the
+//! departure-settled safety net, the sandbox) claims the drained range; where
+//! no later scan of that buffer follows, the claim is inert (the ledger is
+//! cleared at the next action).
 
 use engine::game::combat::AttackTarget;
 use engine::game::dungeon::DungeonId;
