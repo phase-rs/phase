@@ -51950,9 +51950,7 @@ fn parse_effect_chain_ir_body(
                         refuse_target_pt_threshold_rider_with_own_target(clause);
                     }
                 }
-                for c in body_ir.clauses {
-                    builder.absorb_clause(c);
-                }
+                builder.absorb_chain(body_ir.clauses);
                 continue;
             }
         }

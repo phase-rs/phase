@@ -6,6 +6,8 @@
 //! list and performs all assembly operations (continuation patching, condition lifting,
 //! delayed-trigger wrapping, sub_ability chain wiring).
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use super::ast::{with_clause_chain_duration, ClauseBoundary, ContinuationAst, ParsedEffectClause};
@@ -1378,11 +1380,28 @@ impl ClauseIrBuilder {
         self.clauses.last_mut()
     }
 
+    /// Re-mint nested clauses together so their antecedents refer to the same
+    /// producers after absorption. IDs from a different chain cannot bind here.
+    pub(crate) fn absorb_chain(&mut self, clauses: Vec<ClauseIr>) {
+        let mut ids = BTreeMap::new();
+        for mut clause in clauses {
+            if let ClauseDisposition::ReplaceMeaning {
+                kind: ReplaceMeaningKind::Instead { antecedent, .. },
+            } = &mut clause.disposition
+            {
+                *antecedent = antecedent.and_then(|old| ids.get(&old).copied());
+            }
+            let old = clause.id;
+            let new = self.absorb_clause(clause);
+            ids.insert(old, new);
+        }
+    }
+
     /// Absorb an already-built clause from a NESTED chain: re-mint a fresh
     /// source-order `ClauseId` + `ChainRelative` span (re-locating its fragment in
     /// THIS chain), preserving all content. Keeps single-construction — still
     /// routes through [`ClauseIrBuilder::clause`] + [`ClauseDraft::push`].
-    pub(crate) fn absorb_clause(&mut self, c: ClauseIr) {
+    fn absorb_clause(&mut self, c: ClauseIr) -> ClauseId {
         // CR 608.2c: `placement` is deliberately NOT propagated. Every field below is
         // an intrinsic property of the clause; `placement` is a RELATIONAL verdict
         // about one position in one chain's delayed-payload placement registry, and a
@@ -1417,11 +1436,11 @@ impl ClauseIrBuilder {
         .declared_player_group(c.declared_player_group)
         .head_window(c.head_window)
         .push();
-        if let Some(absorbed) = self.clauses.last_mut() {
-            absorbed.target_reads = c.target_reads;
-            absorbed.sibling_condition = c.sibling_condition;
-            absorbed.instruction_join = c.instruction_join;
-        }
+        let absorbed = self.clauses.last_mut().expect("clause was just pushed");
+        absorbed.target_reads = c.target_reads;
+        absorbed.sibling_condition = c.sibling_condition;
+        absorbed.instruction_join = c.instruction_join;
+        absorbed.id
     }
 
     /// Consume the builder, yielding the source-ordered clause list.
@@ -1842,6 +1861,44 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::types::ability::{Duration, Effect};
+
+    #[test]
+    fn absorbed_instead_antecedent_names_only_its_nested_token_producer() {
+        // Synthetic nested chains. Conquest Mission prints the Borg override,
+        // but does not nest it after an independent Treasure instruction.
+        let outer_text = "Create a Treasure token.";
+        let nested_text = "Create a 1/1 colorless Borg artifact creature token. If ~ has six or more quest counters on it, create two of those tokens instead.";
+        let parse = |text| {
+            crate::parser::oracle_effect::parse_effect_chain_ir(
+                text,
+                AbilityKind::Spell,
+                &mut crate::parser::oracle_effect::ParseContext::default(),
+            )
+            .clauses
+        };
+        let antecedent = |clause: &ClauseIr| match &clause.disposition {
+            ClauseDisposition::ReplaceMeaning {
+                kind: ReplaceMeaningKind::Instead { antecedent, .. },
+            } => *antecedent,
+            _ => panic!("expected the token override"),
+        };
+
+        let mut outer = ClauseIrBuilder::new(&format!("{outer_text} {nested_text} {nested_text}"));
+        outer.absorb_chain(parse(outer_text));
+        let nested = parse(nested_text);
+        assert_eq!(nested.len(), 2);
+        assert_eq!(antecedent(&nested[1]), Some(nested[0].id));
+        assert_eq!(nested[0].id, outer.clauses()[0].id);
+
+        outer.absorb_chain(nested.clone());
+        assert_ne!(outer.clauses()[1].id, outer.clauses()[0].id);
+        assert_eq!(antecedent(&outer.clauses()[2]), Some(outer.clauses()[1].id));
+
+        // Without its producer, the next override cannot borrow the previous
+        // nested chain's binding for the same numeric ID.
+        outer.absorb_chain(nested.into_iter().skip(1).collect());
+        assert_eq!(antecedent(&outer.clauses()[3]), None);
+    }
 
     #[test]
     fn chosen_return_ir_links_the_matching_producer_past_an_unrelated_return() {

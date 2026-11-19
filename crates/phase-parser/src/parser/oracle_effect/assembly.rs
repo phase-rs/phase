@@ -382,6 +382,13 @@ impl Arena {
         id
     }
 
+    /// Insert a new def beside its selected producer without changing the
+    /// identities of any instructions between that producer and this clause.
+    fn insert_after(&mut self, index: usize, def: &AbilityDefinition, clause: ClauseId) {
+        self.push_new(Some(clause), NodeRole::HandlerProduct, def_witness(def));
+        self.order[index + 1..].rotate_right(1);
+    }
+
     /// Return a MOVED def to top-level under its ORIGINAL `NodeId`.
     ///
     /// Identity tracks the def, not its position (U6-C2 ruling). A def that
@@ -2819,7 +2826,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     ReplaceMeaningKind::Instead {
                         def: instead_def,
                         antecedent: declared_antecedent,
-                    } => {
+                    } => 'instead: {
                         // CR 614.1a + CR 608.2c: assemble a multi-clause base + an
                         // "instead" override so the runtime can produce both
                         // branches. Clause 1 becomes the root and is the Cow-swap
@@ -2860,6 +2867,25 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                                 instead_override_body_mut(&mut instead),
                                 *declared_antecedent,
                             );
+                            if let Some(index) = declared_antecedent.and(bound_antecedent) {
+                                // CR 608.2c, 614.6: the named producer alone is replaced.
+                                // Its intrinsic continuation belongs to the fallback. Leave
+                                // later instructions in source order for the common chain fold.
+                                let producer = &mut defs[index];
+                                bind_instead_body_to_antecedent(
+                                    instead_override_body_mut(&mut instead),
+                                    producer,
+                                );
+                                instead.else_ability = producer.sub_ability.take();
+                                let next = index + 1;
+                                if let Some(sibling) = defs.get_mut(next) {
+                                    sibling.sub_link = SubAbilityLink::SequentialSibling;
+                                }
+                                env.arena.insert_after(index, &instead, clause_ir.id);
+                                defs.insert(next, instead);
+                                env.observe(&defs, None, NodeRole::Unknown);
+                                break 'instead true;
+                            }
                             // An anaphor no single clause answers fails closed:
                             // the override stays the honest unsupported marker
                             // and is never rewritten from some other instruction.
@@ -4648,6 +4674,15 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             if chain.sub_link == SubAbilityLink::SequentialSibling {
                 if let Some(else_chain) = prev.else_ability.as_mut() {
                     append_to_deepest_sub_ability(else_chain, Some(Box::new(chain.clone())));
+                } else if prev.sub_ability.is_some()
+                    && prev
+                        .condition
+                        .as_ref()
+                        .is_some_and(AbilityCondition::is_instead_override)
+                {
+                    // A guarded replacement body lives under the selector as
+                    // its own sub. Skipping it must still reach the sibling.
+                    prev.else_ability = Some(Box::new(chain.clone()));
                 }
             }
             if prev.sub_ability.is_some() {
@@ -6927,6 +6962,80 @@ mod arena_tests {
                 _ => None,
             });
         assert_eq!(declared, Some(Some(token_clause)));
+    }
+
+    /// Synthetic discriminator for Conquest Mission's "those tokens" override.
+    /// The printed card has no intervening Draw or intrinsic producer tail.
+    #[test]
+    fn declared_token_override_preserves_the_independent_draw() {
+        let text = "Create a 1/1 colorless Borg artifact creature token. Draw a card. If ~ has six or more quest counters on it, create two of those tokens instead.";
+        let mut ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        for intrinsic in [false, true] {
+            if intrinsic {
+                ir.clauses[0].parsed.sub_ability = Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::NoOp,
+                )));
+            }
+            let def = assemble_effect_chain(&ir);
+            let (base, replacement) = instead_antecedent(&def);
+            for (node, expected_count) in [(base, 1), (replacement, 2)] {
+                assert!(matches!(
+                    node.effect.as_ref(),
+                    Effect::Token { name, count: QuantityExpr::Fixed { value }, .. }
+                        if name == "Borg" && *value == expected_count
+                ));
+            }
+            // When the selector succeeds, resolution takes the replacement's
+            // sub. On failure it takes the explicit fallback if present, or
+            // the independent sibling under the override otherwise.
+            let common = replacement
+                .sub_ability
+                .as_deref()
+                .expect("draw after the replacement");
+            assert_eq!(common.sub_link, SubAbilityLink::SequentialSibling);
+            assert!(matches!(common.effect.as_ref(), Effect::Draw { .. }));
+            assert!(common.sub_ability.is_none());
+            if intrinsic {
+                let fallback = replacement
+                    .else_ability
+                    .as_deref()
+                    .expect("base continuation");
+                assert!(matches!(fallback.effect.as_ref(), Effect::NoOp));
+                assert_eq!(fallback.sub_ability.as_deref(), Some(common));
+            } else {
+                assert!(replacement.else_ability.is_none());
+            }
+        }
+    }
+
+    /// Synthetic sibling of Conquest Mission. A separately guarded replacement
+    /// body uses a selector carrier; declining the selector skips the body.
+    #[test]
+    fn declared_token_override_with_guarded_body_keeps_draw_outside_the_guard() {
+        let text = "Create a 1/1 colorless Borg artifact creature token. Draw a card. If ~ has six or more quest counters on it, create two of those tokens instead.";
+        let mut ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let ClauseDisposition::ReplaceMeaning {
+            kind: ReplaceMeaningKind::Instead { def, .. },
+        } = &mut ir.clauses.last_mut().unwrap().disposition
+        else {
+            panic!("expected the token override");
+        };
+        let selector = def.condition.take().expect("the printed condition");
+        def.condition = Some(AbilityCondition::EventOutcomeWon);
+        **def = super::super::instead_override_definition((**def).clone(), selector);
+        let assembled = assemble_effect_chain(&ir);
+        let (_, selector) = instead_antecedent(&assembled);
+        let body = selector.sub_ability.as_deref().expect("replacement body");
+        assert_eq!(token_name(body), Some("Borg"));
+        assert_eq!(body.condition, Some(AbilityCondition::EventOutcomeWon));
+        let draw = body
+            .sub_ability
+            .as_deref()
+            .expect("independent instruction");
+        assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+        assert_eq!(draw.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(selector.else_ability.as_deref(), Some(draw));
     }
 
     /// SYNTHETIC binding test — no printed card has this shape. With two
