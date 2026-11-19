@@ -382,7 +382,7 @@ fn assert_priority(result: &ActionResult, what: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// (a) Action-seam finisher at a prompt end
+// Action-seam finisher at a prompt end
 // ---------------------------------------------------------------------------
 
 /// F-1: CR 601.2c + CR 603.3d + CR 603.2: the mentor's target is chosen by
@@ -629,7 +629,7 @@ fn f5_valiant_of_a_finisher_target_is_collected_once() {
 }
 
 // ---------------------------------------------------------------------------
-// (b), (g) Priority end: base placement, exact count
+// Priority end: unchanged placement, exact count
 // ---------------------------------------------------------------------------
 
 /// F-6: CR 603.3b: Fiend Hunter's ETB targets Tar Pit Warrior; the drain places
@@ -704,7 +704,7 @@ fn f6c_priority_end_crime_is_collected_once() {
 }
 
 // ---------------------------------------------------------------------------
-// (a) DistributeAmong end
+// DistributeAmong end
 // ---------------------------------------------------------------------------
 
 fn titan_divided_board(
@@ -846,7 +846,7 @@ fn f7h_hostile_siblings_in_one_divided_finalize() {
 }
 
 // ---------------------------------------------------------------------------
-// (a) SelectModes action seam
+// SelectModes action seam
 // ---------------------------------------------------------------------------
 
 /// F-8: CR 603.3c + CR 700.2b: Charming Prince's exile mode is chosen by
@@ -900,7 +900,7 @@ fn f8_select_modes_finisher_collects_its_span_once() {
 }
 
 // ---------------------------------------------------------------------------
-// (d) Windowless synthetic dispatch (dungeon rooms)
+// Windowless synthetic dispatch (dungeon rooms)
 // ---------------------------------------------------------------------------
 
 fn fates_reversal_in_hand(scenario: &mut GameScenario) -> ObjectId {
@@ -1012,7 +1012,7 @@ fn f9c_room_ability_crime_is_collected_once() {
 }
 
 // ---------------------------------------------------------------------------
-// (d), (h) In-window finisher (random modes)
+// In-window finisher (random modes)
 // ---------------------------------------------------------------------------
 
 fn magus_on_battlefield(scenario: &mut GameScenario) -> ObjectId {
