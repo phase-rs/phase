@@ -5426,6 +5426,28 @@ fn classify_negation(negated: &str) -> NegationResult {
     {
         return NegationResult::Prop(FilterProp::NotHistoric);
     }
+    // CR 205.4a + CR 314.1: "non-ongoing scheme" (My Laughter Echoes).
+    // CR 903.3: "noncommander" (You Will Know True Suffering, Subjugate the
+    // Hobbits, Shield Broker, Become the Pilot) — commander is a
+    // deck-construction designation, not a subtype, so it must not fall
+    // through to the vacuous `Non(Subtype("Commander"))` below (no object
+    // carries that subtype, so the exclusion would match everything).
+    if let Ok((_, result)) = all_consuming(alt((
+        map(tag::<_, _, OracleError<'_>>("ongoing"), |_| {
+            NegationResult::Prop(FilterProp::NotSupertype {
+                value: Supertype::Ongoing,
+            })
+        }),
+        map(tag("commander"), |_| {
+            NegationResult::Prop(FilterProp::Not {
+                prop: Box::new(FilterProp::IsCommander),
+            })
+        }),
+    )))
+    .parse(negated)
+    {
+        return result;
+    }
 
     match negated {
         // Color negation — parallel to HasColor
@@ -5453,18 +5475,6 @@ fn classify_negation(negated: &str) -> NegationResult {
         }),
         "snow" => NegationResult::Prop(FilterProp::NotSupertype {
             value: Supertype::Snow,
-        }),
-        // CR 205.4a + CR 314.1: "non-ongoing scheme" (My Laughter Echoes).
-        "ongoing" => NegationResult::Prop(FilterProp::NotSupertype {
-            value: Supertype::Ongoing,
-        }),
-        // CR 903.3: "noncommander" (You Will Know True Suffering, Subjugate
-        // the Hobbits, Shield Broker, Become the Pilot) — commander is a
-        // deck-construction designation, not a subtype, so it must not fall
-        // through to the vacuous `Non(Subtype("Commander"))` below (no object
-        // carries that subtype, so the exclusion would match everything).
-        "commander" => NegationResult::Prop(FilterProp::Not {
-            prop: Box::new(FilterProp::IsCommander),
         }),
         // CR 205.2a + CR 205.3: Card-type / subtype negation → TypeFilter::Non
         _ => {

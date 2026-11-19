@@ -6172,11 +6172,15 @@ fn try_parse_choose_revealed_anaphor(lower: &str) -> Option<ChooseImperativeAst>
         };
         (TargetFilter::Typed(TypedFilter::new(type_filter)), rest)
     };
-    let selection = match tail {
-        "" => crate::types::ability::CardSelectionMode::Chosen,
-        " at random" => crate::types::ability::CardSelectionMode::Random,
-        _ => return None,
-    };
+    let (_, selection) = all_consuming(alt((
+        value(
+            crate::types::ability::CardSelectionMode::Random,
+            tag::<_, _, E>(" at random"),
+        ),
+        value(crate::types::ability::CardSelectionMode::Chosen, eof),
+    )))
+    .parse(tail)
+    .ok()?;
     Some(ChooseImperativeAst::FromZone {
         count: 1,
         zones: vec![Zone::Library],
@@ -31913,7 +31917,8 @@ mod tests {
             draw_tail.effect
         );
         assert!(
-            !format!("{draw:?}").contains("Unimplemented"),
+            !std::iter::successors(Some(&draw), |node| node.sub_ability.as_deref())
+                .any(|node| matches!(*node.effect, Effect::Unimplemented { .. })),
             "draw/abandon chain must be fully parsed"
         );
 
@@ -31936,7 +31941,8 @@ mod tests {
             token_tail.effect
         );
         assert!(
-            !format!("{token:?}").contains("Unimplemented"),
+            !std::iter::successors(Some(&token), |node| node.sub_ability.as_deref())
+                .any(|node| matches!(*node.effect, Effect::Unimplemented { .. })),
             "token/abandon chain must be fully parsed"
         );
     }
