@@ -1599,6 +1599,47 @@ pub(crate) fn parked_prompt_is_stale(state: &GameState, pending: &PendingReplace
         || !pending_candidates_are_current(state, pending)
 }
 
+/// CR 616.1 + CR 800.4a: a control change can transfer a choice while every
+/// stored replacement still applies. An optional replacement keeps its own
+/// choice authority; an ordering belongs to the controller of the affected object.
+pub(crate) fn departure_choice_is_current(
+    state: &GameState,
+    pending: &PendingReplacement,
+    chooser: PlayerId,
+) -> bool {
+    let current = if pending.is_optional {
+        pending
+            .candidates
+            .first()
+            .and_then(|&rid| replacement_choice_player(state, &pending.proposed, rid))
+    } else {
+        Some(pending.proposed.affected_player(state))
+    };
+    current == Some(chooser)
+        && super::players::is_alive(state, chooser)
+        && pending_candidates_are_current(state, pending)
+}
+
+/// Reconsult the existing event after a departure. Its modification, applied
+/// replacement IDs, and pipeline depth survive the change of chooser.
+pub(crate) fn repropose_departure_choice(
+    state: &mut GameState,
+    pending: PendingReplacement,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    prepare_replacement_index_for_pipeline(state);
+    let result = pipeline_loop(
+        state,
+        pending.proposed,
+        pending.depth,
+        replacement_registry(),
+        events,
+        None,
+    );
+    clear_replacement_index_pipeline(state);
+    result
+}
+
 /// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
 /// Centralizes candidate count and description extraction so callers don't repeat this logic.
 ///

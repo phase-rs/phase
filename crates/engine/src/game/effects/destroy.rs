@@ -648,6 +648,7 @@ pub(crate) fn drain_pending_simultaneous_departure(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ParkedDepartureConsult {
     rider_custody: DepartureRiderCustody,
+    binding: ObjectIdentityBinding,
 }
 
 /// CR 616.1: is the replacement choice about to be answered the parked consult
@@ -659,13 +660,12 @@ pub(crate) fn parked_departure_consult(
 ) -> Option<ParkedDepartureConsult> {
     let pending = parked_departure_frame(state)?;
     match &pending.stage {
-        Some(SimultaneousDepartureStage::Consulting { member, .. })
-            if Some(member.object_id) == answered_object =>
-        {
-            Some(ParkedDepartureConsult {
-                rider_custody: pending.rider_custody,
-            })
-        }
+        Some(SimultaneousDepartureStage::Consulting {
+            member, binding, ..
+        }) if Some(member.object_id) == answered_object => Some(ParkedDepartureConsult {
+            rider_custody: pending.rider_custody,
+            binding: *binding,
+        }),
         _ => None,
     }
 }
@@ -713,6 +713,21 @@ pub(crate) fn resume_parked_departure_consult(
     result: ReplacementResult,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), Box<ReplacementResult>> {
+    let Some(pending) = take_departure_consult_frame(state, parked, true) else {
+        return Err(Box::new(result));
+    };
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    finish_departure_consult(state, pending, result, events.len(), events);
+    Ok(())
+}
+
+fn take_departure_consult_frame(
+    state: &mut GameState,
+    parked: ParkedDepartureConsult,
+    keep_member_rider: bool,
+) -> Option<PendingSimultaneousDeparture> {
     // Applying the answer may have stashed the chosen replacement's
     // instructions in a drain frame above the batch. They belong to this
     // member; lift them off so the batch is reachable, then reinstall them for
@@ -721,13 +736,20 @@ pub(crate) fn resume_parked_departure_consult(
         DepartureRiderCustody::OuterPending => None,
         DepartureRiderCustody::PerMember => state.take_ready_post_replacement_drain(),
     };
-    let taken = state.take_active_simultaneous_departure();
-    if let Some(rider) = rider {
+    let taken = state.take_active_simultaneous_departure().ok().flatten();
+    if let Some(rider) = rider.filter(|_| keep_member_rider || taken.is_none()) {
         state.install_post_replacement_drain(rider, ResidentDrainPolicy::KeepResident);
     }
-    let Ok(Some(mut pending)) = taken else {
-        return Err(Box::new(result));
-    };
+    taken
+}
+
+fn finish_departure_consult(
+    state: &mut GameState,
+    mut pending: PendingSimultaneousDeparture,
+    result: ReplacementResult,
+    consult_start: usize,
+    events: &mut Vec<GameEvent>,
+) {
     let Some(SimultaneousDepartureStage::Consulting {
         member,
         binding,
@@ -736,10 +758,6 @@ pub(crate) fn resume_parked_departure_consult(
     else {
         unreachable!("a parked departure consult owns a Consulting stage");
     };
-    state.waiting_for = WaitingFor::Priority {
-        player: state.active_player,
-    };
-    let consult_start = events.len();
     let child_stack_start = state.resolution_stack.capture_child_boundary();
     match settle_consult(state, &mut pending, member, binding, step, result, events) {
         ConsultFlow::Paused => {
@@ -754,7 +772,54 @@ pub(crate) fn resume_parked_departure_consult(
             state.resolution_stack.push_simultaneous_departure(pending);
         }
     }
-    Ok(())
+}
+
+/// The batch owns only a replacement question for its exact in-flight member.
+pub(crate) fn departure_choice_in_flight(state: &GameState) -> bool {
+    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
+        && state.pending_replacement.as_ref().is_some_and(|pending| {
+            parked_departure_consult(state, pending.proposed.affected_object_id()).is_some()
+        })
+}
+
+/// CR 616.1f + CR 800.4a: the object, its controller, or applicable
+/// replacements may have changed during the leave sweep. Keep the consult's
+/// already-modified event, and retain its rider only for the same incarnation.
+pub(crate) fn reconcile_departure_consult_after_player_leave(state: &mut GameState) -> bool {
+    let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for else {
+        return false;
+    };
+    let Some(choice) = &state.pending_replacement else {
+        return false;
+    };
+    let Some(parked) = parked_departure_consult(state, choice.proposed.affected_object_id()) else {
+        return false;
+    };
+    let current = parked.binding.is_current(state);
+    if current && replacement::departure_choice_is_current(state, choice, player) {
+        return false;
+    }
+    let Some(mut frame) = take_departure_consult_frame(state, parked, current) else {
+        return false;
+    };
+    let choice = state
+        .pending_replacement
+        .take()
+        .expect("the in-flight consult owns its proposal");
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    if current {
+        // Only this consult's events are held back for simultaneous delivery.
+        // Concession and player-loss events remain in the departure's buffer.
+        let mut events = Vec::new();
+        let result = replacement::repropose_departure_choice(state, choice, &mut events);
+        finish_departure_consult(state, frame, result, 0, &mut events);
+    } else {
+        frame.stage = None;
+        state.resolution_stack.push_simultaneous_departure(frame);
+    }
+    true
 }
 
 fn departure_proposal(
@@ -843,28 +908,34 @@ fn next_departure_consult(
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => None,
         }
     };
-    let Some(mut player) = chooser(pending.unconsulted[0]) else {
+    let Some(mut first_chooser) = chooser(pending.unconsulted[0]) else {
         return NextDeparture::Consult(0);
     };
-    let mut earliest = crate::game::topology::apnap_team_rank(state, player);
+    let mut earliest = crate::game::topology::apnap_team_rank(state, first_chooser);
+    let mut order_chooser = first_chooser;
     let mut next = 0;
     let mut choices = Vec::new();
     for (index, &member) in pending.unconsulted.iter().enumerate().skip(1) {
         let Some(other) = chooser(member) else {
             continue;
         };
-        if other == player {
+        let rank = crate::game::topology::apnap_team_rank(state, other);
+        if rank == earliest {
             if choices.is_empty() {
                 choices.push(pending.unconsulted[next].object_id);
             }
             choices.push(member.object_id);
-            continue;
-        }
-        // Shared-turn teammates have the same rank, but one cannot make the
-        // other's choices. Keep the first chooser within that team.
-        let rank = crate::game::topology::apnap_team_rank(state, other);
-        if rank < earliest {
-            (earliest, player) = (rank, other);
+            if other != first_chooser {
+                // CR 805.2 + CR 805.6: the shared-turn representative submits
+                // the team's chosen order. Consulting the selected member
+                // still asks its actual chooser for the replacement.
+                order_chooser =
+                    crate::game::topology::normalize_shared_turn_recipient(state, first_chooser);
+            }
+        } else if rank < earliest {
+            earliest = rank;
+            first_chooser = other;
+            order_chooser = other;
             next = index;
             choices.clear();
         }
@@ -872,23 +943,39 @@ fn next_departure_consult(
     if choices.is_empty() {
         NextDeparture::Consult(next)
     } else {
-        NextDeparture::Choose { player, choices }
+        NextDeparture::Choose {
+            player: order_chooser,
+            choices,
+        }
     }
 }
 
-/// CR 800.4: a departure can change the choices even when their chooser stays.
-/// Release only this batch's order prompt; the elimination boundary resumes
-/// the still-parked batch with its own event buffer.
-pub(crate) fn retire_departure_order_after_player_leave(state: &mut GameState) -> bool {
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::MemberOrderChoice {
-            purpose: MemberOrderPurpose::DepartureReplacements,
-            ..
-        }
-    ) || !state
+pub(crate) enum DepartureOrderChange {
+    PlayerLeft,
+    ReplacementPreferenceRemoved,
+}
+
+/// Release a posted choice whose departure batch needs to be scheduled again.
+/// Player departure can invalidate an offered incarnation even when the chooser
+/// survives; a preference edit changes only which replacements ask for input.
+pub(crate) fn retire_departure_order(state: &mut GameState, change: DepartureOrderChange) -> bool {
+    let WaitingFor::MemberOrderChoice {
+        player,
+        choices,
+        purpose: MemberOrderPurpose::DepartureReplacements,
+        ..
+    } = &state.waiting_for
+    else {
+        return false;
+    };
+    let Some(pending) = state
         .active_simultaneous_departure()
-        .is_some_and(|pending| pending.stage.is_none())
+        .filter(|pending| pending.stage.is_none())
+    else {
+        return false;
+    };
+    if matches!(change, DepartureOrderChange::ReplacementPreferenceRemoved)
+        && matches!(next_departure_consult(state, pending), NextDeparture::Choose {player: current, choices: offered} if current == *player && offered == *choices)
     {
         return false;
     }

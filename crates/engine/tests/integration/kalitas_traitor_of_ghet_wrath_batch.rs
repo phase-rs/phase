@@ -123,6 +123,136 @@ fn zombies_on_battlefield(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
+/// A remembered Murder replacement initially leaves only P1's simultaneous
+/// choices visible. Clearing P0's record restores P0's first decision before P1 acts.
+#[test]
+fn clearing_a_remembered_replacement_reschedules_the_parked_wrath() {
+    use engine::game::engine::apply;
+    use engine::types::actions::ReplacementAutoChoice;
+    use engine::types::player::PlayerId;
+
+    for clear_all in [false, true] {
+        let p2 = PlayerId(2);
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let later = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+        let active_bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let murder_target = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+        let kalitas = scenario
+            .add_creature_from_oracle(p2, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+            .id();
+        let rip = scenario
+            .add_enchantment_from_oracle(p2, "Rest in Peace", REST_IN_PEACE)
+            .id();
+        let murder = scenario
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+            .id();
+        let wrath = scenario
+            .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+            .id();
+        let mut runner = scenario.build();
+
+        runner.cast(murder).target_object(murder_target).resolve();
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Murder must ask which replacement applies");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        let rip_index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == rip)
+            .unwrap();
+        runner
+            .act(GameAction::ChooseReplacementAndRemember {
+                choice: ReplacementAutoChoice::Order {
+                    order: vec![rip_index, 1 - rip_index],
+                },
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&murder_target].zone, Zone::Exile);
+        let stored = &runner.state().replacement_auto_choices;
+        assert_eq!(stored.len(), 1);
+        let id = stored[0].id.clone();
+
+        let mut events = runner.cast(wrath).resolve().events().to_vec();
+        let posted = runner.state().waiting_for.clone();
+        engine::game::interaction::bind_interaction_authority(
+            runner.state_mut(),
+            engine::types::interaction::InteractionSessionId("wrath-member-order".to_owned()),
+        )
+        .unwrap();
+        let original_slots = runner.state().active_interaction_slots.clone();
+        assert_eq!(original_slots.len(), 1);
+        assert_eq!(original_slots[0].semantic_owner, P1.0);
+        assert!(
+            matches!(&posted, WaitingFor::MemberOrderChoice { player, choices, .. }
+            if *player == P1 && choices.as_slice() == [first, later]),
+            "Wrath's first manual choices are P1's: {posted:?}"
+        );
+
+        // P1 may change their own preferences but cannot remove P0's record.
+        let unchanged = apply(
+            runner.state_mut(),
+            P1,
+            GameAction::SetReplacementAutoChoice {
+                selector: Some(id.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(unchanged.waiting_for, posted);
+        assert_eq!(runner.state().active_interaction_slots, original_slots);
+        assert!(unchanged.events.is_empty());
+        assert_eq!(runner.state().replacement_auto_choices.len(), 1);
+
+        let refreshed = apply(
+            runner.state_mut(),
+            P0,
+            GameAction::SetReplacementAutoChoice {
+                selector: (!clear_all).then_some(id),
+            },
+        )
+        .unwrap();
+        assert!(runner.state().replacement_auto_choices.is_empty());
+        assert!(
+            matches!(refreshed.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+            "P0 now owes the earliest manual replacement decision: {:?}",
+            refreshed.waiting_for
+        );
+        events.extend(refreshed.events);
+        let replacement_slots = &runner.state().active_interaction_slots;
+        assert_eq!(replacement_slots.len(), 1);
+        assert_eq!(replacement_slots[0].semantic_owner, P0.0);
+        assert_ne!(
+            replacement_slots[0].interaction_id,
+            original_slots[0].interaction_id
+        );
+        events.extend(choose_replacement_from(&mut runner, rip));
+        assert_eq!(runner.state().waiting_for, posted);
+        events.extend(
+            runner
+                .act(GameAction::SelectCards { cards: vec![later] })
+                .unwrap()
+                .events,
+        );
+        events.extend(choose_replacement_from(&mut runner, kalitas));
+        events.extend(choose_replacement_from(&mut runner, rip));
+        runner.advance_until_stack_empty();
+
+        for id in [first, later, active_bear, kalitas] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+            assert_eq!(zone_changes_of(&events, id), 1);
+        }
+        let tokens = zombies_on_battlefield(runner.state());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(runner.state().objects[&tokens[0]].controller, p2);
+    }
+}
+
 /// CR 616.1 + CR 101.4: both Kalitas controllers choose between the opposing
 /// Kalitas and Rest in Peace. The active player decides first in either board order.
 #[test]
@@ -288,6 +418,126 @@ fn wrath_lets_the_affected_player_choose_which_bear_to_consult_first() {
         let tokens = zombies_on_battlefield(runner.state());
         assert_eq!(tokens.len(), 1);
         assert_eq!(runner.state().objects[&tokens[0]].controller, P1);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 800.4a + CR 616.1: leaving after selecting a permanent does not
+/// answer its replacement choice. Reconsult the same proposed move using
+/// the surviving controller and replacement effects before allowing priority.
+#[test]
+fn conceding_during_wraths_selected_bear_reconsults_that_member() {
+    use engine::game::effects::attach::attach_to;
+    use engine::game::layers::evaluate_layers;
+    use engine::types::ability::TypedFilter;
+    use engine::types::keywords::Keyword;
+    use engine::types::player::PlayerId;
+
+    let p2 = PlayerId(2);
+    // Losing the chooser reassigns the choice. Losing its replacement sources
+    // instead removes the choice from a surviving controller.
+    for (leaving, select_owned, loss_sba) in [
+        (P1, false, false),
+        (P1, true, false),
+        (p2, false, false),
+        (P1, false, true),
+    ] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let borrowed = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let owned = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+        let aura = scenario
+            .add_enchantment_from_oracle(
+                P1,
+                "Control Magic",
+                "Enchant creature\nYou control enchanted creature.",
+            )
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TypedFilter::creature().into()))
+            .id();
+        let kalitas = scenario
+            .add_creature_from_oracle(p2, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+            .id();
+        let rest = scenario
+            .add_enchantment_from_oracle(p2, "Rest in Peace", REST_IN_PEACE)
+            .id();
+        let wrath = scenario
+            .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+            .id();
+        let mut runner = scenario.build();
+        attach_to(runner.state_mut(), aura, borrowed);
+        evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&borrowed].controller, P1);
+        runner.cast(wrath).commit().resolve();
+        assert!(matches!(&runner.state().waiting_for,
+            WaitingFor::MemberOrderChoice { player: P1, choices, .. }
+                if choices.contains(&borrowed) && choices.contains(&owned)));
+        let selected = if select_owned { owned } else { borrowed };
+        if loss_sba {
+            // Arrange a pending player-loss SBA. The public selection opens
+            // the replacement prompt and then reconciles the terminal result.
+            runner.state_mut().players[leaving.0 as usize].life = 0;
+        }
+        let mut events = runner
+            .act(GameAction::SelectCards {
+                cards: vec![selected],
+            })
+            .unwrap()
+            .events;
+        if !loss_sba {
+            assert!(matches!(&runner.state().waiting_for,
+                WaitingFor::ReplacementChoice {player: P1, candidates, ..}
+                    if candidates.iter().any(|candidate| candidate.source_id == kalitas)
+                    && candidates.iter().any(|candidate| candidate.source_id == rest)));
+            assert_eq!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .proposed
+                    .affected_object_id(),
+                Some(selected)
+            );
+            events.extend(
+                runner
+                    .act(GameAction::Concede { player_id: leaving })
+                    .unwrap()
+                    .events,
+            );
+        }
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::PlayerLost {player_id, ..} if *player_id == leaving)).count(), 1);
+        if leaving == P1 {
+            assert_eq!(runner.state().objects[&borrowed].controller, P0);
+            assert!(matches!(&runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, candidates, .. }
+                    if candidates.iter().any(|candidate| candidate.source_id == kalitas)
+                    && candidates.iter().any(|candidate| candidate.source_id == rest)));
+            assert_eq!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .proposed
+                    .affected_object_id(),
+                Some(borrowed)
+            );
+            events.extend(choose_replacement_from(&mut runner, kalitas));
+            assert_eq!(runner.state().objects[&borrowed].zone, Zone::Exile);
+            assert_eq!(zombies(&events), 1);
+        } else {
+            for bear in [borrowed, owned] {
+                assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
+            }
+            assert_eq!(zone_changes_of(&events, owned), 1);
+        }
+        assert_eq!(zone_changes_of(&events, borrowed), 1);
+        assert!(runner.state().active_simultaneous_departure().is_none());
         assert!(runner.state().stack.is_empty());
         assert!(matches!(
             runner.state().waiting_for,
@@ -1248,4 +1498,91 @@ fn fumigate_life_gain_waits_for_the_last_delivery_time_token_choice() {
     assert_eq!(zombies(&events), bears.len());
     assert!(state.stack.is_empty());
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 805.2 + CR 805.6: the team orders its simultaneous decisions, then each
+/// affected player answers their own replacement choice (CR 616.1).
+#[test]
+fn shared_team_chooses_the_later_bear_to_consult_without_answering_for_its_controller() {
+    use engine::game::engine::apply;
+    use engine::types::format::FormatConfig;
+    use engine::types::player::PlayerId;
+
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let early = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let late = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let kalitas = scenario
+        .add_creature_from_oracle(p2, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+        .id();
+    let rip = scenario
+        .add_enchantment_from_oracle(p2, "Rest in Peace", REST_IN_PEACE)
+        .id();
+    let wrath = scenario
+        .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+        .id();
+    let mut runner = scenario.build();
+    let mut events = runner.cast(wrath).commit().resolve().events().to_vec();
+    let WaitingFor::MemberOrderChoice {
+        player, choices, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the active team must order its two Bears' decisions, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        *player, P0,
+        "the shared-turn representative submits the order"
+    );
+    assert_eq!(choices.len(), 2);
+    assert!(choices.contains(&early) && choices.contains(&late));
+    let choose_late = GameAction::SelectCards { cards: vec![late] };
+    assert!(
+        apply(runner.state_mut(), p2, choose_late.clone()).is_err(),
+        "the opposing team cannot order these decisions"
+    );
+    events.extend(apply(runner.state_mut(), P0, choose_late).unwrap().events);
+    for (bear, chooser, teammate, source) in [(late, P1, P0, kalitas), (early, P0, P1, rip)] {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected the individual replacement choice for {bear:?}, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, chooser);
+        assert_eq!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id()),
+            Some(bear)
+        );
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == source)
+            .unwrap();
+        let action = GameAction::ChooseReplacement { index };
+        assert!(
+            apply(runner.state_mut(), teammate, action.clone()).is_err(),
+            "one teammate cannot answer for the other"
+        );
+        events.extend(apply(runner.state_mut(), chooser, action).unwrap().events);
+    }
+    runner.advance_until_stack_empty();
+    for id in [early, late, kalitas] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+        assert_eq!(zone_changes_of(&events, id), 1);
+    }
+    assert_eq!(zombies(&events), 1);
+    let tokens = zombies_on_battlefield(runner.state());
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(runner.state().objects[&tokens[0]].controller, p2);
+    assert!(runner.state().stack.is_empty());
 }

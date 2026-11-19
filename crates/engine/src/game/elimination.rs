@@ -934,7 +934,11 @@ pub(crate) fn eliminate_players(
         // have left. Reconsult the batch from the caller's fresh event buffer:
         // re-parking it must never capture the concession's own events.
         if !leaving_set.is_empty()
-            && super::effects::destroy::retire_departure_order_after_player_leave(state)
+            && (super::effects::destroy::reconcile_departure_consult_after_player_leave(state)
+                || super::effects::destroy::retire_departure_order(
+                    state,
+                    super::effects::destroy::DepartureOrderChange::PlayerLeft,
+                ))
         {
             resume = DepartureResume::ParkedZoneChangeTail;
         }
@@ -2127,6 +2131,9 @@ fn do_eliminate(
     if state.pending_replacement.is_some()
         && leaving_is_latched_chooser
         && !settles_with_parked_payment
+        // A selected destruction/death member retains its in-flight proposal
+        // until every leaver's objects and control effects have been removed.
+        && !super::effects::destroy::departure_choice_in_flight(state)
         // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
         // with its chooser: the damaged permanent may survive the departure (a
         // Control Magic host returns to its owner), so the event is lifted back
