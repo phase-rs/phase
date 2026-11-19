@@ -1992,6 +1992,7 @@ pub fn resolve(
             logical_zone_change_group,
             tail,
             ctx.origin,
+            false,
             events,
         ) {
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(None),
@@ -3979,16 +3980,23 @@ pub fn resolve_all(
         dest_zone,
     );
 
-    // CR 401.4: When multiple objects are placed at the same library position
-    // simultaneously and `random_order` is false, the owner arranges their
-    // relative order ("in any order" restates this default). Route through the
-    // shared `EffectZoneChoice` + `PutAtLibraryPosition` production path instead
-    // of silently picking an engine-default batch order.
-    if dest_zone == Zone::Library
+    // CR 401.4 + CR 614.6: mixed merged cohorts need their physical arrivals
+    // approved before ordering. Other mass-order producers keep their existing
+    // EffectZoneChoice path, including in-library reorders.
+    let owner_orders = dest_zone == Zone::Library
         && effect_library_position.is_some()
         && !random_order
-        && matching.len() > 1
-    {
+        && matching.len() > 1;
+    let arrange_after_replacements = owner_orders
+        && library_shuffle == LibraryShuffleMode::PerObject
+        && effect_library_position
+            .as_ref()
+            .is_some_and(LibraryPosition::is_owner_arrangeable)
+        && matching
+            .iter()
+            .any(|id| merged_components_of(&state.objects[id]).is_some())
+        && !population_reorders_the_library(state, matching.iter().copied(), dest_zone);
+    if owner_orders && !arrange_after_replacements {
         // `matching.len() > 1` guarantees at least one owner batch.
         let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
         // CR 401.4: a mass move names no arranger; each owner orders their own.
@@ -4029,7 +4037,6 @@ pub fn resolve_all(
     let logical_group_event_start = events.len();
     // CR 608.2c + CR 730.3a: multiple objects, or the physical components of
     // one merged permanent, need staged ownership through a component pause.
-    // The early owner-arrangement branch above stays unchanged.
     if (matching.len() >= 2
         || matching.iter().any(|id| {
             state
@@ -4089,6 +4096,7 @@ pub fn resolve_all(
             logical_zone_change_group,
             tail,
             ctx.origin,
+            arrange_after_replacements,
             events,
         ) {
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(()),

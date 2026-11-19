@@ -8,7 +8,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::game::visibility::filter_events_for_viewer;
-use engine::types::ability::{EffectKind, LibraryPosition};
+use engine::types::ability::{DigRestSplitScope, EffectKind, LibraryPosition};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastingVariant, PersistedGameState, WaitingFor};
@@ -98,6 +98,33 @@ fn assert_bottom_arrangement_prompt(waiting_for: &WaitingFor, owner: PlayerId, c
         }
         other => panic!("expected {owner:?}'s CR 401.4 ordering prompt, got {other:?}"),
     }
+}
+
+/// CR 401.4: the batch owns the permutation of approved physical arrivals.
+fn assert_approved_arrangement(
+    waiting_for: &WaitingFor,
+    owner: PlayerId,
+    expected: &[ObjectId],
+    on_top: bool,
+) {
+    let WaitingFor::DigRestSplitChoice {
+        player,
+        library_owner,
+        cards,
+        top_count,
+        scope: DigRestSplitScope::OrderOnly,
+        ..
+    } = waiting_for
+    else {
+        panic!("expected {owner:?}'s CR 401.4 ordering prompt, got {waiting_for:?}");
+    };
+    assert_eq!((*player, *library_owner), (owner, owner));
+    assert_eq!(*top_count, if on_top { expected.len() } else { 0 });
+    let mut cards = cards.clone();
+    cards.sort_unstable();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    assert_eq!(cards, expected);
 }
 
 fn put_at_library_position_resolutions(events: &[GameEvent]) -> usize {
@@ -488,7 +515,12 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
     assert_arrangement_finished(&runner);
     let sentinel = library(&runner, P0)[0];
     let cast = runner.cast(burial).resolve();
-    assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[ordinary, host, rider]);
+    assert_approved_arrangement(
+        cast.final_waiting_for(),
+        P0,
+        &[ordinary, host, rider],
+        false,
+    );
     let mut events = cast.events().to_vec();
     let mut alternate = GameRunner::from_state(runner.state().clone());
     events.extend(
@@ -544,10 +576,10 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
     assert_arrangement_finished(&alternate);
 }
 
-/// CR 401.4 + CR 730.3a: Top ordering discriminates verbatim inheritance from
-/// a component-only filtered copy of the parent's ranks.
+/// CR 401.4 + CR 730.3a: Top placement also allows an ordinary card to
+/// interleave with the components of one merged permanent.
 #[test]
-fn harmonic_convergence_top_interleave_keeps_inherited_order() {
+fn harmonic_convergence_interleaves_components_at_the_top() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Sentinel"]);
@@ -568,20 +600,7 @@ fn harmonic_convergence_top_interleave_keeps_inherited_order() {
     merge_pair(&mut runner, host, rider);
     let sentinel = library(&runner, P0)[0];
     let cast = runner.cast(spell).resolve();
-    match cast.final_waiting_for() {
-        WaitingFor::EffectZoneChoice {
-            cards,
-            library_position: Some(LibraryPosition::Top),
-            ..
-        } => {
-            let mut offered = cards.clone();
-            offered.sort_unstable();
-            let mut expected = vec![host, rider, ordinary];
-            expected.sort_unstable();
-            assert_eq!(offered, expected);
-        }
-        other => panic!("expected physical Top arrangement, got {other:?}"),
-    }
+    assert_approved_arrangement(cast.final_waiting_for(), P0, &[host, rider, ordinary], true);
     runner
         .act(GameAction::SelectCards {
             cards: vec![rider, ordinary, host],
@@ -591,10 +610,10 @@ fn harmonic_convergence_top_interleave_keeps_inherited_order() {
     assert_arrangement_finished(&runner);
 }
 
-/// CR 903.9b + CR 730.3a: a component-specific replacement retains the full
-/// parent order through the production persistence chokepoint.
+/// CR 903.9b + CR 730.3a: the absorbed commander is offered its redirect
+/// before the interleaved physical arrangement, including after save/reopen.
 #[test]
-fn hallowed_burial_component_commander_pause_round_trips_the_inherited_arrangement() {
+fn hallowed_burial_absorbed_commander_choice_and_arrangement_round_trip() {
     let mut scenario =
         GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -607,21 +626,25 @@ fn hallowed_burial_component_commander_pause_round_trips_the_inherited_arrangeme
     merge_pair(&mut runner, host, rider);
     let sentinel = library(&runner, P0)[0];
     let cast = runner.cast(burial).resolve();
-    assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[ordinary, host, rider]);
+    assert!(matches!(
+        cast.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    round_trip_arrangement(&mut runner);
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    assert_approved_arrangement(
+        &runner.state().waiting_for,
+        P0,
+        &[host, rider, ordinary],
+        false,
+    );
+    round_trip_arrangement(&mut runner);
     runner
         .act(GameAction::SelectCards {
             cards: vec![rider, ordinary, host],
         })
-        .unwrap();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { player: P0, .. }
-    ));
-    let child = runner.state().active_batch_delivery().unwrap();
-    assert!(child.component_delivery_parent.is_some());
-    round_trip_arrangement(&mut runner);
-    runner
-        .act(GameAction::ChooseReplacement { index: 1 })
         .unwrap();
     assert_eq!(library(&runner, P0), vec![sentinel, rider, ordinary, host]);
     assert_arrangement_finished(&runner);
@@ -633,7 +656,12 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
     let mut scenario =
         GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_mana_pool(P0, burial_mana());
+    let mut mana = burial_mana();
+    mana.extend(
+        [ManaType::Green, ManaType::Green, ManaType::Colorless]
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![])),
+    );
+    scenario.with_mana_pool(P0, mana);
     scenario.with_library_top(P0, &["Sentinel"]);
     let host = scenario
         .add_creature_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
@@ -645,40 +673,100 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
         .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
         .with_subtypes(vec!["Beast"])
         .id();
-    let ordinary = with_ordinary.then(|| scenario.add_creature(P0, "Ordinary creature", 2, 2).id());
+    let ordinary = with_ordinary.then(|| scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id());
     let burial = add_hallowed_burial(&mut scenario);
     let mut runner = scenario.build();
-    merge_pair(&mut runner, host, rider);
-    let sentinel = library(&runner, P0)[0];
-    let cast = runner.cast(burial).resolve();
-    if let Some(ordinary) = ordinary {
-        assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[host, rider, ordinary]);
-        runner
-            .act(GameAction::SelectCards {
-                cards: vec![rider, ordinary, host],
-            })
-            .unwrap();
-    }
+    let mutate = runner
+        .cast(rider)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .casting_variant(CastingVariant::Mutate)
+        .target_object(host)
+        .resolve();
     assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { player: P0, .. }
+        mutate.final_waiting_for(),
+        WaitingFor::MutateMergeChoice { player: P0, .. }
     ));
-    let child = runner.state().active_batch_delivery().unwrap();
-    assert_eq!(
-        child
-            .component_delivery_parent
-            .as_ref()
-            .unwrap()
-            .member
-            .object_id,
-        host
-    );
-    round_trip_arrangement(&mut runner);
     runner
-        .act(GameAction::ChooseReplacement {
-            index: usize::from(!accept_command),
+        .act(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Bottom,
         })
         .unwrap();
+    assert_eq!(
+        runner.state().objects[&host].merged_components,
+        [host, rider]
+    );
+    let sentinel = library(&runner, P0)[0];
+    let cast = runner.cast(burial).resolve();
+    assert!(matches!(
+        cast.final_waiting_for(),
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    let mut events = cast.events().to_vec();
+    round_trip_arrangement(&mut runner);
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: usize::from(!accept_command),
+            })
+            .unwrap()
+            .events,
+    );
+    if let Some(ordinary) = ordinary {
+        let order = if accept_command {
+            vec![rider, ordinary]
+        } else {
+            vec![host, ordinary, rider]
+        };
+        assert_eq!(library(&runner, P0), vec![sentinel]);
+        assert_approved_arrangement(&runner.state().waiting_for, P0, &order, false);
+        round_trip_arrangement(&mut runner);
+        let mut alternate = GameRunner::from_state(runner.state().clone());
+        let mut alternate_events = events.clone();
+        events.extend(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: order.clone(),
+                })
+                .unwrap()
+                .events,
+        );
+        let reversed: Vec<_> = order.iter().rev().copied().collect();
+        alternate_events.extend(
+            alternate
+                .act(GameAction::SelectCards {
+                    cards: reversed.clone(),
+                })
+                .unwrap()
+                .events,
+        );
+        assert_eq!(
+            library(&runner, P0),
+            [&[sentinel], order.as_slice()].concat()
+        );
+        assert_eq!(
+            library(&alternate, P0),
+            [&[sentinel], reversed.as_slice()].concat()
+        );
+        for viewer in [P1, PlayerId(u8::MAX)] {
+            assert_eq!(
+                filter_events_for_viewer(&events, runner.state(), viewer),
+                filter_events_for_viewer(&alternate_events, alternate.state(), viewer),
+            );
+        }
+        let departures = |id, origin| {
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(event, GameEvent::ZoneChanged { object_id, from, .. }
+                        if *object_id == id && *from == origin)
+                })
+                .count()
+        };
+        assert_eq!(departures(host, Some(Zone::Battlefield)), 1);
+        assert_eq!(departures(rider, Some(Zone::Battlefield)), 0);
+        assert_eq!(departures(rider, None), 1);
+        assert_arrangement_finished(&alternate);
+    }
     if ordinary.is_none() && !accept_command {
         match &runner.state().waiting_for {
             WaitingFor::DigRestSplitChoice { player, cards, .. } => {
@@ -699,9 +787,10 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
     }
     let mut expected_library = vec![sentinel];
     if let Some(ordinary) = ordinary {
-        expected_library.extend([rider, ordinary]);
-        if !accept_command {
-            expected_library.push(host);
+        if accept_command {
+            expected_library.extend([rider, ordinary]);
+        } else {
+            expected_library.extend([host, ordinary, rider]);
         }
         assert_eq!(zone(&runner, ordinary), Zone::Library);
     } else if accept_command {
@@ -740,7 +829,7 @@ fn hallowed_burial_lone_commander_host_declines_command_after_round_trip() {
 
 /// CR 903.9b + CR 903.9c + CR 401.4: Otrimi represents the permanent, but
 /// redirecting it to command leaves only Gemrazer and the ordinary card in the
-/// library order. The vanished rank does not displace either of them.
+/// library order, and neither private permutation changes a viewer's events.
 #[test]
 fn hallowed_burial_interleaved_commander_host_accepts_command_after_round_trip() {
     check_hallowed_burial_commander_host_round_trip(true, true);
@@ -936,16 +1025,10 @@ fn unexpectedly_absent_fixed_depth_component_arrangement_survives_reopen() {
     ));
 }
 
-/// CR 903.9b + CR 401.4: an earlier consultation can pause while the seeded
-/// permanent has not yet been consulted. Its original submitted order survives.
-///
-/// Since the live scheduler (CR 616.1 + CR 101.4) the sweep consults every
-/// member before any prompt, so the seeded merged permanent, which needs no
-/// choice, is already approved (not unconsulted) when the commander's choice
-/// is asked. The property is unchanged: the submitted component seed survives
-/// that pause and its round trip, and delivery honours it.
+/// CR 903.9b + CR 401.4: a separate commander's replacement pauses the
+/// logical approval sweep; save/reopen before either component is arranged.
 #[test]
-fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed() {
+fn hallowed_burial_ordinary_commander_choice_round_trips_before_component_order() {
     let mut scenario =
         GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -961,14 +1044,9 @@ fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed(
     merge_pair(&mut runner, host, rider);
     let sentinel = library(&runner, P0)[0];
     let cast = runner.cast(burial).resolve();
-    assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[commander, host, rider]);
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![commander, rider, host],
-        })
-        .unwrap();
+    assert_eq!(library(&runner, P0), vec![sentinel]);
     assert!(matches!(
-        runner.state().waiting_for,
+        cast.final_waiting_for(),
         WaitingFor::ReplacementChoice { player: P0, .. }
     ));
     let staged = runner
@@ -993,7 +1071,7 @@ fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed(
     );
     assert!(
         member.held_decision.is_none(),
-        "the seeded permanent needs no choice"
+        "the noncommander permanent needs no choice"
     );
     assert!(
         matches!(
@@ -1004,7 +1082,7 @@ fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed(
                 ..
             }) if object_id == host
         ),
-        "the sweep approved the seeded permanent's own library move, got {:?}",
+        "the sweep approved the merged permanent's own library move, got {:?}",
         member.approved_event
     );
     assert_eq!(
@@ -1012,18 +1090,21 @@ fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed(
         Some(commander),
         "the commander's choice is the one asked"
     );
-    assert_eq!(
-        staged.arrangements[0]
-            .batch
-            .members
-            .iter()
-            .map(|entry| entry.identity.object_id)
-            .collect::<Vec<_>>(),
-        vec![commander, rider, host]
-    );
+    assert!(staged.arrangements.is_empty());
     round_trip_arrangement(&mut runner);
     runner
         .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    assert_approved_arrangement(
+        &runner.state().waiting_for,
+        P0,
+        &[commander, rider, host],
+        false,
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![commander, rider, host],
+        })
         .unwrap();
     assert_eq!(library(&runner, P0), vec![sentinel, commander, rider, host]);
     assert_arrangement_finished(&runner);
@@ -1062,10 +1143,10 @@ fn hallowed_burial_lone_merged_permanent_keeps_component_order_prompt() {
     assert_arrangement_finished(&runner);
 }
 
-/// CR 800.4a + CR 401.4: abandoning a covered permanent prunes all its physical
-/// entries while the other owners' already-submitted cards finish.
+/// CR 800.4a + CR 401.4: a departing owner loses their physical arrivals
+/// while another owner's already-submitted arrangement finishes.
 #[test]
-fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
+fn hallowed_burial_owner_concedes_during_approved_arrangement() {
     let mut scenario =
         GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 3, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -1074,6 +1155,7 @@ fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
         scenario.with_library_top(player, &["Sentinel"]);
     }
     let a = scenario.add_creature(P0, "P0 creature", 2, 2).id();
+    let other = scenario.add_creature(P0, "Other P0 creature", 2, 2).id();
     let (host, rider) = add_component_pair(&mut scenario, P1, false);
     let commander = scenario
         .add_creature(P1, "Commander", 2, 2)
@@ -1086,24 +1168,25 @@ fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
     let l0 = library(&runner, P0)[0];
     let l2 = library(&runner, P2)[0];
     let cast = runner.cast(burial).resolve();
-    assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[a]);
-    runner
-        .act(GameAction::SelectCards { cards: vec![a] })
-        .unwrap();
-    assert_bottom_arrangement_prompt(&runner.state().waiting_for, P1, &[host, rider, commander]);
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![rider, host, commander],
-        })
-        .unwrap();
-    assert_bottom_arrangement_prompt(&runner.state().waiting_for, P2, &[b]);
-    runner
-        .act(GameAction::SelectCards { cards: vec![b] })
-        .unwrap();
     assert!(matches!(
-        runner.state().waiting_for,
+        cast.final_waiting_for(),
         WaitingFor::ReplacementChoice { player: P1, .. }
     ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    assert_approved_arrangement(&runner.state().waiting_for, P0, &[a, other], false);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![other, a],
+        })
+        .unwrap();
+    assert_approved_arrangement(
+        &runner.state().waiting_for,
+        P1,
+        &[host, rider, commander],
+        false,
+    );
     let departure = runner.act(GameAction::Concede { player_id: P1 }).unwrap();
     for card in [host, rider, commander] {
         assert_eq!(zone(&runner, card), Zone::Exile);
@@ -1121,11 +1204,8 @@ fn hallowed_burial_owner_concedes_while_seeded_group_is_live() {
         .resolution_stack
         .validate_at_rest(&runner.state().waiting_for)
         .unwrap();
-    // The batch has already settled. Entry pruning is witnessed by the lib rows
-    // `prune_inherited_entries_keeps_link_equality` and
-    // `component_detach_strips_inherited_foreign_entries`.
     assert!(runner.state().active_batch_delivery().is_none());
-    assert_eq!(library(&runner, P0), vec![l0, a]);
+    assert_eq!(library(&runner, P0), vec![l0, other, a]);
     assert_eq!(library(&runner, P2), vec![l2, b]);
     assert_arrangement_finished(&runner);
 }

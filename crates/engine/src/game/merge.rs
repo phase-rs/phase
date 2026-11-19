@@ -597,11 +597,36 @@ pub(crate) fn move_merged_permanent_for_parent(
     parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
-    let Some(survivor) = state.objects.get(&merged_id) else {
+    let requests = prepare_merged_component_moves(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        library_shuffle,
+        applied,
+        performed_by,
+    );
+    if requests.is_empty() {
         return BatchMoveResult::Done;
+    }
+    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
+}
+
+/// CR 730.3d: turn an approved merged departure into physical move requests.
+pub(crate) fn prepare_merged_component_moves(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+    applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
+) -> Vec<ZoneMoveRequest> {
+    let Some(survivor) = state.objects.get(&merged_id) else {
+        return Vec::new();
     };
     if survivor.merged_components.is_empty() {
-        return BatchMoveResult::Done;
+        return Vec::new();
     }
     let components = survivor.merged_components.clone();
     let survivor_successor = leave_successor(survivor);
@@ -617,7 +642,7 @@ pub(crate) fn move_merged_permanent_for_parent(
         survivor.merge_kind = None;
     }
 
-    let requests = components
+    components
         .into_iter()
         .map(|component_id| {
             if component_id != merged_id {
@@ -648,9 +673,7 @@ pub(crate) fn move_merged_permanent_for_parent(
                     ownership_actor: None,
                 })
         })
-        .collect();
-
-    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
+        .collect()
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness

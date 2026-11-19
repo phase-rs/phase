@@ -8372,6 +8372,13 @@ impl PendingBatchDeliveries {
         if staged.population_devour_snapshot.is_some() && !self.is_change_zone_population() {
             return Err("only a ChangeZone population owns a Devour snapshot".to_string());
         }
+        if staged.arrange_library_arrivals
+            && (self.destination != Zone::Library || !self.is_change_zone_population())
+        {
+            return Err(
+                "only a library-bound ChangeZone population arranges physical arrivals".into(),
+            );
+        }
         let members = &staged.members;
         if members.is_empty() {
             return Err("staged batch delivery has no members".to_string());
@@ -8426,7 +8433,7 @@ impl PendingBatchDeliveries {
         // announcement order. A member abandoned because its owner left the
         // game is neither consulted nor delivered, so it is excluded from both
         // without shifting the frozen announcement indices. `attempted` is the
-        // whole original cohort.
+        // whole delivery cohort, including any expanded physical moves.
         let unconsulted: Vec<&StagedBatchMember> = members
             .iter()
             .filter(|member| member.state == StagedBatchMemberState::Unconsulted)
@@ -8453,7 +8460,7 @@ impl PendingBatchDeliveries {
         }
         let attempted: HashSet<ObjectId> = self.attempted.iter().copied().collect();
         if attempted.len() != self.attempted.len() || attempted != object_ids {
-            return Err("staged batch attempted is not the original cohort".to_string());
+            return Err("staged batch attempted is not the delivery cohort".to_string());
         }
 
         self.validate_staged_stage(staged)?;
@@ -8658,23 +8665,26 @@ impl PendingBatchDeliveries {
                     member.pending_outcome,
                     Some(StagedMemberOutcome::Approved(_))
                 ),
-                // CR 616.1: an approved outer Destroy consult owns its rider
-                // while the independent inner zone-change choice is unresolved.
+                // CR 616.1: an outer Destroy or merged departure may carry
+                // approved work while its inner move is being consulted.
                 StagedBatchMemberState::InnerConsulting => {
                     matches!(
                         member.pending_outcome,
                         Some(StagedMemberOutcome::Approved(_))
                     ) || (member.pending_outcome.is_none()
-                        && matches!(
+                        && (matches!(
                             member.operation,
                             StagedMemberOperation::Destroy(StagedDestroyOperation {
                                 outer: StagedDestroyOuterApproval::Approved,
                                 ..
                             })
-                        ))
+                        ) || member.request.cause
+                            == PendingBatchZoneChangeCause::MergedComponentRouting))
                 }
-                StagedBatchMemberState::Unconsulted
-                | StagedBatchMemberState::PreventedWithChild
+                StagedBatchMemberState::Unconsulted => {
+                    member.request.cause == PendingBatchZoneChangeCause::MergedComponentRouting
+                }
+                StagedBatchMemberState::PreventedWithChild
                 | StagedBatchMemberState::Terminal
                 | StagedBatchMemberState::Abandoned => false,
             };
@@ -9268,7 +9278,8 @@ pub struct PendingBatchZoneMoveRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StagedBatchDelivery {
     pub stage: BatchDeliveryStage,
-    /// Original membership in announcement order; fixed length after entry.
+    /// Delivery order. A positioned mass placement expands merged members
+    /// in this list after logical approval; the logical group stays frozen.
     pub members: Vec<StagedBatchMember>,
     /// Next member to consult for the first time (`Approving`) or to deliver
     /// (`Delivering`). The approval sweep walks the members in announcement
@@ -9292,6 +9303,10 @@ pub struct StagedBatchDelivery {
         serialize_with = "crate::types::deterministic_serde::option_hash_set"
     )]
     pub population_devour_snapshot: Option<HashSet<ObjectId>>,
+    /// CR 401.4 + CR 730.3a: one owner-arranged mass placement whose
+    /// logical population includes merged permanents.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub arrange_library_arrivals: bool,
 }
 
 /// The three distinct stages of one admitted batch. Consultation and
@@ -9758,7 +9773,12 @@ pub(crate) fn change_zone_settled_facts(
     let mut policy_count = 0i32;
     let mut arrival_count = 0usize;
     for member in members {
-        if member.state == StagedBatchMemberState::Abandoned {
+        // CR 730.3: absorbed components arrive but are not separate subjects
+        // of the mass instruction that moved their merged permanent.
+        if member.state == StagedBatchMemberState::Abandoned
+            || (member.request.cause == PendingBatchZoneChangeCause::MergedComponentRouting
+                && !group.announced_members().contains(&member.identity))
+        {
             continue;
         }
         // CR 614.1 + CR 616.1: the group's own terminal outcomes are the
@@ -63734,6 +63754,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 arrangement_cursor: 0,
                 population_devour_snapshot: None,
                 asking: None,
+                arrange_library_arrivals: false,
             }),
             pre_entry_battlefield: None,
         }

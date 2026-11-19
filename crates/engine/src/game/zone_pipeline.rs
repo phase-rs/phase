@@ -2209,27 +2209,7 @@ fn new_staged_batch(
     let members = reqs
         .iter()
         .enumerate()
-        .map(|(index, req)| {
-            let object = state
-                .objects
-                .get(&req.object_id)
-                .expect("admission captured every staged member");
-            StagedBatchMember {
-                announcement_index: index as u32,
-                request: req.to_pending(),
-                identity: ObjectIncarnationRef::from_object(object),
-                expected_origin: None,
-                owner: object.owner,
-                state: StagedBatchMemberState::Unconsulted,
-                approved_event: None,
-                pending_outcome: None,
-                terminal: None,
-                operation: StagedMemberOperation::ZoneMove,
-                approved_post_replacement: None,
-                held_decision: None,
-                blocked: false,
-            }
-        })
+        .map(|(index, req)| new_staged_member(state, index, req))
         .collect();
     StagedBatchDelivery {
         stage: BatchDeliveryStage::Approving,
@@ -2239,6 +2219,26 @@ fn new_staged_batch(
         arrangements,
         arrangement_cursor: 0,
         population_devour_snapshot: None,
+        arrange_library_arrivals: false,
+    }
+}
+
+fn new_staged_member(state: &GameState, index: usize, req: &ZoneMoveRequest) -> StagedBatchMember {
+    let object = &state.objects[&req.object_id];
+    StagedBatchMember {
+        announcement_index: index as u32,
+        request: req.to_pending(),
+        identity: ObjectIncarnationRef::from_object(object),
+        expected_origin: None,
+        owner: object.owner,
+        state: StagedBatchMemberState::Unconsulted,
+        approved_event: None,
+        pending_outcome: None,
+        terminal: None,
+        operation: StagedMemberOperation::ZoneMove,
+        approved_post_replacement: None,
+        held_decision: None,
+        blocked: false,
     }
 }
 
@@ -2444,6 +2444,10 @@ fn run_staged_batch(
                         return StagedStop::Paused;
                     }
                     StagedConsult::AllConsulted => {
+                        if prepare_staged_library_components(state, owner) {
+                            run.blocking_settled = false;
+                            continue;
+                        }
                         begin_staged_arrangement(state, owner);
                         continue;
                     }
@@ -3974,6 +3978,78 @@ fn note_change_zone_member_terminal(
     }
 }
 
+/// CR 730.3d + CR 903.9c: once the logical moves are approved, consult the
+/// physical moves in the same batch. Its original group still owns the
+/// permanent departures; absorbed cards acquire no battlefield slot.
+fn prepare_staged_library_components(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+) -> bool {
+    let staged = owner
+        .staged
+        .as_mut()
+        .expect("approval stage has staged members");
+    if !staged.arrange_library_arrivals {
+        return false;
+    }
+
+    let mut components = Vec::new();
+    staged.members.retain_mut(|member| {
+        let Some(ProposedEvent::ZoneChange {
+            from: Zone::Battlefield,
+            to: Zone::Library,
+            library_placement,
+            library_shuffle: LibraryShuffleMode::PerObject,
+            applied,
+            performed_by,
+            ..
+        }) = member.approved_event.as_ref()
+        else {
+            return true;
+        };
+        if member.state != StagedBatchMemberState::Approved || !staged_member_is_live(state, member)
+        {
+            return true;
+        }
+        let requests = crate::game::merge::prepare_merged_component_moves(
+            state,
+            member.identity.object_id,
+            Zone::Library,
+            library_placement.as_deref(),
+            LibraryShuffleMode::PerObject,
+            applied,
+            *performed_by,
+        );
+        if requests.is_empty() {
+            return true;
+        }
+        components.extend(requests.iter().map(|request| {
+            let mut component = new_staged_member(state, 0, request);
+            component.expected_origin = Some(Zone::Battlefield);
+            if component.identity == member.identity {
+                component.approved_post_replacement = member.approved_post_replacement.take();
+            }
+            component
+        }));
+        false
+    });
+    if components.is_empty() {
+        return false;
+    }
+
+    // The logical approvals form a completed prefix, followed by physical
+    // consultations. Neither this order nor delivery uses the private ranks.
+    staged.cursor = staged.members.len();
+    staged.members.append(&mut components);
+    owner.attempted.clear();
+    for (index, member) in staged.members.iter_mut().enumerate() {
+        member.announcement_index = index as u32;
+        owner.attempted.push(member.identity.object_id);
+    }
+    sync_staged_requests(owner);
+    true
+}
+
 /// CR 401.4: final approvals sharing an owner and fixed position form one group.
 pub(crate) fn staged_arrangement_groups(
     staged: &StagedBatchDelivery,
@@ -4114,6 +4190,7 @@ fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliverie
         });
         let needs_prompt = announced.len() >= 2
             && (component_group
+                || staged.arrange_library_arrivals
                 || announced
                     .iter()
                     .any(|member| staged_member_placement_is_replacement(member)));
@@ -4255,7 +4332,8 @@ fn publish_next_staged_arrangement(
             PendingBatchZoneChangeCause::Effect { source }
             | PendingBatchZoneChangeCause::Cost { source } => Some(*source),
             _ => None,
-        });
+        })
+        .or(owner.source_id);
     state.waiting_for = WaitingFor::new_dig_rest_split_for_batch(
         library_owner,
         library_owner,
@@ -4703,12 +4781,14 @@ pub(crate) fn deliver_staged_change_zone_batch(
     logical_zone_change_group: LogicalZoneChangeGroup,
     tail: crate::types::game_state::ChangeZoneBatchTail,
     expected_origin: Option<Zone>,
+    arrange_library_arrivals: bool,
     events: &mut Vec<GameEvent>,
 ) -> StagedChangeZoneOutcome {
     let event_start = events.len();
     let tail_collector = tail.entry_collector;
     let group_id = logical_zone_change_group.logical_group_id;
     let mut staged = new_staged_batch(state, &reqs, Vec::new());
+    staged.arrange_library_arrivals = arrange_library_arrivals;
     // CR 400.7: carry the producer's origin snapshot so a member
     // that moved during a preceding pause is refused before any replacement is
     // offered for it, matching the ordinary per-member guard.
@@ -14715,7 +14795,15 @@ mod staged_batch_tests {
             .collect();
         let mut events = Vec::new();
         assert!(matches!(
-            deliver_staged_change_zone_batch(&mut state, requests, group, tail, None, &mut events),
+            deliver_staged_change_zone_batch(
+                &mut state,
+                requests,
+                group,
+                tail,
+                None,
+                false,
+                &mut events
+            ),
             StagedChangeZoneOutcome::Settled { .. }
         ));
         assert!(members
@@ -14837,6 +14925,7 @@ mod staged_batch_tests {
                         group,
                         tail,
                         None,
+                        false,
                         &mut events
                     ),
                     StagedChangeZoneOutcome::Settled { .. }
@@ -15026,6 +15115,7 @@ mod staged_batch_tests {
             arrangement_cursor: 0,
             population_devour_snapshot: None,
             asking: None,
+            arrange_library_arrivals: false,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             library_reorder: None,
@@ -16326,6 +16416,7 @@ mod staged_batch_tests {
             arrangement_cursor: 0,
             population_devour_snapshot: None,
             asking,
+            arrange_library_arrivals: false,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             library_reorder: None,
