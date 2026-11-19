@@ -402,7 +402,8 @@ fn cait_sith_scry_bottom_exiles_next_card_and_allows_cast_from_exile() {
         "+X/+0 uses the exiled Four Drop (MV 4), not the bottomed One Drop"
     );
 
-    // CR 608.2c + CR 601.2: the exiled card can be cast this turn using real mana.
+    // CR 611.2a + CR 601.2: "You may play that card this turn" lasts until end of
+    // turn, so the exiled card can be cast now, paying its real mana cost.
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
         "reach: P0 holds priority after reflexive resolves"
