@@ -110,7 +110,7 @@ pub(super) fn handle_ability_mode_choice(
                 mode_abilities,
                 indices,
                 // CR 603.3c: the `SelectModes` action seam finishes this
-                // construction, so it owns the span (charter D9 Owner).
+                // construction, so it owns the span it emits (ConstructionSpanOwner::Finisher).
                 span_owner: triggers::ConstructionSpanOwner::Finisher,
             },
             events,
@@ -627,7 +627,7 @@ pub(super) fn resolve_random_modal_trigger(
             indices,
             // CR 603.3c + CR 700.2b: the random mode is chosen inside the
             // dispatch window, whose range collection owns the span and whose
-            // dispatcher places the queue (charter D9 Owner; option B).
+            // dispatcher places the queue (ConstructionSpanOwner::EnclosingWindow).
             span_owner: triggers::ConstructionSpanOwner::EnclosingWindow,
         },
         events,

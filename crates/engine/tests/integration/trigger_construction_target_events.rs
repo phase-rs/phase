@@ -3,7 +3,7 @@
 //! (`BecomesTarget`) and the crime it commits (`CrimeCommitted`) — trigger the
 //! abilities that watch for them exactly once, whichever context emitted them.
 //!
-//! The class (Firebender Ascension charter §0.5): the abilities that trigger on
+//! The class (Firebender Ascension): the abilities that trigger on
 //! becoming the target of an ability (193 cards, objects and players), on a
 //! crime (21 cards) and ward (325 cards). They are reached here through the
 //! shared matcher, so each row covers its whole family.
@@ -15,7 +15,7 @@
 //!   matched abilities after its own drain (`ConstructionSpanOwner::Finisher`);
 //! - a finisher that runs inside a dispatch window (the random-mode re-entry)
 //!   leaves the span to the window and does not drain
-//!   (`ConstructionSpanOwner::EnclosingWindow`, option B);
+//!   (`ConstructionSpanOwner::EnclosingWindow`);
 //! - a drain that runs dispatch windows on the reducer action's own buffer
 //!   claims the ranges its windows collected, so the post-action pipeline does
 //!   not collect them a second time (`triggers::drain_on_action_buffer`);
@@ -1116,7 +1116,7 @@ fn skaro_board(with_ascension: bool) -> (GameRunner, Option<ObjectId>, [ObjectId
     (runner, ascension, [iroh, trapper, skaro, tar_pit])
 }
 
-/// N-1: option B with the typed observer beside the target-lock observer. The
+/// N-1: the nested finalize with the typed observer beside the target-lock observer. The
 /// batch's end-of-batch drain prompts valiant and both Ascension firings
 /// together (CR 603.3b).
 #[test]
@@ -1157,7 +1157,7 @@ fn n1_in_window_random_mode_does_not_drain_mid_batch() {
     assert!(positions[0] > valiant_index);
 }
 
-/// N-1b: option B's count discriminator (no Ascension).
+/// N-1b: the nested finalize's count discriminator (no Ascension).
 #[test]
 fn n1b_in_window_random_mode_collects_the_nested_target_once() {
     let (mut runner, _, [iroh, trapper, skaro, tar_pit]) = skaro_board(false);
@@ -1262,7 +1262,7 @@ fn w2_released_context_window_is_collected_once() {
     assert_eq!(count, 1, "Count(Tar Pit) = {count}");
 }
 
-/// W-4: CR 603.2c + K12: two abilities each make Tar Pit a target — two
+/// W-4: CR 603.2c (each ability that targets it is its own trigger event): two each make Tar Pit a target — two
 /// trigger events. The `DistributeAmong` arm's drain dispatches the goad in a
 /// window on the action buffer.
 #[test]
