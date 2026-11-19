@@ -239,15 +239,26 @@ pub enum ConsumedTriggerEventScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TriggerCollectionRequester {
     Ordinary,
+    /// The combat batch itself: its ordinary-only claims fence off the generic
+    /// scan while it is parked, not the batch that will settle those events.
+    CombatDamageBatch,
     Delayed,
 }
 
 impl ConsumedTriggerEventScope {
     pub(crate) fn consumes(self, requester: TriggerCollectionRequester) -> bool {
         match (self, requester) {
-            (Self::AllCollectors, _)
+            (
+                Self::AllCollectors,
+                TriggerCollectionRequester::Ordinary
+                | TriggerCollectionRequester::CombatDamageBatch
+                | TriggerCollectionRequester::Delayed,
+            )
             | (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Ordinary) => true,
-            (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Delayed) => false,
+            (
+                Self::OrdinaryCollectorsOnly,
+                TriggerCollectionRequester::CombatDamageBatch | TriggerCollectionRequester::Delayed,
+            ) => false,
         }
     }
 }
@@ -17471,18 +17482,29 @@ pub(crate) fn uncollected_trigger_events_from(
     event_start: usize,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> UnclaimedTriggerEvents {
+    uncollected_trigger_events_for(
+        state,
+        events,
+        event_start,
+        consumed,
+        TriggerCollectionRequester::Ordinary,
+    )
+}
+
+fn uncollected_trigger_events_for(
+    state: &GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    consumed: &[ConsumedTriggerEventOccurrence],
+    requester: TriggerCollectionRequester,
+) -> UnclaimedTriggerEvents {
     let mut queued_occurrence_witnesses: Vec<&GameEvent> = state
         .deferred_triggers
         .iter()
         .flat_map(|context| context.trigger_events.iter())
         .filter(|event| has_queued_occurrence_witness(event))
         .collect();
-    let mut unclaimed = unclaimed_trigger_events_from(
-        events,
-        event_start,
-        TriggerCollectionRequester::Ordinary,
-        consumed,
-    );
+    let mut unclaimed = unclaimed_trigger_events_from(events, event_start, requester, consumed);
     unclaimed.retain(|event| {
         if !matches!(event, GameEvent::ZoneChanged { .. }) {
             return true;
@@ -19724,6 +19746,48 @@ pub(crate) fn collect_triggers_for_batch(
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
     collect_pending_triggers(state, events)
+}
+
+/// CR 603.2c + CR 603.3b + CR 510.3a: a damage replacement can perform a
+/// logical zone change (such as a mill) before combat settles. Its delivery
+/// owner has already observed those occurrences. Move its contexts into the
+/// combat batch, rather than rescanning the moves or placing them separately.
+/// The caller keeps the unfiltered batch for delayed triggers (CR 603.7b).
+pub(super) fn collect_combat_damage_batch_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+) -> Vec<PendingTriggerContext> {
+    if !events.iter().any(has_queued_occurrence_witness) {
+        return collect_triggers_for_batch(state, events);
+    }
+    let unclaimed = uncollected_trigger_events_for(
+        state,
+        events,
+        0,
+        &state.consumed_before_priority_trigger_events,
+        TriggerCollectionRequester::CombatDamageBatch,
+    );
+    // An exact ZoneChanged record identifies a single occurrence in this
+    // turn. Keep unrelated queued work and every independent observer.
+    let mut pending: Vec<_> = state
+        .deferred_triggers
+        .extract_if(.., |context| {
+            context.batch_origin == DeferredTriggerBatchOrigin::Ordinary
+                && context
+                    .trigger_events
+                    .iter()
+                    .any(|event| has_queued_occurrence_witness(event) && events.contains(event))
+        })
+        .collect();
+    // CR 603.10 + CR 608.2c: a claimed battlefield departure is no longer a
+    // trigger input, but it still determines which earlier events its object saw.
+    let departures = ActionDepartures::from_positions(events, 0, unclaimed.positions(), 0);
+    pending.extend(collect_pending_triggers_observing(
+        state,
+        &unclaimed.events,
+        Some(departures),
+    ));
+    pending
 }
 
 /// CR 603.3b + CR 603.7: Combine an already-observed normal seed with every
