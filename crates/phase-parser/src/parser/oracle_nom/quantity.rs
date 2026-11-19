@@ -5441,12 +5441,27 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         // (`oracle_effect/lower.rs`) requires the where-X expression to be
         // fully consumed, and this arm only matches when nothing follows
         // "damage dealt".
+        //
+        // CR 120.9 + CR 608.2c: the explicit "the amount of damage those
+        // creatures dealt to that player" (Quartzwood Crasher) names the
+        // triggering sources and recipient of a batched combat-damage trigger;
+        // it reads the same per-occurrence amount. Only the printed wording is
+        // admitted, so it requires "the amount of" and "to that player".
         value(
             QuantityRef::EventContextAmount,
-            preceded(
-                opt(alt((tag("the amount of "), tag("amount of "), tag("the ")))),
-                tag("damage dealt"),
-            ),
+            alt((
+                preceded(
+                    tag("the amount of "),
+                    preceded(
+                        tag("damage "),
+                        preceded(tag("those creatures dealt "), tag("to that player")),
+                    ),
+                ),
+                preceded(
+                    opt(alt((tag("the amount of "), tag("amount of "), tag("the ")))),
+                    tag("damage dealt"),
+                ),
+            )),
         ),
         // CR 701.47c: amass-specific definite phrases name the Army chosen by
         // the current amass instruction, not the generic demonstrative referent.
