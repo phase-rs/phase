@@ -3683,7 +3683,12 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // refusal is inert — the stack does not grow, this returns `None`, and
     // cleanup advances exactly as it does today.
     let stack_before = state.stack.len();
-    if let Some(prompt) = super::triggers::drain_deferred_trigger_queue(state, events) {
+    // CR 603.2c: the drain's windows run on the action buffer; claim them.
+    if let Some(prompt) = super::triggers::drain_on_action_buffer(
+        state,
+        events,
+        super::triggers::drain_deferred_trigger_queue,
+    ) {
         return Some(prompt);
     }
     if state.stack.len() > stack_before {
@@ -4243,12 +4248,18 @@ fn process_phase_triggers(
         return (false, Some(prompt));
     }
     let (normal_pending, delayed_events) = step_entry_trigger_batch(state, events);
-    let outcome = super::triggers::process_collected_triggers_with_delayed_phase_events(
-        state,
-        normal_pending,
-        &delayed_events,
-        events_out,
-    );
+    // CR 603.2c: the batch dispatches its windows on the action buffer (the one
+    // `hold_turn_based_action_triggers` claims on), so their collected ranges are
+    // claimed and the post-action ordinary scan does not collect them again.
+    let outcome =
+        super::triggers::drain_on_action_buffer(state, events_out, |state, events_out| {
+            super::triggers::process_collected_triggers_with_delayed_phase_events(
+                state,
+                normal_pending,
+                &delayed_events,
+                events_out,
+            )
+        });
     // CR 117.3a + CR 117.5 + CR 603.3: reaching this point in a phase/step arm
     // IS the moment "a player would receive priority", so abilities already
     // waiting in `deferred_triggers` must be PUT ON THE STACK here, not merely
@@ -4295,7 +4306,11 @@ fn process_phase_triggers(
     // lose its effect by reaching this path.
     let prompt = match outcome.prompt {
         Some(prompt) => Some(prompt),
-        None => super::triggers::drain_deferred_trigger_queue(state, events_out),
+        None => super::triggers::drain_on_action_buffer(
+            state,
+            events_out,
+            super::triggers::drain_deferred_trigger_queue,
+        ),
     };
     (outcome.fired, prompt)
 }

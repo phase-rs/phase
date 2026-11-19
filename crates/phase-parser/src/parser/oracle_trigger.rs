@@ -90,14 +90,13 @@ use crate::types::ability::{
     ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold,
     DamageChannel, DamageKindFilter, DelayedTriggerCondition, DestinationConstraint,
     DieResultFilter, Duration, Effect, EffectScope, FilterProp, GameRestriction,
-    IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
-    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
-    ProhibitedActivity, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    RenownSubject, RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor, StaticCondition,
-    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause, ZoneRef,
+    IllegalTargetsDisposition, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
+    ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SpentColor, StaticCondition, TapCreaturesRequirement,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -3625,12 +3624,6 @@ pub(crate) fn lower_trigger_ir_with_provenance(
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
             lift_shared_quality_parent_target_to_triggering_source_in_ability(execute);
-            // CR 608.2k: "put X +1/+1 counters on it, where X is its power" —
-            // "its" is the entering object (the counter recipient), not the
-            // ability carrier (#5253, Railway Brawler). Run after the
-            // parent-target lift so the counter recipient is already
-            // `TriggeringSource` when this checks the target.
-            lift_counter_count_self_scope_to_event_source_in_ability(execute);
             // CR 603.6 + CR 400.7e: a self-departure trigger returning its
             // source must find the card in the public zone it moved to. An
             // enters-the-battlefield trigger can instead retrieve a different
@@ -4658,106 +4651,6 @@ fn demote_becomes_target_delayed_payloads(ability: &mut AbilityDefinition) {
     }
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
         demote_becomes_target_delayed_payloads(else_ability);
-    }
-}
-
-/// CR 608.2k + CR 122.1: On a single-object enters/zone-change trigger,
-/// "put X +1/+1 counters on it, where X is its power" refers to the ENTERING
-/// object for both "it" (the counter recipient) and "its" (the per-object
-/// characteristic X reads). The recipient is lifted to `TriggeringSource` by
-/// `lift_parent_target_to_triggering_source`; this companion lifts the count's
-/// self-scoped per-object refs the same way.
-///
-/// The `where X is its power` clause parses "its power" via
-/// `parse_self_power_ref`, which emits `ObjectScope::Source` (the ability
-/// carrier — Railway Brawler) because that combinator also serves the genuine
-/// self-read forms (`~'s power`, `this card's power`, Scavenge). On an enters
-/// trigger the anaphor is the event object, not the carrier, so the count reads
-/// the wrong creature's power (#5253). When the counter effect's `target` is
-/// itself the event object (`TriggeringSource`/`ParentTarget`), the "its" in
-/// the count clause is the SAME object as the "it" recipient, so its
-/// `Source`-scoped per-object refs are remapped to `EventSource` (the entering
-/// object, resolved live-then-LKI at runtime). Genuine self-reads are untouched:
-/// they only reach this remap on an enters trigger whose counter target is the
-/// event object, where "its" cannot mean the carrier.
-fn lift_counter_count_self_scope_to_event_source(effect: &mut Effect) {
-    let (count, target) = match effect {
-        Effect::PutCounter { count, target, .. } | Effect::PutCounterAll { count, target, .. } => {
-            (count, &*target)
-        }
-        _ => return,
-    };
-    if matches!(
-        target,
-        TargetFilter::TriggeringSource | TargetFilter::ParentTarget
-    ) {
-        remap_self_scope_to_event_source_in_quantity(count);
-    }
-}
-
-/// Remap `Source`-scoped per-object quantity refs (power, toughness, mana value,
-/// …) to `EventSource`, recursing through arithmetic wrappers. Exhaustive over
-/// `QuantityExpr` so a new wrapper forces a compile error here rather than
-/// silently skipping a nested per-object ref.
-fn remap_self_scope_to_event_source_in_quantity(expr: &mut QuantityExpr) {
-    match expr {
-        QuantityExpr::Ref { qty } => remap_self_scope_to_event_source_in_ref(qty),
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => remap_self_scope_to_event_source_in_quantity(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs
-                .iter_mut()
-                .for_each(remap_self_scope_to_event_source_in_quantity);
-        }
-        QuantityExpr::Difference { left, right } => {
-            remap_self_scope_to_event_source_in_quantity(left);
-            remap_self_scope_to_event_source_in_quantity(right);
-        }
-        QuantityExpr::Fixed { .. } => {}
-    }
-}
-
-/// Retarget a single per-object `QuantityRef` whose scope is `Source` to
-/// `EventSource`. Mirrors `rebind_anaphoric_ref`'s per-object arm set. Leaves
-/// every non-`Source` scope and every non-per-object ref untouched.
-fn remap_self_scope_to_event_source_in_ref(qty: &mut QuantityRef) {
-    let scope = match qty {
-        QuantityRef::Power { scope }
-        | QuantityRef::BasePower { scope }
-        | QuantityRef::Toughness { scope }
-        | QuantityRef::ObjectManaValue { scope }
-        | QuantityRef::ObjectColorCount { scope }
-        | QuantityRef::ObjectNameWordCount { scope }
-        | QuantityRef::NameStickerLetterCount {
-            stickers: NameStickerSet::OnObject { scope },
-            letters: _,
-        }
-        | QuantityRef::ObjectTypelineComponentCount { scope }
-        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
-        | QuantityRef::CountersOn { scope, .. } => scope,
-        _ => return,
-    };
-    if *scope == ObjectScope::Source {
-        *scope = ObjectScope::EventSource;
-    }
-}
-
-/// Recurse `lift_counter_count_self_scope_to_event_source` through an ability's
-/// effect and every chained `sub_ability`/`else_ability`, mirroring the descent
-/// of the sibling parent-target lifts.
-fn lift_counter_count_self_scope_to_event_source_in_ability(ability: &mut AbilityDefinition) {
-    lift_counter_count_self_scope_to_event_source(ability.effect.as_mut());
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        lift_counter_count_self_scope_to_event_source_in_ability(sub);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        lift_counter_count_self_scope_to_event_source_in_ability(else_ability);
     }
 }
 
@@ -12897,13 +12790,13 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // handlers via the per-half re-parse loop.
     // Renamed from `is_event_verb_start`: it now answers "does an event HEAD start
     // here", covering the active-voice verbs AND the state-change/passive voices.
-    // 4 of the 11 event-head lexicon CONSULTATION SITES are WIDE: this one; the LEADING-half gate in
+    // 4 of the 12 event-head lexicon CONSULTATION SITES are WIDE: this one; the LEADING-half gate in
     // split_cross_subject_event_compound; extract_subject_text (a fn-value handoff to
     // scan_split_at_phrase); and the pass-2 scan in is_new_sentence_not_type_continuation (issue #7451).
-    // 7 stay narrow: split_cross_subject_event_compound's TRAILING-half gate — that function owns one
-    // gate of EACH width — the three trailing-leg gates in split_serial_event_compound, and the three in
-    // continues_serial_event_condition. Counting unit + regeneration command: see
-    // parse_event_head_start's doc.
+    // 8 stay narrow: split_cross_subject_event_compound's TRAILING-half gate — that function owns one
+    // gate of EACH width — the three trailing-leg gates in split_serial_event_compound, the three in
+    // continues_serial_event_condition, and the StateGate arm of parse_bare_leg_verb. Counting unit +
+    // regeneration command: see parse_event_head_start's doc.
     fn is_event_head_start(text: &str) -> bool {
         parse_event_head_start(text).is_ok()
     }
@@ -13319,15 +13212,16 @@ fn parse_non_event_complement(input: &str) -> OracleResult<'_, ()> {
 /// ```
 /// One line per site; the WIDE ones are exactly the lines naming `parse_event_head_start`.
 ///
-/// Composed at exactly **FOUR of the ELEVEN** consultation sites: the **LEADING**-half gate in
+/// Composed at exactly **FOUR of the TWELVE** consultation sites: the **LEADING**-half gate in
 /// `split_cross_subject_event_compound` (deliberately wide — see its own comment there), the 2-way
 /// or-split gate (`is_event_head_start`, defined inside `split_or_event_compound` and consulted by
 /// that function's `" or "` scan loop), the subject-span terminator (`extract_subject_text`), and the
 /// widened-window pass-2 scan in `is_new_sentence_not_type_continuation` (issue #7451). The other
-/// **SEVEN** stay NARROW — `split_cross_subject_event_compound`'s **TRAILING**-half gate (that function
+/// **EIGHT** stay NARROW — `split_cross_subject_event_compound`'s **TRAILING**-half gate (that function
 /// owns one gate of EACH width; do not read it as a narrow-only consumer), the three serial TRAILING-leg
-/// gates in `split_serial_event_compound`, and the three in `continues_serial_event_condition` — each
-/// with a named counterexample or a measured zero-demand justification at its own site.
+/// gates in `split_serial_event_compound`, the three in `continues_serial_event_condition`, and the
+/// `StateGate` arm of `parse_bare_leg_verb` — each with a named counterexample or a measured
+/// zero-demand justification at its own site.
 ///
 /// The #7451 site is the only composition whose consumer can move a condition/effect boundary, and it is
 /// safe there for a structural reason rather than a measured one: it is consulted **only** inside a
@@ -13434,6 +13328,11 @@ enum SharedComplement {
     /// of both combat events (Sol, Advocate Eternal: "Whenever you attack or
     /// block with both ~ and its partner").
     CombatAdjunct,
+    /// CR 603.2: a "while <state>" gate printed once after the second leg gates
+    /// both events (Syr Vondam, Sunstar Exemplar: "When ~ dies or is put into
+    /// exile while its power is 4 or greater"); `strip_while_state_clause` then
+    /// reads it the same way on each leg.
+    StateGate,
 }
 
 fn parse_bare_leg_verb(input: &str) -> OracleResult<'_, SharedComplement> {
@@ -13443,8 +13342,19 @@ fn parse_bare_leg_verb(input: &str) -> OracleResult<'_, SharedComplement> {
             SharedComplement::CombatAdjunct,
             parse_combat_declaration_verb,
         ),
+        // NARROW consultation site: the only bare first leg printed before a
+        // shared "while" gate is a "dies" verb (Syr Vondam); no state-change head is.
+        value(SharedComplement::StateGate, parse_event_verb_start),
     ))
     .parse(input)
+}
+
+/// "while <state>" ending the second leg, in original case.
+fn extract_state_gate<'a>(pair: TextPair<'a>) -> Option<&'a str> {
+    let (gate_lower, _) = take_until::<_, _, OracleError<'_>>(" while ")
+        .parse(pair.lower)
+        .ok()?;
+    pair.original_remainder(gate_lower).map(str::trim)
 }
 
 /// "with X" after the second leg's combat verb, in original case.
@@ -13471,6 +13381,9 @@ fn append_shared_complement_if_bare_event(
         .and_then(|(_, kind, _)| match kind {
             SharedComplement::Object => extract_shared_object(after_lower, second_event),
             SharedComplement::CombatAdjunct => extract_combat_adjunct(after_lower, second_event),
+            SharedComplement::StateGate => {
+                extract_state_gate(TextPair::new(second_event, after_lower))
+            }
         });
     match shared {
         Some(complement) => format!("{first} {complement}"),

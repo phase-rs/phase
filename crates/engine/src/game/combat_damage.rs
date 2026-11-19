@@ -69,7 +69,8 @@ fn process_combat_damage_triggers(
         });
     }
     before_priority_events.extend_from_slice(damage_events);
-    let mut pending = triggers::collect_triggers_for_batch(state, &before_priority_events);
+    let mut pending =
+        triggers::collect_combat_damage_batch_triggers(state, &before_priority_events);
 
     // Steps 2-4: SBA/trigger loop per CR 704.3.
     // SBAs may generate events (ZoneChanged for dying creatures) that need trigger
@@ -110,6 +111,10 @@ fn process_combat_damage_triggers(
                 &consumed,
             ));
             pending.extend(triggers::collect_triggers_for_batch(state, &new_events));
+            // CR 603.2c: this loop also owns the SBA results it just scanned.
+            // Do not let an open trigger-ordering prompt make the generic
+            // action collector observe the same deaths again.
+            claim_combat_batch_events_for_ordinary_collection(state, all_events, events_before);
         } else {
             break;
         }
@@ -210,19 +215,16 @@ pub fn resolve_combat_damage(
         let batch = apply_combat_damage(state, &pending, CombatDamageSubStep::FirstStrike);
         let batch_event_start = events.len();
         events.extend_from_slice(batch.events());
+        claim_combat_batch_events_for_ordinary_collection(state, events, batch_event_start);
         match batch {
             // CR 616.1: the batch parked on a life-gain ordering choice. The
             // sub-step flags are deliberately NOT set here — the resume sets them
             // once the batch actually completes, so neither re-entry nor
             // priority.rs's completeness gate can skip the rest of combat damage.
-            CombatDamageBatch::Paused { waiting_for, .. } => {
-                claim_combat_lifelink_batch_events_for_ordinary_collection(
-                    state,
-                    events,
-                    batch_event_start,
-                );
-                return Some(*waiting_for);
-            }
+            CombatDamageBatch::Paused {
+                events: _,
+                waiting_for,
+            } => return Some(*waiting_for),
             // CR 510.3 + CR 510.4: the first combat damage step is complete and ends
             // with the active player's priority window (or a prompt that must come
             // first); the regular step is a separate call, entered once that window
@@ -258,17 +260,14 @@ pub fn resolve_combat_damage(
     let batch = apply_combat_damage(state, &pending, CombatDamageSubStep::Regular);
     let batch_event_start = events.len();
     events.extend_from_slice(batch.events());
+    claim_combat_batch_events_for_ordinary_collection(state, events, batch_event_start);
     match batch {
         // CR 616.1: see the first-strike arm above — the completion flags belong
         // to the resume, not to a batch that has parked.
-        CombatDamageBatch::Paused { waiting_for, .. } => {
-            claim_combat_lifelink_batch_events_for_ordinary_collection(
-                state,
-                events,
-                batch_event_start,
-            );
-            Some(*waiting_for)
-        }
+        CombatDamageBatch::Paused {
+            events: _,
+            waiting_for,
+        } => Some(*waiting_for),
         CombatDamageBatch::Complete(damage_events) => finish_combat_damage_sub_step(
             state,
             CombatDamageSubStep::Regular,
@@ -434,7 +433,7 @@ pub(crate) fn resume_pending_combat_lifelink(
                 let batch = record.batch_events.clone();
                 state.pending_combat_lifelink = Some(Box::new(record));
                 events.extend_from_slice(&batch[owed_from..]);
-                claim_combat_lifelink_batch_events_for_ordinary_collection(
+                claim_combat_batch_events_for_ordinary_collection(
                     state,
                     events,
                     action_event_start,
@@ -453,22 +452,14 @@ pub(crate) fn resume_pending_combat_lifelink(
             // answer. The still-untouched rest was re-parked with the batch so
             // far, so the eventual completion still fires ONE CR 603.3b batch.
             events.extend_from_slice(&batch[owed_from..]);
-            claim_combat_lifelink_batch_events_for_ordinary_collection(
-                state,
-                events,
-                action_event_start,
-            );
+            claim_combat_batch_events_for_ordinary_collection(state, events, action_event_start);
             Some(*waiting_for)
         }
         CombatDamageBatch::Complete(damage_events) => {
             events.extend_from_slice(&damage_events[owed_from..]);
             let waiting_for =
                 finish_combat_damage_sub_step(state, sub_step, &damage_events, events);
-            claim_combat_lifelink_batch_events_for_ordinary_collection(
-                state,
-                events,
-                action_event_start,
-            );
+            claim_combat_batch_events_for_ordinary_collection(state, events, action_event_start);
             // CR 510.3 + CR 510.4: a completed batch ends its combat damage step with
             // the active player's priority window. A first-strike batch already
             // returned that window (or a prompt that must come first) from
@@ -483,12 +474,11 @@ pub(crate) fn resume_pending_combat_lifelink(
     }
 }
 
-/// CR 510.2 + CR 603.2c: a combat-damage batch parked for a CR 616.1 choice
-/// still owns its ordinary trigger collection. Suppress only the generic
-/// post-action ordinary collector for the exact full-buffer occurrences; the
-/// resumed batch collector receives the retained events, and delayed collectors
-/// retain their CR 603.7b visibility.
-pub(crate) fn claim_combat_lifelink_batch_events_for_ordinary_collection(
+/// CR 510.2 + CR 603.2c: the damage batch owns ordinary collection even
+/// when it returns with an ordering prompt and nothing has reached the stack.
+/// Claim its exact public occurrences only against the generic ordinary scan;
+/// the batch's own resumed and delayed collectors can still see them.
+pub(crate) fn claim_combat_batch_events_for_ordinary_collection(
     state: &mut GameState,
     events: &[GameEvent],
     event_start: usize,
