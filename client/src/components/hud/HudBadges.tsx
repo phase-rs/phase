@@ -32,6 +32,17 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
 
+/**
+ * Every badge whose explanation shows in a `BadgeTip` takes this. The host
+ * decides: a badge that sits in a control whose tap acts at that moment (a HUD
+ * plate while its player is a target, an opponent tab unless it is focused and
+ * not a target) keeps the default, and every other host passes `"toggle"` so a
+ * tap shows the explanation (see `GameplayTooltip`).
+ */
+export interface BadgeTouchProps {
+  touch?: TooltipTouch;
+}
+
 interface StatusBadgeProps {
   label: string;
   value?: number | string;
@@ -98,10 +109,10 @@ export function DesignationArt({
   );
 }
 
-export function MonarchBadge() {
+export function MonarchBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.monarchTooltip")}>
+    <BadgeTip text={t("badges.monarchTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.monarch")}
@@ -126,10 +137,10 @@ export function MonarchBadge() {
   );
 }
 
-export function InitiativeBadge() {
+export function InitiativeBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.initiativeTooltip")}>
+    <BadgeTip text={t("badges.initiativeTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.initiative")}
@@ -154,10 +165,10 @@ export function InitiativeBadge() {
   );
 }
 
-export function CityBlessingBadge() {
+export function CityBlessingBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.cityBlessingTooltip")}>
+    <BadgeTip text={t("badges.cityBlessingTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.cityBlessing")}
@@ -224,10 +235,10 @@ export function DayNightBadge() {
   );
 }
 
-export function EnduringStoryBadge() {
+export function EnduringStoryBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.enduringStoryTooltip")}>
+    <BadgeTip text={t("badges.enduringStoryTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.enduringStory")}
@@ -348,7 +359,7 @@ const POISON_LOSS_KEY = {
   Team: "badges.poisonLossTeam",
 } as const satisfies Record<PoisonLossScope, ParseKeys<"game">>;
 
-interface PoisonCounterBadgeProps {
+interface PoisonCounterBadgeProps extends BadgeTouchProps {
   playerId: PlayerId;
   value: number;
 }
@@ -360,14 +371,14 @@ interface PoisonCounterBadgeProps {
  * glow all come from the engine — never a client literal. The loss rule is part
  * of the accessible name as well as the hover tooltip, so it is not mouse-only.
  */
-export function PoisonCounterBadge({ playerId, value }: PoisonCounterBadgeProps) {
+export function PoisonCounterBadge({ playerId, value, touch }: PoisonCounterBadgeProps) {
   const { t } = useTranslation("game");
   const lossRule = useGameStore((s) => s.gameState?.derived?.poison_loss?.[String(playerId)]);
   const lossLine = lossRule && t(POISON_LOSS_KEY[lossRule.scope], { threshold: lossRule.threshold });
   const tooltip = [t("badges.poisonTooltip", { count: value }), lossLine].filter(Boolean).join("\n");
   const ariaLabel = [t("badges.poisonAriaLabel", { count: value }), lossLine].filter(Boolean).join(". ");
   return (
-    <BadgeTip text={tooltip}>
+    <BadgeTip text={tooltip} touch={touch}>
       <span
         role="img"
         aria-label={ariaLabel}
@@ -396,17 +407,17 @@ export function PoisonCounterBadge({ playerId, value }: PoisonCounterBadgeProps)
 
 type CounterBadgeKind = "speed" | "rad" | "energy" | "ring" | "experience";
 
-interface CounterBadgeProps {
+interface CounterBadgeProps extends BadgeTouchProps {
   kind: CounterBadgeKind;
   value: number;
   ringBearerName?: string | null;
 }
 
-export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps) {
+export function CounterBadge({ kind, value, ringBearerName, touch }: CounterBadgeProps) {
   const { t } = useTranslation("game");
   if (kind === "energy") {
     return (
-      <BadgeTip text={t("badges.energyTooltip", { count: value })}>
+      <BadgeTip text={t("badges.energyTooltip", { count: value })} touch={touch}>
         <span
           role="img"
           aria-label={t("badges.energyAriaLabel", { count: value })}
@@ -447,13 +458,14 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
           bearer: ringBearerName ?? t("badges.noRingBearer"),
         })}
         title={ringTitle}
+        touch={touch}
       />
     );
   }
 
   if (kind === "rad") {
     return (
-      <BadgeTip text={t("badges.radTooltip", { count: value })}>
+      <BadgeTip text={t("badges.radTooltip", { count: value })} touch={touch}>
         <span
           role="img"
           aria-label={t("badges.radAriaLabel", { count: value })}
@@ -488,7 +500,7 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
     // CR 122.1: Experience counters are player counters; surfaced so the player can
     // see their total without activating an ability that consumes them.
     return (
-      <BadgeTip text={t("badges.experienceTooltip", { count: value })}>
+      <BadgeTip text={t("badges.experienceTooltip", { count: value })} touch={touch}>
         <span
           role="img"
           aria-label={t("badges.experienceAriaLabel", { count: value })}
@@ -505,7 +517,7 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
   }
 
   return (
-    <BadgeTip text={t("badges.speedTooltip", { value })}>
+    <BadgeTip text={t("badges.speedTooltip", { value })} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.speedAriaLabel", { value })}
@@ -552,7 +564,7 @@ const CONDITION_LABEL_KEY = {
  * escapes the badge's own rounded `overflow-hidden` clip. Newline-separated text
  * becomes stacked rows (native `title` line breaks have no inline-HTML analog).
  */
-function BadgeTip({ text, touch, children }: { text: string; touch?: TooltipTouch; children: ReactNode }) {
+function BadgeTip({ text, touch, children }: { text: string; children: ReactNode } & BadgeTouchProps) {
   const lines = text.split("\n");
   return (
     <span className="group relative inline-flex">
@@ -576,7 +588,7 @@ function BadgeTip({ text, touch, children }: { text: string; touch?: TooltipTouc
  * name (when the engine surfaced one) for the tooltip; never re-derives the
  * condition itself — `condition` comes straight from `DerivedViews.player_status`.
  */
-export function ConditionBadge({ condition }: { condition: PlayerStatusView }) {
+export function ConditionBadge({ condition, touch }: { condition: PlayerStatusView } & BadgeTouchProps) {
   const { t } = useTranslation("game");
   const sourceName = useGameStore((s) =>
     condition.source != null
@@ -587,7 +599,7 @@ export function ConditionBadge({ condition }: { condition: PlayerStatusView }) {
   const label = t(CONDITION_LABEL_KEY[kind]);
   const title = sourceName ? t("badges.condFromSource", { condition: label, name: sourceName }) : label;
   return (
-    <BadgeTip text={title}>
+    <BadgeTip text={title} touch={touch}>
       <span
         role="img"
         aria-label={title}
@@ -677,7 +689,8 @@ export const UNBOUNDED_FAMILY_LABEL_KEY = {
 export function UnboundedBadge({
   family,
   state,
-}: {
+  touch,
+}: BadgeTouchProps & {
   family: UnboundedFamily;
   /** The engine's published `unbounded_families` row behind this badge. ABSENT means this badge
    *  is not backed by a published `∞` row. */
@@ -736,7 +749,7 @@ export function UnboundedBadge({
     }
   })();
   return (
-    <BadgeTip text={title}>
+    <BadgeTip text={title} touch={touch}>
       <span
         role="img"
         aria-label={title}
@@ -798,7 +811,8 @@ function describeNextSpellModifier(
 export function PendingSpellBadge({
   modifiers,
   reductions,
-}: {
+  touch,
+}: BadgeTouchProps & {
   modifiers: PendingNextSpellModifier[];
   reductions: PendingSpellCostReduction[];
 }) {
@@ -809,7 +823,7 @@ export function PendingSpellBadge({
   ];
   const title = [t("badges.pendingSpell"), ...lines].join("\n");
   return (
-    <BadgeTip text={title}>
+    <BadgeTip text={title} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.pendingSpell")}
@@ -832,6 +846,7 @@ function RingChip({
   value,
   ariaLabel,
   title,
+  touch,
   chipRef,
   onMouseEnter,
   onMouseLeave,
@@ -839,6 +854,7 @@ function RingChip({
   value: number;
   ariaLabel: string;
   title?: string;
+  touch?: TooltipTouch;
   chipRef?: React.Ref<HTMLSpanElement>;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
@@ -861,7 +877,7 @@ function RingChip({
   );
   // Opponent ring badge: static multi-line tooltip. The player's own ring omits
   // `title` and gets the richer hover popover via <RingBenefitsBadge> instead.
-  return title ? <BadgeTip text={title}>{chip}</BadgeTip> : chip;
+  return title ? <BadgeTip text={title} touch={touch}>{chip}</BadgeTip> : chip;
 }
 
 // Brief dismiss delay smoothing cursor jitter on the chip edge (mirrors

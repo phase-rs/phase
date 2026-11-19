@@ -220,7 +220,16 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
             // unboundedly — render ∞ instead of the (still-finite) real count.
             const unbounded = isUnbounded(row);
             return (
-              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+              <CounterTooltip
+                key={type}
+                type={type}
+                count={row.count}
+                isUnbounded={unbounded}
+                // An interactive card's tap targets or activates it; an inert
+                // card's tap does nothing, so a tap opens the counter's
+                // explanation instead.
+                touch={interactive ? "ignore" : "toggle"}
+              >
                 <span
                   className={`rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                 >
