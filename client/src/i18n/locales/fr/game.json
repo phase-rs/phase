@@ -1438,6 +1438,9 @@
       "poisonCounters": "Marqueurs poison",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Vous",
+      "archenemyOpponent": "Adversaire {{number}}",
       "firstPlayer": {
         "random": "Aléatoire",
         "play": "Jouer",
