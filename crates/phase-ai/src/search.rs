@@ -17779,6 +17779,7 @@ mod tests {
         );
         state.waiting_for = WaitingFor::EffectZoneChoice {
             performed_by: None,
+            privacy_zones: None,
             player: ai,
             cards,
             count,
@@ -18793,6 +18794,7 @@ mod tests {
             let source = vanilla_in_hand(state, PlayerId(0));
             WaitingFor::EffectZoneChoice {
                 performed_by: None,
+                privacy_zones: None,
                 player: PlayerId(0),
                 cards: hand_pool(state, PlayerId(0), 3),
                 count: 1,
