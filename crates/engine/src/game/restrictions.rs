@@ -5392,12 +5392,24 @@ mod tests {
         let face_down_filter = typed(vec![FilterProp::FaceDown], None);
         assert!(ledger_filter_is_evaluable(&face_down_filter));
         assert!(
-            battlefield_entry_matches_filter(&face_down_record, &face_down_filter, player, &[], Some(source_id)),
+            battlefield_entry_matches_filter(
+                &face_down_record,
+                &face_down_filter,
+                player,
+                &[],
+                Some(source_id)
+            ),
             "FaceDown must MATCH a face-down record"
         );
         // FaceDown should NOT match a face-up record.
         assert!(
-            !battlefield_entry_matches_filter(&record, &face_down_filter, player, &[], Some(source_id)),
+            !battlefield_entry_matches_filter(
+                &record,
+                &face_down_filter,
+                player,
+                &[],
+                Some(source_id)
+            ),
             "FaceDown must NOT match a face-up record"
         );
 

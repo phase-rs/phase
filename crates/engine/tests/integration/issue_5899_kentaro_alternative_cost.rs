@@ -48,12 +48,12 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
                 assert_eq!(costs.len(), 2);
                 match &costs[0] {
                     AbilityCost::Mana {
-                        cost: ManaCost::Cost {
-                            shards,
-                            generic: 3,
-                        },
+                        cost: ManaCost::Cost { shards, generic: 3 },
                     } if shards.is_empty() => {}
-                    _ => panic!("expected first choice to be {{3}} mana cost, got {:?}", costs[0]),
+                    _ => panic!(
+                        "expected first choice to be {{3}} mana cost, got {:?}",
+                        costs[0]
+                    ),
                 }
             }
             other => panic!("expected Kentaro alternative-cost choice, got {other:?}"),

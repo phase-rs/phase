@@ -819,7 +819,14 @@ pub(crate) fn handle_decide_additional_cost(
                 [first, second] => (first.clone(), second.clone()),
                 _ => {
                     // Fallback for unexpected N>2: treat first as preferred, last as fallback
-                    (costs.first().cloned().unwrap_or(AbilityCost::Mana { cost: ManaCost::zero() }), costs.last().cloned().unwrap_or(AbilityCost::Mana { cost: ManaCost::zero() }))
+                    (
+                        costs.first().cloned().unwrap_or(AbilityCost::Mana {
+                            cost: ManaCost::zero(),
+                        }),
+                        costs.last().cloned().unwrap_or(AbilityCost::Mana {
+                            cost: ManaCost::zero(),
+                        }),
+                    )
                 }
             };
             if pay {
@@ -9470,7 +9477,10 @@ fn check_additional_cost_or_pay_with_kept_cost(
             return Ok(make_optional_cost_choice(
                 state,
                 player,
-                AdditionalCost::Choice(vec![alt_cost.cost, AbilityCost::Mana { cost: cost.clone() }]),
+                AdditionalCost::Choice(vec![
+                    alt_cost.cost,
+                    AbilityCost::Mana { cost: cost.clone() },
+                ]),
                 0,
                 pending,
             ));

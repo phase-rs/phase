@@ -6457,9 +6457,7 @@ fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
         AdditionalCost::Kicker { costs, .. } => {
             costs.iter().any(AbilityCost::contains_unimplemented)
         }
-        AdditionalCost::Choice(costs) => {
-            costs.iter().any(AbilityCost::contains_unimplemented)
-        }
+        AdditionalCost::Choice(costs) => costs.iter().any(AbilityCost::contains_unimplemented),
     }
 }
 
@@ -10586,7 +10584,7 @@ fn extract_trigger_condition_features(
         TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
             extract_trigger_condition_features(condition, features);
         }
-// Operand-free: no `QuantityExpr` to walk.
+        // Operand-free: no `QuantityExpr` to walk.
         TriggerCondition::GainedLife { .. }
         | TriggerCondition::LostLife
         | TriggerCondition::Descended

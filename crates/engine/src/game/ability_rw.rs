@@ -2091,7 +2091,8 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
         | TriggerCondition::PlacedByAbilitySource
-        | TriggerCondition::AddedManaWithThisAbilityThisTurn => false,
+        | TriggerCondition::AddedManaWithThisAbilityThisTurn
+        | TriggerCondition::DefendingPlayerIsPoisoned => false,
     }
 }
 
@@ -2248,6 +2249,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => false,
     }
 }
@@ -7417,6 +7419,9 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // event-consuming intervening-ifs.
         TriggerCondition::ChoseOtherRingBearer => reads_event_live(),
         TriggerCondition::ChoseRingBearer => reads_event_live(),
+        // CR 701.27 + CR 509.1b: defending player poison status reads the
+        // defending player's poison counters (player state).
+        TriggerCondition::DefendingPlayerIsPoisoned => reads_player_of(StateKind::PlayerLife),
     }
 }
 
@@ -7551,6 +7556,9 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => RwProfile::empty(),
+        // CR 701.27 + CR 509.1b: defending player poison status reads the
+        // defending player's poison counters (player state).
+        StaticCondition::DefendingPlayerIsPoisoned => reads_player_of(StateKind::PlayerLife),
         // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
         // Shared with the `AbilityCondition` / `TriggerCondition` mirrors of the
         // same printed clause.

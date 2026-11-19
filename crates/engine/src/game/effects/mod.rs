@@ -9646,6 +9646,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => false,
     }
 }
@@ -10094,7 +10095,8 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
         | TriggerCondition::PlacedByAbilitySource
-        | TriggerCondition::AddedManaWithThisAbilityThisTurn => false,
+        | TriggerCondition::AddedManaWithThisAbilityThisTurn
+        | TriggerCondition::DefendingPlayerIsPoisoned => false,
     }
 }
 

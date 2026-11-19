@@ -7202,6 +7202,10 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         // is unanswerable rather than merely absent, so `None` is the honest
         // lowering and NOT an approximation that silently drops the anchor.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // CR 701.27 + CR 509.1b: defending player poison status has no
+        // `TriggerCondition` bridge (the trigger-side variant is produced directly
+        // by the trigger parser, not bridged from static).
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.

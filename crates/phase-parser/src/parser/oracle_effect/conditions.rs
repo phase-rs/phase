@@ -6727,6 +6727,9 @@ pub(crate) fn static_condition_to_ability_condition(
         // so there is no attacker whose latched record could answer. The anchor
         // is structurally unavailable here, not merely unused.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // CR 701.27 + CR 509.1b: defending player poison status has no
+        // `AbilityCondition` equivalent.
+        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => None,
     }
 }
