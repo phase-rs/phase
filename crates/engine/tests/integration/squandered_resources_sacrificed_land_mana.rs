@@ -142,8 +142,7 @@ fn choose(runner: &mut GameRunner, mana_type: ManaType) {
 fn pool(runner: &GameRunner, player: PlayerId) -> Vec<ManaType> {
     runner.state().players[player.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|unit| unit.color)
         .collect()
 }
@@ -730,10 +729,7 @@ fn contamination_rewrites_only_the_tapped_for_mana_production() {
         vec![ManaType::Black],
         "control: Contamination rewrites a Forest tapped for mana"
     );
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
 
     let activation = activate_and_sacrifice(&mut runner, squandered, millikin);
 
@@ -764,10 +760,7 @@ fn sacrificed_forest_under_contamination_adds_black() {
         })
         .expect("control: tapping a Forest for mana");
     assert_eq!(pool(&runner, P0), vec![ManaType::Black]);
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
 
     let activation = activate_and_sacrifice(&mut runner, squandered, forest);
 
@@ -954,10 +947,7 @@ fn sacrificed_reflecting_pool_follows_an_anchored_chain() {
         vec![ManaType::Green],
         "control: the Orchard reads the opponent's Forest"
     );
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
     runner.state_mut().objects.get_mut(&orchard).unwrap().tapped = false;
 
     let activation = activate_and_sacrifice(&mut runner, squandered, pool_land);
@@ -1182,10 +1172,7 @@ fn play_a_land(runner: &mut GameRunner, land: ObjectId) {
 
 /// Taps `land` for its first ability and returns what arrived (no prompt).
 fn tap_for_mana(runner: &mut GameRunner, land: ObjectId) -> Vec<ManaType> {
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
     runner
         .act(GameAction::ActivateAbility {
             source_id: land,
@@ -1194,10 +1181,7 @@ fn tap_for_mana(runner: &mut GameRunner, land: ObjectId) -> Vec<ManaType> {
         })
         .expect("tapping the land for mana");
     let produced = pool(runner, P0);
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
     produced
 }
 
@@ -1345,10 +1329,7 @@ fn resolve_seeker(runner: &mut GameRunner, seeker: ObjectId, times: u32) {
             .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
         runner.activate(seeker, 0).target_object(seeker).resolve();
     }
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
     flush(runner);
 }
 
@@ -1847,10 +1828,7 @@ fn reflecting_pool_options(runner: &mut GameRunner, reflecting_pool: ObjectId) -
         .get_mut(&reflecting_pool)
         .expect("the Pool exists")
         .tapped = false;
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
     runner
         .act(GameAction::ActivateAbility {
             source_id: reflecting_pool,

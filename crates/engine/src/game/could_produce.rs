@@ -2803,8 +2803,7 @@ mod tests {
         };
         let pool = runner.state().players[P0.0 as usize]
             .mana_pool
-            .mana
-            .iter()
+            .units()
             .map(|unit| unit.color)
             .collect();
         (prompt, pool)
@@ -3495,8 +3494,7 @@ mod tests {
             if runtime.is_empty() {
                 runtime = runner.state().players[0]
                     .mana_pool
-                    .mana
-                    .iter()
+                    .units()
                     .map(|unit| unit.color)
                     .collect();
             }

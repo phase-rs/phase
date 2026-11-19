@@ -85,8 +85,7 @@ fn new_scenario() -> GameScenario {
 fn pool(runner: &GameRunner, player: PlayerId) -> Vec<ManaType> {
     runner.state().players[player.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .map(|unit| unit.color)
         .collect()
 }
@@ -108,10 +107,7 @@ fn tap_for_mana(runner: &mut GameRunner, source: ObjectId) -> Produced {
 /// which resolves at once (CR 605.3b), and reports the prompt it raised or the
 /// mana it added.
 fn activate_for_mana(runner: &mut GameRunner, source: ObjectId, ability_index: usize) -> Produced {
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    runner.state_mut().players[P0.0 as usize].mana_pool.clear();
     runner
         .act(GameAction::ActivateAbility {
             source_id: source,
@@ -2636,10 +2632,7 @@ fn your_graveyard_skips_a_legend_you_stole_and_sacrificed_this_step() {
 
     let mut read = GameRunner::from_state(board.state.clone());
     // The Altar's {C}{C} floats in P0's pool on this board.
-    read.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    read.state_mut().players[P0.0 as usize].mana_pool.clear();
     assert!(
         !legal_actions(read.state()).iter().any(|action| matches!(
             action,
@@ -2682,10 +2675,7 @@ fn your_graveyard_counts_your_legend_an_opponent_stole_and_sacrificed_this_step(
     );
 
     let mut read = GameRunner::from_state(board.state.clone());
-    read.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
+    read.state_mut().players[P0.0 as usize].mana_pool.clear();
     assert!(
         legal_actions(read.state()).iter().any(|action| matches!(
             action,
