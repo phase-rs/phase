@@ -10912,6 +10912,428 @@ impl StructuralFeature {
     }
 }
 
+/// Where a damage shield's rider gets its targets: CR 601.2c / CR 602.2b announce a prevention
+/// spell's or ability's targets with it (Channel Harm's "target creature", Acolyte's Reward's
+/// "any target"), and a printed replacement's action picks them when it runs.
+#[derive(Clone, Copy)]
+enum RiderTargets {
+    Announced,
+    AtResolution,
+}
+
+/// CR 120.2a + CR 510.2: can combat damage reach this shield? Combat damage is dealt as one
+/// simultaneous batch in the combat damage step, and a shield that watches every damage event
+/// meets it. A noncombat-only one (Purity, Stormwild Capridor) never does.
+fn damage_replacement_reaches_combat(repl: &ReplacementDefinition) -> bool {
+    matches!(
+        repl.event,
+        ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage
+    ) && !matches!(repl.combat_scope, Some(CombatDamageScope::NoncombatOnly))
+}
+
+/// [`StructuralFeature::DamageReplacementChoiceUnaskedInCombat`] for a damage replacement: its
+/// own "may", or a choice in its action.
+fn damage_replacement_asks_a_choice_in_combat(repl: &ReplacementDefinition) -> bool {
+    damage_replacement_reaches_combat(repl)
+        && (!matches!(repl.mode, ReplacementMode::Mandatory)
+            || repl.execute.as_deref().is_some_and(|action| {
+                damage_rider_asks_a_choice(action, RiderTargets::AtResolution)
+            }))
+}
+
+/// [`StructuralFeature::DamageReplacementChoiceUnaskedInCombat`] for a prevention effect whose
+/// rider is its `ContinuationStep` sub (`effects::prevent_damage` installs exactly that sub).
+/// CR 615.5: every `PreventionScope` includes combat damage, so the rider always meets the
+/// combat batch.
+fn prevention_rider_asks_a_choice_in_combat(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::PreventDamage { .. })
+        && def
+            .sub_ability
+            .as_deref()
+            .filter(|rider| rider.sub_link == SubAbilityLink::ContinuationStep)
+            .is_some_and(|rider| damage_rider_asks_a_choice(rider, RiderTargets::Announced))
+}
+
+/// CR 608.2d: does any instruction of this rider ask its player a choice? A target the rider
+/// announced with its spell is already chosen; a population a sacrifice or zone change picks from
+/// (Dralnu's "that many permanents", Nefarious Lich's "that many cards from your graveyard") and a
+/// target a printed replacement's action picks as it runs are chosen when the rider runs, and so
+/// is an "up to" count (`resolution_prompt::quantity_offers_up_to_choice`).
+fn damage_rider_asks_a_choice(rider: &AbilityDefinition, targets: RiderTargets) -> bool {
+    rider.optional
+        || damage_rider_effect_asks_a_choice(&rider.effect, targets)
+        || [rider.sub_ability.as_deref(), rider.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|next| damage_rider_asks_a_choice(next, targets))
+}
+
+/// [`damage_rider_asks_a_choice`] for one instruction. Exhaustive over `Effect` with no wildcard,
+/// like `resolution_prompt::effect_offers_choice`: a new effect fails to compile until it is
+/// classified, and every effect outside the shapes the printed riders use asks a choice (fail
+/// closed). The classified arms destructure every field, so a new field forces a re-audit.
+fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> bool {
+    use crate::game::resolution_prompt::{effect_offers_choice, quantity_offers_up_to_choice};
+    let picks_a_population = |filter: &TargetFilter| !filter.is_context_ref();
+    let picks_a_target = |filter: &TargetFilter| match targets {
+        RiderTargets::Announced => false,
+        RiderTargets::AtResolution => picks_a_population(filter),
+    };
+    match effect {
+        // CR 701.21a + CR 608.2d: the player picks what to sacrifice or move from a population.
+        Effect::Sacrifice {
+            target,
+            count,
+            min_count: _,
+        } => picks_a_population(target) || quantity_offers_up_to_choice(count),
+        Effect::ChangeZone {
+            origin: _,
+            destination: _,
+            target,
+            owner_library: _,
+            enter_transformed: _,
+            enters_under: _,
+            enter_tapped: _,
+            enters_attacking: _,
+            up_to,
+            enter_with_counters: _,
+            conditional_enter_with_counters: _,
+            face_down_profile: _,
+            enters_modified_if: _,
+            library_shuffle: _,
+            actor: _,
+        } => *up_to || picks_a_population(target),
+        // CR 608.2c + CR 701.24a: "that creature's owner shuffles it into their library"
+        // (Weeping Angel) moves the bound object and shuffles; it picks nothing unless its object
+        // is a population. Any other mass move fails closed.
+        Effect::ChangeZoneAll {
+            origin: _,
+            destination: _,
+            target,
+            enters_under: _,
+            enter_tapped: _,
+            enters_attacking: _,
+            enter_with_counters: _,
+            face_down_profile: _,
+            library_position: _,
+            library_shuffle: _,
+            random_order: _,
+            actor: _,
+        } => {
+            !crate::game::effects::is_selected_object_library_move(effect)
+                || picks_a_population(target)
+        }
+        // CR 115.1 + CR 608.2b: the move's declaration node names the same bound object.
+        Effect::TargetOnly { target } => picks_a_target(target),
+        // `effect_offers_choice` already answers the count half of these: its "up to" guard.
+        Effect::GainLife { amount: _, player } => {
+            picks_a_target(player) || effect_offers_choice(effect)
+        }
+        Effect::LoseLife { amount: _, target } => {
+            target.as_ref().is_some_and(picks_a_target) || effect_offers_choice(effect)
+        }
+        Effect::Draw { count: _, target } => picks_a_target(target) || effect_offers_choice(effect),
+        Effect::DealDamage {
+            amount: _,
+            target,
+            damage_source: _,
+            excess: _,
+        } => picks_a_target(target) || effect_offers_choice(effect),
+        Effect::PutCounter {
+            counter_type: _,
+            count: _,
+            target,
+        } => picks_a_target(target) || effect_offers_choice(effect),
+        Effect::Token {
+            enters_blocking: _,
+            name: _,
+            power: _,
+            toughness: _,
+            types: _,
+            colors: _,
+            keywords: _,
+            tapped: _,
+            count: _,
+            owner,
+            attach_to,
+            enters_attacking: _,
+            attack_destination: _,
+            supertypes: _,
+            static_abilities: _,
+            enter_with_counters: _,
+        } => {
+            picks_a_target(owner)
+                || attach_to.as_ref().is_some_and(picks_a_target)
+                || effect_offers_choice(effect)
+        }
+        Effect::Mill {
+            count,
+            target,
+            destination: _,
+            position: _,
+        } => picks_a_target(target) || quantity_offers_up_to_choice(count),
+        Effect::ExileTop {
+            player,
+            count,
+            position: _,
+            face_down: _,
+            actor: _,
+        } => picks_a_target(player) || quantity_offers_up_to_choice(count),
+        Effect::RemoveCounter {
+            counter_type: _,
+            count,
+            target,
+            scope: _,
+        } => picks_a_target(target) || quantity_offers_up_to_choice(count),
+        Effect::PreventDamage {
+            amount: _,
+            amount_dynamic,
+            target,
+            recipient_scope: _,
+            scope: _,
+            damage_source_filter: _,
+            prevention_duration: _,
+        } => {
+            picks_a_target(target)
+                || amount_dynamic
+                    .as_ref()
+                    .is_some_and(quantity_offers_up_to_choice)
+        }
+        Effect::RemoveAllDamage { target } | Effect::Shuffle { target } => picks_a_target(target),
+        Effect::SetTapState {
+            target,
+            scope: _,
+            state: _,
+        } => picks_a_target(target),
+        Effect::LoseTheGame { target } => target.as_ref().is_some_and(picks_a_target),
+        // Every other instruction: fail closed, it asks until classified above.
+        Effect::NoteManaSpent
+        | Effect::CompletePlayerAction { .. }
+        | Effect::NoteNumber { .. }
+        | Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch { .. }
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Discard { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::Choose { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RollDie { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::ChaosEnsues
+        | Effect::RedistributeLifeTotals
+        | Effect::ReverseTurnOrder
+        | Effect::ChooseOneOf { .. }
+        | Effect::Unimplemented { .. } => true,
+    }
+}
+
 /// Extract structural feature tags from a card's entire parsed data.
 ///
 /// Each tag is mapped to `FeatureSupport::Handled` or `FeatureSupport::Unhandled`

@@ -12399,6 +12399,7 @@ fn your_plans_mean_nothing_full_oracle_parses_discard_draw_tail() {
             QuantityRef::FilteredTrackedSetSize {
                 filter,
                 caused_by: Some(ThisWayCause::Discarded),
+                destination: None,
             },
     } = inner.as_ref()
     else {

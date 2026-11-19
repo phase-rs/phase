@@ -7436,6 +7436,7 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -9126,6 +9127,7 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
         | StaticMode::ActivateAsInstant { .. }
         | StaticMode::CantGainLife
         | StaticMode::CantLoseLife
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::MustAttack
         | StaticMode::MustBlock
         | StaticMode::MustBlockAttacker { .. }
