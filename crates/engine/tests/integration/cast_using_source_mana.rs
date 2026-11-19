@@ -1762,17 +1762,26 @@ fn waterbend_x_excludes_a_permanent_that_cannot_tap() {
 
             let paid_x = if restricted { 1 } else { 2 };
             runner.act(GameAction::ChooseX { value: paid_x }).unwrap();
+            let candidates = candidate_actions(runner.state());
             let tap = GameAction::TapForConvoke {
                 object_id: helper,
                 mana_type: ManaType::Colorless,
             };
             assert_eq!(
-                candidate_actions(runner.state())
-                    .iter()
-                    .any(|candidate| candidate.action == tap),
+                candidates.iter().any(|candidate| candidate.action == tap),
                 !restricted,
             );
             if restricted {
+                let katara_tap = GameAction::TapForConvoke {
+                    object_id: katara,
+                    mana_type: ManaType::Colorless,
+                };
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.action == katara_tap),
+                    "{payment_mode:?}: Katara's Waterbend tap must be offered at restricted X=1",
+                );
                 let before = resources(&runner);
                 assert!(
                     !runner
