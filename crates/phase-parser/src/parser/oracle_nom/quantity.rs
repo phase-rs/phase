@@ -7004,7 +7004,10 @@ fn parse_counter_added_this_turn_condition_active(input: &str) -> OracleResult<'
 
 fn parse_counter_added_this_turn_condition_passive(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = parse_article(input)?;
-    let (rest, counters) = parse_typed_counter_match(rest)?;
+    // CR 122.1: "a counter was put on ~ this turn" (Wakka, Devoted Guardian)
+    // reads any counter kind, like the active form's generic arm.
+    let (rest, counters) =
+        alt((parse_typed_counter_match, parse_generic_counter_match)).parse(rest)?;
     let (rest, _) = tag(" was put on ").parse(rest)?;
     let (rest, target) = parse_counter_added_target(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
@@ -11460,6 +11463,24 @@ mod tests {
                 target: TargetFilter::Typed(
                     TypedFilter::permanent().controller(ControllerRef::You)
                 ),
+            }
+        );
+    }
+
+    /// CR 122.1: Wakka, Devoted Guardian's "a counter was put on ~ this turn"
+    /// is the passive form with a GENERIC counter: any kind, any actor, on the
+    /// source object.
+    #[test]
+    fn parse_counter_added_condition_accepts_passive_generic_counter() {
+        let (rest, q) =
+            parse_counter_added_this_turn_condition("a counter was put on ~ this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::CounterAddedThisTurn {
+                actor: CountScope::All,
+                counters: crate::types::counter::CounterMatch::Any,
+                target: TargetFilter::SelfRef,
             }
         );
     }

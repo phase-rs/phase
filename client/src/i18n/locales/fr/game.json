@@ -2452,6 +2452,9 @@
     "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
     "replacementChoices": "Choix de remplacement ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Maintenez appuyé pour voir la carte en entier"
+  },
   "optionalEffect": {
     "sourceFallback": "Effet",
     "title": "{{name}} - Effet facultatif",
