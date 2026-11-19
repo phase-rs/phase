@@ -50685,41 +50685,88 @@ pub mod tests {
         ));
     }
 
-    /// A resolving triggered ability whose resolution has raised an unless
-    /// prompt and owns no resolution-stack frame, plus a battlefield watcher
-    /// whose "whenever you draw a card" trigger is not part of it.
+    /// Parse one printed trigger line into its first trigger definition.
+    fn parsed_printed_trigger(name: &str, oracle: &str) -> TriggerDefinition {
+        crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &[String::from("Creature")],
+            &[],
+        )
+        .triggers
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{name}: the trigger line parses to a trigger"))
+    }
+
+    /// Rottenmouth Viper's trigger line, verbatim from its Oracle text.
+    const VIPER_TRIGGER: &str = "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.";
+
+    /// Psychosis Crawler's trigger line, verbatim from its Oracle text.
+    const CRAWLER_TRIGGER: &str = "Whenever you draw a card, each opponent loses 1 life.";
+
+    /// The per-opponent unless instruction of Rottenmouth Viper's trigger, as the
+    /// parser builds it and a resolution reaches it (the `LoseLife` link carrying
+    /// the counted repeat and the "unless that player sacrifices a nonland
+    /// permanent of their choice or discards a card" modifier).
+    fn viper_unless_link(source: ObjectId) -> ResolvedAbility {
+        let trigger = parsed_printed_trigger("Rottenmouth Viper", VIPER_TRIGGER);
+        let execute = trigger.execute.expect("Viper's trigger has an effect");
+        let mut node =
+            crate::game::ability_utils::build_resolved_from_def(&execute, source, PlayerId(0));
+        loop {
+            if node.unless_pay.is_some() {
+                node.sub_ability = None;
+                return node;
+            }
+            node = *node
+                .sub_ability
+                .expect("Viper's trigger chain reaches its unless instruction");
+        }
+    }
+
+    /// Rottenmouth Viper's "each opponent loses 4 life unless that player
+    /// sacrifices a nonland permanent of their choice or discards a card" is
+    /// mid-resolution with its unless prompt raised and no resolution-stack frame,
+    /// plus a battlefield Psychosis Crawler ("Whenever you draw a card, each
+    /// opponent loses 1 life.") whose trigger is not part of it.
     fn unless_prompt_mid_resolution() -> (GameState, GameEvent) {
         let mut state = setup();
         let source = create_object(
             &mut state,
             CardId(9_601),
             PlayerId(0),
-            "Polling Source".to_string(),
+            "Rottenmouth Viper".to_string(),
             Zone::Battlefield,
         );
         let entry = create_object(
             &mut state,
             CardId(9_602),
             PlayerId(0),
-            "Polling Trigger".to_string(),
+            "Rottenmouth Viper".to_string(),
             Zone::Stack,
         );
-        let lose_life = ResolvedAbility::new(
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 4 },
-                target: None,
-            },
-            Vec::new(),
-            source,
-            PlayerId(0),
+        let unless_link = viper_unless_link(source);
+        let unless_cost = unless_link
+            .unless_pay
+            .as_ref()
+            .expect("the unless link carries its modifier")
+            .cost
+            .clone();
+        assert!(
+            matches!(&unless_cost, AbilityCost::OneOf { costs } if costs.len() == 2),
+            "Viper's unless cost is the two-branch sacrifice-or-discard choice"
         );
+        let mut pending_effect = unless_link.clone();
+        pending_effect.unless_pay = None;
         state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
             id: entry,
             source_id: source,
             controller: PlayerId(0),
             kind: StackEntryKind::TriggeredAbility {
                 source_id: source,
-                ability: Box::new(lose_life.clone()),
+                ability: Box::new(unless_link),
                 condition: None,
                 trigger_event: None,
                 description: None,
@@ -50732,8 +50779,8 @@ pub mod tests {
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(1),
             repeat: None,
-            cost: AbilityCost::Tap,
-            pending_effect: Box::new(lose_life),
+            cost: unless_cost,
+            pending_effect: Box::new(pending_effect),
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
@@ -50744,20 +50791,11 @@ pub mod tests {
             &mut state,
             CardId(9_603),
             PlayerId(0),
-            "Draw Watcher".to_string(),
+            "Psychosis Crawler".to_string(),
             Zone::Battlefield,
         );
-        let mut trigger = make_trigger(TriggerMode::Drawn);
-        trigger.valid_target = Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::You),
-        ));
-        trigger.execute = Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-        )));
+        let trigger = parsed_printed_trigger("Psychosis Crawler", CRAWLER_TRIGGER);
+        assert_eq!(trigger.mode, TriggerMode::Drawn);
         state
             .objects
             .get_mut(&watcher)
@@ -50780,20 +50818,27 @@ pub mod tests {
         (state, draw)
     }
 
-    /// An open choose-all-then-act poll's carrier, as a resolution installs it.
+    /// An open choose-all-then-act poll's carrier, as Rottenmouth Viper's
+    /// resolution installs it: its own unless modifier (the OneOf sacrifice or
+    /// discard cost, paid by the scoped player) over its two blight counters.
     fn simultaneous_unless_carrier(
         state: &GameState,
     ) -> crate::types::game_state::PendingSimultaneousUnless {
         let entry = state.resolving_stack_entry.as_ref().unwrap();
-        let WaitingFor::UnlessPayment { pending_effect, .. } = &state.waiting_for else {
-            unreachable!("the fixture waits on an unless prompt");
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            unreachable!("the fixture resolves a triggered ability");
         };
+        // The coordinator's per-instance template: the instruction with its
+        // count and unless modifier removed (`per_instance_template`).
+        let mut template = ability.clone();
+        let unless_pay = template
+            .unless_pay
+            .take()
+            .expect("Viper's unless link carries its modifier");
+        template.repeat_for = None;
         crate::types::game_state::PendingSimultaneousUnless {
-            ability: pending_effect.clone(),
-            unless_pay: crate::types::ability::UnlessPayModifier {
-                cost: AbilityCost::Tap,
-                payer: TargetFilter::ScopedPlayer,
-            },
+            ability: template,
+            unless_pay,
             instances: 2,
             current_player: PlayerId(1),
             next_instance: 0,
