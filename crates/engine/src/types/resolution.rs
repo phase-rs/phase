@@ -3081,6 +3081,23 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 800.4a + CR 702.12b: a player can leave during any nested choice,
+    /// including a delivery's child. Reconcile only still-queued graveyard
+    /// legs of destructions. A move substituted for the outer destruction,
+    /// an independent rider in place of a prevented move, and an in-flight
+    /// or completed delivery have no destruction left to authorize.
+    pub(crate) fn retain_queued_destructions(&mut self, still_owed: impl Fn(ObjectId) -> bool) {
+        for frame in self.frames.iter_mut() {
+            if let ResolutionFrame::SimultaneousDeparture(pending) = frame {
+                pending.queued.retain(|member| {
+                    member.cause != crate::types::game_state::DepartureCause::Destruction
+                        || member.zone_event.is_none()
+                        || still_owed(member.object_id)
+                });
+            }
+        }
+    }
+
     /// Consume the exact parked simultaneous departure once its in-flight
     /// child has settled.
     pub fn take_active_simultaneous_departure(

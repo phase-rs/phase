@@ -431,34 +431,163 @@ fn wrath_lets_the_affected_player_choose_which_bear_to_consult_first() {
 /// the surviving controller and replacement effects before allowing priority.
 #[test]
 fn conceding_during_wraths_selected_bear_reconsults_that_member() {
+    use engine::types::player::PlayerId;
+    use BearAtDeparture::{Selected, Unconsulted};
+
+    // Losing the chooser reassigns the choice. Losing its replacement sources
+    // instead removes the choice from a surviving controller.
+    run_borrowed_bear_departures(
+        false,
+        &[
+            (P1, Selected, false),
+            (P1, Unconsulted, false),
+            (PlayerId(2), Selected, false),
+            (P1, Selected, true),
+        ],
+    );
+}
+
+/// CR 800.4a + CR 702.12b: when Control Magic's controller leaves, Avacyn
+/// protects the very same Bear again. Its destruction cannot cause a graveyard
+/// move, whether its own replacement choice or another Bear's was pending.
+#[test]
+fn avacyn_protects_the_returning_bear_before_wrath_finishes() {
+    use BearAtDeparture::{Selected, Unconsulted};
+    run_borrowed_bear_departures(
+        true,
+        &[
+            (P1, Selected, false),
+            (P1, Unconsulted, false),
+            (P1, Selected, true),
+        ],
+    );
+}
+
+#[test]
+fn avacyn_protects_the_returning_bear_and_cancels_its_queued_zombie() {
+    run_borrowed_bear_departures(true, &[(P1, BearAtDeparture::Queued, false)]);
+}
+
+#[derive(Clone, Copy)]
+enum BearAtDeparture {
+    Unconsulted,
+    Selected,
+    Queued,
+}
+
+fn add_avacyn(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(
+            P0,
+            "Avacyn, Angel of Hope",
+            8,
+            8,
+            "Flying, vigilance, indestructible\nOther permanents you control have indestructible.",
+        )
+        .as_legendary()
+        .with_subtypes(vec!["Angel"])
+        .with_mana_cost(engine::types::mana::parse_mtgjson_mana_cost("{5}{W}{W}{W}"))
+        .id()
+}
+
+fn add_control_magic(scenario: &mut GameScenario) -> ObjectId {
+    use engine::types::ability::TypedFilter;
+    use engine::types::keywords::Keyword;
+
+    scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Control Magic",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TypedFilter::creature().into()))
+        .id()
+}
+
+/// Control Magic changes Avacyn's controller, not the Bear's. When the Aura's
+/// owner leaves, the affected player and replacement sources stay the same,
+/// but the Bear newly gains indestructible (CR 800.4a + CR 702.12b).
+#[test]
+fn avacyn_returning_to_the_same_bear_controller_invalidates_wraths_replacement_choice() {
     use engine::game::effects::attach::attach_to;
     use engine::game::layers::evaluate_layers;
-    use engine::types::ability::TypedFilter;
+    use engine::types::keywords::Keyword;
+    use engine::types::player::PlayerId;
+
+    let db = shared_card_db().expect("integration card fixture must load");
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let avacyn = add_avacyn(&mut scenario);
+    let bear = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let aura = add_control_magic(&mut scenario);
+    let kalitas = scenario.add_real_card(p2, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let rip = scenario.add_real_card(p2, "Rest in Peace", Zone::Battlefield, db);
+    let wrath = scenario
+        .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, avacyn);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&avacyn].controller, P1);
+    assert_eq!(runner.state().objects[&bear].controller, P0);
+    assert!(!runner.state().objects[&bear].has_keyword(&Keyword::Indestructible));
+    let incarnation = runner.state().objects[&bear].incarnation;
+
+    let mut events = runner.cast(wrath).commit().resolve().events().to_vec();
+    assert!(matches!(&runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, candidates, .. }
+        if candidates.iter().any(|c| c.source_id == kalitas)
+        && candidates.iter().any(|c| c.source_id == rip)));
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|p| p.proposed.affected_object_id()),
+        Some(bear)
+    );
+    events.extend(
+        runner
+            .act(GameAction::Concede { player_id: P1 })
+            .unwrap()
+            .events,
+    );
+    let state = runner.state();
+    assert_eq!(state.objects[&avacyn].controller, P0);
+    assert_eq!(state.objects[&bear].controller, P0);
+    assert_eq!(state.objects[&bear].incarnation, incarnation);
+    assert!(state.objects[&bear].has_keyword(&Keyword::Indestructible));
+    assert_eq!(state.objects[&bear].zone, Zone::Battlefield);
+    assert_eq!(zone_changes_of(&events, bear), 0);
+    assert_eq!(zombies(&events), 0);
+    assert_eq!(state.objects[&kalitas].zone, Zone::Exile);
+    assert_eq!(zone_changes_of(&events, kalitas), 1);
+    assert_eq!(state.objects[&wrath].zone, Zone::Exile);
+    assert!(state.pending_replacement.is_none());
+    assert!(state.active_simultaneous_departure().is_none());
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+fn run_borrowed_bear_departures(
+    protected_by_avacyn: bool,
+    cases: &[(engine::types::player::PlayerId, BearAtDeparture, bool)],
+) {
+    use engine::game::effects::attach::attach_to;
+    use engine::game::layers::evaluate_layers;
     use engine::types::keywords::Keyword;
     use engine::types::player::PlayerId;
 
     let p2 = PlayerId(2);
-    // Losing the chooser reassigns the choice. Losing its replacement sources
-    // instead removes the choice from a surviving controller.
-    for (leaving, select_owned, loss_sba) in [
-        (P1, false, false),
-        (P1, true, false),
-        (p2, false, false),
-        (P1, false, true),
-    ] {
+    for &(leaving, stage, loss_sba) in cases {
         let mut scenario = GameScenario::new_n_player(3, 42);
         scenario.at_phase(Phase::PreCombatMain);
+        let avacyn = protected_by_avacyn.then(|| add_avacyn(&mut scenario));
         let borrowed = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
         let owned = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
-        let aura = scenario
-            .add_enchantment_from_oracle(
-                P1,
-                "Control Magic",
-                "Enchant creature\nYou control enchanted creature.",
-            )
-            .with_subtypes(vec!["Aura"])
-            .with_keyword(Keyword::Enchant(TypedFilter::creature().into()))
-            .id();
+        let aura = add_control_magic(&mut scenario);
         let kalitas = scenario
             .add_creature_from_oracle(p2, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
             .id();
@@ -472,11 +601,16 @@ fn conceding_during_wraths_selected_bear_reconsults_that_member() {
         attach_to(runner.state_mut(), aura, borrowed);
         evaluate_layers(runner.state_mut());
         assert_eq!(runner.state().objects[&borrowed].controller, P1);
+        let incarnation = runner.state().objects[&borrowed].incarnation;
+        assert!(!runner.state().objects[&borrowed].has_keyword(&Keyword::Indestructible));
         runner.cast(wrath).commit().resolve();
         assert!(matches!(&runner.state().waiting_for,
             WaitingFor::MemberOrderChoice { player: P1, choices, .. }
                 if choices.contains(&borrowed) && choices.contains(&owned)));
-        let selected = if select_owned { owned } else { borrowed };
+        let selected = match stage {
+            BearAtDeparture::Unconsulted => owned,
+            BearAtDeparture::Selected | BearAtDeparture::Queued => borrowed,
+        };
         if loss_sba {
             // Arrange a pending player-loss SBA. The public selection opens
             // the replacement prompt and then reconciles the terminal result.
@@ -503,6 +637,26 @@ fn conceding_during_wraths_selected_bear_reconsults_that_member() {
                     .affected_object_id(),
                 Some(selected)
             );
+            if matches!(stage, BearAtDeparture::Queued) {
+                // P1 has already chosen Kalitas's replacing instructions for
+                // the borrowed Bear. The other Bear's ordering choice holds
+                // delivery, so the first Bear and its rider are still pending.
+                events.extend(choose_replacement_from(&mut runner, kalitas));
+                assert_eq!(runner.state().objects[&borrowed].zone, Zone::Battlefield);
+                assert_eq!(zombies(&events), 0);
+                assert!(matches!(
+                    &runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { player: P1, .. }
+                ));
+                assert_eq!(
+                    runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .and_then(|pending| pending.proposed.affected_object_id()),
+                    Some(owned)
+                );
+            }
             events.extend(
                 runner
                     .act(GameAction::Concede { player_id: leaving })
@@ -511,7 +665,29 @@ fn conceding_during_wraths_selected_bear_reconsults_that_member() {
             );
         }
         assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::PlayerLost {player_id, ..} if *player_id == leaving)).count(), 1);
-        if leaving == P1 {
+        if let Some(avacyn) = avacyn {
+            let bear = &runner.state().objects[&borrowed];
+            assert_eq!(bear.controller, P0);
+            assert_eq!(bear.incarnation, incarnation);
+            assert!(bear.has_keyword(&Keyword::Indestructible));
+            assert_eq!(bear.zone, Zone::Battlefield);
+            assert!(
+                runner.state().pending_replacement.is_none(),
+                "Wrath cannot offer replacements for the protected Bear's destruction: {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(zone_changes_of(&events, borrowed), 0);
+            assert_eq!(zombies(&events), 0);
+            assert!(zombies_on_battlefield(runner.state()).is_empty());
+            assert_eq!(runner.state().objects[&avacyn].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&kalitas].zone, Zone::Exile);
+            assert_eq!(
+                zone_changes_of(&events, kalitas),
+                1,
+                "Wrath finished Kalitas's departure"
+            );
+            assert_eq!(runner.state().objects[&wrath].zone, Zone::Exile);
+        } else if leaving == P1 {
             assert_eq!(runner.state().objects[&borrowed].controller, P0);
             assert!(matches!(&runner.state().waiting_for,
                 WaitingFor::ReplacementChoice { player: P0, candidates, .. }
@@ -529,14 +705,15 @@ fn conceding_during_wraths_selected_bear_reconsults_that_member() {
             );
             events.extend(choose_replacement_from(&mut runner, kalitas));
             assert_eq!(runner.state().objects[&borrowed].zone, Zone::Exile);
+            assert_eq!(zone_changes_of(&events, borrowed), 1);
             assert_eq!(zombies(&events), 1);
         } else {
             for bear in [borrowed, owned] {
                 assert_eq!(runner.state().objects[&bear].zone, Zone::Graveyard);
             }
             assert_eq!(zone_changes_of(&events, owned), 1);
+            assert_eq!(zone_changes_of(&events, borrowed), 1);
         }
-        assert_eq!(zone_changes_of(&events, borrowed), 1);
         assert!(runner.state().active_simultaneous_departure().is_none());
         assert!(runner.state().stack.is_empty());
         assert!(matches!(

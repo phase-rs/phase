@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use crate::game::game_object::ObjectIdentityBindingExt;
+use crate::game::game_object::{GameObject, ObjectIdentityBindingExt};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
@@ -19,6 +19,7 @@ use crate::types::game_state::{
     SimultaneousDepartureOwner, SimultaneousDepartureStage, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIdentityBinding};
+use crate::types::object_map::ObjectMap;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::ResolutionFrame;
@@ -171,7 +172,7 @@ pub(crate) fn destroy_single_object(
     cant_regenerate: bool,
     events: &mut Vec<GameEvent>,
 ) -> DestroyOutcome {
-    if !is_destroyable(state, object_id) {
+    if !state.objects.get(&object_id).is_some_and(is_destroyable) {
         return DestroyOutcome::Skipped;
     }
 
@@ -275,7 +276,9 @@ pub fn resolve(
             TargetRef::Object(object_id) => Some(object_id),
             TargetRef::Player(_) => None,
         })
-        .filter(|&object_id| seen.insert(object_id) && is_destroyable(state, object_id))
+        .filter(|object_id| {
+            seen.insert(*object_id) && state.objects.get(object_id).is_some_and(is_destroyable)
+        })
         .map(|object_id| SimultaneousDepartureMember {
             object_id,
             departure: SimultaneousDeparture::Destroy,
@@ -298,12 +301,20 @@ pub fn resolve(
 /// CR 114.5 / CR 701.8a / CR 702.12b: the guards every destruction passes
 /// before it is proposed: an emblem is not a permanent, only a battlefield
 /// object can be destroyed, and an indestructible permanent can't be.
-fn is_destroyable(state: &GameState, object_id: ObjectId) -> bool {
-    state.objects.get(&object_id).is_some_and(|obj| {
-        !obj.is_emblem
-            && obj.zone == Zone::Battlefield
-            && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
-    })
+fn is_destroyable(obj: &GameObject) -> bool {
+    !obj.is_emblem
+        && obj.is_phased_in_permanent()
+        && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
+}
+
+/// CR 701.8a–b + CR 702.12b + CR 704.5f: the original instruction determines
+/// eligibility even after destruction has advanced to its graveyard proposal.
+/// Putting a zero-toughness creature into its owner's graveyard isn't destruction.
+fn can_depart(obj: &GameObject, departure: SimultaneousDeparture) -> bool {
+    match departure {
+        SimultaneousDeparture::Destroy => is_destroyable(obj),
+        SimultaneousDeparture::PutIntoGraveyard => obj.is_phased_in_permanent(),
+    }
 }
 
 /// CR 701.8a: the objects a single-target `Destroy` node destroys. Shared by
@@ -447,12 +458,7 @@ pub fn resolve_all(
         .battlefield
         .iter()
         .filter(|id| {
-            let is_indestructible = state
-                .objects
-                .get(id)
-                .map(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Indestructible))
-                .unwrap_or(false);
-            !is_indestructible
+            state.objects.get(id).is_some_and(is_destroyable)
                 && !spare_self_created.contains(id)
                 && crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
         })
@@ -649,6 +655,7 @@ pub(crate) fn drain_pending_simultaneous_departure(
 pub(crate) struct ParkedDepartureConsult {
     rider_custody: DepartureRiderCustody,
     binding: ObjectIdentityBinding,
+    step: ConsultStep,
 }
 
 /// CR 616.1: is the replacement choice about to be answered the parked consult
@@ -661,10 +668,13 @@ pub(crate) fn parked_departure_consult(
     let pending = parked_departure_frame(state)?;
     match &pending.stage {
         Some(SimultaneousDepartureStage::Consulting {
-            member, binding, ..
+            member,
+            binding,
+            step,
         }) if Some(member.object_id) == answered_object => Some(ParkedDepartureConsult {
             rider_custody: pending.rider_custody,
             binding: *binding,
+            step: *step,
         }),
         _ => None,
     }
@@ -782,9 +792,36 @@ pub(crate) fn departure_choice_in_flight(state: &GameState) -> bool {
         })
 }
 
+/// CR 101.4 + CR 800.4a: a leave can newly prohibit a queued destruction.
+/// Compare both sides of the leave: a keyword already visible because an
+/// earlier member physically moved in the same simultaneous batch does not
+/// retroactively invalidate an approved destruction.
+pub(crate) fn reconcile_queued_destructions_after_player_leave(
+    state: &mut GameState,
+    before: &ObjectMap,
+) {
+    if !state
+        .resolution_stack
+        .iter()
+        .any(|frame| matches!(frame, ResolutionFrame::SimultaneousDeparture(_)))
+    {
+        return;
+    }
+    // The final CR 800.4a exile sweep can itself remove a continuous effect.
+    crate::game::layers::flush_layers(state);
+    let after = &state.objects;
+    state
+        .resolution_stack
+        .retain_queued_destructions(|id| !destruction_became_impossible(before, after, id));
+}
+
+fn destruction_became_impossible(before: &ObjectMap, after: &ObjectMap, id: ObjectId) -> bool {
+    before.get(&id).is_some_and(is_destroyable) && !after.get(&id).is_some_and(is_destroyable)
+}
+
 /// CR 616.1f + CR 800.4a: the object, its controller, or applicable
 /// replacements may have changed during the leave sweep. Keep the consult's
-/// already-modified event, and retain its rider only for the same incarnation.
+/// already-modified event, and retain its rider only for an eligible member.
 pub(crate) fn reconcile_departure_consult_after_player_leave(state: &mut GameState) -> bool {
     let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for else {
         return false;
@@ -795,11 +832,28 @@ pub(crate) fn reconcile_departure_consult_after_player_leave(state: &mut GameSta
     let Some(parked) = parked_departure_consult(state, choice.proposed.affected_object_id()) else {
         return false;
     };
-    let current = parked.binding.is_current(state);
-    if current && replacement::departure_choice_is_current(state, choice, player) {
+    // CR 614.6: a move substituted for the outer Destroy is already a
+    // different event. Only the Destroy itself or its own inner graveyard
+    // leg still requires destruction to be possible.
+    let owes_destruction = match parked.step {
+        ConsultStep::Destruction => matches!(choice.proposed, ProposedEvent::Destroy { .. }),
+        ConsultStep::GraveyardMove { cause, .. } => cause == DepartureCause::Destruction,
+    };
+    let eligible = parked.binding.is_current(state)
+        && state
+            .objects
+            .get(&parked.binding.reference.object_id)
+            .is_some_and(|obj| {
+                if owes_destruction {
+                    is_destroyable(obj)
+                } else {
+                    obj.is_phased_in_permanent()
+                }
+            });
+    if eligible && replacement::departure_choice_is_current(state, choice, player) {
         return false;
     }
-    let Some(mut frame) = take_departure_consult_frame(state, parked, current) else {
+    let Some(mut frame) = take_departure_consult_frame(state, parked, eligible) else {
         return false;
     };
     let choice = state
@@ -809,7 +863,7 @@ pub(crate) fn reconcile_departure_consult_after_player_leave(state: &mut GameSta
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    if current {
+    if eligible {
         // Only this consult's events are held back for simultaneous delivery.
         // Concession and player-loss events remain in the departure's buffer.
         let mut events = Vec::new();
@@ -896,7 +950,7 @@ fn next_departure_consult(
     }
     let chooser = |member: SimultaneousDepartureMember| {
         let obj = state.objects.get(&member.object_id)?;
-        if obj.zone != Zone::Battlefield || obj.is_phased_out() {
+        if !can_depart(obj, member.departure) {
             return None;
         }
         let mut board = Cow::Borrowed(state);
@@ -1053,7 +1107,7 @@ fn advance_simultaneous_departure(
         let Some(binding) = state
             .objects
             .get(&member.object_id)
-            .filter(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
+            .filter(|obj| can_depart(obj, member.departure))
             .map(ObjectIdentityBinding::from_object)
         else {
             continue;
@@ -1386,6 +1440,40 @@ mod tests {
         );
         state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
         id
+    }
+
+    /// Synthetic member-level control: a partial batch has already exposed a
+    /// protection on the physical board before an unrelated player concedes
+    /// (for example, Planar Cleansing taking Song of the Dryads off Avacyn).
+    /// Only protection gained across the concession retires a queued move.
+    #[test]
+    fn queued_destruction_compares_eligibility_on_both_sides_of_a_leave() {
+        let mut state = GameState::new_two_player(42);
+        let already_protected = battlefield_creature(&mut state, "Already protected");
+        let newly_protected = battlefield_creature(&mut state, "Newly protected");
+        state
+            .objects
+            .get_mut(&already_protected)
+            .unwrap()
+            .keywords
+            .push(Keyword::Indestructible);
+        let before = state.objects.clone();
+        state
+            .objects
+            .get_mut(&newly_protected)
+            .unwrap()
+            .keywords
+            .push(Keyword::Indestructible);
+        assert!(!destruction_became_impossible(
+            &before,
+            &state.objects,
+            already_protected
+        ));
+        assert!(destruction_became_impossible(
+            &before,
+            &state.objects,
+            newly_protected
+        ));
     }
 
     /// A `DestroyAll` over creatures carrying the `FilterProp::Another` ("other")

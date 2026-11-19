@@ -636,6 +636,12 @@ pub(crate) fn eliminate_players(
     // directly above — which is why this cannot live in `do_eliminate`.
     remove_stack_objects_controlled_by_leaving_players(state, &leave_nodes, events);
     retire_suppressors_of_controlled_sources_that_left(state, &leaving_set);
+    if let Some(before) = &looked_back_observers {
+        super::effects::destroy::reconcile_queued_destructions_after_player_leave(
+            state,
+            before.objects(),
+        );
+    }
 
     // CR 800.4a + CR 101.4: A player that leaves during an APNAP unless poll
     // neither answers nor remains an eligible future chooser. Preserve the
