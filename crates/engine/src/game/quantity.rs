@@ -2033,6 +2033,7 @@ fn type_filter_is_context_free(filter: &TypeFilter) -> bool {
         | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
+        | TypeFilter::Scheme
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => true,
     }
@@ -2672,6 +2673,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: the poison predicate reads poison counters, never mana.
         | StaticCondition::PlayerIsPoisoned { .. }

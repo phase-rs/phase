@@ -2271,6 +2271,7 @@ mod tests {
 
     fn batch_spec(name: &str) -> Box<TokenSpec> {
         Box::new(TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: Some(1),
@@ -2460,6 +2461,7 @@ mod tests {
 
     fn token_spec_with(attack_request: TokenAttackRequest) -> TokenSpec {
         TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),

@@ -1307,6 +1307,7 @@ fn put_counter_all(count: QuantityExpr) -> Effect {
 }
 fn token_power_src() -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Elemental".into(),
         power: crate::types::ability::PtValue::Fixed(1),
         toughness: crate::types::ability::PtValue::Fixed(1),

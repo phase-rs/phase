@@ -14490,6 +14490,10 @@ pub enum EmergeSacrificeQuality {
     Land,
     Permanent,
     Planeswalker,
+    // CR 314.1: mirrors `TypeFilter::Scheme` (no printed emerge card names
+    // it — schemes can't be sacrificed — but the constructor match is
+    // exhaustive over `TypeFilter`).
+    Scheme,
     Sorcery,
     Subtype(String),
 }
@@ -46249,6 +46253,7 @@ mod tests {
     #[test]
     fn continue_token_event_delivery_serde_roundtrip() {
         let spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),

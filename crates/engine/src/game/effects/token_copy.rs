@@ -4503,6 +4503,7 @@ mod tests {
         );
         let create_food = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Food".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),

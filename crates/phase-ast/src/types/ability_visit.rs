@@ -983,6 +983,7 @@ where
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder

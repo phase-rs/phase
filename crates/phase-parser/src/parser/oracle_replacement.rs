@@ -8009,6 +8009,7 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -11591,6 +11592,31 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         .or_else(|| parse_damage_source_filter_passive(norm_lower))
 }
 
+/// CR 615.1a: fail-closed reader for the chain-position damage-modification
+/// lift (`try_parse_global_damage_modification_replacement`). Reports whether
+/// the antecedent's damage-source subject is printed but unreadable
+/// (`DamageSourceScope::Unrecognized` — e.g. Jeska, Thrice Reborn's anaphoric
+/// "that creature"), so the lift can decline and record the honest gap
+/// instead of emitting an unscoped replacement that would triple/double every
+/// source's damage. Mirrors the `WhileAntecedent::Unparsed` fail-closed arm in
+/// `parse_damage_modification_replacement`. Genuinely unscoped subjects ("a
+/// source" — Rankle and Torbran, Approach My Molten Realm) read `AnySource`
+/// and pass; the passive-voice fallback ("...would be dealt ... by
+/// <subject>") rescues clauses whose active subject is empty but whose "by"
+/// subject parses.
+pub(crate) fn damage_source_subject_unrecognized(norm_lower: &str) -> bool {
+    let Ok((_, (subject, _))) = nom_primitives::split_once_on(norm_lower, "would deal") else {
+        return false;
+    };
+    if !matches!(
+        damage_source_subject_scope(subject),
+        DamageSourceScope::Unrecognized
+    ) {
+        return false;
+    }
+    parse_damage_source_filter_passive(norm_lower).is_none()
+}
+
 /// CR 301.5 + CR 702.6: "equipped creature" (Equipment) and "enchanted
 /// creature" (Aura) both name the host object the permanent is attached to,
 /// which the runtime resolves via `TargetFilter::AttachedTo`. Mirrors the
@@ -14348,6 +14374,8 @@ fn token_description_to_spec(
         // Replacement-created tokens ("instead, create a token") are not the
         // "attached to" Aura/Role class; that path flows through `Effect::Token`.
         attach_to: crate::types::token_spec::TokenHostRequest::NotRequested,
+        // Replacement-created tokens carry no blocking rider either.
+        blocking_attacker: None,
     })
 }
 
@@ -17917,6 +17945,39 @@ mod tests {
         ] {
             assert_eq!(parse_damage_source_scope_passive(text), None, "{text}");
         }
+    }
+
+    /// CR 615.1a: the chain-position damage-modification lift's fail-closed
+    /// gate. An anaphoric active-voice subject ("that creature" — Jeska,
+    /// Thrice Reborn's duration-stripped `[0]` clause) reads unrecognized so
+    /// the lift declines and records the honest gap, instead of emitting an
+    /// unscoped replacement that would triple every source's damage. The
+    /// positive legs pin the corpus subjects that must keep lifting.
+    #[test]
+    fn damage_source_subject_unrecognized_gate() {
+        // Positive reach-guards: genuinely unscoped "a source" (Rankle and
+        // Torbran, Approach My Molten Realm) and scoped "a source you
+        // control" (I Call for Slaughter) both lift.
+        for text in [
+            "if a source would deal damage, it deals double that damage instead",
+            "if a source you control would deal damage this turn, it deals that much damage plus 1 instead",
+        ] {
+            assert!(!damage_source_subject_unrecognized(text), "{text}");
+        }
+        // The anaphoric subject declines: no filter expresses "that creature".
+        assert!(damage_source_subject_unrecognized(
+            "if that creature would deal combat damage to one of your opponents, it deals triple that damage to that player instead"
+        ));
+        // No "would deal" anchor (passive-only shield): nothing to read, no veto.
+        assert!(!damage_source_subject_unrecognized(
+            "prevent all damage that would be dealt to you by sources you don't control"
+        ));
+        // Synthetic rescue: an unrecognized active subject with a parseable
+        // passive "by" subject does not veto (mirrors the `or_else` chain in
+        // `parse_damage_source_filter`).
+        assert!(!damage_source_subject_unrecognized(
+            "if that creature would deal damage. prevent all damage that would be dealt to you by red sources"
+        ));
     }
 
     /// Corpus regression, found via PR #7615's card-data.json parse-diff:

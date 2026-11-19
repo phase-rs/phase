@@ -3054,6 +3054,7 @@ fn target_type_for_announcing_opponent_choice(ability: &ResolvedAbility) -> Opti
             TypeFilter::Sorcery => Some(CoreType::Sorcery),
             TypeFilter::Battle => Some(CoreType::Battle),
             TypeFilter::Kindred => Some(CoreType::Kindred),
+            TypeFilter::Scheme => Some(CoreType::Scheme),
             TypeFilter::Permanent
             | TypeFilter::Card
             | TypeFilter::Any
@@ -28208,6 +28209,7 @@ mod tests {
         }
 
         let token_effect = Effect::Token {
+            enters_blocking: None,
             name: "Insect".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

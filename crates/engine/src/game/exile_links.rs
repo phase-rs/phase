@@ -1320,6 +1320,7 @@ mod tests {
     fn player_scope_counts_as_linked_exile_consumer() {
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Illusion".to_string(),
                 power: crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
                     qty: QuantityRef::CardsExiledBySource,

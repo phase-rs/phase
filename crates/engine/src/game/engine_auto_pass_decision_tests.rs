@@ -623,6 +623,7 @@ fn push_spell(state: &mut GameState, id: ObjectId, controller: PlayerId, ability
 
 fn insect_token_effect() -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Insect".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),
