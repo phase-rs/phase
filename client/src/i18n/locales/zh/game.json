@@ -2171,6 +2171,9 @@
       "title": "承诺赠礼？"
     }
   },
+  "choiceModal": {
+    "holdForFullCard": "长按查看整张牌"
+  },
   "optionalEffect": {
     "dontAskAgain": "本局游戏不再询问",
     "dontAskAgainForSameCard": "本局游戏中，对这张牌的每张同名牌都使用此选择",
