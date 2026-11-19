@@ -614,9 +614,9 @@ pub(crate) fn drain_pending_simultaneous_departure(
     match pending.stage.take() {
         None => {}
         Some(SimultaneousDepartureStage::SelectedForConsult { binding }) => {
-            if binding.is_current(state) {
-                selected = Some(binding.reference.object_id);
-            }
+            selected = binding
+                .is_current(state)
+                .then_some(binding.reference.object_id);
         }
         // CR 616.1: the consult's answer was carried out by the answer's own
         // owner rather than recorded here (the batch was not the active frame
