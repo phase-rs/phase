@@ -4087,6 +4087,16 @@ pub(crate) fn parse_static_line_inner(
                 core_types,
                 entrant,
             }
+        } else if nom_primitives::scan_preceded(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("causes a triggered ability").parse(i)
+        })
+        .is_some()
+        {
+            // CR 603.2d: a printed cause clause no arm above types must not
+            // degrade to the unrestricted `Any`, which would double triggers
+            // the clause excludes (the doubler's own included). Decline so the
+            // line stays a flagged gap.
+            return None;
         } else {
             TriggerCause::Any
         };

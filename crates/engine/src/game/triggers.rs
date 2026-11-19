@@ -16756,6 +16756,10 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
 /// - `TriggerCause::ControlledCreature { event }` matches the event `event`
 ///   names (`DamageDealt` to, `BecomesTarget` of, or combat damage to a
 ///   player by) a creature controlled by `doubler_controller`.
+/// - `TriggerCause::PlayerAction { player, action }` matches a life gain
+///   (`LifeChanged` with a positive amount) or a card draw (`CardDrawn` /
+///   `CardsDrawn`) by the named player.
+/// - `TriggerCause::TurnedFaceUp` matches `TurnedFaceUp` events.
 pub(super) fn trigger_cause_matches(
     state: &GameState,
     cause: &TriggerCause,

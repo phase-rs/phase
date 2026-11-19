@@ -967,6 +967,20 @@ fn player_action_and_face_up_doubler_causes() {
     }
 }
 
+/// CR 603.2d: a cause clause the parser can't type declines rather than
+/// becoming the unrestricted `Any` cause.
+#[test]
+fn untyped_doubler_cause_clause_declines() {
+    let text = "If a player sacrificing a permanent causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
+    assert!(
+        !matches!(
+            parse_static_line(text).map(|def| def.mode),
+            Some(StaticMode::DoubleTriggers { .. })
+        ),
+        "an untyped cause must not lower to a doubler"
+    );
+}
+
 /// CR 603.2d: "another permanent entering" (The Fish Brewer) excludes the
 /// doubler's own entering; "a permanent entering" (Yarok) does not.
 #[test]
