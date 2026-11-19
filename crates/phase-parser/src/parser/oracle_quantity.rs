@@ -3364,25 +3364,24 @@ fn parse_spell_history_clause(
     clause: &str,
     default_controller: CountScope,
 ) -> Option<(CountScope, Option<TargetFilter>)> {
-    // Verb-phrase alternates, longest-first so "… this turn" wins over the bare
-    // form. The shared scanner owns the word-boundary traversal; this parser only
-    // describes the typed alternatives that may occur at each cursor position.
+    // Subject alternates share one optional time suffix. The shared scanner owns
+    // the word-boundary traversal; this parser only describes the typed subject
+    // alternatives that may occur at each cursor position.
     let (noun_end, scope, tail) =
         nom_primitives::scan_at_word_boundaries_with_offset(clause, |input| {
-            alt((
-                value(CountScope::ScopedPlayer, tag("they've cast this turn")),
+            let (input, scope) = alt((
                 value(
                     CountScope::ScopedPlayer,
-                    tag("that player has cast this turn"),
+                    alt((tag("they've cast"), tag("that player has cast"))),
                 ),
-                value(default_controller.clone(), tag("you've cast this turn")),
-                value(default_controller.clone(), tag("you cast this turn")),
-                value(CountScope::ScopedPlayer, tag("they've cast")),
-                value(CountScope::ScopedPlayer, tag("that player has cast")),
-                value(default_controller.clone(), tag("you've cast")),
-                value(default_controller.clone(), tag("you cast")),
+                value(
+                    default_controller.clone(),
+                    alt((tag("you've cast"), tag("you cast"))),
+                ),
             ))
-            .parse(input)
+            .parse(input)?;
+            let (input, _) = opt(tag(" this turn")).parse(input)?;
+            Ok((input, scope))
         })?;
     let noun = clause[..noun_end].trim();
     let tail = tail.trim();
@@ -9845,6 +9844,40 @@ mod tests {
                 Some((CountScope::ScopedPlayer, None)),
                 "{clause} must bind to the player named by the event context",
             );
+        }
+    }
+
+    #[test]
+    fn spell_history_clause_accepts_optional_this_turn_for_all_subject_forms() {
+        for (with_suffix, without_suffix, expected_scope) in [
+            (
+                "spells they've cast this turn",
+                "spells they've cast",
+                CountScope::ScopedPlayer,
+            ),
+            (
+                "spells that player has cast this turn",
+                "spells that player has cast",
+                CountScope::ScopedPlayer,
+            ),
+            (
+                "spells you've cast this turn",
+                "spells you've cast",
+                CountScope::Owner,
+            ),
+            (
+                "spells you cast this turn",
+                "spells you cast",
+                CountScope::Owner,
+            ),
+        ] {
+            for clause in [with_suffix, without_suffix] {
+                assert_eq!(
+                    parse_spell_history_clause(clause, CountScope::Owner),
+                    Some((expected_scope.clone(), None)),
+                    "spell-history subject form must accept optional `this turn`: {clause:?}",
+                );
+            }
         }
     }
 

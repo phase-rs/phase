@@ -4,7 +4,7 @@
 //! the trigger, even when a different player controls the permanent.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{AbilityDefinition, Effect};
+use engine::parser::oracle::has_unimplemented;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -15,18 +15,6 @@ const RUG_OF_SMOTHERING: &str =
 const MAGEBANE_LIZARD: &str = "Whenever a player casts a noncreature spell, this creature deals damage to that player equal to the number of noncreature spells they've cast this turn.";
 const DAMPING_SPHERE: &str = "If a land is tapped for two or more mana, it produces {C} instead of any other type and amount.\nEach spell a player casts costs {1} more to cast for each other spell that player has cast this turn.";
 const NO_OP_SPELL: &str = "You gain 0 life.";
-
-fn ability_contains_unimplemented(ability: &AbilityDefinition) -> bool {
-    matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
-        || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_contains_unimplemented)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_contains_unimplemented)
-}
 
 fn cast_and_assert_life_delta(
     runner: &mut engine::game::scenario::GameRunner,
@@ -80,7 +68,7 @@ fn rug_counts_the_triggering_players_spells() {
             .all(|trigger| trigger
                 .execute
                 .as_deref()
-                .is_some_and(|ability| !ability_contains_unimplemented(ability))),
+                .is_some_and(|ability| !has_unimplemented(ability))),
         "Rug's parsed trigger must contain a real executable effect"
     );
 
@@ -151,7 +139,7 @@ fn magebane_lizard_filters_the_triggering_players_noncreature_spells() {
             .all(|trigger| trigger
                 .execute
                 .as_deref()
-                .is_some_and(|ability| !ability_contains_unimplemented(ability))),
+                .is_some_and(|ability| !has_unimplemented(ability))),
         "Magebane Lizard's parsed trigger must contain a real executable effect"
     );
 
