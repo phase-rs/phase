@@ -2421,10 +2421,8 @@ fn run_damage_batch_phases(
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
-                if let Some(pending) = state.pending_replacement.as_mut() {
-                    pending.excess_recipient = ctx.excess_recipient;
-                    pending.lifelink_bonus = ctx.lifelink_bonus;
-                }
+                // CR 400.7: also records the incarnation that dealt the damage.
+                park_damage_context(state, &ctx);
                 // CR 616.1 + CR 101.4: a choice found while carrying portions through their
                 // automatic replacements waits until every portion's chooser is known.
                 if !asking {

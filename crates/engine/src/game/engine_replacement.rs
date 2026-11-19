@@ -32,7 +32,9 @@ use super::ability_utils::build_resolved_from_def_with_targets;
 use super::arithmetic::u32_to_i32_saturating;
 use super::casting_costs::AnsweredLifeGain;
 use super::effects;
-use super::effects::deal_damage::{apply_damage_after_replacement, damage_context_for_stamp};
+use super::effects::deal_damage::{
+    apply_damage_after_replacement, damage_context_for_stamp, DamageResult,
+};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
@@ -1070,9 +1072,33 @@ fn handle_replacement_choice_inner(
                     // batch, which finishes its other portions' replacement before delivering.
                     if !super::effects::deal_damage::return_answered_portion_to_batch(
                         state, &ctx, &damage,
+                    ) && matches!(
+                        apply_damage_after_replacement(state, &ctx, damage, is_combat, events),
+                        DamageResult::NeedsChoice
                     ) {
-                        let _ =
-                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                        {
+                            // CR 616.1 + CR 616.1f: the resumed hit raised its own
+                            // result prompt (poison counters, life loss, the
+                            // lifelink gain, or an excess-redirect leg), parked by
+                            // the nested pipeline together with any owed results.
+                            // Keep that wait: the Priority reset below and the
+                            // settled-stash drain must not run over it; the nested
+                            // answer's own tail drains the stash exactly once.
+                            debug_assert!(
+                                state.pending_replacement.is_some()
+                                    || state.active_batch_delivery().is_some(),
+                                "a resumed damage NeedsChoice must leave its pause owned"
+                            );
+                            // CR 603.2 + CR 603.3b + CR 120.4b: this action ends on
+                            // a prompt, so the post-action scan never sees the
+                            // damage events dealt so far; defer their observers.
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                            return Ok(state.waiting_for.clone());
+                        }
                     }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -1868,6 +1894,14 @@ fn handle_replacement_choice_inner(
                     crate::game::effects::deal_damage::DamagePostCounterDrainOutcome::PausedForReplacement
                 ) {
                     waiting_for = state.waiting_for.clone();
+                    // CR 603.2 + CR 603.3b: the action ends on this prompt, so the
+                    // damage events dealt so far must be collected for the next
+                    // priority window.
+                    super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                        state,
+                        events,
+                        replacement_action_event_start,
+                    );
                 }
             }
 
@@ -2687,17 +2721,21 @@ fn handle_replacement_choice_inner(
 /// frame. Fight is deliberately not included (its re-pausing continuations
 /// keep their pre-existing collection).
 fn damage_parent_continuation_pending(state: &GameState) -> bool {
+    let Some(frame) = state.active_ability_continuation_frame() else {
+        return false;
+    };
+    // The re-parked remainder of a damage chain (a later recipient's `DealDamage` node that
+    // paused again) no longer carries its parent kind: the drain that resumed it already
+    // re-emitted the parent event. It is still the rest of the same damage effect.
     matches!(
-        state
-            .active_ability_continuation_frame()
-            .and_then(|frame| frame.pending.parent_kind),
+        frame.pending.parent_kind,
         Some(
             EffectKind::DamageAll
                 | EffectKind::DamageEachPlayer
                 | EffectKind::EachDealsDamageEqualToPower
                 | EffectKind::EachSourceDealsDamage
         )
-    )
+    ) || matches!(frame.pending.chain.effect, Effect::DealDamage { .. })
 }
 
 /// CR 120.4b + CR 603.2 + CR 603.3b: a damage effect's continuation drained in

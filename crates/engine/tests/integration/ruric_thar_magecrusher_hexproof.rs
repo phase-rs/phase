@@ -4558,9 +4558,18 @@ fn b10_1_damage_chain_observers_survive_the_continuation_pause() {
             "two draws minus the cast card"
         );
         if pair {
+            // The batch settles every portion's replacement choices before any
+            // delivery (CR 616.1 + CR 101.4): the two Vorinclex's counter
+            // placements are ordered first (their controllers P0 and P1, nothing
+            // stashed yet), then each opponent chooses its own poison result.
             assert_eq!(
                 prompts,
-                vec![(P1, "poison", true), (p2, "poison", true)],
+                vec![
+                    (P0, "poison", false),
+                    (P1, "poison", false),
+                    (P1, "poison", true),
+                    (p2, "poison", true),
+                ],
                 "reach-guard: each opponent chose its own poison"
             );
             assert_eq!(
