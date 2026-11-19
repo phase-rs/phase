@@ -679,7 +679,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     default_config: {
       format: "Archenemy",
       starting_life: 20,
-      min_players: 2,
+      min_players: 3,
       max_players: 6,
       deck_size: { type: "Minimum", data: 60 },
       singleton: false,

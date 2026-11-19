@@ -193,14 +193,14 @@ describe("HostSetup — archenemy seat", () => {
     await user.click(await screen.findByRole("button", { name: "Seat 4" }));
     // Shrink below the pick: the role follows to the last remaining guest
     // seat rather than silently returning to the host.
-    await user.click(screen.getByRole("button", { name: "2" }));
-    expect(screen.getByRole("button", { name: "Seat 2" })).toHaveClass("bg-white/10");
+    await user.click(screen.getByRole("button", { name: "3" }));
+    expect(screen.getByRole("button", { name: "Seat 3" })).toHaveClass("bg-white/10");
 
     await user.click(screen.getByRole("button", { name: "Host Game" }));
 
     expect(onHost).toHaveBeenCalledWith(
       expect.objectContaining({
-        formatConfig: expect.objectContaining({ archenemy_player: 1 }),
+        formatConfig: expect.objectContaining({ archenemy_player: 2 }),
       }),
       expect.any(String),
     );

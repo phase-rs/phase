@@ -68,5 +68,6 @@ describe("Archenemy Commander seat minimum", () => {
     // and multiplayer begins with more than two players (CR 800.1), so 1v2
     // is the smallest legal table. Mirrors the engine registry.
     expect(formatMetadata("ArchenemyCommander")?.default_config.min_players).toBe(3);
+    expect(formatMetadata("Archenemy")?.default_config.min_players).toBe(3);
   });
 });
