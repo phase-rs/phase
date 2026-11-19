@@ -827,10 +827,11 @@ fn handle_triggered_mode_choice(
             // reverted at this call site.
             let mut resolved = trigger.ability.clone();
             assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
-            // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`
-            // already drains the deferred-trigger queue and surfaces the next
-            // WaitingFor if a sibling trigger needs input; use that result
-            // instead of falling through to Priority below.
+            // CR 113.2c + CR 603.2 + CR 603.3b: under `ConstructionSpanOwner::Finisher`,
+            // `finalize_trigger_target_selection` drains the deferred-trigger queue and
+            // surfaces the next WaitingFor if a sibling trigger needs input; under
+            // `EnclosingWindow` it does not drain (the enclosing dispatcher's end-of-batch
+            // drain places the queue). Use its result instead of falling through to Priority below.
             return Ok(engine_stack::finalize_trigger_target_selection(
                 state, trigger, resolved, events, span_owner,
             ));

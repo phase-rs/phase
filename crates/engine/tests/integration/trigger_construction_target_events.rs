@@ -44,10 +44,11 @@
 //! Drain sites not wrapped by the drain owner rule, by reading: a combat-damage
 //! window cannot be rescanned (a window emission comes with a stack push, so
 //! the `CombatDamage` pass skips its trigger scan, and the damage-assignment
-//! arms process triggers inline); the departure-settled safety net and the
-//! sandbox's state-based-action check run no pipeline after their drain (the
-//! sandbox scans before it). The elimination drain itself is wrapped: an
-//! effect's loss during a resolution is scanned by the pipeline afterwards.
+//! arms process triggers inline). The elimination drain is wrapped inside
+//! `drain_or_clear_deferred_triggers_after_elimination`, so every route to it
+//! (state-based-action losses, a concession, the departure-settled safety net,
+//! the sandbox) claims the drained range; where no later scan of that buffer
+//! follows, the claim is inert (the ledger is cleared at the next action).
 
 use engine::game::combat::AttackTarget;
 use engine::game::dungeon::DungeonId;
@@ -1076,6 +1077,19 @@ fn m1_in_window_finisher_span_is_collected_once() {
     );
     let (_, targets) = only_trigger_of(state, magus);
     assert_eq!(targets, vec![obj(magus)]);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "completion boundary: waiting {:?}",
+        state.waiting_for
+    );
+    assert!(
+        state.deferred_triggers.is_empty(),
+        "completion boundary: deferred queue not drained"
+    );
+    assert!(
+        state.pending_trigger_order.is_none(),
+        "completion boundary: trigger ordering still pending"
+    );
     let count = count_triggers_from(state, cowardice);
     assert_eq!(count, 1, "Count(Cowardice) = {count}");
 }

@@ -10283,6 +10283,7 @@ pub(crate) struct HeldConstructionSpan {
 /// as it is now and claim the span for ordinary collectors, so the post-action
 /// pipeline (or a live announcement's staging) does not collect it again.
 /// `None` when the enclosing window owns the span.
+#[must_use = "release the held span after the finisher's drain"]
 pub(crate) fn hold_construction_span(
     state: &mut GameState,
     events: &[GameEvent],
