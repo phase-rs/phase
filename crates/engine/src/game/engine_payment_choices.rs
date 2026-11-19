@@ -3996,10 +3996,9 @@ fn settle_simultaneous_unless(
     resume_pending_continuation_if_priority(state, events)?;
     let pipeline_start = match pipeline {
         SettlePipeline::RunFrom { event_start } => Some(event_start),
-        // CR 603.2 + CR 603.3 + CR 616.1: a delivery paused on a replacement
-        // choice after earlier chosen actions completed (a sacrifice before a
-        // discard) leaves no priority wait, so the reducer epilogue runs no
-        // pipeline. A delivery paused on a step's or the batch's CR 616.1
+        // CR 603.2 + CR 603.3 + CR 616.1: a delivery whose later work left a
+        // non-priority wait leaves the reducer epilogue no pipeline to run.
+        // A delivery paused on a step's or the batch's CR 616.1
         // choice holds its completed events
         // (`SimultaneousUnlessDelivery.held_events` / the batch's
         // `deferred_events`), so no pipeline collects them before the delivery

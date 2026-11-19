@@ -515,10 +515,10 @@ pub(crate) fn settle_simultaneous_unless_after_departure(
             // resume runs only under a priority wait; this names the seat the
             // completed resolution's own grant gives priority to.
             set_priority(state, super::engine::living_priority_seat(state));
-            // The delivery appends straight into the action's buffer: a pause
-            // inside it claims occurrences against that full buffer
-            // (`claim_trigger_event_occurrences`), and nothing in the delivery
-            // takes the buffer it is handed.
+            // The delivery appends into the action's buffer from its current end:
+            // a pause moves only the delivery's own events (from that end) into its
+            // held set or the sacrifice batch's deferred span (CR 603.10), so the
+            // concession's earlier events stay in this buffer.
             let outcome = effects::simultaneous_unless::deliver(state, *carrier, events, 0)
                 .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
             match outcome {
