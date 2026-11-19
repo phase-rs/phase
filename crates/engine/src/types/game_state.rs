@@ -58177,6 +58177,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     Some(Box::new(crate::types::ability::ForwardedResultContext {
                         targets: vec![target],
                         object_incarnations: vec![reference],
+                        phase_population: false,
                     }));
             }
             AbilityPinSlot::ForwardedZoneSelection => {
