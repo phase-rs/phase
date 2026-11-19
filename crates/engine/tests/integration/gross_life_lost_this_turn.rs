@@ -1,5 +1,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::EffectKind;
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -98,7 +100,27 @@ fn announce_sigil(runner: &mut GameRunner, sigil: ObjectId) {
 }
 
 fn resolve_sigil(runner: &mut GameRunner, sigil: ObjectId, expected: [i32; 3]) {
-    runner.advance_until_stack_empty();
+    let mut gain_resolutions = 0;
+    for _ in 0..runner.state().players.len() {
+        let pass = runner.act(GameAction::PassPriority).unwrap();
+        gain_resolutions += pass
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::GainLife,
+                        source_id,
+                        subject: None,
+                    } if *source_id == sigil
+                )
+            })
+            .count();
+        if runner.state().stack.is_empty() {
+            break;
+        }
+    }
     assert!(runner.state().stack.is_empty());
     assert_eq!(runner.state().objects[&sigil].zone, Zone::Graveyard);
     // Pass to the controller if the ability resolved during another player's turn.
@@ -123,6 +145,10 @@ fn resolve_sigil(runner: &mut GameRunner, sigil: ObjectId, expected: [i32; 3]) {
     assert!(runner.state().stack.is_empty());
     eprintln!("Sigil sacrificed and unavailable; expected final life {expected:?}");
     assert_life(runner, expected);
+    assert_eq!(
+        gain_resolutions, 1,
+        "Sigil's gain instruction must resolve even at zero"
+    );
 }
 
 #[test]
