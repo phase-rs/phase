@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_while1};
-use nom::character::complete::{multispace0, one_of, satisfy, space1};
-use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -26,8 +26,10 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
+use super::oracle_ir::ast::AnaphorNumber;
 use super::oracle_ir::context::{
-    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+    bind_controller_phrase, ChainPriorPublishers, ChosenColorQualifierScope, ParseContext,
+    SpellAnaphorBinding,
 };
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -320,7 +322,7 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// CR 608.2c + CR 406.6 + CR 607.2a + CR 707.10 + CR 702.75a: Resolve a
 /// singular "the exiled card" / "copy the exiled card" anaphor to the
 /// correct binding. When an earlier clause in the SAME resolution chain
-/// already exiled a card (`chain_has_prior_exile_producer`), the anaphor
+/// already exiled a card (`ChainPriorPublishers::IncludesExile`), the anaphor
 /// refers to that same-chain exile and keeps its pre-existing binding
 /// (`same_chain_binding`, e.g. `TrackedSet{0}` or `ParentTarget`). Otherwise
 /// the referenced exile happened in an EARLIER, separately-resolved ability
@@ -330,13 +332,56 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// `exile_links` (CR 607.1/607.2a: linked abilities reference the same
 /// object across resolutions).
 pub(crate) fn resolve_singular_exiled_card_target(
-    chain_has_prior_exile_producer: bool,
+    chain: ChainPriorPublishers,
     same_chain_binding: TargetFilter,
 ) -> TargetFilter {
-    if chain_has_prior_exile_producer {
-        same_chain_binding
-    } else {
-        TargetFilter::ExiledBySource
+    match chain {
+        ChainPriorPublishers::IncludesExile => same_chain_binding,
+        ChainPriorPublishers::Absent | ChainPriorPublishers::NonExileOnly => {
+            TargetFilter::ExiledBySource
+        }
+    }
+}
+
+/// CR 607.2a: "the exiled card" / "the exiled cards" as a whole target phrase.
+/// The grammatical number selects how a return binds the linked set: plural
+/// names the whole set (a set-wide move), singular one card. Input is the
+/// trimmed, lowercased target text.
+pub(crate) fn parse_exiled_card_anaphor(input: &str) -> OracleResult<'_, AnaphorNumber> {
+    all_consuming(terminated(
+        alt((
+            value(AnaphorNumber::Plural, tag("the exiled cards")),
+            value(AnaphorNumber::Singular, tag("the exiled card")),
+        )),
+        (space0, eof),
+    ))
+    .parse(input)
+}
+
+/// CR 607.2a + CR 406.6 (D8): "the exiled card(s)" in a chain whose prior
+/// publishers are all non-exile departures refers only to cards put in exile by
+/// the linked ability — never to the chain's own sacrificed / library-put
+/// members. Rebinds the bare chain sentinel to the `Exiled`-caused subset.
+/// `Some` iff D8 applies; `None` keeps the caller's binding (no prior publisher:
+/// the O-ring LTB shape `detect_etb_exile_ltb_return` pairs; or a same-chain
+/// exile producer).
+pub(crate) fn chain_exiled_cause_binding(
+    chain: ChainPriorPublishers,
+    binding: &TargetFilter,
+) -> Option<TargetFilter> {
+    match (chain, binding) {
+        (
+            ChainPriorPublishers::NonExileOnly,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+        ) => Some(TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Any),
+            caused_by: Some(ThisWayCause::Exiled),
+        }),
+        (ChainPriorPublishers::NonExileOnly, _)
+        | (ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile, _) => None,
     }
 }
 
@@ -12259,6 +12304,102 @@ mod tests {
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
     use crate::types::keywords::Keyword;
+
+    const CHAIN_STATES: [ChainPriorPublishers; 3] = [
+        ChainPriorPublishers::Absent,
+        ChainPriorPublishers::NonExileOnly,
+        ChainPriorPublishers::IncludesExile,
+    ];
+
+    /// U1 — CR 607.2a: the anaphor combinator reads the grammatical number of
+    /// a whole "the exiled card(s)" phrase and rejects adjacent grammar.
+    #[test]
+    fn exiled_card_anaphor_reads_number_of_the_whole_phrase() {
+        let number = |text| parse_exiled_card_anaphor(text).ok().map(|(_, n)| n);
+        assert_eq!(number("the exiled card"), Some(AnaphorNumber::Singular));
+        assert_eq!(number("the exiled cards"), Some(AnaphorNumber::Plural));
+        assert_eq!(number("the exiled cards "), Some(AnaphorNumber::Plural));
+        for adjacent in [
+            "the exiled card's owner",
+            "the exiled creature",
+            "the rest of the exiled cards",
+            "those exiled cards",
+        ] {
+            assert_eq!(number(adjacent), None, "{adjacent:?} is not the anaphor");
+        }
+    }
+
+    /// U2 — CR 607.2a + CR 406.6: only the bare chain sentinel over a chain of
+    /// non-exile publishers is rebound to the `Exiled`-caused subset; every
+    /// other chain state and binding passes through.
+    #[test]
+    fn chain_exiled_cause_binding_rebinds_only_the_bare_sentinel_over_non_exile_chains() {
+        let bindings = [
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            },
+            TargetFilter::ExiledBySource,
+            TargetFilter::Any,
+        ];
+        let exiled_caused = TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Any),
+            caused_by: Some(ThisWayCause::Exiled),
+        };
+        for chain in CHAIN_STATES {
+            for (index, binding) in bindings.iter().enumerate() {
+                let expected = (chain == ChainPriorPublishers::NonExileOnly && index == 0)
+                    .then(|| exiled_caused.clone());
+                assert_eq!(
+                    chain_exiled_cause_binding(chain, binding),
+                    expected,
+                    "{chain:?} × {binding:?}"
+                );
+            }
+        }
+    }
+
+    /// U3 — the chain-state join is a lattice (`Absent` identity,
+    /// `IncludesExile` absorbing), and the singular authority keeps the
+    /// same-chain binding only over an exile producer.
+    #[test]
+    fn chain_prior_publishers_join_and_singular_authority() {
+        for a in CHAIN_STATES {
+            assert_eq!(a.join(a), a, "idempotent: {a:?}");
+            assert_eq!(a.join(ChainPriorPublishers::Absent), a, "identity: {a:?}");
+            assert_eq!(
+                a.join(ChainPriorPublishers::IncludesExile),
+                ChainPriorPublishers::IncludesExile,
+                "absorbing: {a:?}"
+            );
+            for b in CHAIN_STATES {
+                assert_eq!(a.join(b), b.join(a), "commutative: {a:?} {b:?}");
+            }
+        }
+        assert_eq!(
+            ChainPriorPublishers::Absent.join(ChainPriorPublishers::NonExileOnly),
+            ChainPriorPublishers::NonExileOnly
+        );
+        for chain in CHAIN_STATES {
+            assert_eq!(
+                chain.includes_exile(),
+                chain == ChainPriorPublishers::IncludesExile
+            );
+            let expected = if chain == ChainPriorPublishers::IncludesExile {
+                TargetFilter::ParentTarget
+            } else {
+                TargetFilter::ExiledBySource
+            };
+            assert_eq!(
+                resolve_singular_exiled_card_target(chain, TargetFilter::ParentTarget),
+                expected,
+                "{chain:?}"
+            );
+        }
+    }
 
     #[test]
     fn parent_controller_population_requires_a_typed_object_permission() {

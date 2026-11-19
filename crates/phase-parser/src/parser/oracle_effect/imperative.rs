@@ -77,8 +77,9 @@ use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    fold_article_led_type_union, match_mass_union_separator, parse_anaphoric_target_ref,
-    parse_declared_damage_source_target, parse_definite_parent_reference, parse_event_context_ref,
+    chain_exiled_cause_binding, fold_article_led_type_union, match_mass_union_separator,
+    parse_anaphoric_target_ref, parse_declared_damage_source_target,
+    parse_definite_parent_reference, parse_event_context_ref, parse_exiled_card_anaphor,
     parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
     parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
     parse_word_bounded, resolve_pronoun_target, resolve_singular_exiled_card_target,
@@ -2467,16 +2468,15 @@ pub(super) fn parse_targeted_action_ast(
         // non-battlefield returns (for example a granted delayed return to a
         // graveyard) retain their normal antecedent and zone semantics.
         let target_text_lower = target_text.trim().to_ascii_lowercase();
-        let names_linked_exiled_card =
-            all_consuming((tag::<_, _, OracleError<'_>>("the exiled card"), space0, eof))
-                .parse(target_text_lower.as_str())
-                .is_ok();
+        let exiled_anaphor = parse_exiled_card_anaphor(target_text_lower.trim())
+            .ok()
+            .map(|(_, number)| number);
         let returns_to_hand = matches!(dest, Some(ref d) if d.zone == Zone::Hand);
         let target = if returns_to_hand
             && ctx.current_ability_exile_cost_zone.is_none()
-            && names_linked_exiled_card
+            && exiled_anaphor == Some(AnaphorNumber::Singular)
         {
-            resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+            resolve_singular_exiled_card_target(ctx.chain_prior_publishers, target)
         } else {
             target
         };
@@ -2527,6 +2527,27 @@ pub(super) fn parse_targeted_action_ast(
         if super::target_span_dropped_this_way_anaphor(target_text, &target) {
             return None;
         }
+        // CR 607.2a + CR 406.6 (D8): "the exiled card(s)" over a chain whose
+        // prior publishers are all non-exile (Day of the Dragons' sacrifice,
+        // Timothar's granted sacrifice, The Spot's library put) refers only to
+        // the cards the linked exile instruction put into exile, never to the
+        // chain's own members. Applied after the clause-level origin inference,
+        // so the `origin` local and the target's zone constraints stay as
+        // parsed; the set-wide lowering supplies the exile origin.
+        let d8 = exiled_anaphor.zip(chain_exiled_cause_binding(
+            ctx.chain_prior_publishers,
+            &target,
+        ));
+        let (target, is_mass) = match d8 {
+            // CR 607.2a: a plural linked-exile anaphor is the whole linked set — a
+            // set-wide move, never the single-pick ChangeZone route. The hand arm
+            // with no origin already emits Bounce, the set-wide reader (The Spot).
+            Some((AnaphorNumber::Plural, bound)) => {
+                (bound, is_mass || !(returns_to_hand && origin.is_none()))
+            }
+            Some((AnaphorNumber::Singular, bound)) => (bound, is_mass),
+            None => (target, is_mass),
+        };
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;
         // mass destinations use ChangeZoneAll. Only pure mass-bounce
@@ -7705,7 +7726,7 @@ pub(super) fn parse_utility_imperative_ast(
                         // sites keep their own same-chain bindings.
                         return Some(UtilityImperativeAst::Copy {
                             target: resolve_singular_exiled_card_target(
-                                ctx.chain_has_prior_exile_producer,
+                                ctx.chain_prior_publishers,
                                 TargetFilter::ExiledBySource,
                             ),
                             retarget,

@@ -107,12 +107,13 @@ use super::oracle_quantity::{
 };
 use super::oracle_target::{
     history_clause_subject, parse_anaphoric_target_ref, parse_definite_anaphor,
-    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
-    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
-    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, population_drops_block_history_clause,
-    resolve_singular_exiled_card_target, strip_block_history_clauses, unique_slot_for_anaphor,
-    AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
+    parse_definite_parent_reference, parse_event_context_ref, parse_exiled_card_anaphor,
+    parse_fight_target, parse_parent_target_controller_population, parse_target,
+    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    population_drops_block_history_clause, resolve_singular_exiled_card_target,
+    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
+    DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -204,8 +205,8 @@ use self::subject::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::{
-    bind_controller_phrase, BodyScope, ClauseChooser, PendingTrackedSet, ResolvedChainRoot,
-    TrackedSetProducer,
+    bind_controller_phrase, BodyScope, ChainPriorPublishers, ClauseChooser, PendingTrackedSet,
+    ResolvedChainRoot, TrackedSetProducer,
 };
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
@@ -38889,7 +38890,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // the same treatment as the singular anaphor. The sibling "cards exiled
         // this way" form (Chandra, Heart of Fire; Dream Harvest) refers to the
         // batch this very resolution produced and must keep `ParentTarget`.
-        // Both still defer to `chain_has_prior_exile_producer`, so a
+        // Both still defer to `chain_prior_publishers`, so a
         // source-anchored tail in a chain that ALSO exiles keeps its
         // same-chain binding.
         //
@@ -38903,7 +38904,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         };
         let target = if anchors_to_source_exile_ledger {
             resolve_singular_exiled_card_target(
-                ctx.chain_has_prior_exile_producer,
+                ctx.chain_prior_publishers,
                 TargetFilter::ParentTarget,
             )
         } else {
@@ -39039,7 +39040,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     if scan_contains_phrase(rest, "from among them")
         || scan_contains_phrase(rest, "from among those cards")
     {
-        if !ctx.chain_has_prior_exile_producer {
+        if !ctx.chain_prior_publishers.includes_exile() {
             if let Some(controller) = ctx
                 .chain_prior_hand_reveal_target
                 .as_ref()
@@ -39129,7 +39130,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         let driver = if mode == CardPlayMode::Cast
             && without_paying
             && ctx.chain_prior_self_library_peek
-            && !ctx.chain_has_prior_exile_producer
+            && !ctx.chain_prior_publishers.includes_exile()
         {
             // CR 608.2c: `DuringResolution` casts a SINGLE card, so this arm may
             // be selected only for an exact single-card cap — never for
@@ -42296,7 +42297,7 @@ fn is_exile_effect(effect: &Effect) -> bool {
 
 /// CR 406.6 + CR 607.2a: Exhaustive predicate over every exile-producer
 /// effect shape recognized by the parser — used to gate
-/// `ParseContext::chain_has_prior_exile_producer` so a singular "the exiled
+/// `ParseContext::chain_prior_publishers` so a singular "the exiled
 /// card" anaphor in a LATER clause of the SAME chain keeps binding to that
 /// same-chain exile (`TrackedSet{0}` / `ParentTarget`), while an anaphor with
 /// NO prior same-chain exile producer binds durably to
@@ -42375,7 +42376,7 @@ fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> boo
 /// `Continue`, because a `ContinuationAst::ExileLookedAtCardsFaceDown` marker on this
 /// SAME clause later rewrites the PRECEDING `Dig` into the exile-producing form
 /// and discards this raw `ChangeZone` during the LATER lowering pass.
-/// `chain_has_prior_exile_producer` is seeded during the earlier per-chunk PARSE
+/// `chain_prior_publishers` is seeded during the earlier per-chunk PARSE
 /// pass, so skipping `Continue` clauses here would discard this clause's
 /// still-genuine exile evidence and wrongly flip Discover the Impossible to
 /// `ExiledBySource`. That is the load-bearing property of this predicate, and it
@@ -42395,6 +42396,20 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
     chain_clause_is_exile_producer(&clause.parsed.effect)
         || continuation_is_exile_producer(clause.disposition.followup())
         || continuation_is_exile_producer(clause.disposition.intrinsic())
+}
+
+/// CR 608.2c + CR 607.2a: classifies one earlier clause of the chain for
+/// [`ChainPriorPublishers`]. Every prior clause is a potential tracked-set
+/// publisher (runtime publication is generic over the affected objects of any
+/// effect), and it is an exile publisher iff [`clause_ir_is_exile_producer`]
+/// holds. Like that scan, `ClauseDisposition::Continue` clauses are NOT skipped
+/// (the Hideaway reason documented on `clause_ir_is_exile_producer`).
+fn classify_prior_clause(clause: &ClauseIr) -> ChainPriorPublishers {
+    if clause_ir_is_exile_producer(clause) {
+        ChainPriorPublishers::IncludesExile
+    } else {
+        ChainPriorPublishers::NonExileOnly
+    }
 }
 
 /// CR 701.20e + CR 608.2c: A bare private peek Dig ("look at the top N cards"
@@ -49042,11 +49057,11 @@ fn parse_effect_chain_ir_with_damage_context(
     already_chosen: u8,
     damage_context: Option<DamageTargetContext>,
 ) -> EffectChainIr {
-    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
+    let enclosing_chain_prior_publishers = ctx.chain_prior_publishers;
     let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen, damage_context);
     // Nested delayed, reflexive, and continuation bodies may inherit an outer
     // chain's tracked exile binding. Keep that context scoped to this call.
-    ctx.chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer;
+    ctx.chain_prior_publishers = enclosing_chain_prior_publishers;
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
 }
@@ -49079,7 +49094,7 @@ fn parse_effect_chain_ir_body(
     already_chosen_players: u8,
     enclosing_damage_context: Option<DamageTargetContext>,
 ) -> EffectChainIr {
-    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
+    let enclosing_chain_prior_publishers = ctx.chain_prior_publishers;
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
@@ -52170,13 +52185,18 @@ fn parse_effect_chain_ir_body(
             TargetFilter::DeclaredPlayer { group } => Some(ControllerRef::DeclaredPlayer { group }),
             _ => None,
         });
-        let chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer
-            || builder.clauses().iter().any(clause_ir_is_exile_producer);
+        // CR 608.2c + CR 607.2a: every earlier clause of this chain (joined with
+        // the enclosing chain's state) classified as a publisher, exile or not.
+        let chain_prior_publishers = builder
+            .clauses()
+            .iter()
+            .map(classify_prior_clause)
+            .fold(enclosing_chain_prior_publishers, ChainPriorPublishers::join);
         // Recursive chain parses below receive `ctx` rather than this freshly
         // built per-chunk context. Publish the current chain-local binding for
         // those nested delayed/reflexive/continuation parses; the public wrapper
         // restores the caller's value on every return path.
-        ctx.chain_has_prior_exile_producer = chain_has_prior_exile_producer;
+        ctx.chain_prior_publishers = chain_prior_publishers;
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -52313,14 +52333,16 @@ fn parse_effect_chain_ir_body(
             // card discarded for the cost (Hisoka, Minamo Sensei).
             current_ability_cost_components: ctx.current_ability_cost_components.clone(),
             parent_target_available,
-            // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
-            // chain already produces an exile, so a later singular "the
+            // CR 406.6 + CR 607.2a: what the EARLIER clauses of this same
+            // chain publish. Over an exile producer a later singular "the
             // exiled card" anaphor keeps its same-chain binding instead of
             // falling back to the durable `ExiledBySource` cross-resolution
-            // binding. Unlike `any_prior_publishes`, this scan deliberately does
-            // NOT skip absorbed (`ClauseDisposition::Continue`) clauses — see
+            // binding; over non-exile publishers only, a return binds the
+            // `Exiled`-caused members (`chain_exiled_cause_binding`). Unlike
+            // `any_prior_publishes`, this scan deliberately does NOT skip
+            // absorbed (`ClauseDisposition::Continue`) clauses — see
             // `clause_ir_is_exile_producer` for why (Hideaway).
-            chain_has_prior_exile_producer,
+            chain_prior_publishers,
             chain_prior_self_library_peek: builder
                 .clauses()
                 .iter()
@@ -55845,9 +55867,11 @@ fn try_parse_put_zone_change_parts(
             // excluded exactly as the cast-path caller does.
             let target = if !is_tracked_anaphor
                 && ctx.current_ability_exile_cost_zone.is_none()
-                && target_text.trim().eq_ignore_ascii_case("the exiled card")
-            {
-                resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+                && matches!(
+                    parse_exiled_card_anaphor(&target_text.trim().to_ascii_lowercase()),
+                    Ok((_, AnaphorNumber::Singular))
+                ) {
+                resolve_singular_exiled_card_target(ctx.chain_prior_publishers, target)
             } else {
                 target
             };

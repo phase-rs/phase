@@ -13268,7 +13268,7 @@ fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
 
 /// Regression guard for the #5577 fix: a SAME-chain exile-then-put keeps the
 /// chain-local `TrackedSet(0)` binding (the helper returns `same_chain_binding`
-/// when `chain_has_prior_exile_producer` is set), so it must NOT flip to
+/// when `chain_prior_publishers` includes an exile), so it must NOT flip to
 /// `ExiledBySource`.
 #[test]
 fn same_chain_put_exiled_card_keeps_tracked_set() {
@@ -66233,7 +66233,7 @@ fn find_cast_from_zone_target(ability: &AbilityDefinition) -> Option<&TargetFilt
 /// clause in the SAME resolution chain already produced the exile. Keldon
 /// Flamesage's "look at the top X ... exile ... You may cast the exiled
 /// card" is entirely one chain (one triggered ability, one resolution), so
-/// `chain_has_prior_exile_producer` must gate `resolve_singular_exiled_card_target`
+/// `chain_prior_publishers` must gate `resolve_singular_exiled_card_target`
 /// back to its pre-existing `TrackedSet{0}` binding.
 #[test]
 fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
@@ -66272,7 +66272,7 @@ fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
 /// is ALSO entirely one chain (one resolving spell), even though the
 /// Hideaway-shaped "exile one of them face down" clause is recognized via a
 /// `ContinuationAst` marker rather than its own raw exile-shaped effect
-/// surviving to the final lowered tree. `chain_has_prior_exile_producer`
+/// surviving to the final lowered tree. `chain_prior_publishers`
 /// must still detect that same-chain exile and keep the cast anaphor at
 /// `ParentTarget` — never widen it to `ExiledBySource`.
 #[test]

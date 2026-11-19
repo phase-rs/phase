@@ -478,7 +478,8 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
 /// an intended prompt the legacy engine wrongly auto-ordered — not an over-prompt.
 const BATCH_GENUINE_ROWS: &[&str] = &[
     // LTB: Sacrifice{Dragons-you-control, count: ObjectCount{same}} → sub
-    // ChangeZone{TrackedSet(0) → Battlefield, enters_under: You} (AST measured).
+    // ChangeZoneAll{origin: Exile, TrackedSetFiltered(0, Exiled) → Battlefield,
+    // enters_under: You} (AST measured).
     // Each co-departing member returns ITS OWN tracked exile set, and returned
     // creatures can be Dragons the OTHER member's re-sacrifice then consumes —
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
