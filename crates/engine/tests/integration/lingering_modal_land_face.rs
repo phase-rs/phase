@@ -372,6 +372,10 @@ fn the_land_back_face_is_refused_after_the_window_expires() {
         Zone::Exile,
         "reach guard: still exiled"
     );
+    assert!(
+        offers_play_land(state, b.land_in_hand),
+        "reach guard: a land play is otherwise available (hand Forest, land drop free)"
+    );
     assert!(!offers_play_land(state, b.recovery));
     assert!(!offers_cast(state, b.recovery));
     assert_refused_and_unchanged(
@@ -382,7 +386,7 @@ fn the_land_back_face_is_refused_after_the_window_expires() {
     );
 }
 
-/// CR 116.2a + CR 305.1: a land is played only on the owner's turn. During the
+/// CR 305.3 + CR 116.2a: a land is played only on the owner's turn. During the
 /// opponent's turn the exiled land back face is neither offered nor playable,
 /// even when the owner receives priority there.
 #[test]
@@ -492,7 +496,8 @@ fn a_different_exile_batch_has_no_land_back_permission() {
     );
 }
 
-/// Cast-only control (CR 305.1 + CR 305.9): Nivix, Aerie of the Firemind's
+/// Cast-only control (CR 701.18b: playing a card is playing it as a land or
+/// casting it as a spell, and a cast-only permission covers only the spell half): Nivix, Aerie of the Firemind's
 /// "you may cast it if it's an instant or sorcery spell" grant lets the exiled
 /// Bala Ged Recovery's spell front be cast but offers no land play of its land
 /// back face, because a Cast-mode permission never authorizes a land play.
@@ -540,4 +545,88 @@ fn a_cast_only_grant_does_not_admit_the_modal_land_back_face() {
         play_land_action(state, recovery),
         "a cast-only grant authorizes no land play",
     );
+}
+
+/// Zone fence (CR 116.2a: a land is put onto the battlefield from the zone it
+/// was in): Ark of Hunger's "Mill a card. You may play that card this turn."
+/// puts Bala Ged Recovery into the graveyard with a Play permission. The
+/// graveyard land scan finds lands by their front face, so the modal land back
+/// is neither offered nor playable from there; only the spell front is castable.
+#[test]
+fn a_milled_modal_card_keeps_its_land_back_face_refused_in_the_graveyard() {
+    let Some(db) = load_db() else { return };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    for _ in 0..3 {
+        s.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    }
+    let ark = s.add_real_card(P0, "Ark of Hunger", Zone::Battlefield, db);
+    add_fillers(&mut s);
+    let recovery = s.add_real_card(P0, "Bala Ged Recovery", Zone::Library, db);
+    let mut runner = s.build();
+    put_on_top(&mut runner, P0, recovery);
+    runner.activate(ark, 0).resolve();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&recovery].zone,
+        Zone::Graveyard,
+        "reach guard: Ark of Hunger milled the card"
+    );
+    assert!(
+        !state.objects[&recovery].casting_permissions.is_empty(),
+        "reach guard: the mill grant was recorded"
+    );
+    assert!(
+        offers_cast(state, recovery),
+        "reach guard: the milled spell front is castable under the grant"
+    );
+    assert!(!offers_play_land(state, recovery));
+    assert_refused_and_unchanged(
+        state,
+        P0,
+        play_land_action(state, recovery),
+        "a graveyard modal card's land face is not admitted",
+    );
+}
+
+/// A static exile permission reaches the land back through the same authority:
+/// Uba Mask's "each player may play lands and cast spells from among cards they
+/// exiled with this artifact this turn" lets the cards Divination would draw
+/// be played, the modal card as its land face.
+#[test]
+fn a_static_exile_permission_plays_the_modal_land_back_face() {
+    let Some(db) = load_db() else { return };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    // Divination's {2}{U} leaves three Forests to pay Bala Ged Recovery's {2}{G}.
+    for _ in 0..2 {
+        s.add_real_card(P0, "Island", Zone::Battlefield, db);
+    }
+    for _ in 0..4 {
+        s.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    }
+    s.add_real_card(P0, "Uba Mask", Zone::Battlefield, db);
+    add_fillers(&mut s);
+    let divination = s.add_real_card(P0, "Divination", Zone::Hand, db);
+    let recovery = s.add_real_card(P0, "Bala Ged Recovery", Zone::Library, db);
+    let mut runner = s.build();
+    put_on_top(&mut runner, P0, recovery);
+    runner.cast(divination).resolve();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&recovery].zone,
+        Zone::Exile,
+        "reach guard: Uba Mask exiled the drawn card"
+    );
+    assert!(
+        offers_cast(state, recovery),
+        "reach guard: the static permission offers the spell front"
+    );
+    assert!(offers_play_land(state, recovery), "land back offered");
+    let action = play_land_action(state, recovery);
+    runner.act(action).expect("playing the land back face");
+    let played = &runner.state().objects[&recovery];
+    assert_eq!(played.zone, Zone::Battlefield);
+    assert_eq!(played.name, "Bala Ged Sanctuary");
+    assert_eq!(lands_played(runner.state(), P0), 1);
 }
