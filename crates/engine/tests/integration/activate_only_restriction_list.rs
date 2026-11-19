@@ -705,6 +705,10 @@ fn activate_manticore_damage(
     assert_eq!(*source_id, source);
     assert_eq!(ability.targets, [TargetRef::Object(target)]);
     runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: _ }
+    ));
     assert!(runner.state().stack.is_empty());
     assert_eq!(runner.state().objects[&target].damage_marked, 2);
     assert_eq!(runner.state().objects[&other_target].damage_marked, 0);
@@ -836,7 +840,7 @@ fn manticore_removed_from_combat_loses_permission_immediately() {
     refuse_manticore_damage(&mut runner, P0, source, "SourceIsAttackingOrBlocking");
 }
 
-/// CR 602.5 and CR 511.3: Check the source gate even when there are also
+/// CR 602.5: Check the source gate even when there are also
 /// no legal damage targets, and leave the separate flying activation alone.
 #[test]
 fn manticore_damage_refused_before_combat_without_restricting_flying() {
@@ -863,6 +867,7 @@ fn manticore_damage_refused_before_combat_without_restricting_flying() {
     assert_eq!(activation_snapshot(&runner, P0, source, flying).0, 0);
 }
 
+/// CR 511.3: Leaving combat ends live participation.
 #[test]
 fn manticore_damage_refused_after_combat() {
     let mut scenario = GameScenario::new();
@@ -888,7 +893,8 @@ fn manticore_damage_refused_after_combat() {
     refuse_manticore_damage(&mut runner, P0, source, "SourceIsAttackingOrBlocking");
 }
 
-/// CR 201.5b: A gained ability reads its battlefield carrier, not its donor.
+/// CR 113.7 + CR 700.7: “This creature” identifies the new source, not the
+/// donor. CR 602.5c: The restriction follows the acquired ability.
 #[test]
 fn manticore_gained_damage_checks_quicksilver_not_opposing_donor() {
     for source_blocks in [true, false] {
