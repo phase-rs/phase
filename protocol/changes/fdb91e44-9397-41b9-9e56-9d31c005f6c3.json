@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CombatRelationSubject gains AnaphoricTarget in ability definitions inside GameState. Old shapes still read, but an older peer cannot parse the new value. Full-game peers and P2P move in lockstep; no lobby carrier names it."
+}

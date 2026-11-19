@@ -6,7 +6,7 @@ import type {
   MatchConfig,
   PeerInfo,
 } from "../adapter/types";
-import { lobbyProtocolRequiredForFormat, type ServerInfo } from "../adapter/ws-adapter";
+import { lobbyProtocolRequiredForFormatConfig, type ServerInfo } from "../adapter/ws-adapter";
 import { isFormatConfigShape } from "../adapter/format-config-shape";
 import {
   HandshakeError,
@@ -202,7 +202,7 @@ export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
         return;
       }
 
-      const needed = req.formatConfig ? lobbyProtocolRequiredForFormat(req.formatConfig.format) : null;
+      const needed = req.formatConfig ? lobbyProtocolRequiredForFormatConfig(req.formatConfig) : null;
       if (
         needed !== null
         && (serverInfo.lobbyProtocolVersion === undefined || serverInfo.lobbyProtocolVersion < needed)

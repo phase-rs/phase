@@ -23,6 +23,7 @@ use engine::game::filter::{matches_target_filter, spell_record_matches_filter, F
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
+use engine::types::ability::TurnWindow;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CountScope, Effect,
     FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition, TargetFilter,
@@ -384,9 +385,10 @@ fn spells_cast_this_turn(state: &GameState, source: ObjectId, filter: Option<Tar
     engine::game::quantity::resolve_quantity(
         state,
         &QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter,
+                window: TurnWindow::ThisTurn,
             },
         },
         P0,
@@ -2553,7 +2555,12 @@ fn exile_card_population_leave_the_game_sweep_still_reaches_objects() {
     let copy = exact_linked_copy(runner.state(), emeritus, P0, "Swords to Plowshares");
 
     let state = runner.state_mut();
-    engine::game::elimination::eliminate_player(state, P0, &mut Vec::new());
+    engine::game::elimination::eliminate_player(
+        state,
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     engine::game::sba::check_state_based_actions(state, &mut Vec::new());
 
     assert!(state.exile.contains(&bolt));

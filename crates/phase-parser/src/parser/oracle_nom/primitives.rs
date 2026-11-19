@@ -5,12 +5,13 @@ use std::borrow::Cow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{char, digit1, multispace0, satisfy, space0};
-use nom::combinator::{all_consuming, eof, map, map_res, opt, peek, recognize, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value, verify};
 use nom::multi::many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 use crate::types::ability::{AggregateFunction, ObjectProperty, PtValue};
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
@@ -67,13 +68,30 @@ pub fn parse_article(input: &str) -> OracleResult<'_, ()> {
 /// cannot drift between modules. Callers that also accept the self-reference
 /// token `~` compose it as an outer `alt((tag("~"), parse_object_recipient_pronoun))`.
 pub fn parse_object_recipient_pronoun(input: &str) -> OracleResult<'_, &str> {
-    recognize(terminated(
-        alt((tag("it"), tag("them"), tag("him"), tag("her"))),
+    recognize(parse_object_recipient_pronoun_number).parse(input)
+}
+
+/// The same object-recipient pronoun set as [`parse_object_recipient_pronoun`],
+/// reporting the pronoun's grammatical number instead of its slice: "them" is
+/// plural, "it" / "him" / "her" are singular. Callers whose referent depends on
+/// the number (a singular pronoun can name one antecedent object; a plural one
+/// cannot) read it here rather than re-matching the recognized word.
+pub(crate) fn parse_object_recipient_pronoun_number(
+    input: &str,
+) -> OracleResult<'_, AnaphorNumber> {
+    terminated(
+        alt((
+            value(
+                AnaphorNumber::Singular,
+                alt((tag("it"), tag("him"), tag("her"))),
+            ),
+            value(AnaphorNumber::Plural, tag("them")),
+        )),
         peek(alt((
             value((), eof),
             value((), satisfy(|c| !c.is_alphanumeric() && c != '\'')),
         ))),
-    ))
+    )
     .parse(input)
 }
 
@@ -358,6 +376,29 @@ pub fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterK
     .parse(input)
 }
 
+/// CR 122.1: The counter-KIND quantifier "kind of" / "kinds of" — the head of
+/// a counter-kind census ("for each kind of counter on …", "the number of
+/// different kinds of counters among …"). It quantifies over counter kinds; it
+/// never names one (no counter is called "kind"). Lowercase input.
+pub fn parse_counter_kind_quantifier(input: &str) -> OracleResult<'_, ()> {
+    value((), (tag("kind"), opt(tag("s")), tag(" of"))).parse(input)
+}
+
+/// CR 122.1: Guard for open-ended counter-NAME readers — those that slice an
+/// arbitrary phrase before " counter[s]" and map it to `CounterType::Generic`.
+/// Succeeds without consuming unless the input opens with the counter-kind
+/// quantifier (optionally after the "different " determiner) at a word
+/// boundary, so "kind of counter on ~" can never be read as a count of a
+/// counter named "kind of". Lowercase input.
+pub fn not_counter_kind_quantifier(input: &str) -> OracleResult<'_, ()> {
+    not((
+        opt(tag("different ")),
+        parse_counter_kind_quantifier,
+        alt((eof, tag(" "))),
+    ))
+    .parse(input)
+}
+
 /// Parse a counter type: power/toughness counter notation (`+1/+1`,
 /// `-0/-1`, etc.) or one of the named counter types recognized by Oracle text
 /// (`loyalty`, `charge`, `lore`, …).
@@ -460,6 +501,10 @@ fn parse_keyword_counter_name(input: &str) -> OracleResult<'_, &str> {
 fn parse_named_counter_type(input: &str) -> OracleResult<'_, &str> {
     // Split into two alt groups to stay within nom's 21-arm tuple limit.
     let named = alt((
+        // CR 122.1: multi-word counter names must be enumerated — the open
+        // fallback consumes one token; 'acquired taste' is the only multi-word
+        // non-keyword name in the corpus.
+        tag("acquired taste"),
         tag("loyalty"),
         tag("charge"),
         tag("lore"),
@@ -493,6 +538,7 @@ fn parse_named_counter_type(input: &str) -> OracleResult<'_, &str> {
         tag("pupa"),
         tag("net"),
         tag("stun"),
+        tag("ore"),
     )));
     terminated(
         named,
@@ -973,6 +1019,33 @@ where
         remaining = remaining
             .find(' ')
             .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    None
+}
+
+/// Like [`scan_at_word_boundaries`] but returns the first successful match's
+/// byte offset and remaining input. Callers that need to split the original
+/// text around the match should use this instead of duplicating the cursor
+/// traversal locally.
+pub fn scan_at_word_boundaries_with_offset<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            return Some((offset, val, rest));
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
     }
     None
 }
@@ -1640,6 +1713,32 @@ mod tests {
         assert_eq!(
             parse_strict_counter_type("lore").unwrap(),
             ("", CounterType::Lore)
+        );
+    }
+
+    /// CR 122.1: "ore" (Orcish Mine) is a recognized named counter, so the
+    /// strict parser accepts it, and the shared word-boundary guard keeps a
+    /// longer word that starts with it ("oreo") from reading as an ore counter.
+    #[test]
+    fn named_counter_type_recognizes_ore() {
+        let ore = crate::types::counter::parse_counter_type("ore");
+        assert_eq!(
+            parse_strict_counter_type("ore counter").unwrap(),
+            (" counter", ore.clone())
+        );
+        assert_eq!(
+            parse_counter_type_typed("ore counter").unwrap(),
+            (" counter", ore)
+        );
+        assert!(parse_strict_counter_type("oreo counter").is_err());
+        // The open-ended typed arm keeps the whole word instead of splitting
+        // "ore" off the front of "oreo".
+        assert_eq!(
+            parse_counter_type_typed("oreo counter").unwrap(),
+            (
+                " counter",
+                crate::types::counter::parse_counter_type("oreo")
+            )
         );
     }
 

@@ -11,16 +11,21 @@
 //!
 //! A model never authors a game action or names a card. It is handed the
 //! engine-issued option domain — an `AiDecisionContract`'s candidates in a game,
-//! the pack in front of a seat in a draft — and returns an INDEX into it. The
-//! engine then re-validates that selection through the same authority path the
-//! heuristic AI uses. There is deliberately no route by which a model's text
-//! becomes an action without passing an engine legality check.
+//! the pack in front of a seat in a draft — and returns an INDEX into it. A
+//! combat declaration is composed from the attacks or blocks the engine's
+//! prompt lists, by the indices of those declared. The engine then re-validates
+//! that selection through the same authority path the heuristic AI uses.
+//! There is deliberately no route by which a model's text becomes an action
+//! without passing an engine legality check.
 //!
 //! # Where the network lives
 //!
 //! Not here. [`wire::build_chat_request`] produces an
 //! [`HttpRequestSpec`](provider::HttpRequestSpec) that a transport executes
-//! verbatim, and [`wire::extract_completion_text`] parses the raw body back. The
+//! verbatim, and [`wire::extract_completion_text`] parses the raw body back.
+//! A game decision for a profile that opted into Anthropic message threads gets
+//! its request from [`game_thread::LlmThreadMemory`] instead, which keeps each
+//! seat's game in one server-side conversation. The
 //! transport chooses nothing — not the URL, not the auth scheme, not the prompt,
 //! not the fallback. That keeps every LLM opponent behaviour testable in Rust
 //! and keeps the display layer a display layer.
@@ -33,10 +38,12 @@
 //! stall a game or a draft.
 
 pub mod catalog;
+pub(crate) mod combat_declaration;
 pub mod error;
 pub mod fingerprint;
 pub mod format_guidance;
 pub mod game_decision;
+pub mod game_thread;
 pub mod probe;
 pub mod prompt;
 pub mod provider;
@@ -49,21 +56,24 @@ pub mod draft_decision;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-pub use error::{LlmError, LlmResult};
+pub use error::{LlmError, LlmResult, ThreadErrorCode};
 pub use format_guidance::game_format_brief;
 pub use game_decision::{
     build_game_decision_prompt, decision_fingerprint, information_fingerprint, select_action,
     select_action_from_response, GameDecisionRequest, LlmActionSelection, LlmDecisionMemory,
 };
-pub use probe::{connection_probe_prompt, validate_probe_response};
+pub use game_thread::{
+    ClockReading, DecisionHttpRequest, LlmThreadMemory, ThreadTurnId, THREAD_CONTEXT_BUDGET_TOKENS,
+};
+pub use probe::{build_probe_request, connection_probe_prompt, validate_probe_response};
 pub use prompt::{difficulty_brief, LlmChoice, LlmPrompt};
 pub use provider::{
-    HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, RedirectPolicy, WireProtocol,
-    ACCEPTED_PROVIDER_LABELS,
+    DecisionContext, HttpHeader, HttpRequestSpec, LlmEndpointConfig, LlmProvider, RedirectPolicy,
+    WireProtocol, ACCEPTED_PROVIDER_LABELS,
 };
 pub use wire::{
-    build_chat_request, completion_from_response, extract_completion_text, system_one_option_keys,
-    token_usage, LlmReply, TokenUsage,
+    build_chat_request, build_thread_request, completion_from_response, continuable_message_id,
+    extract_completion_text, system_one_option_keys, token_usage, LlmReply, ThreadTurn, TokenUsage,
 };
 
 #[cfg(feature = "draft")]

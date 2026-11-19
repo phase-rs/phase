@@ -93,6 +93,8 @@ fn spell_object(state: &mut GameState, idx: u64, core: Vec<CoreType>) -> ObjectI
 
 fn reanimation_effect(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target,
@@ -251,6 +253,7 @@ fn self_mill_enabler_scored() {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: engine::types::ability::LibraryPosition::Top,
             },
         ),
     );

@@ -1,0 +1,1609 @@
+{
+  "saved_sessions": {
+    "fifo_drafting": {
+      "verdict": { "type": "Incompatible" },
+      "session": {
+        "fifo": {
+          "session_id": "guard-incarnation",
+          "revision": 1,
+          "last_now_ms": 1000,
+          "seats": [
+            {
+              "queue": [
+                {
+                  "pack_id": 0,
+                  "opening_seat": 0,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 },
+                "pack_id": 0,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 1,
+                  "opening_seat": 1,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 },
+                "pack_id": 1,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 2,
+                  "opening_seat": 2,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 },
+                "pack_id": 2,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 3,
+                  "opening_seat": 3,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 },
+                "pack_id": 3,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            }
+          ],
+          "packs": {
+            "0": { "pack_id": 0, "opening_seat": 0, "round": 0, "original_size": 2, "original_card_ids": ["TST-0-0-0", "TST-0-0-1"] },
+            "1": { "pack_id": 1, "opening_seat": 1, "round": 0, "original_size": 2, "original_card_ids": ["TST-1-0-0", "TST-1-0-1"] },
+            "2": { "pack_id": 2, "opening_seat": 2, "round": 0, "original_size": 2, "original_card_ids": ["TST-2-0-0", "TST-2-0-1"] },
+            "3": { "pack_id": 3, "opening_seat": 3, "round": 0, "original_size": 2, "original_card_ids": ["TST-3-0-0", "TST-3-0-1"] },
+            "4": { "pack_id": 4, "opening_seat": 0, "round": 1, "original_size": 2, "original_card_ids": ["TST-0-1-0", "TST-0-1-1"] },
+            "5": { "pack_id": 5, "opening_seat": 1, "round": 1, "original_size": 2, "original_card_ids": ["TST-1-1-0", "TST-1-1-1"] },
+            "6": { "pack_id": 6, "opening_seat": 2, "round": 1, "original_size": 2, "original_card_ids": ["TST-2-1-0", "TST-2-1-1"] },
+            "7": { "pack_id": 7, "opening_seat": 3, "round": 1, "original_size": 2, "original_card_ids": ["TST-3-1-0", "TST-3-1-1"] },
+            "8": { "pack_id": 8, "opening_seat": 0, "round": 2, "original_size": 2, "original_card_ids": ["TST-0-2-0", "TST-0-2-1"] },
+            "9": { "pack_id": 9, "opening_seat": 1, "round": 2, "original_size": 2, "original_card_ids": ["TST-1-2-0", "TST-1-2-1"] },
+            "10": { "pack_id": 10, "opening_seat": 2, "round": 2, "original_size": 2, "original_card_ids": ["TST-2-2-0", "TST-2-2-1"] },
+            "11": { "pack_id": 11, "opening_seat": 3, "round": 2, "original_size": 2, "original_card_ids": ["TST-3-2-0", "TST-3-2-1"] }
+          },
+          "cards": {
+            "TST-0-0-0": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-0-1": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-0": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-1": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-0": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-1": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-0": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-1": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-0": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-1": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-0": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-1": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-0": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-1": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-0": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-1": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-0": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-1": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-0": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-1": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-0": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-1": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-0": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-1": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            }
+          },
+          "removed": [],
+          "returned_effects": {},
+          "review": null,
+          "paused": null
+        },
+        "draft_code": "guard-fixture",
+        "set_code": "TST",
+        "kind": "Premier",
+        "status": "Drafting",
+        "config": {
+          "flow": "FifoAsync",
+          "clock_policy": { "pick": { "type": "Fixed", "duration_ms": 1000 }, "review_duration_ms": 1000 },
+          "source": { "type": "Set", "data": { "codes": ["TST"] } },
+          "set_code": "TST",
+          "kind": "Premier",
+          "pod_size": 4,
+          "cards_per_pack": 2,
+          "pack_count": 3,
+          "min_deck_size": 40,
+          "addable_cards": { "policy": "StandardBasics", "custom": [] },
+          "rng_seed": 42,
+          "tournament_format": "Swiss",
+          "pod_policy": "Competitive",
+          "spectator_visibility": "Public"
+        },
+        "seats": [
+          { "type": "Human", "player_id": 0, "display_name": "Player 0" },
+          { "type": "Human", "player_id": 1, "display_name": "Player 1" },
+          { "type": "Human", "player_id": 2, "display_name": "Player 2" },
+          { "type": "Human", "player_id": 3, "display_name": "Player 3" }
+        ],
+        "current_pack_number": 0,
+        "pack_sizes": [2, 2, 2],
+        "pick_number": 0,
+        "seats_picked_this_round": [false, false, false, false],
+        "connected_seats": [true, true, true, true],
+        "pass_direction": "Left",
+        "packs_by_seat": [
+          [
+            [
+              { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ]
+        ],
+        "current_pack": [null, null, null, null],
+        "current_pack_origins": [null, null, null, null],
+        "pools": [[], [], [], []],
+        "submitted_decks": {},
+        "match_records": {},
+        "pairings": [],
+        "current_round": 0,
+        "created_at": 0,
+        "updated_at": 0
+      }
+    },
+    "legacy_review": {
+      "verdict": { "type": "Incompatible" },
+      "session": {
+        "draft_code": "guard-fixture",
+        "set_code": "TST",
+        "kind": "Premier",
+        "status": "Review",
+        "config": {
+          "source": { "type": "Set", "data": { "codes": ["TST"] } },
+          "set_code": "TST",
+          "kind": "Premier",
+          "pod_size": 4,
+          "cards_per_pack": 2,
+          "pack_count": 3,
+          "min_deck_size": 40,
+          "addable_cards": { "policy": "StandardBasics", "custom": [] },
+          "rng_seed": 42,
+          "tournament_format": "Swiss",
+          "pod_policy": "Competitive",
+          "spectator_visibility": "Public"
+        },
+        "seats": [
+          { "type": "Human", "player_id": 0, "display_name": "Player 0" },
+          { "type": "Human", "player_id": 1, "display_name": "Player 1" },
+          { "type": "Human", "player_id": 2, "display_name": "Player 2" },
+          { "type": "Human", "player_id": 3, "display_name": "Player 3" }
+        ],
+        "current_pack_number": 0,
+        "pack_sizes": [2, 2, 2],
+        "pick_number": 0,
+        "seats_picked_this_round": [false, false, false, false],
+        "connected_seats": [true, true, true, true],
+        "pass_direction": "Left",
+        "packs_by_seat": [
+          [
+            [
+              { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ]
+        ],
+        "current_pack": [
+          [
+            { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ]
+        ],
+        "current_pack_origins": [0, 1, 2, 3],
+        "pools": [[], [], [], []],
+        "submitted_decks": {},
+        "match_records": {},
+        "pairings": [],
+        "current_round": 0,
+        "created_at": 0,
+        "updated_at": 0
+      }
+    },
+    "legacy_carrying_fifo": {
+      "verdict": { "type": "Incompatible" },
+      "session": {
+        "fifo": {
+          "session_id": "guard-incarnation",
+          "revision": 1,
+          "last_now_ms": 1000,
+          "seats": [
+            {
+              "queue": [
+                {
+                  "pack_id": 0,
+                  "opening_seat": 0,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 },
+                "pack_id": 0,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 1,
+                  "opening_seat": 1,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 },
+                "pack_id": 1,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 2,
+                  "opening_seat": 2,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 },
+                "pack_id": 2,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 3,
+                  "opening_seat": 3,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 },
+                "pack_id": 3,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            }
+          ],
+          "packs": {
+            "0": { "pack_id": 0, "opening_seat": 0, "round": 0, "original_size": 2, "original_card_ids": ["TST-0-0-0", "TST-0-0-1"] },
+            "1": { "pack_id": 1, "opening_seat": 1, "round": 0, "original_size": 2, "original_card_ids": ["TST-1-0-0", "TST-1-0-1"] },
+            "2": { "pack_id": 2, "opening_seat": 2, "round": 0, "original_size": 2, "original_card_ids": ["TST-2-0-0", "TST-2-0-1"] },
+            "3": { "pack_id": 3, "opening_seat": 3, "round": 0, "original_size": 2, "original_card_ids": ["TST-3-0-0", "TST-3-0-1"] },
+            "4": { "pack_id": 4, "opening_seat": 0, "round": 1, "original_size": 2, "original_card_ids": ["TST-0-1-0", "TST-0-1-1"] },
+            "5": { "pack_id": 5, "opening_seat": 1, "round": 1, "original_size": 2, "original_card_ids": ["TST-1-1-0", "TST-1-1-1"] },
+            "6": { "pack_id": 6, "opening_seat": 2, "round": 1, "original_size": 2, "original_card_ids": ["TST-2-1-0", "TST-2-1-1"] },
+            "7": { "pack_id": 7, "opening_seat": 3, "round": 1, "original_size": 2, "original_card_ids": ["TST-3-1-0", "TST-3-1-1"] },
+            "8": { "pack_id": 8, "opening_seat": 0, "round": 2, "original_size": 2, "original_card_ids": ["TST-0-2-0", "TST-0-2-1"] },
+            "9": { "pack_id": 9, "opening_seat": 1, "round": 2, "original_size": 2, "original_card_ids": ["TST-1-2-0", "TST-1-2-1"] },
+            "10": { "pack_id": 10, "opening_seat": 2, "round": 2, "original_size": 2, "original_card_ids": ["TST-2-2-0", "TST-2-2-1"] },
+            "11": { "pack_id": 11, "opening_seat": 3, "round": 2, "original_size": 2, "original_card_ids": ["TST-3-2-0", "TST-3-2-1"] }
+          },
+          "cards": {
+            "TST-0-0-0": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-0-1": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-0": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-1": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-0": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-1": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-0": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-1": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-0": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-1": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-0": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-1": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-0": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-1": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-0": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-1": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-0": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-1": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-0": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-1": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-0": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-1": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-0": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-1": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            }
+          },
+          "removed": [],
+          "returned_effects": {},
+          "review": null,
+          "paused": null
+        },
+        "draft_code": "guard-fixture",
+        "set_code": "TST",
+        "kind": "Premier",
+        "status": "Drafting",
+        "config": {
+          "source": { "type": "Set", "data": { "codes": ["TST"] } },
+          "set_code": "TST",
+          "kind": "Premier",
+          "pod_size": 4,
+          "cards_per_pack": 2,
+          "pack_count": 3,
+          "min_deck_size": 40,
+          "addable_cards": { "policy": "StandardBasics", "custom": [] },
+          "rng_seed": 42,
+          "tournament_format": "Swiss",
+          "pod_policy": "Competitive",
+          "spectator_visibility": "Public"
+        },
+        "seats": [
+          { "type": "Human", "player_id": 0, "display_name": "Player 0" },
+          { "type": "Human", "player_id": 1, "display_name": "Player 1" },
+          { "type": "Human", "player_id": 2, "display_name": "Player 2" },
+          { "type": "Human", "player_id": 3, "display_name": "Player 3" }
+        ],
+        "current_pack_number": 0,
+        "pack_sizes": [2, 2, 2],
+        "pick_number": 0,
+        "seats_picked_this_round": [false, false, false, false],
+        "connected_seats": [true, true, true, true],
+        "pass_direction": "Left",
+        "packs_by_seat": [
+          [
+            [
+              { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ]
+        ],
+        "current_pack": [
+          [
+            { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ]
+        ],
+        "current_pack_origins": [0, 1, 2, 3],
+        "pools": [[], [], [], []],
+        "submitted_decks": {},
+        "match_records": {},
+        "pairings": [],
+        "current_round": 0,
+        "created_at": 0,
+        "updated_at": 0
+      }
+    },
+    "fifo_complete": {
+      "verdict": { "type": "Incompatible" },
+      "session": {
+        "fifo": {
+          "session_id": "guard-incarnation",
+          "revision": 1,
+          "last_now_ms": 1000,
+          "seats": [
+            {
+              "queue": [
+                {
+                  "pack_id": 0,
+                  "opening_seat": 0,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 },
+                "pack_id": 0,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 1,
+                  "opening_seat": 1,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 },
+                "pack_id": 1,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 2,
+                  "opening_seat": 2,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 },
+                "pack_id": 2,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 3,
+                  "opening_seat": 3,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 },
+                "pack_id": 3,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            }
+          ],
+          "packs": {
+            "0": { "pack_id": 0, "opening_seat": 0, "round": 0, "original_size": 2, "original_card_ids": ["TST-0-0-0", "TST-0-0-1"] },
+            "1": { "pack_id": 1, "opening_seat": 1, "round": 0, "original_size": 2, "original_card_ids": ["TST-1-0-0", "TST-1-0-1"] },
+            "2": { "pack_id": 2, "opening_seat": 2, "round": 0, "original_size": 2, "original_card_ids": ["TST-2-0-0", "TST-2-0-1"] },
+            "3": { "pack_id": 3, "opening_seat": 3, "round": 0, "original_size": 2, "original_card_ids": ["TST-3-0-0", "TST-3-0-1"] },
+            "4": { "pack_id": 4, "opening_seat": 0, "round": 1, "original_size": 2, "original_card_ids": ["TST-0-1-0", "TST-0-1-1"] },
+            "5": { "pack_id": 5, "opening_seat": 1, "round": 1, "original_size": 2, "original_card_ids": ["TST-1-1-0", "TST-1-1-1"] },
+            "6": { "pack_id": 6, "opening_seat": 2, "round": 1, "original_size": 2, "original_card_ids": ["TST-2-1-0", "TST-2-1-1"] },
+            "7": { "pack_id": 7, "opening_seat": 3, "round": 1, "original_size": 2, "original_card_ids": ["TST-3-1-0", "TST-3-1-1"] },
+            "8": { "pack_id": 8, "opening_seat": 0, "round": 2, "original_size": 2, "original_card_ids": ["TST-0-2-0", "TST-0-2-1"] },
+            "9": { "pack_id": 9, "opening_seat": 1, "round": 2, "original_size": 2, "original_card_ids": ["TST-1-2-0", "TST-1-2-1"] },
+            "10": { "pack_id": 10, "opening_seat": 2, "round": 2, "original_size": 2, "original_card_ids": ["TST-2-2-0", "TST-2-2-1"] },
+            "11": { "pack_id": 11, "opening_seat": 3, "round": 2, "original_size": 2, "original_card_ids": ["TST-3-2-0", "TST-3-2-1"] }
+          },
+          "cards": {
+            "TST-0-0-0": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-0-1": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-0": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-1": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-0": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-1": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-0": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-1": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-0": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-1": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-0": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-1": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-0": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-1": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-0": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-1": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-0": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-1": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-0": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-1": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-0": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-1": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-0": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-1": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            }
+          },
+          "removed": [],
+          "returned_effects": {},
+          "review": null,
+          "paused": null
+        },
+        "draft_code": "guard-fixture",
+        "set_code": "TST",
+        "kind": "Premier",
+        "status": "Complete",
+        "config": {
+          "flow": "FifoAsync",
+          "clock_policy": { "pick": { "type": "Fixed", "duration_ms": 1000 }, "review_duration_ms": 1000 },
+          "source": { "type": "Set", "data": { "codes": ["TST"] } },
+          "set_code": "TST",
+          "kind": "Premier",
+          "pod_size": 4,
+          "cards_per_pack": 2,
+          "pack_count": 3,
+          "min_deck_size": 40,
+          "addable_cards": { "policy": "StandardBasics", "custom": [] },
+          "rng_seed": 42,
+          "tournament_format": "Swiss",
+          "pod_policy": "Competitive",
+          "spectator_visibility": "Public"
+        },
+        "seats": [
+          { "type": "Human", "player_id": 0, "display_name": "Player 0" },
+          { "type": "Human", "player_id": 1, "display_name": "Player 1" },
+          { "type": "Human", "player_id": 2, "display_name": "Player 2" },
+          { "type": "Human", "player_id": 3, "display_name": "Player 3" }
+        ],
+        "current_pack_number": 0,
+        "pack_sizes": [2, 2, 2],
+        "pick_number": 0,
+        "seats_picked_this_round": [false, false, false, false],
+        "connected_seats": [true, true, true, true],
+        "pass_direction": "Left",
+        "packs_by_seat": [
+          [
+            [
+              { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ]
+        ],
+        "current_pack": [null, null, null, null],
+        "current_pack_origins": [null, null, null, null],
+        "pools": [[], [], [], []],
+        "submitted_decks": {},
+        "match_records": {},
+        "pairings": [],
+        "current_round": 0,
+        "created_at": 0,
+        "updated_at": 0
+      }
+    },
+    "fifo_abandoned": {
+      "verdict": { "type": "Incompatible" },
+      "session": {
+        "fifo": {
+          "session_id": "guard-incarnation",
+          "revision": 1,
+          "last_now_ms": 1000,
+          "seats": [
+            {
+              "queue": [
+                {
+                  "pack_id": 0,
+                  "opening_seat": 0,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 },
+                "pack_id": 0,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 0, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 1,
+                  "opening_seat": 1,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 },
+                "pack_id": 1,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 1, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 2,
+                  "opening_seat": 2,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 },
+                "pack_id": 2,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 2, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            },
+            {
+              "queue": [
+                {
+                  "pack_id": 3,
+                  "opening_seat": 3,
+                  "round": 0,
+                  "original_size": 2,
+                  "pack": [
+                    { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+                    { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+                  ]
+                }
+              ],
+              "generation": 1,
+              "prompt": {
+                "id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 },
+                "pack_id": 3,
+                "clock": { "target": { "type": "Pick", "prompt_id": { "session_id": "guard-incarnation", "seat": 3, "generation": 1 } }, "state": { "type": "Running", "deadline_ms": 2000 } }
+              },
+              "completed_steps": 0,
+              "round_completed_steps": 0
+            }
+          ],
+          "packs": {
+            "0": { "pack_id": 0, "opening_seat": 0, "round": 0, "original_size": 2, "original_card_ids": ["TST-0-0-0", "TST-0-0-1"] },
+            "1": { "pack_id": 1, "opening_seat": 1, "round": 0, "original_size": 2, "original_card_ids": ["TST-1-0-0", "TST-1-0-1"] },
+            "2": { "pack_id": 2, "opening_seat": 2, "round": 0, "original_size": 2, "original_card_ids": ["TST-2-0-0", "TST-2-0-1"] },
+            "3": { "pack_id": 3, "opening_seat": 3, "round": 0, "original_size": 2, "original_card_ids": ["TST-3-0-0", "TST-3-0-1"] },
+            "4": { "pack_id": 4, "opening_seat": 0, "round": 1, "original_size": 2, "original_card_ids": ["TST-0-1-0", "TST-0-1-1"] },
+            "5": { "pack_id": 5, "opening_seat": 1, "round": 1, "original_size": 2, "original_card_ids": ["TST-1-1-0", "TST-1-1-1"] },
+            "6": { "pack_id": 6, "opening_seat": 2, "round": 1, "original_size": 2, "original_card_ids": ["TST-2-1-0", "TST-2-1-1"] },
+            "7": { "pack_id": 7, "opening_seat": 3, "round": 1, "original_size": 2, "original_card_ids": ["TST-3-1-0", "TST-3-1-1"] },
+            "8": { "pack_id": 8, "opening_seat": 0, "round": 2, "original_size": 2, "original_card_ids": ["TST-0-2-0", "TST-0-2-1"] },
+            "9": { "pack_id": 9, "opening_seat": 1, "round": 2, "original_size": 2, "original_card_ids": ["TST-1-2-0", "TST-1-2-1"] },
+            "10": { "pack_id": 10, "opening_seat": 2, "round": 2, "original_size": 2, "original_card_ids": ["TST-2-2-0", "TST-2-2-1"] },
+            "11": { "pack_id": 11, "opening_seat": 3, "round": 2, "original_size": 2, "original_card_ids": ["TST-3-2-0", "TST-3-2-1"] }
+          },
+          "cards": {
+            "TST-0-0-0": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-0-1": {
+              "pack_id": 0,
+              "card": { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-0": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-1-1": {
+              "pack_id": 4,
+              "card": { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-0": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-0-2-1": {
+              "pack_id": 8,
+              "card": { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-0": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-0-1": {
+              "pack_id": 1,
+              "card": { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-0": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-1-1": {
+              "pack_id": 5,
+              "card": { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-0": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-1-2-1": {
+              "pack_id": 9,
+              "card": { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-0": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-0-1": {
+              "pack_id": 2,
+              "card": { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-0": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-1-1": {
+              "pack_id": 6,
+              "card": { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-0": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-2-2-1": {
+              "pack_id": 10,
+              "card": { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-0": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-0-1": {
+              "pack_id": 3,
+              "card": { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-0": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-1-1": {
+              "pack_id": 7,
+              "card": { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-0": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" }
+            },
+            "TST-3-2-1": {
+              "pack_id": 11,
+              "card": { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            }
+          },
+          "removed": [],
+          "returned_effects": {},
+          "review": null,
+          "paused": null
+        },
+        "draft_code": "guard-fixture",
+        "set_code": "TST",
+        "kind": "Premier",
+        "status": "Abandoned",
+        "config": {
+          "flow": "FifoAsync",
+          "clock_policy": { "pick": { "type": "Fixed", "duration_ms": 1000 }, "review_duration_ms": 1000 },
+          "source": { "type": "Set", "data": { "codes": ["TST"] } },
+          "set_code": "TST",
+          "kind": "Premier",
+          "pod_size": 4,
+          "cards_per_pack": 2,
+          "pack_count": 3,
+          "min_deck_size": 40,
+          "addable_cards": { "policy": "StandardBasics", "custom": [] },
+          "rng_seed": 42,
+          "tournament_format": "Swiss",
+          "pod_policy": "Competitive",
+          "spectator_visibility": "Public"
+        },
+        "seats": [
+          { "type": "Human", "player_id": 0, "display_name": "Player 0" },
+          { "type": "Human", "player_id": 1, "display_name": "Player 1" },
+          { "type": "Human", "player_id": 2, "display_name": "Player 2" },
+          { "type": "Human", "player_id": 3, "display_name": "Player 3" }
+        ],
+        "current_pack_number": 0,
+        "pack_sizes": [2, 2, 2],
+        "pick_number": 0,
+        "seats_picked_this_round": [false, false, false, false],
+        "connected_seats": [true, true, true, true],
+        "pass_direction": "Left",
+        "packs_by_seat": [
+          [
+            [
+              { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ]
+        ],
+        "current_pack": [null, null, null, null],
+        "current_pack_origins": [null, null, null, null],
+        "pools": [[], [], [], []],
+        "submitted_decks": {},
+        "match_records": {},
+        "pairings": [],
+        "current_round": 0,
+        "created_at": 0,
+        "updated_at": 0
+      }
+    },
+    "legacy_review_unknown_flow": {
+      "verdict": { "type": "Unreadable" },
+      "session": {
+        "draft_code": "guard-fixture",
+        "set_code": "TST",
+        "kind": "Premier",
+        "status": "Review",
+        "config": {
+          "flow": "FutureFlow",
+          "source": { "type": "Set", "data": { "codes": ["TST"] } },
+          "set_code": "TST",
+          "kind": "Premier",
+          "pod_size": 4,
+          "cards_per_pack": 2,
+          "pack_count": 3,
+          "min_deck_size": 40,
+          "addable_cards": { "policy": "StandardBasics", "custom": [] },
+          "rng_seed": 42,
+          "tournament_format": "Swiss",
+          "pod_policy": "Competitive",
+          "spectator_visibility": "Public"
+        },
+        "seats": [
+          { "type": "Human", "player_id": 0, "display_name": "Player 0" },
+          { "type": "Human", "player_id": 1, "display_name": "Player 1" },
+          { "type": "Human", "player_id": 2, "display_name": "Player 2" },
+          { "type": "Human", "player_id": 3, "display_name": "Player 3" }
+        ],
+        "current_pack_number": 0,
+        "pack_sizes": [2, 2, 2],
+        "pick_number": 0,
+        "seats_picked_this_round": [false, false, false, false],
+        "connected_seats": [true, true, true, true],
+        "pass_direction": "Left",
+        "packs_by_seat": [
+          [
+            [
+              { "instance_id": "TST-0-1-0", "name": "TST Card 0-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-1-1", "name": "TST Card 0-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-0-2-0", "name": "TST Card 0-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-0-2-1", "name": "TST Card 0-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-1-1-0", "name": "TST Card 1-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-1-1", "name": "TST Card 1-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-1-2-0", "name": "TST Card 1-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-1-2-1", "name": "TST Card 1-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-2-1-0", "name": "TST Card 2-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-1-1", "name": "TST Card 2-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-2-2-0", "name": "TST Card 2-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-2-2-1", "name": "TST Card 2-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ],
+          [
+            [
+              { "instance_id": "TST-3-1-0", "name": "TST Card 3-1-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-1-1", "name": "TST Card 3-1-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ],
+            [
+              { "instance_id": "TST-3-2-0", "name": "TST Card 3-2-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+              { "instance_id": "TST-3-2-1", "name": "TST Card 3-2-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+            ]
+          ]
+        ],
+        "current_pack": [
+          [
+            { "instance_id": "TST-0-0-0", "name": "TST Card 0-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-0-0-1", "name": "TST Card 0-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-1-0-0", "name": "TST Card 1-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-1-0-1", "name": "TST Card 1-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-2-0-0", "name": "TST Card 2-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-2-0-1", "name": "TST Card 2-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ],
+          [
+            { "instance_id": "TST-3-0-0", "name": "TST Card 3-0-0", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "" },
+            { "instance_id": "TST-3-0-1", "name": "TST Card 3-0-1", "set_code": "TST", "collector_number": "2", "rarity": "uncommon", "colors": [], "cmc": 0, "type_line": "" }
+          ]
+        ],
+        "current_pack_origins": [0, 1, 2, 3],
+        "pools": [[], [], [], []],
+        "submitted_decks": {},
+        "match_records": {},
+        "pairings": [],
+        "current_round": 0,
+        "created_at": 0,
+        "updated_at": 0
+      }
+    }
+  },
+  "queued_view": {
+    "flow": "FifoAsync",
+    "fifo": {
+      "state": { "session_id": "incarnation-one", "revision": 2, "paused": null, "review_clock": null },
+      "progress": { "completed_steps": 0, "round_completed_steps": 0 },
+      "queue_count": 1,
+      "head": { "pack_id": 2, "opening_seat": 2, "round": 0, "original_size": 2 },
+      "prompt_id": { "session_id": "incarnation-one", "seat": 2, "generation": 1 },
+      "requirements": { "picks": 1, "burns": 0 },
+      "effects": null,
+      "clock": {
+        "target": { "type": "Pick", "prompt_id": { "session_id": "incarnation-one", "seat": 2, "generation": 1 } },
+        "state": { "type": "Running", "deadline_ms": 2000 }
+      }
+    },
+    "status": "Drafting",
+    "kind": "Premier",
+    "source": { "type": "Set", "data": { "layout": { "UniformByRound": { "codes": ["TST"] } } } },
+    "launch_capability": "None",
+    "distribution": "PickAndPass",
+    "commanders_required": 0,
+    "current_pack_number": 0,
+    "pick_number": 0,
+    "pass_direction": "Left",
+    "current_pack": [
+      { "instance_id": "s2-r0-a", "name": "Card a", "set_code": "TST", "collector_number": "1", "rarity": "rare", "colors": [], "cmc": 0, "type_line": "Artifact" },
+      { "instance_id": "s2-r0-z", "name": "Card z", "set_code": "TST", "collector_number": "0", "rarity": "common", "colors": [], "cmc": 0, "type_line": "Artifact" }
+    ],
+    "required_pick_count": 1,
+    "pick_selection_mode": "Direct",
+    "pool": [],
+    "draft_effects": [],
+    "pool_groups": {
+      "color_groups": [],
+      "type_groups": [],
+      "cmc_groups": [],
+      "rarity_groups": [],
+      "type_filter_options": [],
+      "color_filter_options": [],
+      "color_counts": { "white": 0, "blue": 0, "black": 0, "red": 0, "green": 0 },
+      "workspace_capabilities": { "rarity_group_order": ["mythic", "rare", "uncommon", "common", "rarity_other"] },
+      "workspace_row_classification": { "creature_instance_ids": [], "noncreature_instance_ids": [] }
+    },
+    "sealed_packs": null,
+    "seats": [
+      { "fifo_progress": { "completed_steps": 1, "round_completed_steps": 1 }, "seat_index": 0, "display_name": "Player 0", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "Picked", "active_pack_count": 0, "drafted_card_count": 1, "face_up_draft_cards": [] },
+      { "fifo_progress": { "completed_steps": 0, "round_completed_steps": 0 }, "seat_index": 1, "display_name": "Player 1", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "Pending", "active_pack_count": 2, "drafted_card_count": 0, "face_up_draft_cards": [] },
+      { "fifo_progress": { "completed_steps": 0, "round_completed_steps": 0 }, "seat_index": 2, "display_name": "Player 2", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "Pending", "active_pack_count": 1, "drafted_card_count": 0, "face_up_draft_cards": [] },
+      { "fifo_progress": { "completed_steps": 0, "round_completed_steps": 0 }, "seat_index": 3, "display_name": "Player 3", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "Pending", "active_pack_count": 1, "drafted_card_count": 0, "face_up_draft_cards": [] }
+    ],
+    "cards_per_pack": 2,
+    "pack_sizes": [2, 2],
+    "pack_set_codes": ["TST", "TST"],
+    "pack_pick_steps": [2, 2],
+    "pick_steps_per_pack": 2,
+    "pack_count": 2,
+    "min_deck_size": 40,
+    "addable_cards": ["Forest", "Island", "Mountain", "Plains", "Snow-Covered Forest", "Snow-Covered Island", "Snow-Covered Mountain", "Snow-Covered Plains", "Snow-Covered Swamp", "Swamp", "Wastes"],
+    "grantable_commander_fillers": [],
+    "draft_set_codes": [],
+    "timer_remaining_ms": null,
+    "standings": [],
+    "current_round": 0,
+    "next_pairing_round": 1,
+    "tournament_format": "Swiss",
+    "pod_policy": "Competitive",
+    "pairings": [],
+    "match_config": { "match_type": "Bo1" }
+  },
+  "review_view": {
+    "flow": "FifoAsync",
+    "fifo": {
+      "state": {
+        "session_id": "incarnation-one",
+        "revision": 5,
+        "paused": null,
+        "review_clock": { "target": { "type": "Review", "next_round": 1 }, "state": { "type": "Running", "deadline_ms": 2100 } }
+      },
+      "progress": { "completed_steps": 1, "round_completed_steps": 1 },
+      "queue_count": 0,
+      "head": null,
+      "prompt_id": null,
+      "requirements": { "picks": 0, "burns": 0 },
+      "effects": null,
+      "clock": null
+    },
+    "status": "Review",
+    "kind": "Premier",
+    "source": { "type": "Set", "data": { "layout": { "UniformByRound": { "codes": ["TST"] } } } },
+    "launch_capability": "None",
+    "distribution": "PickAndPass",
+    "commanders_required": 0,
+    "current_pack_number": 0,
+    "pick_number": 0,
+    "pass_direction": "Left",
+    "current_pack": null,
+    "required_pick_count": 0,
+    "pick_selection_mode": "Direct",
+    "pool": [
+      { "instance_id": "s2-r0-z", "name": "Card z", "set_code": "TST", "collector_number": "0", "rarity": "common", "colors": [], "cmc": 0, "type_line": "Artifact" }
+    ],
+    "draft_effects": [],
+    "pool_groups": {
+      "color_groups": [
+        {
+          "kind": "colorless",
+          "total": 1,
+          "cards": [
+            {
+              "card": { "instance_id": "s2-r0-z", "name": "Card z", "set_code": "TST", "collector_number": "0", "rarity": "common", "colors": [], "cmc": 0, "type_line": "Artifact" },
+              "count": 1,
+              "instance_ids": ["s2-r0-z"]
+            }
+          ]
+        }
+      ],
+      "type_groups": [
+        {
+          "kind": "artifact",
+          "total": 1,
+          "cards": [
+            {
+              "card": { "instance_id": "s2-r0-z", "name": "Card z", "set_code": "TST", "collector_number": "0", "rarity": "common", "colors": [], "cmc": 0, "type_line": "Artifact" },
+              "count": 1,
+              "instance_ids": ["s2-r0-z"]
+            }
+          ]
+        }
+      ],
+      "cmc_groups": [
+        {
+          "kind": "mana_value0",
+          "total": 1,
+          "cards": [
+            {
+              "card": { "instance_id": "s2-r0-z", "name": "Card z", "set_code": "TST", "collector_number": "0", "rarity": "common", "colors": [], "cmc": 0, "type_line": "Artifact" },
+              "count": 1,
+              "instance_ids": ["s2-r0-z"]
+            }
+          ]
+        }
+      ],
+      "rarity_groups": [
+        {
+          "kind": "common",
+          "total": 1,
+          "cards": [
+            {
+              "card": { "instance_id": "s2-r0-z", "name": "Card z", "set_code": "TST", "collector_number": "0", "rarity": "common", "colors": [], "cmc": 0, "type_line": "Artifact" },
+              "count": 1,
+              "instance_ids": ["s2-r0-z"]
+            }
+          ]
+        }
+      ],
+      "type_filter_options": ["artifact"],
+      "color_filter_options": ["colorless"],
+      "color_counts": { "white": 0, "blue": 0, "black": 0, "red": 0, "green": 0 },
+      "workspace_capabilities": { "rarity_group_order": ["mythic", "rare", "uncommon", "common", "rarity_other"] },
+      "workspace_row_classification": { "creature_instance_ids": [], "noncreature_instance_ids": ["s2-r0-z"] }
+    },
+    "sealed_packs": null,
+    "seats": [
+      { "fifo_progress": { "completed_steps": 1, "round_completed_steps": 1 }, "seat_index": 0, "display_name": "Player 0", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "NotDrafting", "active_pack_count": 0, "drafted_card_count": 1, "face_up_draft_cards": [] },
+      { "fifo_progress": { "completed_steps": 1, "round_completed_steps": 1 }, "seat_index": 1, "display_name": "Player 1", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "NotDrafting", "active_pack_count": 0, "drafted_card_count": 1, "face_up_draft_cards": [] },
+      { "fifo_progress": { "completed_steps": 1, "round_completed_steps": 1 }, "seat_index": 2, "display_name": "Player 2", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "NotDrafting", "active_pack_count": 0, "drafted_card_count": 1, "face_up_draft_cards": [] },
+      { "fifo_progress": { "completed_steps": 1, "round_completed_steps": 1 }, "seat_index": 3, "display_name": "Player 3", "is_bot": false, "connected": true, "has_submitted_deck": false, "pick_status": "NotDrafting", "active_pack_count": 0, "drafted_card_count": 1, "face_up_draft_cards": [] }
+    ],
+    "cards_per_pack": 0,
+    "pack_sizes": [1, 1],
+    "pack_set_codes": ["TST", "TST"],
+    "pack_pick_steps": [1, 1],
+    "pick_steps_per_pack": 0,
+    "pack_count": 2,
+    "min_deck_size": 40,
+    "addable_cards": ["Forest", "Island", "Mountain", "Plains", "Snow-Covered Forest", "Snow-Covered Island", "Snow-Covered Mountain", "Snow-Covered Plains", "Snow-Covered Swamp", "Swamp", "Wastes"],
+    "grantable_commander_fillers": [],
+    "draft_set_codes": [],
+    "timer_remaining_ms": null,
+    "standings": [],
+    "current_round": 0,
+    "next_pairing_round": 1,
+    "tournament_format": "Swiss",
+    "pod_policy": "Competitive",
+    "pairings": [],
+    "match_config": { "match_type": "Bo1" }
+  }
+}

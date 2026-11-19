@@ -1,4 +1,6 @@
-import type { FormatConfig, MatchType } from "../adapter/types";
+import type { FormatConfig, MatchType, PlayerId } from "../adapter/types";
+import { notifyActiveGameChange } from "./activeGameChange";
+import { sameFullSessionKey } from "./fullSessionKey";
 
 export const WS_SESSION_STORAGE_KEY = "phase-ws-session";
 export const WS_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
@@ -17,6 +19,7 @@ export interface FullSessionKey {
 
 export interface WsSessionData {
   gameCode: string;
+  playerId?: PlayerId;
   playerToken: string;
   fullKey: FullSessionKey;
   serverUrl: string;
@@ -62,34 +65,39 @@ export function loadWsSession(): WsSessionData | null {
   }
 }
 
-type WsSessionIdentity = Pick<WsSessionData, "fullKey" | "serverUrl" | "playerToken">;
+export type WsSessionIdentity = Pick<WsSessionData, "fullKey" | "serverUrl" | "playerToken">;
 
-function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
+export function matchesStoredWsSession(expected: WsSessionIdentity): boolean {
   const current = loadWsSession();
   return current !== null
     && current.serverUrl === expected.serverUrl
-    && current.fullKey.game_code === expected.fullKey.game_code
-    && current.fullKey.generation === expected.fullKey.generation
+    && sameFullSessionKey(current.fullKey, expected.fullKey)
     && current.playerToken === expected.playerToken;
 }
 
+// The online session decides what the resume list offers for an online game
+// (resume, retained result, or nothing), so every landed write notifies it.
 export function saveWsSession(session: WsSessionData, expected?: WsSessionIdentity): void {
+  if (expected && !matchesStoredWsSession(expected)) return;
   try {
-    if (expected && !matchesStoredWsSession(expected)) return;
     localStorage.setItem(WS_SESSION_STORAGE_KEY, JSON.stringify(session));
     pageSession = null;
   } catch {
     // A blocked/quota-limited store keeps the session for this page only.
     pageSession = session;
   }
+  notifyActiveGameChange();
 }
 
 export function clearWsSession(expected?: WsSessionIdentity): void {
   if (expected && !matchesStoredWsSession(expected)) return;
+  let held = pageSession !== null;
   pageSession = null;
   try {
+    held ||= localStorage.getItem(WS_SESSION_STORAGE_KEY) !== null;
     localStorage.removeItem(WS_SESSION_STORAGE_KEY);
   } catch {
     // Nothing else can be done if the browser refuses storage access.
   }
+  if (held) notifyActiveGameChange();
 }

@@ -126,3 +126,23 @@ describe("DeckList import modal", () => {
     ]);
   });
 });
+
+describe("DeckList export", () => {
+  it("leaves export to the deck builder toolbar", () => {
+    render(
+      <DeckList
+        deck={{ main: [{ name: "Lightning Bolt", count: 4 }], sideboard: [] }}
+        onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
+        onMoveCard={vi.fn()}
+        onImport={vi.fn()}
+        cardDataCache={new Map()}
+        groupMode="type"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Import" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /export/i })).not.toBeInTheDocument();
+  });
+});

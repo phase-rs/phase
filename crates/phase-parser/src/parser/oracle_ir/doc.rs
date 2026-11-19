@@ -173,6 +173,9 @@ impl OracleUnitSource {
 /// One source-addressed parsed item.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct OracleItemIr {
+    /// Execute-root records for an already-lowered spell/activation payload.
+    #[serde(skip)]
+    pub(crate) ability_history: Vec<super::history_provenance::HistoryProvenance>,
     pub(crate) id: OracleItemId,
     pub(crate) source: OracleUnitSource,
     pub(crate) node: OracleNodeIr,
@@ -881,6 +884,7 @@ impl OracleDocBuilder {
         self.items.insert(
             key,
             OracleItemIr {
+                ability_history: Vec::new(),
                 id,
                 source: slot.source,
                 node,
@@ -936,6 +940,19 @@ impl OracleDocBuilder {
         // `spells_emitted` can never name an id absent from `items` — `emit` inserts
         // both together, and this is the only removal path.
         self.items.remove(&key)
+    }
+
+    /// Attach parser-only execute-root records to an already-emitted ability item.
+    pub(crate) fn set_ability_history(
+        &mut self,
+        id: OracleItemId,
+        history: Vec<super::history_provenance::HistoryProvenance>,
+    ) {
+        self.items
+            .values_mut()
+            .find(|item| item.id == id)
+            .expect("history is attached to an emitted item")
+            .ability_history = history;
     }
 
     /// Peek the most-recently-EMITTED spell node without removing it — insertion
@@ -1258,7 +1275,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::StartYourEngines { .. } => {}
         Effect::ChangeSpeed { .. } => {}
         Effect::DealDamage { .. } => {}
-        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::ApplyPostReplacementDamage { .. } | Effect::ResumeDamageBatch { .. } => {}
         Effect::EachDealsDamageEqualToPower { .. } => {}
         Effect::EachSourceDealsDamage { .. } => {}
         Effect::Draw { .. } => {}
@@ -1383,10 +1400,11 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::PreventDamage { .. } => {}
         Effect::CreateDamageReplacement { .. } => {}
         // Nested-definition boundary — intentionally NOT recursed. Both carry a
-        // nested substitute (`replacement_effect: Box<Effect>`) parsed by
-        // `parse_effect` (the calls in `oracle_replacement::parse_oneshot_draw_replacement`
-        // and `oracle_replacement::parse_planar_die_planeswalk_replacement`), which threads a bare
-        // `ParseContext::default()` (constructed in `oracle_effect::parse_effect`) — an index-less ctx.
+        // nested substitute parsed with a fresh, index-less context:
+        // `oracle_replacement::parse_oneshot_draw_replacement` via
+        // `parse_effect_chain` (a `Box<AbilityDefinition>`), and
+        // `oracle_replacement::parse_planar_die_planeswalk_replacement` via
+        // `parse_effect` (a `Box<Effect>`, `ParseContext::default()`).
         // `parse_has_this_ability` reads `ctx.current_{trigger,ability}_index`, both
         // `None` there, so it declines and no `RetainPrinted*FromSource` can be
         // produced past this boundary; the `=> {}` is correct, not a missed carrier.
@@ -1490,12 +1508,14 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::RemoveFromCombat { .. } => {}
         Effect::BecomeBlocked { .. } => {}
         Effect::Conjure { .. } => {}
+        Effect::CreateCardCopyByName { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::DraftFromSpellbook { .. } => {}
         // CR 707.2c (Metamorphic Alteration): no nested printed-slot carrier —
         // the copy is materialized from the chosen donor at resolution.
         Effect::ChoosePermanent { .. } => {}
+        Effect::HordePlayCard { .. } => {}
         Effect::Unimplemented { .. } => {}
     }
 }

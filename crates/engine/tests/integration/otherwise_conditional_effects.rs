@@ -11,7 +11,7 @@
 //!     "if ~ is suspected") → Target/Source `MatchesFilter` (CR 611.2b, CR 701.60b);
 //!   - negated saddled designation ("if ~ isn't saddled") → Not(SourceMatchesFilter)
 //!     against `FilterProp::IsSaddled` (CR 702.171b);
-//!   - "they lost life this turn" → `LifeLostThisTurn { Target }` (CR 119.3, CR 115.1);
+//!   - "they lost life this turn" → `LifeLost { Target }` (CR 119.3, CR 115.1);
 //!   - "you don't control a Snail" → Not(IsPresent) (already supported).
 //!
 //! Each test drives BOTH branches through the real apply() pipeline so reverting
@@ -1047,7 +1047,12 @@ fn drive_rent_end_step(
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 saw_payment_prompt = true;
-                if runner.act(GameAction::DecideOptionalCost { pay }).is_err() {
+                if runner
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }

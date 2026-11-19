@@ -987,7 +987,7 @@ fn snapshot_harold_and_bob_first_numens() {
 fn inverted_as_long_as_flash_grant_attaches_condition() {
     // CR 601.3b + CR 702.8a + CR 611.3a: The inverted conditional flash-grant
     // "As long as <cond>, you may cast [type] spells as though they had flash"
-    // must lower to a `CastWithKeyword { Flash }` static carrying the condition
+    // must lower to a `CastWithFlash` static carrying the condition
     // — not silently collapse into a bare conditionless Continuous fallback.
     let result = parse(
         "As long as it's your turn, you may cast creature spells as though they had flash.",
@@ -1000,21 +1000,14 @@ fn inverted_as_long_as_flash_grant_attaches_condition() {
     let static_def = result
         .statics
         .iter()
-        .find(|static_def| {
-            matches!(
-                static_def.mode,
-                StaticMode::CastWithKeyword {
-                    keyword: Keyword::Flash
-                }
-            )
-        })
-        .expect("expected inverted flash grant to lower to CastWithKeyword { Flash }");
+        .find(|static_def| matches!(static_def.mode, StaticMode::CastWithFlash))
+        .expect("expected inverted flash grant to lower to CastWithFlash");
 
     // "it's your turn" is recognized by parse_static_condition → DuringYourTurn,
     // not just a generic Unrecognized fallback.
     assert!(
         matches!(static_def.condition, Some(StaticCondition::DuringYourTurn)),
-        "expected DuringYourTurn condition on the CastWithKeyword static, \
+        "expected DuringYourTurn condition on the CastWithFlash static, \
          got condition: {:#?}",
         static_def.condition
     );
@@ -1086,13 +1079,13 @@ fn token_grant_spells_no_longer_misroute_to_static() {
     }
 }
 
-/// Negative control: Brood Birthing's "have \"…\"" grant marker is OUTSIDE the
-/// quoted span, so masking must NOT change its parse — it still lowers to its
-/// functional `GrantAbility` static (the sacrifice-for-mana grant). This is the
-/// invariant the masking fix must preserve.
+/// CR 608.2c + CR 111.3: Brood Birthing is a conditional instruction of the
+/// spell, not a static. With a Spawn: three Spawn tokens; otherwise one "of
+/// those tokens". Both branches create the token with the ability text the
+/// creating effect defines ("They have …"), held once, with no leftover grant.
 #[test]
-fn brood_birthing_grant_static_unchanged_by_masking() {
-    use engine::types::ability::ContinuousModification;
+fn brood_birthing_parses_as_conditional_token_chain() {
+    use engine::types::ability::{AbilityCondition, TypeFilter};
 
     let result = parse(
         "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn \
@@ -1104,22 +1097,38 @@ fn brood_birthing_grant_static_unchanged_by_masking() {
         &[],
     );
 
-    assert_eq!(
-        result.statics.len(),
-        1,
-        "Brood Birthing keeps exactly one static (the GrantAbility grant): {:#?}",
-        result.statics
-    );
-    let grants_ability = matches!(result.statics[0].mode, StaticMode::Continuous)
-        && result.statics[0]
-            .modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }));
+    assert!(result.statics.is_empty(), "{:#?}", result.statics);
+    assert_eq!(result.abilities.len(), 1, "{:#?}", result.abilities);
+    let spell = &result.abilities[0];
+    let Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    }) = &spell.condition
+    else {
+        panic!("expected a control-a-Spawn check: {:?}", spell.condition);
+    };
     assert!(
-        grants_ability,
-        "Brood Birthing's static must remain the functional GrantAbility grant, \
-         got: {:#?}",
-        result.statics[0]
+        matches!(filter, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You)
+            && ["Eldrazi", "Spawn"].iter().all(|s| tf.type_filters.contains(&TypeFilter::Subtype((*s).to_string())))),
+        "an Eldrazi Spawn you control: {filter:?}"
+    );
+    let spawn = |effect: &Effect, n: i32| {
+        matches!(effect, Effect::Token { name, count: QuantityExpr::Fixed { value }, static_abilities, .. }
+            if name == "Eldrazi Spawn" && *value == n && static_abilities.len() == 1
+                && static_abilities[0].modifications.iter()
+                    .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })))
+    };
+    assert!(spawn(&spell.effect, 3), "{:?}", spell.effect);
+    assert!(spell.sub_ability.is_none(), "{:?}", spell.sub_ability);
+    let otherwise = spell.else_ability.as_deref().expect("Otherwise branch");
+    assert!(spawn(&otherwise.effect, 1), "{:?}", otherwise.effect);
+    assert!(
+        otherwise.sub_ability.is_none(),
+        "{:?}",
+        otherwise.sub_ability
     );
 }
 

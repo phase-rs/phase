@@ -17,7 +17,7 @@ use engine::types::game_state::{
     CastPaymentMode, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -345,4 +345,90 @@ fn cait_sith_reflexive_survives_save_and_restore_at_its_target_prompt() {
     resolve_stack(&mut restored);
     assert_eq!(restored.state().objects[&bear].power, Some(5));
     assert_eq!(zone(&restored, top.unwrap()), Zone::Exile);
+}
+
+#[test]
+fn cait_sith_scry_bottom_exiles_next_card_and_allows_cast_from_exile() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_creature_from_oracle(P0, "Cait Sith, Fortune Teller", 3, 3, CAIT_SITH);
+    let bear = s.add_creature(P0, "Bear", 2, 2).id();
+    for _ in 0..4 {
+        s.add_basic_land(P0, ManaColor::Red);
+    }
+    // Insert Four Drop first so One Drop sits on top of the library.
+    let four_drop = s
+        .add_spell_to_library_top(P0, "Four Drop", true)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let one_drop = s
+        .add_spell_to_library_top(P0, "One Drop", false)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let mut runner = s.build();
+
+    let mut saw_scry = false;
+    let mut prompted = false;
+    for _ in 0..24 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ScryChoice { cards, .. } => {
+                saw_scry = true;
+                assert_eq!(cards, vec![one_drop], "reach: scry 1 shows the top card");
+                // CR 701.22a: `SelectCards` lists cards to keep on top; empty puts One Drop on bottom.
+                runner
+                    .act(GameAction::SelectCards { cards: vec![] })
+                    .expect("bottom the scried card");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                prompted = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    assert!(saw_scry, "reach: scry prompt opened");
+    assert!(prompted, "reach: reflexive target prompt opened");
+    assert_eq!(zone(&runner, one_drop), Zone::Library);
+    assert_eq!(zone(&runner, four_drop), Zone::Exile);
+
+    choose(&mut runner, bear);
+    resolve_stack(&mut runner);
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(6),
+        "+X/+0 uses the exiled Four Drop (MV 4), not the bottomed One Drop"
+    );
+
+    // CR 611.2a + CR 601.2: "You may play that card this turn" lasts until end of
+    // turn, so the exiled card can be cast now, paying its real mana cost.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "reach: P0 holds priority after reflexive resolves"
+    );
+    let four_drop_card_id = runner.state().objects[&four_drop].card_id;
+    let cast_result = runner
+        .act(GameAction::CastSpell {
+            object_id: four_drop,
+            card_id: four_drop_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the exiled Four Drop");
+    assert!(
+        cast_result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ManaExpended {
+                player_id,
+                amount_spent,
+                ..
+            } if *player_id == P0 && *amount_spent == 4
+        )),
+        "reach: casting Four Drop paid 4 mana"
+    );
+    resolve_stack(&mut runner);
+    assert_eq!(zone(&runner, four_drop), Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
 }

@@ -34,7 +34,7 @@ fn spell_meta(types: &[&str], cost: &ManaCost) -> SpellMeta {
         types: types.iter().map(|t| t.to_string()).collect(),
         subtypes: Vec::new(),
         keyword_kinds: Vec::new(),
-        cast_from_zone: None,
+        cast_origin: None,
         mana_value: Some(cost.mana_value()),
         color_count: None,
         colors: Vec::new(),

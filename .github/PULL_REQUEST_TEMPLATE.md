@@ -46,7 +46,7 @@ Method: /engine-implementer
 
 - `<exact command or CI check>` — <exact result>
 
-<!-- Commands run and exact results. Every required box must be checked. -->
+<!-- Commands run and exact results. Every required box must be checked; the Final review-impl box stays unchecked when a finding is listed as unresolved under Validation Failures. -->
 
 ## Gate A
 
@@ -60,6 +60,7 @@ Gate A PASS head=<40-hex-sha> base=<40-hex-sha>
 ## Final review-impl
 
 Final review-impl PASS head=<40-hex-sha>
+<!-- With a finding listed as unresolved under Validation Failures (AI-CONTRIBUTOR.md §5), write instead: Final review-impl UNRESOLVED head=<40-hex-sha> -->
 
 ## Claimed parse impact
 
@@ -74,7 +75,7 @@ None.
 ## Validation Failures
 
 None.
-<!-- Replace with each unresolved validation failure or shipped residual finding, with its evidence and follow-up. -->
+<!-- Replace with each unresolved finding or disclosed item, with its evidence. -->
 
 ## CI Failures
 

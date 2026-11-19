@@ -155,7 +155,7 @@ fn run_k(def: AbilityDefinition, picks: &[Pick], elim: Option<usize>, kicked: bo
                     .expect("t");
             }
             WaitingFor::OptionalCostChoice { .. } => {
-                r.act(GameAction::DecideOptionalCost { pay: true })
+                r.act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("kick");
             }
             WaitingFor::ManaPayment { .. } => {
@@ -349,6 +349,8 @@ fn illegal_declared_payer_is_not_prompted() {
 
 fn exile_head() -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::Typed(TypedFilter::creature()),
@@ -482,7 +484,14 @@ fn curse_token(attach_to: TargetFilter) -> Effect {
         enters_attacking: false,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
-        static_abilities: vec![],
+        // CR 111.3 + CR 702.5a: "The token has enchant player", as the export
+        // carries it — without an enchant restriction the Aura cannot legally
+        // enchant a player.
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::Player),
+            }])],
         enter_with_counters: vec![],
     }
 }

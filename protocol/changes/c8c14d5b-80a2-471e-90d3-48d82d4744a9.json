@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ChangeZone library_shuffle TerminalShuffle carries batched graveyard delivery authority in ability definitions. Older full-game and P2P peers silently drop the optional field and resume with per-object shuffles, producing extra shuffle events and trigger opportunities; refuse that silent capability loss."
+}

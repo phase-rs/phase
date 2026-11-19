@@ -580,6 +580,7 @@ fn reveal_contraption(
     state.last_revealed_ids = vec![object_id];
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(&[object_id]),
         card_ids: vec![object_id],
         card_names: vec![card_name],
     });

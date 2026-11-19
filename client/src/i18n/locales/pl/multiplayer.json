@@ -253,6 +253,7 @@
     "bo3": "BO3",
     "bo3Note": "BO3 jest dostępne tylko dla meczów 2-osobowych.",
     "commanderDamage": "Obrażenia od dowódcy",
+    "poisonCounters": "Znaczniki trucizny",
     "playerSeats": "Miejsca graczy",
     "seat": "Miejsce {{number}}",
     "youHost": "Ty (gospodarz)",

@@ -221,3 +221,70 @@ fn bolas_citadel_library_top_cast_enters_targeting_not_mana_payment() {
         other => panic!("unexpected waiting state after starting library-top cast: {other:?}"),
     }
 }
+
+/// CR 107.3b: Citadel casts March of Reckless Joy paying neither its mana cost nor an alternative
+/// cost that includes X, so exiling a red card for March's additional cost leaves X at 0.
+#[test]
+fn bolas_citadel_march_of_reckless_joy_pitch_leaves_x_zero() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::game_state::{PayCostKind, StackEntryKind};
+    use engine::types::zones::Zone;
+
+    let db = crate::support::shared_card_db().expect("the integration card fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    scenario.add_real_card(P0, "Bolas's Citadel", Zone::Battlefield, db);
+    let march = scenario.add_real_card(P0, "March of Reckless Joy", Zone::Library, db);
+    let library_rest: Vec<_> = (0..5)
+        .map(|_| scenario.add_real_card(P0, "Hill Giant", Zone::Library, db))
+        .collect();
+    let pitched = scenario.add_real_card(P0, "Hill Giant", Zone::Hand, db);
+
+    let mut runner: GameRunner = scenario.build();
+    assert_eq!(runner.state().players[0].library.front(), Some(&march));
+    let card_id = runner.state().objects[&march].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: march,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Citadel casts March from the library top");
+
+    let mut pitched_offered = false;
+    loop {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => break,
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone { .. },
+                choices,
+                ..
+            } if choices.contains(&pitched) => {
+                pitched_offered = true;
+                GameAction::SelectCards {
+                    cards: vec![pitched],
+                }
+            }
+            other => panic!("unexpected prompt while casting March: {other:?}"),
+        };
+        runner.act(action).expect("answer March's cast prompt");
+    }
+    assert!(pitched_offered, "March's exile cost must be offered");
+    assert_eq!(runner.state().objects[&pitched].zone, Zone::Exile);
+    let Some(StackEntryKind::Spell {
+        ability: Some(ability),
+        ..
+    }) = runner.state().stack.last().map(|entry| &entry.kind)
+    else {
+        panic!("expected March of Reckless Joy on the stack");
+    };
+    assert_eq!(ability.chosen_x.unwrap_or(0), 0);
+    assert_eq!(runner.life(P0), 19);
+
+    runner.advance_until_stack_empty();
+    for id in library_rest {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Library);
+    }
+}

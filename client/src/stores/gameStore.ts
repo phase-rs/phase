@@ -130,7 +130,7 @@ export const GAME_MODE_TRAITS: Record<GameMode, GameModeTraits> = {
 
 /** True when the authoritative engine state lives off this client — i.e. the
  *  authority is REMOTE. Such a client must not rewind its own view
- *  (`stateHistory`/`undo`); see `WebSocketAdapter.restoreState`, which rejects
+ *  (`stateHistory`/`undoLastAction`); see `WebSocketAdapter.restoreState`, which rejects
  *  it at the transport. This is deliberately NOT "is this multiplayer":
  *  desktop solo-vs-AI (`native-ai`) is a wire-authoritative game with no other
  *  humans in it, and every one of this predicate's seven call sites wants the
@@ -194,6 +194,25 @@ export function seatSource(mode: GameMode | null): SeatSource {
   return mode === null ? "seat-zero" : GAME_MODE_TRAITS[mode].seat;
 }
 
+/**
+ * One step of the undo ring: a trusted pre-action checkpoint, and where the game
+ * log stood when the action it precedes was committed.
+ *
+ * The log lives in this store, not in the engine state a restore puts back, so
+ * undo rewinds it itself. Without the position, the log would keep the plays an
+ * undo took back, and so would the history an LLM seat's prompt is built from.
+ */
+export interface UndoCheckpoint {
+  /** The engine-authored trusted envelope `undoLastAction` restores. */
+  state: PersistedGameState;
+  /**
+   * The `seq` the action it precedes gave its first log entry when it was
+   * committed (the next seq, if it logged none). Undo keeps only the entries
+   * below it.
+   */
+  logSeq: number;
+}
+
 interface GameStoreState {
   gameId: string | null;
   gameMode: GameMode | null;
@@ -244,7 +263,17 @@ interface GameStoreState {
   /** Viewer-scoped interaction projection from the same engine snapshot. */
   viewerInteraction: ViewerInteraction | null;
   /** Undo ring: engine-authored trusted checkpoints, never screen projections. */
-  stateHistory: PersistedGameState[];
+  stateHistory: UndoCheckpoint[];
+  /**
+   * The undo in flight, from the moment `undoLastAction` begins it, before its
+   * first await, until its board is committed or its failure handled; `null`
+   * otherwise. Meanwhile the store still shows the state being undone while
+   * the engine may already hold the restored one, so no choice made on that
+   * board reaches the engine (standing preferences still go through), and
+   * the AI controller drops the decision under way and starts none.
+   * Transient: `reset` clears it.
+   */
+  pendingUndoId: number | null;
   /** Debug rewind targets: trusted envelopes for the same reason. */
   turnCheckpoints: PersistedGameState[];
   /**
@@ -265,13 +294,13 @@ interface GameStoreState {
   restoredStackAutomation: RestoredStackAutomationPresentation | null;
   /**
    * Pure-data carrier for the starting-player d20 contest (CR 103.1): the
-   * game-start `DieRolled` batch plus the engine's authoritative starting
-   * player. Set once by `initGame` (null when the starter was chosen
-   * explicitly). A GamePage effect consumes it to drive the dice overlay and
+   * game-start batch carrying the `StartingPlayerContest` event, whose
+   * `winner` the overlay reports. Set once by `initGame` (null when the starter
+   * was chosen explicitly). A GamePage effect consumes it to drive the dice overlay and
    * clears it via `clearStartingContest`. The store holds only data — it never
    * calls the UI store, keeping the layer boundary clean.
    */
-  startingContest: { events: GameEvent[]; startingPlayer: PlayerId } | null;
+  startingContest: { events: GameEvent[] } | null;
   /**
    * PlayerIds bound to AI controllers this game. Client-owned lobby/session
    * config (NOT game-state derivation): set at game init from the resolved AI
@@ -349,7 +378,6 @@ interface GameStoreActions {
    */
   resumeNativeSolo: (gameId: string, adapter: EngineAdapter) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
-  undo: () => Promise<void>;
   /**
    * Replace the server-published rollback targets. Only `dispatch.ts` calls
    * this, and only from inside its generation gate — a superseded remote update
@@ -393,8 +421,13 @@ interface GameStoreActions {
       events?: GameEvent[];
       /** Seq-stamped and appended to `logHistory`. Applied even when the pair is dropped. */
       logEntries?: GameLogEntry[];
-      /** Undo checkpoints. Applied even when the pair is dropped. */
-      stateHistory?: PersistedGameState[];
+      /**
+       * The trusted pre-action checkpoint this commit's action can be undone
+       * to. Pushed onto the undo ring (capped at `MAX_UNDO_HISTORY`) with the
+       * log position this commit's own entries start at. Applied even when the
+       * pair is dropped.
+       */
+      undoCheckpoint?: PersistedGameState;
       /**
        * Site-specific fields applied in the SAME `set()` — but only when the
        * pair commit is accepted, and after the base commit + history handling,
@@ -422,6 +455,21 @@ export function nextGameSessionGeneration(): number {
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
+
+/**
+ * Whether an undo would take an action back now: this client owns the engine
+ * state, the ring holds a checkpoint to restore, and no undo is running yet.
+ * `undoLastAction` asks before it abandons the work in flight, so a press with
+ * nothing to undo leaves that work alone.
+ */
+export function canUndo(store: GameStore): store is GameStore & { adapter: EngineAdapter } {
+  return (
+    store.adapter !== null
+    && store.pendingUndoId === null
+    && !isAuthorityRemote(store.gameMode)
+    && store.stateHistory.length > 0
+  );
+}
 
 /**
  * Seed the store from a server-authoritative adapter whose `initialize()` has
@@ -483,6 +531,7 @@ const initialState: GameStoreState = {
   stuckDiagnostic: null,
   viewerInteraction: null,
   stateHistory: [],
+  pendingUndoId: null,
   turnCheckpoints: [],
   rewindTargets: [],
   lobbyProgress: null,
@@ -537,7 +586,17 @@ export const useGameStore = create<GameStore>()(
                 nextLogSeq,
               }
             : {}),
-          ...(opts?.stateHistory ? { stateHistory: opts.stateHistory } : {}),
+          ...(opts?.undoCheckpoint
+            ? {
+                // The position is read in the same update that stamps this
+                // commit's entries, so it is exactly where they begin: undoing
+                // the action takes back its own lines and every later one.
+                stateHistory: [
+                  ...prev.stateHistory,
+                  { state: opts.undoCheckpoint, logSeq: prev.nextLogSeq },
+                ].slice(-MAX_UNDO_HISTORY),
+              }
+            : {}),
           // 3. Site-specific fields last, so an init/resume/restore reset wins
           //    over the history append above.
           ...(accepted ? opts?.extraState : undefined),
@@ -591,20 +650,15 @@ export const useGameStore = create<GameStore>()(
       }));
       // CR 103.1: capture the starting-player d20 contest as pure data so the
       // dice overlay can animate the engine's authoritative result. Present only
-      // when the engine rolled (random starter); empty for an explicit
-      // play/draw choice. `current_starting_player` is the engine's pick — never
-      // recomputed from the rolls on the frontend.
+      // when the engine rolled; absent for an explicit play/draw choice. The
+      // overlay reads the roll winner from the event itself — never recomputed from
+      // the rolls, and never taken from `current_starting_player`.
       const initEvents = initResult.events ?? [];
       // The engine emits a single StartingPlayerContest event (round structure +
       // winner) at the head of the game-start batch when it ran a roll-off
       // (random starter); absent for an explicit play/draw choice.
       const rolledStart = initEvents[0]?.type === "StartingPlayerContest";
-      const startingContest = rolledStart
-        ? {
-            events: initEvents,
-            startingPlayer: state.current_starting_player ?? state.active_player,
-          }
-        : null;
+      const startingContest = rolledStart ? { events: initEvents } : null;
       get().commitEngineSnapshot(snapshot, {
         extraState: {
           gameId,
@@ -671,9 +725,16 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
-      const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
+      const { adapter, gameState, gameId, gameMode, gameSessionGeneration, pendingUndoId } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
+      }
+      // An action chosen on the board an undo is taking back must not reach
+      // the engine, which may already hold the restored game (see
+      // `undoLastAction` in `dispatch.ts`).
+      if (pendingUndoId !== null) {
+        console.info(`[undo] dispatch refused during an undo: ${submittedAction.type}`);
+        return [];
       }
 
       // Save current state for undo. Three conditions must hold:
@@ -726,42 +787,19 @@ export const useGameStore = create<GameStore>()(
       // replacement game's history.
       const sessionUnchanged =
         current.adapter === adapter && current.gameSessionGeneration === gameSessionGeneration;
-      const stateHistory = checkpoint && sessionUnchanged
-        ? [...current.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
+      const undoCheckpoint = checkpoint && sessionUnchanged
+        ? checkpoint
         : undefined;
       get().commitEngineSnapshot(snapshot, {
         events: result.events,
         logEntries: result.log_entries ?? [],
-        stateHistory,
+        undoCheckpoint,
         extraState: { restoredStackAutomation: null },
       });
 
       if (gameId) void saveAuthoritativeGame(gameId, adapter, snapshot.state);
 
       return result.events;
-    },
-
-    undo: async () => {
-      const { stateHistory, adapter, gameMode } = get();
-      if (isAuthorityRemote(gameMode)) return;
-      if (stateHistory.length === 0 || !adapter) return;
-
-      const previous = stateHistory[stateHistory.length - 1];
-
-      // Sync engine state with the restored trusted checkpoint
-      await adapter.restoreState(previous);
-      // Commit the snapshot's OWN state, not `previous`: post-restore the engine
-      // is the source of truth, and taking both halves from one snapshot is what
-      // keeps the pair coherent. Newest-by-construction, so it passes the gate.
-      const snapshot = await adapter.getSnapshot();
-
-      get().commitEngineSnapshot(snapshot, {
-        extraState: {
-          events: [],
-          stateHistory: stateHistory.slice(0, -1),
-          restoredStackAutomation: null,
-        },
-      });
     },
 
     setRewindTargets: (targets) => {

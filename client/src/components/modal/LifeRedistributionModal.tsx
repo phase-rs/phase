@@ -37,7 +37,6 @@ export function LifeRedistributionModal() {
       title={t("redistributeLifeTotals.title")}
       subtitle={t("redistributeLifeTotals.subtitle")}
       size="md"
-      scrollable
     >
       <div className="px-3 py-3 lg:px-5 lg:py-5">
         <div className="flex flex-col gap-2">
