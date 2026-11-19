@@ -1820,6 +1820,10 @@ fn park_portions_behind_paused_rider(
 
 /// One portion of a two-phase damage batch before its replacement (CR 120.4b): already
 /// through the pre-replacement gate, or not yet.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "portions already live in a Vec; keep the gated event inline to avoid a heap allocation per portion"
+)]
 enum BatchPortion {
     Gated {
         ctx: DamageContext,

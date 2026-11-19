@@ -6895,7 +6895,10 @@ mod r4b_staged_elimination_tests {
         }];
         let parent_group = crate::game::triggers::allocate_logical_zone_change_group(
             &mut state,
-            &crate::types::game_state::ZoneChangeAnnouncement::all(&[host, ordinary], Zone::Library),
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[host, ordinary],
+                Zone::Library,
+            ),
         );
         let parent_group_id = parent_group.logical_group_id;
         let event = members[0].approved_event.clone().unwrap();

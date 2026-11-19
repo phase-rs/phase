@@ -2926,6 +2926,7 @@ impl ResolutionStack {
     }
 
     /// Access only the active owner or the explicitly linked immediate parent.
+    #[cfg(test)]
     pub(crate) fn batch_delivery_owner_mut(
         &mut self,
         group: LogicalZoneChangeGroupId,
