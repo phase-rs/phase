@@ -6286,7 +6286,10 @@ fn parse_shared_subject_has_keyword(input: &str) -> OracleResult<'_, StaticCondi
         .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
     let filter = add_filter_property(
         TargetFilter::Or {
-            filters: vec![first, second],
+            filters: vec![
+                inject_battlefield_presence(first),
+                inject_battlefield_presence(second),
+            ],
         },
         FilterProp::WithKeyword { value: keyword },
     );

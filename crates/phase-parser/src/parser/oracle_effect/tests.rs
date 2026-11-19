@@ -104876,9 +104876,14 @@ fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
                         TargetFilter::Typed(
                             TypedFilter::creature()
                                 .controller(ControllerRef::You)
-                                .properties(vec![FilterProp::WithKeyword {
-                                    value: expected_keyword.clone(),
-                                }]),
+                                .properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
                         ),
                         TargetFilter::Typed(
                             TypedFilter::card()
