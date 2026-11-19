@@ -1126,10 +1126,6 @@ fn resolve_mana_types_impl(
     }
 }
 
-/// CR 106.1 + CR 109.1: Shared helper returning the distinct colors (W/U/B/R/G)
-/// present among permanents matching `filter`. Colorless permanents contribute
-/// nothing. Used by both the mana ability resolver and `mana_sources` so that
-/// cost-payment and direct activation see the same option set.
 /// CR 202.2c + CR 106.5: Colors of the object identified by `scope`, for an
 /// `AnyCombinationOfObjectColors` mana production (Omnath, Locus of All). Reads
 /// the object's current `color` (zone-independent — correct after the revealed
@@ -1189,13 +1185,29 @@ pub(crate) fn distinct_colors<'a>(
     result
 }
 
+/// CR 106.1 + CR 109.1: the distinct colors (W/U/B/R/G) among the objects
+/// matching `filter`, in the zone `filter.extract_in_zone()` names (the
+/// battlefield when it names none). Colorless objects contribute nothing.
+/// The mana ability resolver, `mana_abilities::mana_choice_prompt`,
+/// `mana_sources` and the could-produce walker all read it, so cost payment,
+/// direct activation and the walker see the same option set.
+///
+/// CR 400.3 + CR 404.1 + CR 108.4a + CR 109.5: a card in a hand, library or
+/// graveyard is in its owner's zone and has no controller, so "your graveyard"
+/// means the cards you own there. The filter is matched through
+/// `filter::matches_target_filter_for_zone`, which reads the owner in those
+/// zones, never the controller a departed card's last known information keeps
+/// for the rest of the step (The Grey Havens: "{T}: Add one mana of any color
+/// among legendary creature cards in your graveyard."; Corrupted Grafstone:
+/// "{T}: Choose a color of a card in your graveyard. Add one mana of that
+/// color.").
 pub(crate) fn distinct_colors_among_permanents(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
     source_id: crate::types::identifiers::ObjectId,
     filter: &crate::types::ability::TargetFilter,
 ) -> Vec<crate::types::mana::ManaColor> {
-    use crate::game::filter::{matches_target_filter, FilterContext};
+    use crate::game::filter::{matches_target_filter_for_zone, FilterContext};
     let filter_ctx = match ability {
         Some(a) => FilterContext::from_ability(a),
         None => FilterContext::from_source(state, source_id),
@@ -1206,7 +1218,7 @@ pub(crate) fn distinct_colors_among_permanents(
     distinct_colors(
         crate::game::targeting::zone_object_ids(state, zone)
             .iter()
-            .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
+            .filter(|&&id| matches_target_filter_for_zone(state, id, zone, filter, &filter_ctx))
             .filter_map(|id| state.objects.get(id))
             .flat_map(|obj| obj.color.iter()),
     )

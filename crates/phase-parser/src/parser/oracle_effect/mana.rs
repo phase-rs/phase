@@ -75,6 +75,83 @@ fn try_parse_any_color_among_permanents_filter(
     Some(filter)
 }
 
+/// CR 105.4 + CR 106.5 + CR 608.2d: "Choose a color of <objects>. Add <count>
+/// mana of that color." as one production, recognized on the whole ability
+/// body (Meteor Crater: "{T}: Choose a color of a permanent you control. Add
+/// one mana of that color."; Corrupted Grafstone: "{T}: Choose a color of a
+/// card in your graveyard. Add one mana of that color."). The color is chosen
+/// while the mana is added, from the colors of the objects the phrase names,
+/// and with no colored object there is none to choose, so no mana (Corrupted
+/// Grafstone ruling: "Colorless cards have no color, so you can't add {C} this
+/// way."). That is `ManaProduction::AnyOneColorAmongPermanents`, the Mox Amber
+/// production, whose filter names its zone through `InZone`.
+/// `parse_choose_ast` declines the choose sentence on its own, because no
+/// `ChoiceType` carries a domain fixed by game state, and
+/// `collapse_ephemeral_color_choice_mana` reads only the unconstrained "Choose
+/// a color." (Astral Cornucopia). Declines unless the body is exactly the two
+/// sentences and ends at "of that color", the object phrase is a whole type
+/// phrase, and the mana sentence is a plain "of that color" production.
+pub(super) fn try_parse_color_of_objects_mana(text: &str, ctx: &ParseContext) -> Option<Effect> {
+    let lower = text.to_lowercase();
+    let (after_head, _) = tag::<_, _, OracleError<'_>>("choose a color of ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (mana_lower, phrase_lower) =
+        terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
+            .parse(after_head)
+            .ok()?;
+    // The body ends at "of that color". Clause dispatch never runs on it, so
+    // nothing after the phrase, in this sentence or a later one, may survive
+    // to be dropped.
+    all_consuming((
+        take_until::<_, _, OracleError<'_>>(" mana of that color"),
+        tag(" mana of that color"),
+        opt(tag(".")),
+    ))
+    .parse(mana_lower)
+    .ok()?;
+    let phrase_start = lower.len() - after_head.len();
+    let phrase = text.get(phrase_start..phrase_start + phrase_lower.len())?;
+    let mana_sentence = text.get(lower.len() - mana_lower.len()..)?;
+    let (filter, remainder) = parse_type_phrase_folding(phrase);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    // This grammar binds "that color", so the mana sentence reads no
+    // antecedent: it parses against a throwaway context, and a decline leaves
+    // the caller's untouched.
+    let mut throwaway = ParseContext {
+        parent_target_available: ctx.parent_target_available,
+        ..ParseContext::default()
+    };
+    let Effect::Mana {
+        produced:
+            ManaProduction::ChosenColor {
+                count,
+                contribution,
+                fixed_alternative: None,
+            },
+        restrictions,
+        grants,
+        expiry,
+        target: None,
+    } = try_parse_add_mana_effect_with_context(mana_sentence, &mut throwaway)?
+    else {
+        return None;
+    };
+    Some(Effect::Mana {
+        produced: ManaProduction::AnyOneColorAmongPermanents {
+            count,
+            filter,
+            contribution,
+        },
+        restrictions,
+        grants,
+        expiry,
+        target: None,
+    })
+}
+
 /// CR 106.1 + CR 109.1: Recognize "For each color among [type-phrase], add one
 /// mana of that color" — the Faeburrow Elder class. Emits
 /// `ManaProduction::DistinctColorsAmongPermanents { filter }`, which resolves

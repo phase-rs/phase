@@ -3941,10 +3941,16 @@ pub enum ManaProduction {
     /// variant is deliberately NOT parameterized: no mana ability reads either.
     DistinctColorsAmongPermanents { filter: TargetFilter },
     /// CR 106.1 + CR 109.1: Produce N mana of one chosen color from the distinct
-    /// colors present among permanents matching `filter`. Mox Amber class:
-    /// "{T}: Add one mana of any color among legendary creatures and
-    /// planeswalkers you control." Colors resolve dynamically at activation
-    /// time; CR 106.5 applies when no matching permanent is colored.
+    /// colors present among the objects matching `filter`: permanents, unless
+    /// `filter` names another zone through `FilterProp::InZone`, as
+    /// `effects::mana::distinct_colors_among_permanents` reads it. Mox Amber
+    /// class: "{T}: Add one mana of any color among legendary creatures and
+    /// planeswalkers you control." CR 105.4 + CR 608.2d: "Choose a color of
+    /// <objects>. Add one mana of that color." lowers here too, because that
+    /// choice is made while this production resolves, from the colors of the
+    /// objects it names (Meteor Crater: "a permanent you control"; Corrupted
+    /// Grafstone: "a card in your graveyard"). Colors resolve dynamically at
+    /// activation time; CR 106.5 applies when no matching object is colored.
     AnyOneColorAmongPermanents {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,

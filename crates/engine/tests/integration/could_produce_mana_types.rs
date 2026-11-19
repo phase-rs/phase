@@ -16,21 +16,22 @@
 //! opponent controls could produce colorless mana"; and it "takes into account
 //! any applicable replacement effects".
 
+use engine::ai_support::legal_actions;
 use engine::game::derived::continuously_revealed_cards;
 use engine::game::effects::attach::attach_to;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    inline_mana_preamble, is_mana_ability, AbilityCondition, AbilityKind, Effect,
-    EffectOutcomeSignal,
+    inline_mana_preamble, is_mana_ability, AbilityCondition, AbilityKind, ChoiceType, Effect,
+    EffectOutcomeSignal, ManaProduction,
 };
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::parse_counter_type;
 use engine::types::events::{GameEvent, ManaTapState};
 use engine::types::game_state::{
-    CastPaymentMode, ExileLink, ExileLinkKind, GameState, ManaChoicePrompt, PayCostKind,
-    StackEntryKind, WaitingFor,
+    CastPaymentMode, ExileLink, ExileLinkKind, GameState, ManaChoice, ManaChoicePrompt,
+    PayCostKind, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -95,15 +96,22 @@ fn pool(runner: &GameRunner, player: PlayerId) -> Vec<ManaType> {
 /// the mana it added. Gemstone Caverns' opening-hand ability comes first in its
 /// list, so the index is looked up rather than assumed.
 fn tap_for_mana(runner: &mut GameRunner, source: ObjectId) -> Produced {
-    runner.state_mut().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .clear();
     let ability_index = runner.state().objects[&source]
         .abilities
         .iter()
         .position(|ability| ability.kind == AbilityKind::Activated)
         .expect("reach-guard: the source has an activated ability");
+    activate_for_mana(runner, source, ability_index)
+}
+
+/// Empties P0's pool, activates `source`'s mana ability at `ability_index`,
+/// which resolves at once (CR 605.3b), and reports the prompt it raised or the
+/// mana it added.
+fn activate_for_mana(runner: &mut GameRunner, source: ObjectId, ability_index: usize) -> Produced {
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .mana
+        .clear();
     runner
         .act(GameAction::ActivateAbility {
             source_id: source,
@@ -1764,5 +1772,932 @@ fn sacrificed_cheering_crowd_offers_colorless_after_an_earlier_failed_sacrifice(
         vec![ManaType::Green, ManaType::Colorless],
         "CR 608.2d: answering the \"you may\" clears the earlier failure, so \"If they do\" \
          reads true"
+    );
+}
+
+// ---- A color chosen from objects, or chosen elsewhere (CR 105.4 + CR 607.2d + CR 608.2d) ----
+
+// Verbatim Oracle text (MTGJSON), reminder text omitted.
+const CORRUPTED_GRAFSTONE: &str = "This artifact enters tapped.\n{T}: Choose a color of a card in \
+     your graveyard. Add one mana of that color.";
+const METEOR_CRATER: &str =
+    "{T}: Choose a color of a permanent you control. Add one mana of that color.";
+const MYR_WELDER: &str = "Imprint — {T}: Exile target artifact card from a graveyard.\nThis \
+     creature has all activated abilities of all cards exiled with it.";
+const HERALDIC_BANNER: &str = "As this artifact enters, choose a color.\nCreatures you control of \
+     the chosen color get +1/+0.\n{T}: Add one mana of the chosen color.";
+const RADIANT_LOTUS: &str = "{T}, Sacrifice one or more artifacts: Choose a color. Target player \
+     adds three mana of the chosen color for each artifact sacrificed this way.";
+const THRIVING_GROVE: &str = "This land enters tapped. As it enters, choose a color other than \
+     green.\n{T}: Add {G} or one mana of the chosen color.";
+const THE_GREY_HAVENS: &str = "When The Grey Havens enters, scry 1.\n{T}: Add {C}.\n{T}: Add one \
+     mana of any color among legendary creature cards in your graveyard.";
+const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn. Untap that \
+     creature. It gains haste until end of turn.";
+const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+const RAISE_THE_ALARM: &str = "Create two 1/1 white Soldier creature tokens.";
+
+/// A printed vanilla card the Corrupted Grafstone rows put in P0's graveyard.
+#[derive(Debug, Clone, Copy)]
+enum GraveyardCard {
+    /// Walking Corpse: {1}{B}, black.
+    WalkingCorpse,
+    /// Savannah Lions: {W}, white.
+    SavannahLions,
+    /// Memnite: a {0} artifact creature, colorless.
+    Memnite,
+}
+
+/// A Corrupted Grafstone board's runner and the objects its rows read.
+struct GrafstoneBoard {
+    runner: GameRunner,
+    squandered: ObjectId,
+    reflecting_pool: ObjectId,
+    grafstone: ObjectId,
+    /// The cards staged in P0's graveyard, in the order the row named them.
+    staged: Vec<ObjectId>,
+}
+
+/// Squandered Resources, Reflecting Pool, March of the Machines and Ashaya,
+/// Soul of the Wild beside P0's Corrupted Grafstone ({2}), with `graveyard` in
+/// P0's graveyard and a red Gray Ogre in P1's. March of the Machines makes the
+/// Grafstone a 2/2 artifact creature and Ashaya makes it a Forest land
+/// (CR 613.8: Ashaya's effect depends on March's). The scenario builder applies
+/// neither "This artifact enters tapped." nor a chosen color, which the reach
+/// guards below confirm before any read.
+fn grafstone_board(graveyard: &[GraveyardCard]) -> GrafstoneBoard {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    let reflecting_pool = scenario
+        .add_land_from_oracle(P0, "Reflecting Pool", REFLECTING_POOL)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    let grafstone = scenario
+        .add_artifact_from_oracle(P0, "Corrupted Grafstone", CORRUPTED_GRAFSTONE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+    let mut staged = Vec::with_capacity(graveyard.len());
+    let mut printed_colors = Vec::with_capacity(graveyard.len());
+    for card in graveyard {
+        let (id, color) = match card {
+            GraveyardCard::WalkingCorpse => (
+                scenario
+                    .add_creature_to_graveyard(P0, "Walking Corpse", 2, 2)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 1,
+                    })
+                    .id(),
+                vec![ManaColor::Black],
+            ),
+            GraveyardCard::SavannahLions => (
+                scenario
+                    .add_creature_to_graveyard(P0, "Savannah Lions", 2, 1)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::White],
+                        generic: 0,
+                    })
+                    .id(),
+                vec![ManaColor::White],
+            ),
+            GraveyardCard::Memnite => (
+                scenario
+                    .add_creature_to_graveyard(P0, "Memnite", 1, 1)
+                    .as_artifact_creature()
+                    .with_subtypes(vec!["Construct"])
+                    .with_mana_cost(ManaCost::zero())
+                    .id(),
+                vec![],
+            ),
+        };
+        staged.push(id);
+        printed_colors.push(color);
+    }
+    let gray_ogre = scenario
+        .add_creature_to_graveyard(P1, "Gray Ogre", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, grafstone);
+    let state = runner.state();
+    let object = &state.objects[&grafstone];
+    assert!(
+        object
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Forest")
+            && !object.tapped
+            && !object.summoning_sick,
+        "reach-guard: the Grafstone is an untapped Forest that can tap for mana"
+    );
+    assert_eq!(
+        object.chosen_color(),
+        None,
+        "reach-guard: the Grafstone holds no chosen color"
+    );
+    for (id, color) in staged.iter().zip(&printed_colors) {
+        assert_eq!(
+            &state.objects[id].color, color,
+            "reach-guard: each staged card has its printed color"
+        );
+    }
+    assert!(
+        state.players[P1.0 as usize].graveyard.contains(&gray_ogre)
+            && state.objects[&gray_ogre].color == vec![ManaColor::Red],
+        "reach-guard: P1's graveyard holds the red Gray Ogre"
+    );
+    GrafstoneBoard {
+        runner,
+        squandered,
+        reflecting_pool,
+        grafstone,
+        staged,
+    }
+}
+
+/// F2-1, F2-2 and F2-8 (CR 106.7 + CR 105.4 + CR 106.5 + CR 605.2): Corrupted
+/// Grafstone ("{T}: Choose a color of a card in your graveyard. Add one mana
+/// of that color.") chooses among the colors of the cards in P0's graveyard,
+/// never P1's red Gray Ogre, and a colorless card has no color (the Grafstone
+/// ruling: "Colorless cards have no color, so you can't add {C} this way.").
+/// With no colored card it adds no mana and is still a mana ability. Its Forest
+/// ability (from Ashaya, Soul of the Wild) adds {G}. Each row is read through
+/// Squandered Resources' sacrifice of the Grafstone, through Reflecting Pool,
+/// and through the Grafstone's own activation, whose two-color prompt is
+/// answered with black.
+#[test]
+fn grafstone_reads_only_its_graveyard_colors() {
+    let rows = [
+        (
+            vec![GraveyardCard::WalkingCorpse],
+            vec![ManaType::Black, ManaType::Green],
+            Produced::Prompt(vec![ManaType::Black, ManaType::Green]),
+            Produced::Pool(vec![ManaType::Black]),
+            None,
+        ),
+        (
+            vec![GraveyardCard::WalkingCorpse, GraveyardCard::SavannahLions],
+            vec![ManaType::White, ManaType::Black, ManaType::Green],
+            Produced::Prompt(vec![ManaType::White, ManaType::Black, ManaType::Green]),
+            Produced::Prompt(vec![ManaType::White, ManaType::Black]),
+            Some(ManaType::Black),
+        ),
+        (
+            vec![],
+            vec![ManaType::Green],
+            Produced::Pool(vec![ManaType::Green]),
+            Produced::Pool(vec![]),
+            None,
+        ),
+        (
+            vec![GraveyardCard::Memnite],
+            vec![ManaType::Green],
+            Produced::Pool(vec![ManaType::Green]),
+            Produced::Pool(vec![]),
+            None,
+        ),
+    ];
+    for (graveyard, squandered_types, pool_reading, grafstone_reading, answer) in rows {
+        let board = grafstone_board(&graveyard);
+        let state = board.runner.state();
+        let mut in_graveyard: Vec<ObjectId> = state.players[P0.0 as usize]
+            .graveyard
+            .iter()
+            .copied()
+            .collect();
+        in_graveyard.sort();
+        let mut staged = board.staged.clone();
+        staged.sort();
+        assert_eq!(
+            in_graveyard, staged,
+            "reach-guard: P0's graveyard holds exactly {graveyard:?}"
+        );
+
+        // F2-1: what Squandered Resources' sacrifice of the Grafstone captures.
+        let mut reading = squandered_reading(state, board.squandered, board.grafstone);
+        reading.sort();
+        assert_eq!(
+            reading, squandered_types,
+            "Squandered Resources, graveyard {graveyard:?}"
+        );
+        // After the reading, so a missing lowering fails on the reading first:
+        // the Grafstone's printed ability is one production over a graveyard.
+        let printed = state.objects[&board.grafstone]
+            .abilities
+            .iter()
+            .find(|ability| ability.kind == AbilityKind::Activated)
+            .expect("reach-guard: the Grafstone has its activated ability");
+        assert!(
+            matches!(
+                &*printed.effect,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColorAmongPermanents { filter, .. },
+                    ..
+                } if filter.extract_in_zone() == Some(Zone::Graveyard)
+            ),
+            "reach-guard: the Grafstone's ability reads a graveyard, got {:?}",
+            printed.effect
+        );
+
+        // F2-2: Reflecting Pool reads every land P0 controls, the Grafstone too.
+        let mut read = GameRunner::from_state(state.clone());
+        assert_eq!(
+            tap_for_mana(&mut read, board.reflecting_pool),
+            pool_reading,
+            "Reflecting Pool, graveyard {graveyard:?}"
+        );
+
+        // F2-8: the Grafstone's own activation (CR 106.5 + CR 605.2).
+        let mut read = GameRunner::from_state(state.clone());
+        assert_eq!(
+            tap_for_mana(&mut read, board.grafstone),
+            grafstone_reading,
+            "Corrupted Grafstone, graveyard {graveyard:?}"
+        );
+        assert!(
+            read.state().objects[&board.grafstone].tapped,
+            "reach-guard: the Grafstone's ability ran, graveyard {graveyard:?}"
+        );
+        if let Some(color) = answer {
+            read.act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(color),
+                count: 1,
+            })
+            .expect("the answered color is one the prompt offered");
+            assert_eq!(
+                pool(&read, P0),
+                vec![color],
+                "CR 605.3b: the chosen color arrives, graveyard {graveyard:?}"
+            );
+            assert!(
+                read.state().stack.is_empty()
+                    && matches!(read.state().waiting_for, WaitingFor::Priority { .. }),
+                "the mana ability completed and priority returned, graveyard {graveyard:?}"
+            );
+        }
+    }
+}
+
+/// F2-3 (CR 106.7 + CR 105.4 + CR 109.5): Meteor Crater ("{T}: Choose a color
+/// of a permanent you control. Add one mana of that color.") chooses among the
+/// colors of the permanents P0 controls: Squandered Resources' black and green
+/// and Gray Ogre's red, never the white of P1's Savannah Lions. Sacrificed to
+/// Squandered Resources, it could produce exactly those three colors.
+#[test]
+fn sacrificed_meteor_crater_offers_the_colors_of_permanents_you_control() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    let meteor = scenario
+        .add_land_from_oracle(P0, "Meteor Crater", METEOR_CRATER)
+        .id();
+    let ogre = scenario
+        .add_creature(P0, "Gray Ogre", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    let lions = scenario
+        .add_creature(P1, "Savannah Lions", 2, 1)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    let runner = scenario.build();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&squandered].color,
+        vec![ManaColor::Black, ManaColor::Green],
+        "reach-guard: Squandered Resources is black and green"
+    );
+    assert!(
+        state.objects[&ogre].color == vec![ManaColor::Red] && state.objects[&ogre].controller == P0,
+        "reach-guard: P0 controls the red Gray Ogre"
+    );
+    assert!(
+        state.objects[&lions].color == vec![ManaColor::White]
+            && state.objects[&lions].controller == P1,
+        "reach-guard: P1 controls the white Savannah Lions"
+    );
+
+    let mut reading = squandered_reading(state, squandered, meteor);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![ManaType::Black, ManaType::Red, ManaType::Green]
+    );
+    // After the reading, so a missing lowering fails on the reading first:
+    // Meteor Crater's printed ability is one production over permanents.
+    let printed = state.objects[&meteor]
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach-guard: Meteor Crater has its activated ability");
+    assert!(
+        matches!(
+            &*printed.effect,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColorAmongPermanents { filter, .. },
+                ..
+            } if filter.extract_in_zone().is_none()
+        ),
+        "reach-guard: Meteor Crater's ability reads the battlefield, got {:?}",
+        printed.effect
+    );
+}
+
+/// F2-4 (CR 607.5a + CR 106.5 + CR 106.7): Myr Welder ("This creature has all
+/// activated abilities of all cards exiled with it.") imprints Heraldic Banner
+/// through its real ability, so it gains "{T}: Add one mana of the chosen
+/// color." without the Banner's linked "As this artifact enters, choose a
+/// color." That choice is undefined (the Heraldic Banner ruling: "If there is
+/// somehow no chosen color, Heraldic Banner's static ability has no effect,
+/// and its mana ability produces no mana if you activate it."), so the acquired
+/// ability defines no type, and the sacrificed Welder could produce only the
+/// {G} of the Forest that Ashaya, Soul of the Wild makes it.
+#[test]
+fn sacrificed_welder_with_an_imprinted_banner_offers_only_its_forest_green() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    let welder = scenario
+        .add_creature_from_oracle(P0, "Myr Welder", 1, 4, MYR_WELDER)
+        .id();
+    let banner = scenario
+        .add_artifact_from_oracle(P0, "Heraldic Banner", HERALDIC_BANNER)
+        .id();
+    let mut runner = scenario.build();
+    // Ashaya's power and toughness come from layers, so they are applied before
+    // the imprint activation checks state-based actions.
+    flush(&mut runner);
+    engine::game::zones::move_to_zone(runner.state_mut(), banner, Zone::Graveyard, &mut Vec::new());
+    let imprint = runner.state().objects[&welder]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability.kind == AbilityKind::Activated
+                && matches!(
+                    &*ability.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        ..
+                    }
+                )
+        })
+        .expect("reach-guard: Myr Welder has its imprint ability");
+    runner
+        .activate(welder, imprint)
+        .target_object(banner)
+        .resolve();
+    runner.state_mut().objects.get_mut(&welder).unwrap().tapped = false;
+    flush(&mut runner);
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&banner].zone,
+        Zone::Exile,
+        "reach-guard: the Banner was exiled"
+    );
+    assert!(
+        state
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == banner && link.source_id == welder),
+        "reach-guard: the Banner was exiled with the Welder"
+    );
+    let welder_object = &state.objects[&welder];
+    assert!(
+        welder_object.abilities.iter().any(|ability| {
+            ability.kind == AbilityKind::Activated
+                && matches!(
+                    &*ability.effect,
+                    Effect::Mana {
+                        produced: ManaProduction::ChosenColor {
+                            fixed_alternative: None,
+                            ..
+                        },
+                        ..
+                    }
+                )
+        }),
+        "reach-guard: the Welder gained the Banner's chosen-color mana ability"
+    );
+    assert_eq!(
+        welder_object.chosen_color(),
+        None,
+        "reach-guard: the Welder holds no chosen color"
+    );
+    assert!(
+        welder_object
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Forest")
+            && !welder_object.tapped
+            && !welder_object.summoning_sick,
+        "reach-guard: the Welder is an untapped Forest"
+    );
+    assert_is_land(&runner, welder);
+
+    assert_eq!(
+        squandered_reading(state, squandered, welder),
+        vec![ManaType::Green]
+    );
+}
+
+/// F2-5 (CR 608.2d + CR 105.4 + CR 106.7): Radiant Lotus ("{T}, Sacrifice one
+/// or more artifacts: Choose a color. Target player adds three mana of the
+/// chosen color for each artifact sacrificed this way.") chooses its color as
+/// the ability resolves, and that choice could name any of the five colors, so
+/// the sacrificed Lotus could produce every color. March of the Machines and
+/// Ashaya, Soul of the Wild make it a Forest land.
+#[test]
+fn sacrificed_radiant_lotus_offers_every_color_its_choice_could_name() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    let lotus = scenario
+        .add_artifact_from_oracle(P0, "Radiant Lotus", RADIANT_LOTUS)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 6,
+        })
+        .id();
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, lotus);
+    let object = &runner.state().objects[&lotus];
+    assert!(
+        object
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Forest"),
+        "reach-guard: the Lotus is a Forest"
+    );
+    assert_eq!(
+        object.chosen_color(),
+        None,
+        "reach-guard: the Lotus holds no chosen color"
+    );
+    let printed = object
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach-guard: the Lotus has its activated ability");
+    assert!(
+        matches!(
+            &*printed.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { excluded },
+                persist: false,
+                ..
+            } if excluded.is_empty()
+        ) && printed.sub_ability.as_deref().is_some_and(|sub| {
+            matches!(
+                &*sub.effect,
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor {
+                        fixed_alternative: None,
+                        ..
+                    },
+                    ..
+                }
+            )
+        }),
+        "reach-guard: \"Choose a color.\" is a resolution-time choice that its \"of the \
+         chosen color\" production reads, got {printed:?}"
+    );
+
+    let mut reading = squandered_reading(runner.state(), squandered, lotus);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ]
+    );
+}
+
+/// F2-9 (CR 607.2d + CR 614.12a + CR 106.7): Thriving Grove ("This land enters
+/// tapped. As it enters, choose a color other than green." and "{T}: Add {G} or
+/// one mana of the chosen color.") is played and red is chosen as it enters,
+/// so the sacrificed Grove could produce its chosen {R} and its fixed {G}.
+#[test]
+fn sacrificed_thriving_grove_offers_its_chosen_color_and_green() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    let grove = scenario
+        .add_land_to_hand(P0, "Thriving Grove")
+        .from_oracle_text(THRIVING_GROVE)
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&grove].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: grove,
+            card_id,
+        })
+        .expect("reach-guard: playing Thriving Grove starts its entry");
+    let prompt = runner.state().waiting_for.clone();
+    let WaitingFor::NamedChoice {
+        choice_type,
+        options,
+        ..
+    } = &prompt
+    else {
+        panic!("expected Thriving Grove's as-enters color choice, got {prompt:?}");
+    };
+    assert!(
+        matches!(choice_type, ChoiceType::Color { .. }),
+        "reach-guard: CR 614.12a: the color is chosen as the Grove enters"
+    );
+    let mut offered: Vec<&str> = options.iter().map(String::as_str).collect();
+    offered.sort_unstable();
+    assert_eq!(
+        offered,
+        vec!["Black", "Blue", "Red", "White"],
+        "CR 105.4: \"a color other than green\" is the four other colors"
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Red".to_string(),
+        })
+        .expect("red is one of the offered colors");
+
+    let state = runner.state();
+    let object = &state.objects[&grove];
+    assert!(
+        object.zone == Zone::Battlefield
+            && object.controller == P0
+            && object.chosen_color() == Some(ManaColor::Red),
+        "reach-guard: the Grove entered under P0's control with red chosen"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "reach-guard: the entry completed and priority returned"
+    );
+    assert!(
+        object.abilities.iter().any(|ability| {
+            ability.kind == AbilityKind::Activated
+                && matches!(
+                    &*ability.effect,
+                    Effect::Mana {
+                        produced: ManaProduction::ChosenColor {
+                            fixed_alternative: Some(ManaColor::Green),
+                            ..
+                        },
+                        ..
+                    }
+                )
+        }),
+        "reach-guard: the Grove's mana ability offers {{G}} or the chosen color"
+    );
+
+    let mut reading = squandered_reading(state, squandered, grove);
+    reading.sort();
+    assert_eq!(reading, vec![ManaType::Red, ManaType::Green]);
+}
+
+/// A stolen-legend board's state and the objects its reads use.
+struct StolenLegendBoard {
+    state: GameState,
+    grey_havens: ObjectId,
+    /// The index of The Grey Havens' "any color among legendary creature cards
+    /// in your graveyard" mana ability.
+    any_color_among_index: usize,
+    reflecting_pool: ObjectId,
+    grafstone: ObjectId,
+    raise_the_alarm: ObjectId,
+}
+
+/// CR 400.3 + CR 404.1 + CR 701.21a: P0 controls The Grey Havens, Reflecting
+/// Pool and Corrupted Grafstone ({2}) and holds Raise the Alarm ({1}{W}).
+/// `thief` casts Act of Treason ({2}{R}, paid from {R}{R}{R} floating) on
+/// `owner`'s Isamaru, Hound of Konda, a white legendary creature, and
+/// sacrifices it to Ashnod's Altar beside Memnite, so the card is put into its
+/// owner's graveyard. A thief other than P0 then passes priority to P0
+/// (CR 117.3d). The board is returned within that same step, while the card's
+/// last known information still names the thief as its controller.
+fn stolen_legend_board(thief: PlayerId, owner: PlayerId) -> StolenLegendBoard {
+    let mut scenario = new_scenario();
+    let grey_havens = scenario
+        .add_land_from_oracle(P0, "The Grey Havens", THE_GREY_HAVENS)
+        .as_legendary()
+        .id();
+    let reflecting_pool = scenario
+        .add_land_from_oracle(P0, "Reflecting Pool", REFLECTING_POOL)
+        .id();
+    let grafstone = scenario
+        .add_artifact_from_oracle(P0, "Corrupted Grafstone", CORRUPTED_GRAFSTONE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+    let raise_the_alarm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        })
+        .id();
+    let altar = scenario
+        .add_artifact_from_oracle(thief, "Ashnod's Altar", ASHNODS_ALTAR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        })
+        .id();
+    let memnite = scenario
+        .add_creature(thief, "Memnite", 1, 1)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Construct"])
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let act_of_treason = scenario
+        .add_spell_to_hand_from_oracle(thief, "Act of Treason", false, ACT_OF_TREASON)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    scenario.with_mana_pool(
+        thief,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]); 3],
+    );
+    let legend = scenario
+        .add_creature(owner, "Isamaru, Hound of Konda", 2, 2)
+        .as_legendary()
+        .with_subtypes(vec!["Dog"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    // CR 307.1: the thief casts its sorcery in its own main phase, with
+    // priority and an empty stack.
+    {
+        let state = runner.state_mut();
+        state.active_player = thief;
+        state.priority_player = thief;
+        state.waiting_for = WaitingFor::Priority { player: thief };
+    }
+
+    runner.cast(act_of_treason).target_object(legend).resolve();
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&legend].controller, thief,
+        "reach-guard: Act of Treason gave the thief control of the legend"
+    );
+    assert!(
+        state.players[thief.0 as usize]
+            .graveyard
+            .contains(&act_of_treason)
+            && state.objects[&act_of_treason].color == vec![ManaColor::Red],
+        "reach-guard: the red Act of Treason resolved into the thief's graveyard"
+    );
+    assert!(
+        pool(&runner, thief).is_empty(),
+        "reach-guard: the floating {{R}}{{R}}{{R}} paid for Act of Treason"
+    );
+    assert!(
+        [grey_havens, reflecting_pool, grafstone]
+            .iter()
+            .all(|source| !state.objects[source].tapped),
+        "reach-guard: P0's three mana sources are untapped"
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("reach-guard: Ashnod's Altar is activatable");
+    let prompt = runner.state().waiting_for.clone();
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Sacrifice,
+        choices,
+        ..
+    } = &prompt
+    else {
+        panic!("expected the Altar's sacrifice choice, got {prompt:?}");
+    };
+    assert!(
+        choices.contains(&legend) && choices.contains(&memnite),
+        "reach-guard: the sacrifice is a real choice between the legend and Memnite"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![legend],
+        })
+        .expect("reach-guard: sacrificing the stolen legend");
+    assert_eq!(
+        pool(&runner, thief),
+        vec![ManaType::Colorless, ManaType::Colorless],
+        "reach-guard: Ashnod's Altar added {{C}}{{C}}"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach-guard: the Altar's mana ability resolved at once"
+    );
+    if thief != P0 {
+        // CR 117.3d: the reads below are P0's, so the thief hands it priority.
+        runner
+            .act(GameAction::PassPriority)
+            .expect("reach-guard: the thief passes priority");
+    }
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "reach-guard: P0 holds priority"
+    );
+
+    let state = runner.state();
+    let legend_object = &state.objects[&legend];
+    assert!(
+        legend_object.zone == Zone::Graveyard
+            && legend_object.owner == owner
+            && state.players[owner.0 as usize].graveyard.contains(&legend)
+            && !state.players[thief.0 as usize].graveyard.contains(&legend),
+        "CR 400.3 + CR 404.1: the sacrificed legend is in its owner's graveyard"
+    );
+    assert_eq!(
+        state.lki_cache.get(&legend).map(|lki| lki.controller),
+        Some(thief),
+        "reach-guard: the legend's last known information still names the thief"
+    );
+    assert!(
+        state.phase == Phase::PreCombatMain && state.active_player == thief,
+        "reach-guard: the reads happen in the step the legend was sacrificed in"
+    );
+    assert!(
+        legend_object.color == vec![ManaColor::White]
+            && legend_object
+                .card_types
+                .supertypes
+                .contains(&Supertype::Legendary)
+            && legend_object
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+        "reach-guard: the legend is a white legendary creature card"
+    );
+    let (any_color_among_index, among_filter) = state.objects[&grey_havens]
+        .abilities
+        .iter()
+        .enumerate()
+        .find_map(|(index, ability)| match &*ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColorAmongPermanents { filter, .. },
+                ..
+            } if ability.kind == AbilityKind::Activated => Some((index, filter)),
+            _ => None,
+        })
+        .expect("reach-guard: The Grey Havens has its \"any color among\" mana ability");
+    assert_eq!(
+        among_filter.extract_in_zone(),
+        Some(Zone::Graveyard),
+        "reach-guard: The Grey Havens reads a graveyard"
+    );
+    StolenLegendBoard {
+        state: state.clone(),
+        grey_havens,
+        any_color_among_index,
+        reflecting_pool,
+        grafstone,
+        raise_the_alarm,
+    }
+}
+
+/// F2-10 (a) (CR 400.3 + CR 404.1 + CR 701.21a + CR 109.4 + CR 108.4a +
+/// CR 109.5): P0 steals P1's Isamaru, Hound of Konda with Act of Treason and
+/// sacrifices it to Ashnod's Altar, so it is put into P1's graveyard. In that
+/// same step "your graveyard" is still the cards P0 owns there. The Grey Havens
+/// ("{T}: Add one mana of any color among legendary creature cards in your
+/// graveyard.") finds only Act of Treason, which is not a creature card, so it
+/// adds no mana (CR 106.5). Reflecting Pool could produce only The Grey Havens'
+/// {C} (CR 106.7). Raise the Alarm ({1}{W}) is not offered, as P0 has no white
+/// source. Corrupted Grafstone ("{T}: Choose a color of a card in your
+/// graveyard. Add one mana of that color.") adds only Act of Treason's red.
+/// Paired control: the mirror board below.
+#[test]
+fn your_graveyard_skips_a_legend_you_stole_and_sacrificed_this_step() {
+    let board = stolen_legend_board(P0, P1);
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    assert_eq!(
+        activate_for_mana(&mut read, board.grey_havens, board.any_color_among_index),
+        Produced::Pool(vec![]),
+        "The Grey Havens reads only the cards P0 owns"
+    );
+    assert!(
+        read.state().objects[&board.grey_havens].tapped,
+        "reach-guard: The Grey Havens' ability ran"
+    );
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    assert_eq!(
+        tap_for_mana(&mut read, board.reflecting_pool),
+        Produced::Pool(vec![ManaType::Colorless]),
+        "Reflecting Pool reads The Grey Havens"
+    );
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    // The Altar's {C}{C} floats in P0's pool on this board.
+    read.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .mana
+        .clear();
+    assert!(
+        !legal_actions(read.state()).iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == board.raise_the_alarm
+        )),
+        "Raise the Alarm needs a white source P0 does not have"
+    );
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    assert_eq!(
+        tap_for_mana(&mut read, board.grafstone),
+        Produced::Pool(vec![ManaType::Red]),
+        "Corrupted Grafstone reads only the cards P0 owns"
+    );
+}
+
+/// F2-10 (b) (CR 400.3 + CR 404.1 + CR 701.21a + CR 109.4 + CR 108.4a +
+/// CR 109.5): the mirror. P1 steals P0's Isamaru, Hound of Konda and sacrifices
+/// it, so it is put into P0's graveyard, and in that same step it is a card P0
+/// owns there. The Grey Havens adds its white, Reflecting Pool could produce
+/// that white beside The Grey Havens' {C}, Raise the Alarm is offered, and
+/// Corrupted Grafstone adds white too (Act of Treason is in P1's graveyard).
+/// Paired control: the board above.
+#[test]
+fn your_graveyard_counts_your_legend_an_opponent_stole_and_sacrificed_this_step() {
+    let board = stolen_legend_board(P1, P0);
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    assert_eq!(
+        activate_for_mana(&mut read, board.grey_havens, board.any_color_among_index),
+        Produced::Pool(vec![ManaType::White]),
+        "The Grey Havens reads the legend P0 owns"
+    );
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    assert_eq!(
+        tap_for_mana(&mut read, board.reflecting_pool),
+        Produced::Prompt(vec![ManaType::White, ManaType::Colorless]),
+        "Reflecting Pool reads The Grey Havens"
+    );
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    read.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .mana
+        .clear();
+    assert!(
+        legal_actions(read.state()).iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == board.raise_the_alarm
+        )),
+        "Raise the Alarm is paid with The Grey Havens' white"
+    );
+
+    let mut read = GameRunner::from_state(board.state.clone());
+    assert_eq!(
+        tap_for_mana(&mut read, board.grafstone),
+        Produced::Pool(vec![ManaType::White]),
+        "Corrupted Grafstone reads the legend P0 owns"
     );
 }

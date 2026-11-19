@@ -58,6 +58,16 @@
 //!   and `mana_abilities::instruction_outcomes` for a later link. Empowered
 //!   Autogenerator counts the charge counter it places; under Solemnity that
 //!   counter is never placed, so the amount is the count already there.
+//!   A production of "the chosen color" defines its type from the source's
+//!   linked choice, else from a color an earlier `Choose` of the same
+//!   resolution could name, read as every color that choice allows
+//!   (CR 608.2d: Radiant Lotus's "Choose a color. Target player adds three
+//!   mana of the chosen color for each artifact sacrificed this way."); with
+//!   neither, the choice is undefined and that part defines no type, so only
+//!   a fixed alternative the production also names is read (CR 607.5a +
+//!   CR 106.5: a Myr Welder that gained Heraldic Banner's "{T}: Add one mana
+//!   of the chosen color." defines none; Thriving Grove's "{T}: Add {G} or one
+//!   mana of the chosen color." keeps {G}).
 //! - **Replacements** (CR 614.1a + CR 616.1): each type is mapped through
 //!   `replacement::hypothetical_produced_mana_types`, in every order. Every
 //!   production of a {T} mana ability's resolution is "tapped for mana"
@@ -112,7 +122,7 @@ use super::triggers::{
 use super::visibility::revealed_to_every_seat;
 use crate::types::ability::{
     inline_mana_preamble, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
-    Effect, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    ChoiceType, Effect, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
     TriggerDefinitionRef,
 };
 use crate::types::ability_visit::visit_own_resolution_effects;
@@ -120,7 +130,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::ManaTapState;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaType, ManaTypeSet};
+use crate::types::mana::{ManaColor, ManaType, ManaTypeSet};
 use crate::types::player::PlayerId;
 
 /// CR 106.1b vs CR 105.1: whether a clause asks for mana *types* (Reflecting
@@ -736,6 +746,13 @@ struct Frame<'a> {
     /// cost includes {T}, `NotFromTap` for every other ability. Set at the root
     /// and handed unchanged to every child.
     tap_state: ManaTapState,
+    /// CR 608.2d + CR 105.4: the colors an earlier `Choose` of a color in this
+    /// same resolution could have named, which a later "of the chosen color"
+    /// reads when its source holds no linked choice (Radiant Lotus: "Choose a
+    /// color. Target player adds three mana of the chosen color for each
+    /// artifact sacrificed this way."). `None` at every root and below any
+    /// other performed `Choose`.
+    resolution_color_choice: Option<ManaTypeSet>,
 }
 
 impl<'a> Frame<'a> {
@@ -754,6 +771,7 @@ impl<'a> Frame<'a> {
             },
             cost_owner,
             tap_state,
+            resolution_color_choice: None,
         }
     }
 
@@ -788,6 +806,10 @@ struct BoundChild<'s, 'n> {
     /// CR 106.12b: the tap state of the resolution the child belongs to, its
     /// parent frame's.
     tap_state: ManaTapState,
+    /// CR 608.2d: the color choice the child's subtree reads: every color its
+    /// parent's performed `Choose` of a color allows (Radiant Lotus), `None`
+    /// below any other performed `Choose`, else its parent frame's.
+    resolution_color_choice: Option<ManaTypeSet>,
 }
 
 impl BoundChild<'_, '_> {
@@ -797,6 +819,7 @@ impl BoundChild<'_, '_> {
             bindings: self.bindings,
             cost_owner,
             tap_state: self.tap_state,
+            resolution_color_choice: self.resolution_color_choice,
         };
         walk_chain(&frame, &self.node, productions);
     }
@@ -839,6 +862,27 @@ fn bind_child<'s, 'n>(
     } = match parent_outcome {
         ParentOutcome::Performed => performed_hand_off(frame, parent, child),
         ParentOutcome::Skipped => skipped_hand_off(frame, parent, child),
+    };
+    // CR 608.2d + CR 105.4: a performed "Choose a color" names, for the rest of
+    // this resolution, one of the colors it allows, which a later "of the
+    // chosen color" reads (Radiant Lotus). Any other performed `Choose` names
+    // no color (`effects::mana::chosen_color_for_mana` reads only a
+    // `ChoiceValue::Color`), and every other parent hands on its frame's.
+    let resolution_color_choice = match (parent_outcome, &parent.effect) {
+        (ParentOutcome::Performed, Effect::Choose { choice_type, .. }) => {
+            if let ChoiceType::Color { excluded } = choice_type {
+                Some(
+                    ManaColor::ALL
+                        .into_iter()
+                        .filter(|color| !excluded.contains(color))
+                        .map(ManaType::from)
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        }
+        (ParentOutcome::Performed | ParentOutcome::Skipped, _) => frame.resolution_color_choice,
     };
     let mut node = Cow::Borrowed(child);
     let targets = match handed {
@@ -913,6 +957,7 @@ fn bind_child<'s, 'n>(
                     tracked_set,
                 },
                 tap_state: frame.tap_state,
+                resolution_color_choice,
             }
         })
         .collect()
@@ -1423,7 +1468,9 @@ fn production_reading(
                 .map(ManaType::from)
                 .collect(),
         ),
-        // CR 106.1 + CR 109.5: colors among the permanents a filter matches,
+        // CR 106.1 + CR 109.5: colors among the objects a filter matches
+        // (permanents, or the cards in a zone the filter names through
+        // `InZone`: Corrupted Grafstone's graveyard),
         // evaluated in the resolving ability's context — as `effects::mana`
         // resolves it — when the frame decides every binding the filter reads.
         // A filter the frame cannot decide keeps the source-anchored reading.
@@ -1440,20 +1487,42 @@ fn production_reading(
                 )
             }
         }
+        // CR 607.2d + CR 608.2d + CR 607.5a + CR 106.5: "the chosen color" is the
+        // color the source's linked ability chose (Thriving Grove's "As it
+        // enters, choose a color other than green."), else one an earlier
+        // `Choose` of this resolution could name (Radiant Lotus); with neither,
+        // the choice is undefined and that part adds nothing (a Myr Welder that
+        // gained Heraldic Banner's "{T}: Add one mana of the chosen color."). A
+        // fixed alternative is always offered (Thriving Grove's "{T}: Add {G} or
+        // one mana of the chosen color.").
+        ManaProduction::ChosenColor {
+            fixed_alternative, ..
+        } => {
+            let chosen = state
+                .objects
+                .get(&node.source_id)
+                .and_then(GameObject::chosen_color)
+                .map(|color| ManaTypeSet::of(ManaType::from(color)))
+                .or(frame.resolution_color_choice)
+                .unwrap_or(ManaTypeSet::EMPTY);
+            let options = match fixed_alternative {
+                Some(color) => chosen.with(ManaType::from(*color)),
+                None => chosen,
+            };
+            ProductionReading::Direct(options.iter().collect())
+        }
         // CR 603.2 + CR 106.7: "that land produced" names the trigger's own
         // event, which a hypothetical resolution does not have —
         // `state.current_trigger_event` may hold an unrelated one — so no type
         // can be defined this way.
         ManaProduction::TriggerEventManaType => ProductionReading::Direct(Vec::new()),
-        // State keyed by source or controller (a persisted choice — else the
-        // runtime's every-color prompt — a noted type, an exiled card's colors,
-        // a commander's identity) or nothing at all: the same answer whatever
-        // the frame has bound.
+        // State keyed by source or controller (a noted type, an exiled card's
+        // colors, a commander's identity) or nothing at all: the same answer
+        // whatever the frame has bound.
         ManaProduction::Fixed { .. }
         | ManaProduction::Colorless { .. }
         | ManaProduction::AnyOneColor { .. }
         | ManaProduction::AnyCombination { .. }
-        | ManaProduction::ChosenColor { .. }
         | ManaProduction::NotedType { .. }
         | ManaProduction::AnyInCommandersColorIdentity { .. }
         | ManaProduction::Mixed { .. }

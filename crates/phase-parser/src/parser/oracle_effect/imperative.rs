@@ -5243,6 +5243,12 @@ pub(super) fn parse_choose_ast(
     // zone choice nor targeting; decline before those parsers so the clause
     // stays unsupported instead of lowering to a five-color choice, a card pick,
     // or `TargetOnly { Any }`.
+    // The mana form ("Choose a color of a permanent you control. Add one mana
+    // of that color.") is recognized on the whole body by
+    // `mana::try_parse_color_of_objects_mana`, which lowers it to
+    // `ManaProduction::AnyOneColorAmongPermanents` because that choice is made
+    // while the production resolves (CR 608.2d); this decline covers every form
+    // that recognizer declines.
     if preceded(tag::<_, _, OracleError<'_>>("choose a color"), tag(" of "))
         .parse(lower)
         .is_ok()
