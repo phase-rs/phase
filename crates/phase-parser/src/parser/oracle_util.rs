@@ -6064,7 +6064,7 @@ mod tests {
         );
     }
 
-    /// CR 608.2k + CR 107.3c: in a trigger body whose "it" names the trigger
+    /// CR 608.2k + CR 107.3: in a trigger body whose "it" names the trigger
     /// event's object, the count slot's where-X binder reads "its power" off that
     /// object — both a bare X head (Dying Wish's "you gain X life, where X is its
     /// power") and the X inside a composite head. "X plus 1 life, where X is its
