@@ -9,7 +9,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, DelayedTriggerCondition, Effect, TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, DelayedTriggerCondition, Effect, RestrictionExpiry, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -1059,6 +1060,188 @@ fn cass_reattaches_equipment_to_chosen_host_via_pipeline() {
     );
 }
 
+/// CR 614.1a + CR 400.7: the object carries Storm Herald's host-lifetime
+/// leave-the-battlefield replacement (`Moved`, `valid_card: SelfRef`, ends when
+/// the host leaves the battlefield).
+fn assert_has_leave_battlefield_exile_rider(
+    state: &engine::types::game_state::GameState,
+    id: engine::types::identifiers::ObjectId,
+) {
+    assert!(
+        state.objects[&id]
+            .replacement_definitions
+            .as_slice()
+            .iter()
+            .any(|replacement| {
+                replacement.event == engine::types::replacements::ReplacementEvent::Moved
+                    && replacement.valid_card == Some(TargetFilter::SelfRef)
+                    && replacement.expiry == Some(RestrictionExpiry::UntilHostLeavesPlay)
+            }),
+        "the returned Aura must carry the leave-the-battlefield exile replacement; got {:?}",
+        state.objects[&id].replacement_definitions
+    );
+}
+
+/// A Storm Herald whose ETB has resolved: the returned Aura `aura` is attached to
+/// `host`, a bystander Aura `bystander_aura` was already on the battlefield
+/// attached to `bystander_host`, and P0 holds real Disenchant x2 and Boomerang
+/// with mana for all of them.
+struct StormHeraldBoard {
+    runner: GameRunner,
+    aura: engine::types::identifiers::ObjectId,
+    bystander_aura: engine::types::identifiers::ObjectId,
+    disenchant: [engine::types::identifiers::ObjectId; 2],
+    boomerang: engine::types::identifiers::ObjectId,
+}
+
+fn storm_herald_board() -> StormHeraldBoard {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let bystander_host = scenario.add_creature(P1, "Bystander Bears", 2, 2).id();
+    let bystander_aura = scenario
+        .add_creature(P1, "Bystander Pacifism", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let aura = scenario
+        .add_creature_to_graveyard(P0, "Pacifism", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let herald = scenario
+        .add_creature_to_hand(P0, "Storm Herald", 3, 2)
+        .from_oracle_text(STORM_HERALD_ORACLE)
+        .id();
+    let disenchant = [
+        scenario.add_real_card(P0, "Disenchant", Zone::Hand, db),
+        scenario.add_real_card(P0, "Disenchant", Zone::Hand, db),
+    ];
+    let boomerang = scenario.add_real_card(P0, "Boomerang", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Blue,
+            ManaType::Blue,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, engine::types::identifiers::ObjectId(0), false, vec![]))
+        .collect(),
+    );
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), bystander_aura, bystander_host);
+    let mut etb_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        herald,
+        Zone::Battlefield,
+        &mut etb_events,
+    );
+    process_triggers(runner.state_mut(), &etb_events);
+    drain_priority_preferring(&mut runner, &[aura, host]);
+
+    // Reach-guards: the ETB returned the Aura onto the creature I control, and the
+    // bystander Aura was never part of that set.
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(host))
+    );
+    assert_has_leave_battlefield_exile_rider(runner.state(), aura);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    StormHeraldBoard {
+        runner,
+        aura,
+        bystander_aura,
+        disenchant,
+        boomerang,
+    }
+}
+
+/// CR 614.1a + CR 614.6: the returned Aura is destroyed before the end step, so
+/// the replacement exiles it instead of putting it into the graveyard. The
+/// bystander Aura (not in the returned set) goes to the graveyard (CR 608.2c:
+/// the rider names only the Auras this ETB returned).
+#[test]
+fn storm_herald_returned_aura_destroyed_before_end_step_is_exiled() {
+    let StormHeraldBoard {
+        mut runner,
+        aura,
+        bystander_aura,
+        disenchant,
+        ..
+    } = storm_herald_board();
+
+    runner.cast(disenchant[0]).target_object(aura).resolve();
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Exile,
+        "destroyed returned Aura must be exiled instead of going to the graveyard"
+    );
+
+    // Multi-authority sibling: the same destruction of an Aura outside the
+    // returned set ends in the graveyard. Reach-guard: the cast resolved and the
+    // returned Aura above is already in exile.
+    runner
+        .cast(disenchant[1])
+        .target_object(bystander_aura)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&bystander_aura].zone,
+        Zone::Graveyard,
+        "an Aura not returned by this ETB is untouched by the rider"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 614.1a: "would leave the battlefield" (not "would die"): bouncing the
+/// returned Aura to hand is replaced by exile as well.
+#[test]
+fn storm_herald_returned_aura_bounced_before_end_step_is_exiled() {
+    let StormHeraldBoard {
+        mut runner,
+        aura,
+        boomerang,
+        ..
+    } = storm_herald_board();
+
+    runner.cast(boomerang).target_object(aura).resolve();
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Exile,
+        "a bounced returned Aura must be exiled instead of returning to hand"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+}
+
 #[test]
 fn storm_herald_exiles_returned_auras_at_end_step_via_pipeline() {
     // CR 603.7 + CR 303.4f: return Aura attached to a creature you control, then
@@ -1134,6 +1317,12 @@ fn storm_herald_exiles_returned_auras_at_end_step_via_pipeline() {
         }
         other => panic!("delayed body must be exile TrackedSet, got {other:?}"),
     }
+
+    // CR 608.2c + CR 614.1a: "If those Auras would leave the battlefield, exile
+    // them instead of putting them anywhere else." The rider names the Auras this
+    // ETB returned, so it is installed on the returned Aura as soon as the ETB
+    // resolves (the reach-guard above proved the Aura is back on the battlefield).
+    assert_has_leave_battlefield_exile_rider(runner.state(), aura);
 
     // CR 603.7: Resolve the installed delayed body through the production
     // effect pipeline (same path end-step firing uses). Turn-gate timing for

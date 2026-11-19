@@ -298,6 +298,16 @@ impl CardDatabase {
             .sum()
     }
 
+    /// CR 709.4b: each half's own mana cost for a split card (face order), else
+    /// just the face's. An effect that refers to the symbols in a split card's
+    /// mana cost sees the separate symbols rather than the whole mana cost.
+    pub(crate) fn off_stack_mana_costs_for_face(&self, face: &CardFace) -> Vec<ManaCost> {
+        self.off_stack_faces(face)
+            .iter()
+            .map(|f| f.mana_cost.clone())
+            .collect()
+    }
+
     /// CR 105.2 + CR 202.3d + CR 709.4b: off-stack colors (mana-symbol + color
     /// indicator colors) — the union across both halves for a split card, else the
     /// face's colors. Returned in canonical WUBRG order.

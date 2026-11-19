@@ -31,18 +31,23 @@ export function FreeCastWindowModal() {
   // localized word into the existing `{{remaining}}` slot keeps one sentence
   // shape per locale instead of forking the subtitle strings.
   const remaining = kind.remaining_casts ?? t("freeCastWindow.remainingAny");
+  // CR 701.18b: a Play window ("play lands and cast spells …") also offers
+  // lands; the engine-provided policy mode picks the verb.
+  const isPlay = kind.face_policy.play_mode === "Play";
   const subtitle =
     kind.remaining_mv_budget !== undefined && kind.remaining_mv_budget !== null
-      ? t("freeCastWindow.subtitle", {
+      ? t(isPlay ? "freeCastWindow.subtitlePlay" : "freeCastWindow.subtitle", {
           remaining,
           budget: kind.remaining_mv_budget,
         })
-      : t("freeCastWindow.subtitleNoBudget", { remaining });
+      : t(isPlay ? "freeCastWindow.subtitleNoBudgetPlay" : "freeCastWindow.subtitleNoBudget", {
+          remaining,
+        });
 
   return (
     <DialogShell
       eyebrow={t("freeCastWindow.eyebrow")}
-      title={t("freeCastWindow.title")}
+      title={t(isPlay ? "freeCastWindow.titlePlay" : "freeCastWindow.title")}
       subtitle={subtitle}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
@@ -57,7 +62,7 @@ export function FreeCastWindowModal() {
               className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
             >
               <span className="font-semibold text-white">
-                {t("freeCastWindow.castNamed", { name })}
+                {t(isPlay ? "freeCastWindow.playNamed" : "freeCastWindow.castNamed", { name })}
               </span>
               <span className="ml-2 text-xs text-slate-400">
                 {t("freeCastWindow.castSuffix")}
@@ -73,7 +78,7 @@ export function FreeCastWindowModal() {
         >
           <span className="font-semibold text-white">{t("freeCastWindow.done")}</span>
           <span className="ml-2 text-xs text-slate-400">
-            {t("freeCastWindow.doneSuffix")}
+            {t(isPlay ? "freeCastWindow.doneSuffixPlay" : "freeCastWindow.doneSuffix")}
           </span>
         </button>
       </div>

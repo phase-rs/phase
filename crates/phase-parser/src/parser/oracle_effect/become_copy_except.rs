@@ -3263,6 +3263,43 @@ mod tests {
         );
     }
 
+    /// CR 707.9b + CR 707.9d + CR 205.1b: a bare P/T body followed by an
+    /// ADDITIVE descriptor body (Nightmare Shepherd: "except it's 1/1 and it's
+    /// a Nightmare in addition to its other types."). Both bodies must land:
+    /// the P/T override (CR 707.9b) and the subtype addition (CR 707.9d), and
+    /// the "in addition to its other types" carve-out must emit NO removal
+    /// modification, so the copied creature keeps its types (CR 205.1b).
+    /// Building-block coverage for the bare-P/T-then-descriptor class rather
+    /// than the single card. Base: the P/T override is dropped because the
+    /// bare body falls through the priority chain into the fail-soft skip.
+    #[test]
+    fn except_bare_pt_body_then_additive_descriptor_body() {
+        let mods = mods_of(
+            ", except it's 1/1 and it's a Nightmare in addition to its other types.",
+            "Nightmare Shepherd",
+        );
+        assert_eq!(
+            mods,
+            vec![
+                ContinuousModification::SetPower { value: 1 },
+                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::AddSubtype {
+                    subtype: "Nightmare".to_string()
+                },
+            ]
+        );
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveAllSubtypes { .. }
+                    | ContinuousModification::RemoveSubtype { .. }
+                    | ContinuousModification::SetCardTypes { .. }
+                    | ContinuousModification::RemoveType { .. }
+            )),
+            "the additive carve-out must retain the copied types (CR 205.1b), got {mods:?}"
+        );
+    }
+
     /// CR 707.9b: `parse_subject_pt_only`'s remainder proof — Hulkling, Young
     /// Avenger's bare P/T body must hand the trailing ", and he has flying and
     /// this ability." conjunct back to `parse_except_clause`'s loop rather

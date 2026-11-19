@@ -182,7 +182,8 @@ fn tormented_thoughts_discards_the_sacrificed_creatures_power() {
 
 /// Taster of Wares on the battlefield-bound stack with one other Goblin and one
 /// non-Goblin under P0, P1 holding `p1_hand` cards and P0 holding two.
-/// Returns the runner at the ETB trigger's reveal prompt and P1's hand.
+/// Returns the runner at the ETB trigger's choose prompt over the revealed
+/// cards, P1's hand and P0's hand.
 fn taster_at_reveal(p1_hand: usize) -> (GameRunner, Vec<ObjectId>, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -205,9 +206,14 @@ fn taster_at_reveal(p1_hand: usize) -> (GameRunner, Vec<ObjectId>, Vec<ObjectId>
         .collect();
     let mut runner = scenario.build();
     let outcome = runner.cast(taster).resolve();
+    // CR 701.20a: the revealed cards are shown to every player, so "You choose
+    // one of those cards" is the controller's only prompt.
     assert!(
-        matches!(outcome.final_waiting_for(), WaitingFor::RevealChoice { .. }),
-        "Taster's ETB must reach its reveal prompt: {:?}",
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ),
+        "Taster's ETB must reach its choose prompt: {:?}",
         outcome.final_waiting_for()
     );
     (runner, p1_cards, p0_cards)
@@ -215,15 +221,24 @@ fn taster_at_reveal(p1_hand: usize) -> (GameRunner, Vec<ObjectId>, Vec<ObjectId>
 
 /// CR 701.20a + CR 608.2h: Taster of Wares makes the target opponent reveal
 /// exactly X cards (X = Goblins its controller controls, Taster included), and
-/// the exiled card is one of them.
+/// the exiled card is one of them. CR 608.2c: "That player exiles it" names the
+/// revealing opponent across the controller's intervening choice, so P1 is
+/// recorded as the exiling player.
 #[test]
 fn taster_of_wares_reveals_exactly_x_and_exiles_one_of_them() {
     let (mut runner, p1_cards, p0_cards) = taster_at_reveal(5);
-    let WaitingFor::RevealChoice { player, cards, .. } = runner.state().waiting_for.clone() else {
+    let WaitingFor::ChooseFromZoneChoice {
+        player,
+        cards,
+        count,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
         unreachable!("taster_at_reveal checked the prompt");
     };
-    // Reach guard: P0 chooses among the revealed cards.
+    // Reach guard: P0 chooses one card among the revealed cards.
     assert_eq!(player, P0);
+    assert_eq!(count, 1);
     assert_eq!(
         cards.len(),
         2,
@@ -240,36 +255,19 @@ fn taster_of_wares_reveals_exactly_x_and_exiles_one_of_them() {
         .act(GameAction::SelectCards {
             cards: vec![chosen],
         })
-        .expect("choosing a revealed card must be accepted");
-    // "You choose one of those cards": the choice is among the revealed cards.
-    let WaitingFor::ChooseFromZoneChoice {
-        player,
-        cards: offered,
-        ..
-    } = runner.state().waiting_for.clone()
-    else {
-        panic!(
-            "expected the choose prompt, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(player, P0);
-    assert!(
-        offered.iter().all(|card| cards.contains(card)),
-        "{offered:?} ⊄ {cards:?}"
-    );
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![chosen],
-        })
         .expect("choosing one of those cards must be accepted");
     runner.advance_until_stack_empty();
     assert_eq!(zone(&runner, chosen), Zone::Exile);
     assert_eq!(hand_len(&runner, P1), 4);
+    assert_eq!(
+        runner.state().objects[&chosen].exiled_by,
+        Some(P1),
+        "the revealing opponent exiles the chosen card, not Taster's controller"
+    );
 
     // X greater than the hand reveals the whole (one-card) hand.
     let (runner, p1_cards, _) = taster_at_reveal(1);
-    let WaitingFor::RevealChoice { cards, .. } = &runner.state().waiting_for else {
+    let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
         unreachable!("taster_at_reveal checked the prompt");
     };
     assert_eq!(*cards, p1_cards);

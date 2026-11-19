@@ -3,12 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 
+import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { getCardNames } from "../../services/cardNames.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import {
   getPlayerDisplayName,
   useMultiplayerStore,
@@ -51,9 +53,45 @@ function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string 
 
 const MAX_RESULTS = 10;
 
+type SecretAgendaChoice = Extract<WaitingFor, { type: "SecretAgendaChoice" }>;
+
+/** CR 702.106a / CR 702.106f: collects every name the engine asks for and sends
+ *  them as one answer, so a double agenda looks like any other agenda to the
+ *  table. The engine validates the answer; a rejected one simply starts over. */
+export function SecretAgendaModal({ data }: { data: SecretAgendaChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const [names, setNames] = useState<string[]>([]);
+
+  const handleName = (name: string) => {
+    const next = [...names, name];
+    if (next.length < data.name_count) {
+      setNames(next);
+      return;
+    }
+    setNames([]);
+    dispatch({ type: "ChooseSecretAgendaNames", data: { names: next } });
+  };
+
+  return (
+    <CardNameSearch
+      key={names.length}
+      title={t("namedChoice.secretAgendaTitle", {
+        current: names.length + 1,
+        total: data.name_count,
+      })}
+      subtitle={t("namedChoice.secretAgendaSubtitle")}
+      onConfirm={handleName}
+    />
+  );
+}
+
 export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
-  if (typeKey === "CardName") {
+  // CR 201.4: the open card-name prompt publishes no options (any card name may
+  // be typed). A closed card-name domain (Garth One-Eye) publishes exactly its
+  // legal names, so it renders them like any other enumerated choice.
+  if (typeKey === "CardName" && data.options.length === 0) {
     return <CardNameSearch />;
   }
   // CR 107.1a/b: the engine publishes a free-entry contract when the answer is
@@ -125,7 +163,13 @@ function NumberEntry({ contract }: { contract: FreeEntry }) {
   );
 }
 
-function CardNameSearch() {
+interface CardNameSearchProps {
+  title?: string;
+  subtitle?: string;
+  onConfirm?: (name: string) => void;
+}
+
+function CardNameSearch({ title, subtitle, onConfirm }: CardNameSearchProps) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [query, setQuery] = useState("");
@@ -165,10 +209,13 @@ function CardNameSearch() {
   }, [matches]);
 
   const handleConfirm = useCallback(() => {
-    if (selected) {
+    if (!selected) return;
+    if (onConfirm) {
+      onConfirm(selected);
+    } else {
       dispatch({ type: "ChooseOption", data: { choice: selected } });
     }
-  }, [dispatch, selected]);
+  }, [dispatch, onConfirm, selected]);
 
   const handleSelect = useCallback((name: string) => {
     setSelected(name);
@@ -195,7 +242,7 @@ function CardNameSearch() {
   const showResults = matches.length > 0 && !selected;
 
   return (
-    <ChoiceOverlay title={t("namedChoice.title.cardName")} subtitle={t("namedChoice.searchSubtitle")} footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
+    <ChoiceOverlay title={title ?? t("namedChoice.title.cardName")} subtitle={subtitle ?? t("namedChoice.searchSubtitle")} footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
       <div className="flex w-full max-w-md flex-col items-center gap-3">
         <div className="relative w-full">
           <input
@@ -293,6 +340,13 @@ function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: st
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
+  // CR 608.2c + CR 608.2d: a per-object choice ("for each of those permanents,
+  // choose a different opponent") publishes the object the answer is for;
+  // render it through the shared card display, nothing derived client-side.
+  const subjectId = "decision_subject_id" in data ? data.decision_subject_id : undefined;
+  const subject = useGameStore((s) =>
+    subjectId == null ? undefined : s.gameState?.objects[subjectId],
+  );
 
   const handleConfirm = useCallback(() => {
     if (selected !== null) {
@@ -318,6 +372,15 @@ function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: st
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
     >
+      {subject && (
+        <div className="mx-auto mb-4 w-full max-w-sm px-6" data-testid="named-choice-subject">
+          <CardTextboxPreview
+            cardName={subject.name}
+            ownerPrinting={subject.printing}
+            ownerPrintedRef={subject.printed_ref}
+          />
+        </div>
+      )}
       {showFilter && (
         <div className="mx-auto mb-4 w-full max-w-md">
           <input

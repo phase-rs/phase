@@ -1,7 +1,14 @@
-//! Alchemy "draft a card from [this card]'s spellbook" (digital-only, no CR
-//! entry). A spellbook is a fixed, card-specific list of card names. Drafting
-//! means: reveal the list, the controller chooses one card, and that card is
-//! created in a destination zone.
+//! Alchemy spellbooks (digital-only, no CR entry). A spellbook is a fixed,
+//! card-specific list of card names. [`Effect::DraftFromSpellbook`] takes one
+//! card from it and creates that card in a destination zone, in one of three
+//! wordings ([`SpellbookSelection`]):
+//!
+//! * "draft a card from X's spellbook" — the game offers three distinct entries
+//!   chosen at random and the controller chooses one of them;
+//! * "conjure a card of your choice from X's spellbook" — the controller
+//!   chooses from the whole spellbook;
+//! * "conjure a random card from X's spellbook" — one entry is picked at
+//!   random, with no prompt.
 //!
 //! This composes two existing building blocks rather than reinventing them:
 //!
@@ -16,18 +23,26 @@
 //! `CardFace::metadata.spellbook`); the resolver reads it from the source.
 
 use crate::types::game_state::RandomDraw;
+use rand::seq::IndexedRandom; // rand 0.9: `choose_multiple` on `[T]` lives here.
 use rand::Rng;
 
 use crate::types::ability::{
     ConjureCard, ConjureSource, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility,
+    SpellbookSelection,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::zones::Zone;
 
-/// Resolve [`Effect::DraftFromSpellbook`]: present the source card's spellbook
-/// list for the controller to choose from. With an empty list (no spellbook
-/// data) the draft is a no-op.
+/// Digital-only Alchemy (no CR entry): a draft shows three cards chosen at
+/// random from the spellbook. Each draft samples independently.
+const SPELLBOOK_DRAFT_OFFER_SIZE: usize = 3;
+
+/// Resolve [`Effect::DraftFromSpellbook`]: pick from the source card's
+/// spellbook list per its [`SpellbookSelection`] — raise the controller's choice
+/// over a random three-card offer (`Draft`) or the whole book (`Chosen`), or
+/// conjure a random entry immediately (`Random`). With an empty list (no
+/// spellbook data) the draft is a no-op.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -36,7 +51,7 @@ pub fn resolve(
     let Effect::DraftFromSpellbook {
         destination,
         tapped,
-        random,
+        selection,
     } = &ability.effect
     else {
         return Err(EffectError::MissingParam("DraftFromSpellbook".to_string()));
@@ -52,6 +67,13 @@ pub fn resolve(
         .unwrap_or_default();
 
     if spellbook.is_empty() {
+        // A draft that delivers nothing publishes no created referent, so a
+        // following "it" (the exile rider's `TargetFilter::LastCreated`) cannot
+        // reach an object an earlier instruction created. The producer
+        // convention of `conjure.rs` / `token.rs`: the ledger is ASSIGNED, never
+        // left stale. Reached by a token copy of a spellbook card, which carries
+        // no spellbook.
+        state.last_created_token_ids = Vec::new();
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -60,38 +82,61 @@ pub fn resolve(
         return Ok(());
     }
 
-    // "conjure a random card from ~'s spellbook": the engine picks one uniformly at random
-    // and conjures it immediately, instead of pausing for the controller to choose. Random
-    // vs. choice is the only difference from draft-from-spellbook, so both share this
-    // resolver and the same card-creation path (`complete_draft`).
-    if *random {
-        let index = state
-            .rng
-            .draw(RandomDraw::Outcome)
-            .random_range(0..spellbook.len());
-        let card = spellbook[index].clone();
-        return complete_draft(
-            state,
-            ability.controller,
-            ability.source_id,
-            &spellbook,
-            &card,
-            *destination,
-            *tapped,
-            events,
-        );
-    }
+    let options = match selection {
+        // "conjure a random card from ~'s spellbook": the engine picks one
+        // uniformly at random and conjures it immediately, instead of pausing
+        // for the controller to choose. It shares the card-creation path
+        // (`complete_draft`) with the interactive selections.
+        SpellbookSelection::Random => {
+            let index = state
+                .rng
+                .draw(RandomDraw::Outcome)
+                .random_range(0..spellbook.len());
+            let card = spellbook[index].clone();
+            return complete_draft(
+                state,
+                ability.controller,
+                ability.source_id,
+                &spellbook,
+                &card,
+                *destination,
+                *tapped,
+                events,
+            );
+        }
+        // "conjure a card of your choice from ~'s spellbook": the whole book.
+        SpellbookSelection::Chosen => spellbook,
+        // "draft a card from ~'s spellbook": a random three-card offer.
+        SpellbookSelection::Draft => draft_offer(state, &spellbook),
+    };
 
     // Digital-only Alchemy spellbook choice: pause for the controller to choose
-    // one card from the list.
+    // one card from the offer.
     state.waiting_for = WaitingFor::SpellbookDraft {
         player: ability.controller,
         source_id: ability.source_id,
-        options: spellbook,
+        options,
         destination: *destination,
         tapped: *tapped,
     };
     Ok(())
+}
+
+/// Digital-only Alchemy (no CR entry): the cards a draft shows — up to
+/// [`SPELLBOOK_DRAFT_OFFER_SIZE`] entries sampled at random without
+/// replacement. MTGJSON spellbook entries are distinct names (`jq '.data |
+/// to_entries[] | .value[0] as $f | select($f.relatedCards.spellbook) |
+/// [.key, ($f.relatedCards.spellbook | length), ($f.relatedCards.spellbook |
+/// unique | length)]'` over `AtomicCards.json` shows equal counts), so the
+/// offer holds distinct cards.
+fn draft_offer(state: &mut GameState, spellbook: &[String]) -> Vec<String> {
+    spellbook
+        .choose_multiple(
+            state.rng.draw(RandomDraw::Outcome),
+            SPELLBOOK_DRAFT_OFFER_SIZE.min(spellbook.len()),
+        )
+        .cloned()
+        .collect()
 }
 
 /// Complete a spellbook draft once the controller has chosen `card`: conjure the

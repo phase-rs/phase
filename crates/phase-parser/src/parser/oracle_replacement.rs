@@ -7,7 +7,8 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{
-    all_consuming, cond, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+    all_consuming, cond, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+    verify,
 };
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -15,14 +16,17 @@ use nom::Parser;
 
 use super::oracle_classifier::has_enters_with_counter_tokens;
 use super::oracle_effect::become_copy_except::parse_except_clause;
-use super::oracle_effect::lower::{apply_where_x_quantity_expression, parse_where_x_quantity_core};
+use super::oracle_effect::lower::{
+    apply_where_x_quantity_expression, parse_where_x_quantity_core, WhereXBinding,
+};
 use super::oracle_effect::{
-    excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
-    parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
-    try_parse_named_choice_conjunction,
+    excise_selection_qualifier, lower_ability_ir, parse_ability_ir, parse_effect_chain,
+    parse_effect_chain_with_context_and_provenance, parse_effect_clause, parse_named_choice_object,
+    try_parse_named_choice, try_parse_named_choice_conjunction, ChainLoweringMode,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::OracleNodeIr;
+use super::oracle_ir::history_provenance::{HistoryProvenance, Lowered};
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -38,8 +42,8 @@ use super::oracle_nom::prevention::{
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    controller_phrase_among, parse_self_reference, parse_type_filter_word, parse_type_phrase,
-    ControllerPhrase,
+    controller_phrase_among, parse_controller_suffix, parse_self_reference, parse_type_filter_word,
+    parse_type_phrase, ControllerPhrase,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
@@ -51,6 +55,7 @@ use super::oracle_util::{
     first_sentence, merge_or_filters, normalize_card_name_refs, parse_count_expr, parse_number,
     parse_ordinal, rewrite_quantity_expr_rounding, strip_after, strip_reminder_text, TextPair,
 };
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, ChooseOneOfKind,
     CoinFlipRun, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
@@ -91,13 +96,15 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
 /// IR production: parse a replacement line into `ReplacementIr` (pre-lowering).
 pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<ReplacementIr> {
-    let mut definition = parse_replacement_line_inner(text, card_name)?;
+    let mut history = Vec::new();
+    let mut definition = parse_replacement_line_inner(text, card_name, &mut history)?;
     if definition.condition.is_none() {
         if let Some(condition) = parse_replacement_ability_word_condition(text) {
             definition = definition.condition(condition);
         }
     }
     Some(ReplacementIr {
+        history,
         definition,
         source_text: text.to_string(),
         execute_ir: None,
@@ -108,11 +115,24 @@ pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<R
 ///
 /// Currently identity — replacement definitions are fully assembled during parsing.
 pub(crate) fn lower_replacement_ir(ir: &ReplacementIr) -> ReplacementDefinition {
-    ir.definition.clone()
+    lower_replacement_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_replacement_ir_with_provenance(
+    ir: &ReplacementIr,
+) -> Lowered<ReplacementDefinition> {
+    Lowered {
+        value: ir.definition.clone(),
+        history: ir.history.clone(),
+    }
 }
 
 /// Internal dispatch body for replacement line parsing.
-fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
+fn parse_replacement_line_inner(
+    text: &str,
+    card_name: &str,
+    history: &mut Vec<HistoryProvenance>,
+) -> Option<ReplacementDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let normalized = replace_self_refs(&text, card_name);
@@ -127,6 +147,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // Routes that consult `enters_with_fails_closed` record the line as the
     // `enters_with_clause` gap. An arm that reads every sentence of such a line
     // must dispatch above this gate.
+    // CR 614.1c + CR 603.6d + CR 706.4: "As ~ enters, roll <dice>. ~ enters
+    // with <counters> equal to the result." reads both sentences, so it
+    // dispatches above the gate below (Neverwinter Hydra, Hammer Jammer).
+    if let Some(Ok(def)) = as_enters_roll_enters_with_outcome(&norm_lower) {
+        return Some(def.description(text.to_string()));
+    }
     if is_line_owned_enters_with_clause(&norm_lower) {
         return None;
     }
@@ -201,7 +227,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- "As ~ is turned face up, [effect]" → TurnFaceUp replacement (megamorph/
     //     disguise). CR 614.1e + CR 708.11: the effect applies as the permanent is
     //     turned face up, so it is a replacement, not a stack triggered ability. ---
-    if let Some(def) = parse_turned_face_up_replacement(&norm_lower, &text) {
+    if let Some(def) = parse_turned_face_up_replacement_with_provenance(&norm_lower, &text) {
+        *history = def.history;
+        let def = def.value;
         return Some(def);
     }
 
@@ -258,7 +286,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
     match parse_clone_replacement(&norm_lower, &text, card_name) {
-        Ok(Some(def)) => return Some(def),
+        Ok(Some(def)) => {
+            *history = def.history;
+            return Some(def.value);
+        }
         Ok(None) => {}
         // A recognized clone rider that could not be represented is not an
         // absent rider. Stop this parser so the outer router records the whole
@@ -335,9 +366,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If an opponent causes you to discard this card, put it onto the battlefield instead" ---
-    if let Some(def) =
-        parse_discard_self_to_battlefield_replacement(&norm_lower, &normalized, &text)
-    {
+    if let Some(def) = parse_discard_self_to_battlefield_replacement_with_provenance(
+        &norm_lower,
+        &normalized,
+        &text,
+    ) {
+        *history = def.history;
+        let def = def.value;
         return Some(def);
     }
 
@@ -348,9 +383,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If enchanted land would be destroyed, instead {effect}" ---
-    if let Some(def) =
-        parse_enchanted_land_destroy_sacrifice_replacement(&norm_lower, &normalized, &text)
-    {
+    if let Some(def) = parse_enchanted_land_destroy_sacrifice_replacement_with_provenance(
+        &norm_lower,
+        &normalized,
+        &text,
+    ) {
+        *history = def.history;
+        let def = def.value;
         return Some(def);
     }
 
@@ -376,7 +415,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         // "instead exile it with three egg counters on it" routes through
         // here (self-die `~ would die`), not through the non-self path.
         if let Some(execute) = self_die_exile_anaphor_execute(&normalized, &text) {
-            def = def.execute(execute);
+            *history = execute.history;
+            def = def.execute(execute.value);
             return Some(def);
         }
         // Fall through: anaphor didn't match — keep prior coverage for compound
@@ -384,7 +424,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         // chain parser.
         let effect_text = extract_replacement_effect(&normalized);
         if let Some(e) = effect_text {
-            def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
+            let lowered =
+                super::oracle_effect::parse_effect_chain_with_provenance(&e, AbilityKind::Spell);
+            *history = lowered.history;
+            def = def.execute(lowered.value);
         }
         return Some(def);
     }
@@ -396,7 +439,8 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     //       "If a nontoken creature an opponent controls would die, exile it instead." (Valentin)
     //       "If a creature an opponent controls would die, exile it instead." (Vren)
     if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &normalized) {
-        return Some(def);
+        *history = def.history;
+        return Some(def.value);
     }
 
     // --- "If a [filter] would enter and it wasn't cast, exile it instead" ---
@@ -423,14 +467,21 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
-    if let Some(def) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
-        return Some(def);
+    if let Some(lowered) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
+        *history = lowered.history;
+        return Some(lowered.value);
     }
-    if let Some(def) = parse_damage_to_self_instead_followup(&norm_lower, &normalized, &text) {
-        return Some(def);
+    if let Some(lowered) =
+        parse_damage_to_self_instead_followup_with_provenance(&norm_lower, &normalized, &text)
+    {
+        *history = lowered.history;
+        return Some(lowered.value);
     }
-    match parse_damage_prevention_replacement(&norm_lower, &text) {
-        Ok(def) => return Some(def),
+    match parse_damage_prevention_replacement_with_provenance(&norm_lower, &text) {
+        Ok(lowered) => {
+            *history = lowered.history;
+            return Some(lowered.value);
+        }
         // CR 615.1a: a prevention shield with a printed part it cannot carry is
         // claimed by no later parser; the route lands the line as
         // `Effect::unimplemented` (`damage_prevention_fails_closed`).
@@ -468,7 +519,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             if optional_modal_present {
                 def = def.mode(ReplacementMode::Optional { decline: None });
             }
-            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
+            let lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+                effect_after_modal,
+                AbilityKind::Spell,
+            );
+            *history = lowered.history;
+            def = def.execute(lowered.value);
         }
         apply_proliferate_player_scope(&lower, &mut def);
         return Some(def);
@@ -489,7 +545,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- Explore replacement: "If a creature you control would explore, instead …"
     // (Twists and Turns / Topography Tracker class).
     if nom_primitives::scan_contains(&lower, "would explore") {
-        if let Some(def) = parse_explore_replacement(&lower, &text) {
+        if let Some(def) = parse_explore_replacement_with_provenance(&lower, &text) {
+            *history = def.history;
+            let def = def.value;
             return Some(def);
         }
     }
@@ -500,7 +558,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // then that creature connives") contains "would"/"draw" text that the draw
     // arm would otherwise mis-claim.
     if nom_primitives::scan_contains(&lower, "would connive") {
-        if let Some(def) = parse_connive_replacement(&lower, &text) {
+        if let Some(def) = parse_connive_replacement_with_provenance(&lower, &text) {
+            *history = def.history;
+            let def = def.value;
             return Some(def);
         }
     }
@@ -509,7 +569,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // controller's | your] untap step, [effect] instead" (Freyalise's Winds,
     // Edge of Malacol). CR 502.3 + CR 502.4 + CR 614.1a.
     if nom_primitives::scan_contains(&lower, "would untap during") {
-        if let Some(def) = parse_untap_step_replacement(&text, &lower) {
+        if let Some(def) = parse_untap_step_replacement_with_provenance(&text, &lower) {
+            *history = def.history;
+            let def = def.value;
             return Some(def);
         }
     }
@@ -550,7 +612,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         .parse(i)
     });
     if let Some((draw_scope, threshold)) = draw_antecedent {
-        let def = parse_draw_replacement(&text, &normalized, &lower, draw_scope)?;
+        let def = parse_draw_replacement_with_provenance(&text, &normalized, &lower, draw_scope)?;
+        *history = def.history;
+        let def = def.value;
         // CR 121.2a: the single composition step for a count-form antecedent's
         // threshold, applied to every draw-replacement form parsed above.
         return match threshold {
@@ -615,7 +679,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             // seam, exactly as the CR 615.5 prevention follow-up path does for
             // damage recipients. Generic `ParentTarget*` resolution is left
             // untouched.
-            let mut execute = parse_effect_chain(&e, AbilityKind::Spell);
+            let lowered =
+                super::oracle_effect::parse_effect_chain_with_provenance(&e, AbilityKind::Spell);
+            *history = lowered.history;
+            let mut execute = lowered.value;
             rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
             def = def.execute(execute);
         }
@@ -663,6 +730,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         && nom_primitives::scan_contains(&lower, "instead")
     {
         if let Some(def) = parse_damage_modification_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
+        // CR 614.1a + CR 614.6: "If <source> would deal [noncombat] damage to
+        // <recipient>, put that many <counter> counters on that <noun> instead"
+        // (Soul-Scar Mage) — the damage event is replaced by a counter placement.
+        if let Some(def) = parse_damage_to_counters_substitution(&norm_lower, &text) {
             return Some(def);
         }
         // Exotic pattern (coin-flip, redirection, etc.) — keep as no-op stub
@@ -1087,10 +1160,15 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            // CR 608.2c + CR 701.23a: "they exile each card they find" — the
+            // subject agrees with the searcher, who searches their own library,
+            // so the library's player performs the exile.
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             origin: None,
             destination: parsed.exile.destination,
             target: parsed.exile.target,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -1163,11 +1241,11 @@ fn parse_discard_to_library_top_replacement(
     )
 }
 
-fn parse_discard_self_to_battlefield_replacement(
+fn parse_discard_self_to_battlefield_replacement_with_provenance(
     norm_lower: &str,
     normalized: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
         value(
             (),
@@ -1184,16 +1262,19 @@ fn parse_discard_self_to_battlefield_replacement(
     if !tail.trim_end_matches('.').trim().is_empty() {
         return None;
     }
-    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Discard)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let execute = lowered.value;
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Discard)
             .execute(execute)
             .valid_card(TargetFilter::SelfRef)
             .condition(ReplacementCondition::EventSourceControlledBy {
                 controller: ControllerRef::Opponent,
             })
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 614.1a + CR 614.12 + CR 614.12a: Karoo-style self-ETB cost replacement.
@@ -1275,10 +1356,12 @@ fn parse_self_enters_pay_cost_replacement(
     let decline = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Graveyard,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -1416,11 +1499,11 @@ fn replace_self_refs(text: &str, card_name: &str) -> String {
 
 /// CR 614.1a: "instead" marks the enchanted-land destruction event as replaced
 /// by the parsed sacrifice/grant effect chain.
-fn parse_enchanted_land_destroy_sacrifice_replacement(
+fn parse_enchanted_land_destroy_sacrifice_replacement_with_provenance(
     norm_lower: &str,
     normalized: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let ((), rest) = nom_on_lower(normalized, norm_lower, |i| {
         let (i, _) = tag("if ").parse(i)?;
         let (i, _) = tag("enchanted land").parse(i)?;
@@ -1432,15 +1515,18 @@ fn parse_enchanted_land_destroy_sacrifice_replacement(
     if effect_text.is_empty() {
         return None;
     }
-    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let mut execute = lowered.value;
     bind_enchanted_land_grant_to_replaced_object(&mut execute);
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Destroy)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Destroy)
             .valid_card(TargetFilter::AttachedTo)
             .execute(execute)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 fn bind_enchanted_land_grant_to_replaced_object(def: &mut AbilityDefinition) {
@@ -2512,11 +2598,15 @@ fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<Replacem
     let (pay_residue, _) = tag::<_, _, OracleError<'_>>("pay ")
         .parse(payment_text)
         .ok()?;
-    let cost = super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
+    let super::oracle_effect::imperative::PayResidueCost { cost, scale } =
+        super::oracle_effect::imperative::parse_pay_residue_cost(pay_residue, pay_residue)?;
     let AbilityCost::PayLife { amount } = &cost else {
         return None;
     };
-    if !crate::types::ability::is_pay_any_amount(amount) {
+    // CR 118.1: this builder's `Effect::PayCost` has no amount-multiplier
+    // surface, so a scaled residue declines rather than having its scale
+    // dropped.
+    if !crate::types::ability::is_pay_any_amount(amount) || scale.is_some() {
         return None;
     }
     let execute = AbilityDefinition::new(
@@ -3241,7 +3331,9 @@ pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<Repl
     }
 
     // Reuse the counter + quantity effect stack (where-X → ObjectCount / Another).
-    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let mut execute = lowered.value;
 
     // Scoping guard + self-anaphor normalization: every effect in the chain must
     // place counters on the entering/turned-up permanent itself (none may be
@@ -3280,6 +3372,9 @@ pub(crate) fn lower_as_enters_or_face_up_counters(text: &str) -> Option<Vec<Repl
         ));
     }
 
+    for ir in &mut irs {
+        ir.history = lowered.history.clone();
+    }
     Some(irs)
 }
 
@@ -3388,7 +3483,7 @@ fn parse_clone_replacement(
     norm_lower: &str,
     original_text: &str,
     card_name: &str,
-) -> Result<Option<ReplacementDefinition>, ()> {
+) -> Result<Option<Lowered<ReplacementDefinition>>, ()> {
     // CR 614.1c: Two grammatical framings of the same ETB-copy replacement class:
     //   (a) "you may have ~ enter as a copy of ..."     (Phantasmal Image class)
     //   (b) "as ~ enters, you may have it become a copy of ..." (Cursed Mirror class)
@@ -3507,8 +3602,16 @@ fn parse_clone_replacement(
     // trigger, including its intervening-if guard, and consume literal `If`
     // only at this accepted replacement branch. The parent's copied-card
     // referent is forwarded to either rider.
-    if let Some(rider) = post_replacement_rider {
-        copy_effect = copy_effect.sub_ability(rider);
+    let mut history = Vec::new();
+    if let Some(mut rider) = post_replacement_rider {
+        for record in &mut rider.history {
+            record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+            if enter_tapped {
+                record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+            }
+        }
+        history.extend(rider.history);
+        copy_effect = copy_effect.sub_ability(rider.value);
     }
 
     // CR 614.1c: When the verb phrase includes "tapped" ("enter tapped as a copy
@@ -3531,8 +3634,8 @@ fn parse_clone_replacement(
         copy_effect
     };
 
-    Ok(Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
+    Ok(Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(execute_effect)
             .mode(ReplacementMode::Optional { decline: None })
             .valid_card(TargetFilter::SelfRef)
@@ -3541,7 +3644,8 @@ fn parse_clone_replacement(
             // permanent's own DEATH.
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
-    ))
+        history,
+    }))
 }
 
 /// Locate the clone-verb phrase in a normalised Oracle line and return
@@ -3702,7 +3806,9 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
 /// reflexive connector; `Err(())` means a recognized connector could not be
 /// represented and the owning replacement must fail closed rather than discard
 /// its rider.
-fn parse_post_replacement_rider(post_period: &str) -> Result<Option<AbilityDefinition>, ()> {
+fn parse_post_replacement_rider(
+    post_period: &str,
+) -> Result<Option<Lowered<AbilityDefinition>>, ()> {
     // Strip the sentence terminator / separator space preceding the reflexive
     // clause. These are structural punctuation, not parsing dispatch.
     let trimmed = post_period.trim_start_matches(['.', ' ']);
@@ -3731,7 +3837,9 @@ fn parse_post_replacement_rider(post_period: &str) -> Result<Option<AbilityDefin
     {
         return Ok(None);
     }
-    let mut def = super::oracle_effect::parse_effect_chain(trimmed, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(trimmed, AbilityKind::Spell);
+    let mut def = lowered.value;
     // Reject unimplemented fallbacks — the chain parser returns
     // `Effect::Unimplemented` when no pattern matches, which would attach a
     // dead sub_ability to the clone replacement.
@@ -3748,7 +3856,10 @@ fn parse_post_replacement_rider(post_period: &str) -> Result<Option<AbilityDefin
         Some(condition) if condition.is_optional_effect_performed() => {}
         Some(_) | None => return Err(()),
     }
-    Ok(Some(def))
+    Ok(Some(Lowered {
+        value: def,
+        history: lowered.history,
+    }))
 }
 
 /// Parse the suffix of a clone replacement, which carries the optional
@@ -4672,6 +4783,122 @@ impl EntersWithGap {
     }
 }
 
+/// CR 614.1c + CR 706.1: is this parsed "As ~ enters, <body>" body a bare
+/// die-roll instruction the as-enters roll composition can carry? A results
+/// table (CR 706.3) is out of class; a roll modifier is part of the roll
+/// (CR 706.2). Every gating or choice-bearing field must be empty, as in
+/// [`as_enters_one_shot_is_admissible`], and the roll must be the whole body.
+fn is_as_enters_roll_prefix(def: &AbilityDefinition) -> bool {
+    let bare_roll = match &*def.effect {
+        Effect::RollDie { results, .. } => results.is_empty(),
+        _ => false,
+    };
+    bare_roll && def.sub_ability.is_none() && is_mandatory_unconditional_node(def)
+}
+
+/// CR 614.1c + CR 706.1: split a two-sentence "As ~ enters, roll <dice>.
+/// <enters-with sentence>" line into its parsed roll and its second sentence
+/// (a subslice of `norm_lower`). `None` for any other shape: a quoted span, a
+/// unit count other than two, no as-enters frame, no entry verb in the second
+/// sentence, or a first-sentence body that is not a bare die roll.
+fn split_as_enters_roll_prefix(norm_lower: &str) -> Option<(AbilityDefinition, &str)> {
+    if nom_primitives::strip_double_quoted_spans(norm_lower) != norm_lower {
+        return None;
+    }
+    let units = alphanumeric_sentence_units(norm_lower);
+    let [frame_unit, enters_with_unit] = units.as_slice() else {
+        return None;
+    };
+    let (body, ()) = parse_as_self_enters_frame(frame_unit).ok()?;
+    nom_primitives::scan_at_word_boundaries(enters_with_unit, parse_entry_verb_with)?;
+    // Punctuation cleanup on the pre-tokenized body (drop the sentence terminator).
+    let body = body.trim().trim_end_matches('.').trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut roll = parse_effect_chain(body, AbilityKind::Spell);
+    if !is_as_enters_roll_prefix(&roll) {
+        return None;
+    }
+    // CR 107.3m: the X of an as-enters roll is the X paid for the spell that
+    // became the permanent.
+    if let Effect::RollDie { count, .. } = &mut *roll.effect {
+        rewrite_variable_x_to_cost_x_paid(count);
+    }
+    Some((roll, enters_with_unit))
+}
+
+/// Is this execute node a modification of how the entering permanent itself
+/// enters (CR 614.1c: counters, CR 122.6; tapped, CR 614.1d)? Allowlist: any
+/// other effect is not an event modifier of this permanent.
+fn is_self_entry_modifier(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            ..
+        } | Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
+/// CR 614.1c + CR 603.6d + CR 706.4 + CR 122.6: the single composition
+/// authority for "As ~ enters, roll <dice>. ~ enters with <counters> equal to
+/// the result / the total of those results." The roll happens as part of the
+/// entry event and the counters it determines are given as the permanent
+/// enters, so one `Moved` replacement carries both: the roll heads the execute
+/// chain and the enters-with sentence's self modifiers follow it.
+///
+/// `None` when the line is not this shape. `Some(Ok(def))` when the second
+/// sentence is an ungated, self-only enters-with replacement whose execute is
+/// self entry modifiers only. Otherwise `Some(Err(..))` with the line's
+/// [`classify_multi_sentence`] verdict, so a line this composition does not
+/// claim keeps exactly the verdict it had without it.
+fn as_enters_roll_enters_with_outcome(
+    norm_lower: &str,
+) -> Option<Result<ReplacementDefinition, EntersWithDecline>> {
+    let (roll, sentence) = split_as_enters_roll_prefix(norm_lower)?;
+    let claimed = enters_with_counters_outcome(sentence, sentence)
+        .ok()
+        .and_then(|mut inner| {
+            // CR 614.12: the frame's "this creature" names only this permanent.
+            let self_only = matches!(inner.event, ReplacementEvent::Moved)
+                && inner.valid_card == Some(TargetFilter::SelfRef);
+            // A gate on the counter sentence would also gate the roll.
+            let ungated = inner.condition.is_none();
+            let execute = inner.execute.take()?;
+            (self_only && ungated && chain_is_self_entry_modifiers(&execute)).then(|| {
+                inner.execute = Some(Box::new(roll.sub_ability(*execute)));
+                inner
+            })
+        });
+    Some(claimed.ok_or_else(|| classify_multi_sentence(&alphanumeric_sentence_units(norm_lower))))
+}
+
+/// Every node of `execute` (through `sub_ability`) is a self entry modifier.
+fn chain_is_self_entry_modifiers(execute: &AbilityDefinition) -> bool {
+    let mut node = Some(execute);
+    while let Some(def) = node {
+        if !is_self_entry_modifier(&def.effect) {
+            return false;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    true
+}
+
+/// The sentence units of `text` that carry a word: punctuation-only fragments
+/// are not sentences. Shared by the multi-sentence enters-with classifier and
+/// the as-enters roll composition so the two read the same units.
+fn alphanumeric_sentence_units(text: &str) -> Vec<&str> {
+    nom_primitives::split_sentence_units(text)
+        .into_iter()
+        .filter(|unit| unit.chars().any(char::is_alphanumeric))
+        .collect()
+}
+
 /// CR 614.1c + CR 608.2c: the multi-sentence step of
 /// [`enters_with_counters_outcome`]. One replacement carries one enters-with
 /// sentence, so a line of several sentences is classified, never claimed
@@ -4679,17 +4906,21 @@ impl EntersWithGap {
 /// ("… and with \"Pay 3 life: Regenerate this creature.\"") does not split the
 /// line, and punctuation-only fragments are not sentences.
 ///
-/// `None` when the line has no entry verb followed by "with " or is a single
-/// sentence; otherwise the line's [`classify_multi_sentence`] verdict. Shared
+/// `None` when the line has no entry verb followed by "with ", is a single
+/// sentence, or is an as-enters roll line the composition claims
+/// ([`as_enters_roll_enters_with_outcome`]); otherwise the composition's
+/// decline or the line's [`classify_multi_sentence`] verdict. Shared
 /// by the enters-with arm and the replacement dispatcher's gate
 /// ([`is_line_owned_enters_with_clause`]) so the two cannot drift.
 fn multi_sentence_enters_with_decline(norm_lower: &str) -> Option<EntersWithDecline> {
     nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with)?;
+    match as_enters_roll_enters_with_outcome(norm_lower) {
+        Some(Ok(_)) => return None,
+        Some(Err(decline)) => return Some(decline),
+        None => {}
+    }
     let masked = nom_primitives::strip_double_quoted_spans(norm_lower);
-    let units: Vec<&str> = nom_primitives::split_sentence_units(&masked)
-        .into_iter()
-        .filter(|unit| unit.chars().any(char::is_alphanumeric))
-        .collect();
+    let units = alphanumeric_sentence_units(&masked);
     (units.len() > 1).then(|| classify_multi_sentence(&units))
 }
 
@@ -4723,6 +4954,13 @@ fn enters_with_counters_outcome(
         return Err(EntersWithDecline::NotThisShape);
     }
 
+    // CR 614.1c + CR 603.6d + CR 706.4: an "As ~ enters, roll <dice>." frame
+    // followed by its enters-with sentence is one replacement; the composition
+    // authority owns both its claim and its decline.
+    if let Some(outcome) = as_enters_roll_enters_with_outcome(norm_lower) {
+        return outcome.map(|def| def.description(original_text.to_string()));
+    }
+
     // CR 614.1c + CR 608.2c: one replacement carries one enters-with sentence;
     // a line of several sentences is classified, never claimed whole.
     if let Some(decline) = multi_sentence_enters_with_decline(norm_lower) {
@@ -4749,15 +4987,14 @@ fn enters_with_counters_outcome(
     // Pet). CR 614.1c makes those riders part of this one replacement; every
     // reader below sees only the counter clause that follows them.
     let (leading_keywords, after_with) = split_enters_with_leading_keyword_riders(head.after_with);
-    // CR 614.1c: a granted QUOTED ability is a printed part of the replacement
-    // this parser cannot carry. Once a leading keyword chain makes the line
-    // claimable, a quoted rider in the payload would be dropped silently, so the
-    // clause fails closed instead.
-    if !leading_keywords.is_empty()
-        && nom_primitives::strip_double_quoted_spans(head.after_with) != head.after_with
-    {
-        return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
-    }
+    // CR 614.1c + CR 611.2a: the quoted-ability riders ("…and with "<ability>"",
+    // the five Invasion/Apocalypse kicker lines) are part of THIS replacement,
+    // like the bare-keyword riders. They classify through the single
+    // quoted-grant authority and compose onto the same execute chain below, so
+    // they inherit the definition's gate. An unreadable rider fails the clause
+    // closed rather than reviving the counters-only claim.
+    let quoted_riders =
+        parse_enters_with_quoted_riders(original_text).map_err(EntersWithDecline::FailsClosed)?;
     // CR 614.1c + CR 611.2a: one keyword list per replacement — the leading
     // riders first, then the trailing "… and with <keyword>" riders. The trailing
     // scan visits every marker, so it re-reads leading chain members; dedupe.
@@ -4907,9 +5144,9 @@ fn enters_with_counters_outcome(
         choice.description = Some("your choice of counter".to_string());
 
         // Compose with "enters tapped" if present (mirrors the single-counter
-        // tail below). The keyword rider composes here too, for the same reason
-        // it does there — CR 614.1c makes it part of this replacement.
-        let choice = compose_enters_with_keyword_grant(choice, keyword_riders);
+        // tail below). The entry riders compose here too, for the same reason
+        // they do there — CR 614.1c makes them part of this replacement.
+        let choice = compose_enters_with_entry_grants(choice, keyword_riders, quoted_riders);
         let execute = if has_enters_tapped_phrase(work_text) {
             AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -5049,12 +5286,81 @@ fn enters_with_counters_outcome(
     {
         return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
     }
-    if let Some(combined) =
-        parse_enters_base_plus_additional_for_each(after_counter, &counter_type, &count_expr)
+    let tail_text = clause_before_where_x(after_counter);
+    match parse_enters_per_each_tail(tail_text, &counter_type) {
+        Some(tail) => {
+            // CR 107.3 + CR 122.6 + CR 614.1c: the "equal to" override below
+            // replaces the count wholesale, and the "where X is" binding only
+            // reaches the X leaves of the amount, not the per-each composition
+            // built here. Composed with a per-each tail either could drop or
+            // misbind it, so decline the whole replacement instead.
+            if enters_counter_amount_override_present(work_text) {
+                return Err(EntersWithDecline::NotThisShape);
+            }
+            count_expr = match (tail, count_expr) {
+                (EntersPerEachTail::ForEach(terms), QuantityExpr::Fixed { value: leading }) => {
+                    terms
+                        .total(u32::try_from(leading).map_err(|_| EntersWithDecline::NotThisShape)?)
+                }
+                // CR 614.1c: "<amount> counters on it for each <filter>" places
+                // the leading amount once per object, so the total is the
+                // product of the amount and a game-state count. `QuantityExpr`
+                // has no product of two dynamic quantities (`Multiply` scales by
+                // a constant `factor`), so a dynamic amount ("X", "twice X",
+                // "that many") has no faithful encoding. Decline the WHOLE
+                // replacement here, before any count is published: the line
+                // surfaces as an unsupported gap, never as a supported count
+                // that drops the amount (X=3 over two other red and one other
+                // green creature is 3×2+1=7, never 2+1).
+                (EntersPerEachTail::ForEach(_), _) => return Err(EntersWithDecline::NotThisShape),
+                // CR 614.1c: under "plus an additional … for each" the leading
+                // amount is an addend placed once, so a dynamic base still
+                // composes faithfully as a sum.
+                (
+                    EntersPerEachTail::BasePlusAdditional {
+                        multiplier,
+                        per_each,
+                    },
+                    base,
+                ) => base_plus_additional_total(base, multiplier, per_each),
+            };
+        }
+        // CR 614.1c: the replacement places exactly the counters it names. No
+        // tail parser read the clause, yet its sentence still carries a
+        // per-each connective ("for each" / "plus") — after a recipient this
+        // grammar does not know ("on that creature", "on it, plus …"), after a
+        // conjoined counter list ("X +1/+1 counters and a charge counter on it
+        // for each …"), or before an unreadable operand. Publishing a dynamic
+        // amount there would silently drop the per-each factor or bonus — and,
+        // the amount being a quantity reference itself, the `DynamicQty`
+        // swallow detector cannot see that drop. Decline the whole replacement.
+        // A fixed amount keeps its count, and the `DynamicQty` swallow detector
+        // surfaces the unread tail. For a counter list only the text after the
+        // list is scanned: an element's own count arithmetic ("and X plus one
+        // charge counters") is read by the list, not a per-each connective.
+        None if enters_counter_amount_is_dynamic(&count_expr, counter_entries.as_deref())
+            && enters_counter_sentence_has_per_each_connective(
+                list_rest.map_or(tail_text, clause_before_where_x),
+            ) =>
+        {
+            return Err(EntersWithDecline::NotThisShape);
+        }
+        None => {}
+    }
+    // CR 107.3 + CR 122.6 + CR 614.1c: the "equal to" / "where X is" overrides
+    // below rewrite only the single-counter `count_expr`; a conjoined counter
+    // list publishes its own entries, so a dynamic entry would keep its own
+    // count and the override's quantity would be silently dropped. (An entry
+    // that prints X beside a where-X definition already failed closed above;
+    // this covers the "equal to" override and any other dynamic entry.) The
+    // list has no per-entry binding for the override, so decline the whole
+    // replacement. A fixed-only list is unaffected.
+    if counter_entries
+        .as_deref()
+        .is_some_and(counter_entries_have_dynamic_count)
+        && enters_counter_amount_override_present(work_text)
     {
-        count_expr = combined;
-    } else if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
-        count_expr = multiply_counter_count_by_for_each(count_expr, for_each_count);
+        return Err(EntersWithDecline::NotThisShape);
     }
     // CR 122.6: For "a number of counters equal to [quantity]" and the
     // sibling shorthand "counters on it equal to [quantity]", parse the
@@ -5105,10 +5411,10 @@ fn enters_with_counters_outcome(
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
     );
-    // CR 614.1c: the "and with <keyword>" rider is part of THIS replacement, so
-    // it composes onto the same execute chain as the counters and inherits the
+    // CR 614.1c: the "and with …" riders are part of THIS replacement, so they
+    // compose onto the same execute chain as the counters and inherit the
     // definition's gate (Invasion kicker cycle).
-    let put_counter = compose_enters_with_keyword_grant(put_counter, keyword_riders);
+    let put_counter = compose_enters_with_entry_grants(put_counter, keyword_riders, quoted_riders);
     let execute = if has_enters_tapped_phrase(work_text) {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -5339,8 +5645,9 @@ fn split_enters_with_leading_keyword_riders(
 /// Lancer, Cetavolver, Degavolver, Duskwalker, Faerie Squadron, Kavu Titan,
 /// Necravolver, Pouncing Kavu, Pouncing Wurm, Prison Barricade, Rakavolver,
 /// Voidpouncer. They print 18 rider lines: 13 BARE keywords (this function's
-/// class) and 5 QUOTED abilities (below). 12 cards print at least one bare
-/// rider; 8 of them print ONLY bare riders and so are fully covered here.
+/// class) and 5 QUOTED abilities (the sibling [`parse_enters_with_quoted_riders`]).
+/// 12 cards print at least one bare rider; 8 of them print ONLY bare riders
+/// and so are fully covered here.
 ///
 /// Scans at `" and with "` boundaries rather than anchoring, because the rider
 /// follows a counter clause of unbounded shape and may not be the first `" and "`
@@ -5356,19 +5663,23 @@ fn split_enters_with_leading_keyword_riders(
 /// keyword parser rejects as a compound — reintroducing, for X, exactly the
 /// silent-keyword-drop bug this function exists to fix.
 ///
-/// The sibling QUOTED-ability rider is deliberately NOT handled here: it needs a
-/// granted-ability parse, not a keyword lookup. Five lines across five cards —
-/// Anavolver's {B} and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this
-/// creature."), Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this
-/// creature deals damage, you gain that much life."), and Prison Barricade
-/// ("This creature can attack as though it didn't have defender."). They keep
-/// their current counters-only behavior rather than being failed closed, since
-/// that would trade a partial parse for no parse at all. Tracked separately.
+/// The sibling QUOTED-ability rider (`"and with "<ability>""`) is handled by
+/// [`parse_enters_with_quoted_riders`], not here: it needs a granted-ability
+/// parse, not a keyword lookup. Five lines across five cards — Anavolver's {B}
+/// and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this creature."),
+/// Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this creature
+/// deals damage, you gain that much life."), and Prison Barricade ("This
+/// creature can attack as though it didn't have defender."). A quoted span is
+/// never a bare keyword, so the two scans partition the rider slot without
+/// overlap: this one lifts bare keywords, the sibling lifts quoted abilities,
+/// and both compose onto the same execute chain.
 fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::Keyword> {
     let mut riders = Vec::new();
     // CR 614.1c: the rider is part of the SAME sentence as the enters-with
     // clause, so the scan is bounded to that sentence UP FRONT rather than
-    // per-candidate. Bounding only after a marker was found would still let the
+    // per-candidate, on the quote-aware boundary shared with the quoted scan:
+    // a quoted sibling rider's own period must not end the entering sentence.
+    // Bounding only after a marker was found would still let the
     // very first `take_until` reach into a later sentence when the entering
     // sentence carried no rider at all, granting an unrelated later
     // `" and with "` to this replacement. The production caller,
@@ -5405,17 +5716,42 @@ fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::K
 /// therefore the only one whose `" and with "` riders belong to this replacement
 /// (CR 614.1c).
 ///
+/// The SHARED sentence boundary for both rider scans (bare-keyword and
+/// quoted-ability). Quoted spans are masked on the length-preserving quote
+/// mask, so a granted ability's own period ("…Regenerate this creature.\"")
+/// does not end the entering sentence: without the mask the bare scan clips at
+/// the quoted period and a bare rider printed AFTER a quoted one ("…and with
+/// \"…creature.\" and with haste.") is silently dropped.
+///
 /// Clipping here is what makes the scan sentence-safe as a whole. Doing it only
 /// inside the per-rider candidate bound is not enough: that bound is applied
 /// after a marker has already been selected, so it cannot undo an initial search
 /// that already crossed a period.
+///
+/// Quoteless input keeps the naive clip: it is zero-alloc and preserves the
+/// exact historical boundary for the entire quoteless corpus. Only text that
+/// actually contains a quote pays for the mask.
 fn enters_with_rider_sentence(text: &str) -> &str {
-    terminated(
+    // Zero-alloc fast path: no double quote means the naive clip is already
+    // exact. A char scan, not string-literal dispatch, mirroring
+    // `strip_double_quoted_spans` and the mask's own fast path.
+    if text.find('"').is_none() {
+        return terminated(
+            take_until::<_, _, OracleError<'_>>("."),
+            tag::<_, _, OracleError<'_>>("."),
+        )
+        .parse(text)
+        .map_or(text, |(_, sentence)| sentence);
+    }
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let masked: &str = &masked;
+    let clip_len = terminated(
         take_until::<_, _, OracleError<'_>>("."),
         tag::<_, _, OracleError<'_>>("."),
     )
-    .parse(text)
-    .map_or(text, |(_, sentence)| sentence)
+    .parse(masked)
+    .map_or(text.len(), |(rest, _)| masked.len() - rest.len());
+    text.get(..clip_len).unwrap_or(text)
 }
 
 /// The `" and with "` rider marker — both the scan anchor and one of the two
@@ -5474,28 +5810,262 @@ fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &s
         .map_or_else(|| rest(input), Ok)
 }
 
-/// CR 611.2a: wrap `inner` so the entering permanent also gains `keywords` for
-/// as long as it remains on the battlefield.
+/// CR 614.1c + CR 611.2a: the `"and with "<ability>""` entry rider printed
+/// alongside an enters-with-counters clause by five lines across five cards —
+/// Anavolver's {B} and Degavolver's {1}{B} halves ("Pay 3 life: Regenerate this
+/// creature."), Necravolver's {W} and Rakavolver's {1}{W} halves ("Whenever this
+/// creature deals damage, you gain that much life."), and Prison Barricade
+/// ("This creature can attack as though it didn't have defender."). CR 614.1c
+/// makes the whole line ONE replacement effect, so this rider is a sibling of
+/// the counters and of the bare-keyword rider, not a separate ability.
 ///
-/// Modeled as a continuous `AddKeyword` grant on `SelfRef` with
-/// `Duration::UntilHostLeavesPlay` rather than a one-shot effect. The sibling
+/// The quoted sibling of [`parse_enters_with_keyword_riders`]: each span is
+/// classified by the single quoted-grant authority
+/// (`oracle_static::classify_quoted_inner`), which routes the three corpus
+/// bodies to `GrantAbility` (activated), `GrantTrigger` (triggered), and
+/// `AddStaticMode` (static) respectively. The caller composes the returned
+/// modifications onto the same execute chain as the counters, so they inherit
+/// the definition's gate (Invasion/Apocalypse kicker cycle).
+///
+/// Quote-aware throughout: the sentence clip is the quote-aware boundary
+/// shared with the bare-keyword scan ([`enters_with_rider_sentence`]), so a
+/// granted ability's own period ("…Regenerate this creature.\"") does not end
+/// the entering sentence. A marker with no closing quote, a span that
+/// classifies to nothing, or an unconsumed span inside the rider region fails
+/// closed (`EntersWithGap::Clause`) rather than dropping printed text — the
+/// counters-only claim was the defect this function exists to fix. "Classifies
+/// to nothing" includes a nonempty grant with an unbuildable body
+/// ([`quoted_rider_grant_is_unsupported`]), and an unmatched trailing opener
+/// is unread text even when the complete-span count matches.
+///
+/// Takes the ORIGINAL-case line: the inner text feeds the quoted-grant
+/// authority verbatim (mana symbols, descriptions), and both its self-reference
+/// forms ("this creature" in direct calls, `~` once `parse_oracle_text` has
+/// normalized) classify identically.
+///
+/// Only the rider region — at and after the first ` and with ` — is rider
+/// text this scan owns. A quoted span inside the counter clause itself
+/// (`Baron Von Count enters with a doom counter on "5."`) belongs to the
+/// counter readers; policing it here fails closed a line the counter clause
+/// reads fine. No rider marker, no riders: the scan returns before the span
+/// count so a non-rider span can never trip the guard.
+fn parse_enters_with_quoted_riders(
+    text: &str,
+) -> Result<Vec<ContinuousModification>, EntersWithGap> {
+    // Zero-alloc fast path: no double quote means no rider. A char scan, not
+    // string-literal dispatch, mirroring `strip_double_quoted_spans`.
+    if text.find('"').is_none() {
+        return Ok(Vec::new());
+    }
+    let sentence = enters_with_rider_sentence(text);
+    let region = match take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER)
+        .parse(sentence)
+    {
+        Ok((region, _)) => region,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut modifications = Vec::new();
+    let mut consumed_spans = 0usize;
+    let mut remaining = region;
+    while let Ok((after_marker, _)) = preceded(
+        take_until::<_, _, OracleError<'_>>(ENTERS_WITH_QUOTED_RIDER_MARKER),
+        tag::<_, _, OracleError<'_>>(ENTERS_WITH_QUOTED_RIDER_MARKER),
+    )
+    .parse(remaining)
+    {
+        // CR 614.1c: the marker promises a quoted ability (its opening quote is
+        // part of the marker, already consumed); an unterminated span is unread
+        // rider text, not an absent rider.
+        let (after_span, inner) = terminated(
+            take_until::<_, _, OracleError<'_>>("\""),
+            char::<_, OracleError<'_>>('"'),
+        )
+        .parse(after_marker)
+        .map_err(|_| EntersWithGap::Clause)?;
+        let classified = crate::parser::oracle_static::classify_quoted_inner(inner.trim());
+        // CR 614.1c: "unreadable" includes a NONEMPTY classification whose
+        // granted body the classifier could not build. The GrantAbility
+        // fallback wraps whatever `parse_quoted_ability` produced — including
+        // an `Unimplemented` body — and a GrantTrigger may carry an
+        // unimplemented (or missing) execute chain. Coverage detects the
+        // nested gap, but the rider check must not accept the span first:
+        // accepting it publishes the line as supported while the grant is
+        // silently lost.
+        let unsupported =
+            classified.is_empty() || classified.iter().any(quoted_rider_grant_is_unsupported);
+        if unsupported {
+            return Err(EntersWithGap::Clause);
+        }
+        modifications.extend(classified);
+        consumed_spans += 1;
+        remaining = after_span;
+    }
+    // CR 614.1c: every quoted span in the RIDER REGION is rider text or a
+    // gap — a span the marker loop did not consume would otherwise be dropped
+    // while the line reads supported. An unmatched trailing opener is unread
+    // text too, and the complete-span count cannot see it (it contributes
+    // zero), so it is checked separately. Spans before the first rider marker
+    // are counter-clause text (Baron Von Count's "5."), owned by other readers.
+    let (span_count, has_unmatched_opener) = count_double_quoted_spans(region);
+    if span_count != consumed_spans || has_unmatched_opener {
+        return Err(EntersWithGap::Clause);
+    }
+    Ok(modifications)
+}
+
+/// True when a classified quoted-rider modification carries a granted body
+/// the classifier could not build — the fail-closed half of the rider
+/// acceptance check. Only the two executable grants are validated, against
+/// the single unimplemented authority (`oracle::has_unimplemented`); every
+/// other variant carries no executable body and passes. A trigger grant with
+/// NO execute chain is unsupported too: trigger lowering leaves `execute`
+/// empty exactly when the effect half did not parse, so there is no body to
+/// check and nothing honest to grant.
+///
+/// The accepted variants are listed exhaustively, with NO wildcard arm: a
+/// future `ContinuousModification` variant must make a deliberate choice here
+/// (and fail compilation until it does) instead of silently passing.
+fn quoted_rider_grant_is_unsupported(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            crate::parser::oracle::has_unimplemented(definition)
+        }
+        ContinuousModification::GrantTrigger { trigger } => trigger
+            .execute
+            .as_deref()
+            .is_none_or(crate::parser::oracle::has_unimplemented),
+        // Copy, name, text, power, and toughness characteristics.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::RemoveManaCost
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SubstituteTextWord { .. }
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::SwitchPowerToughness => false,
+        // Keywords.
+        ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword => false,
+        // Types and subtypes.
+        ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. } => false,
+        // Colors.
+        ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. } => false,
+        // Non-executable grants, modes, and retention markers.
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource => false,
+        // Combat, control, lands, and counters.
+        ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => false,
+    }
+}
+
+/// Complete `"..."` pairs in `text`, plus whether a trailing opening quote
+/// has no close — read with nom combinators so the result agrees with
+/// [`parse_enters_with_quoted_riders`] about what a span is. The unmatched
+/// flag keeps a malformed trailing opener from hiding behind the
+/// complete-span count (it contributes zero there): an opener with no close
+/// is unread rider text, not a valid end of input. `strip_double_quoted_spans`
+/// likewise does not treat it as a span — but unlike that stripper, this
+/// guard must FAIL on it rather than skip it.
+fn count_double_quoted_spans(text: &str) -> (usize, bool) {
+    let mut count = 0usize;
+    let mut unmatched_opener = false;
+    let mut remaining = text;
+    while let Ok((after_open, _)) = preceded(
+        take_until::<_, _, OracleError<'_>>("\""),
+        char::<_, OracleError<'_>>('"'),
+    )
+    .parse(remaining)
+    {
+        match preceded(
+            take_until::<_, _, OracleError<'_>>("\""),
+            char::<_, OracleError<'_>>('"'),
+        )
+        .parse(after_open)
+        {
+            Ok((after_close, _)) => {
+                count += 1;
+                remaining = after_close;
+            }
+            Err(_) => {
+                unmatched_opener = true;
+                break;
+            }
+        }
+    }
+    (count, unmatched_opener)
+}
+
+/// The `" and with "` rider marker with its opening quote — the quoted-rider
+/// anchor, so a bare-keyword rider never enters the quoted scan.
+const ENTERS_WITH_QUOTED_RIDER_MARKER: &str = " and with \"";
+
+/// CR 614.1c + CR 611.2a: wrap `inner` so the entering permanent also gains
+/// the entry riders — bare `keywords` and quoted-ability `quoted` — for as
+/// long as it remains on the battlefield.
+///
+/// Modeled as continuous grants on `SelfRef` with
+/// `Duration::UntilHostLeavesPlay` rather than one-shot effects. The sibling
 /// `"enters tapped"` rider composes a one-shot `SetTapState` because tapping
-/// happens once as the object enters; a granted keyword is not an event but a
-/// characteristic the permanent must keep, and it must end when the object
-/// leaves the battlefield (CR 611.2a) so the new object it becomes elsewhere
-/// does not inherit it.
+/// happens once as the object enters; a granted keyword or ability is not an
+/// event but a characteristic the permanent must keep, and it must end when
+/// the object leaves the battlefield (CR 611.2a) so the new object it becomes
+/// elsewhere does not inherit it. The quoted modifications arrive classified
+/// by the single quoted-grant authority (`GrantAbility`, `GrantTrigger`, or a
+/// static mode), so they ride the same continuous wrapper as the keywords.
 ///
 /// The gate is inherited for free: this rides the SAME `ReplacementDefinition`
 /// as the counters, whose condition already carries the kicker requirement
-/// (CR 702.33d), so the grant applies exactly when the counters do.
-fn compose_enters_with_keyword_grant(
+/// (CR 702.33d), so the grants apply exactly when the counters do.
+fn compose_enters_with_entry_grants(
     inner: AbilityDefinition,
     keywords: Vec<crate::types::keywords::Keyword>,
+    quoted: Vec<ContinuousModification>,
 ) -> AbilityDefinition {
-    if keywords.is_empty() {
+    if keywords.is_empty() && quoted.is_empty() {
         return inner;
     }
-    let statics = keywords
+    let mut statics: Vec<StaticDefinition> = keywords
         .into_iter()
         .map(|keyword| {
             StaticDefinition::continuous()
@@ -5503,6 +6073,13 @@ fn compose_enters_with_keyword_grant(
                 .modifications(vec![ContinuousModification::AddKeyword { keyword }])
         })
         .collect();
+    if !quoted.is_empty() {
+        statics.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(quoted),
+        );
+    }
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::GenericEffect {
@@ -5610,7 +6187,7 @@ fn bind_enters_with_where_x(count: QuantityExpr, where_x: &str) -> Option<Quanti
             if definition.contains_x() {
                 return None;
             }
-            apply_where_x_quantity_expression(count, Some(where_x))
+            apply_where_x_quantity_expression(count, WhereXBinding::bare(Some(where_x)))
         }
     }
 }
@@ -5693,20 +6270,6 @@ fn parse_enters_counter_type_noun(input: &str) -> OracleResult<'_, CounterType> 
     terminated(nom_primitives::parse_counter_type_typed, tag(" counter")).parse(input)
 }
 
-fn multiply_counter_count_by_for_each(
-    count_expr: QuantityExpr,
-    for_each_count: QuantityExpr,
-) -> QuantityExpr {
-    match count_expr {
-        QuantityExpr::Fixed { value: 1 } => for_each_count,
-        QuantityExpr::Fixed { value } => QuantityExpr::Multiply {
-            factor: value,
-            inner: Box::new(for_each_count),
-        },
-        _ => for_each_count,
-    }
-}
-
 /// CR 614.1c: reads only a trailing `if <condition>` inside the payload sentence
 /// (the first sentence unit after `with `). A gate printed before the payload
 /// ("If you do, it enters with …", or a sentence-initial "If …, it enters with …"
@@ -5760,7 +6323,7 @@ enum EntersWithGate {
 /// Returns the unless-free head plus the outcome. Routing order matters: the
 /// "you've cast another spell" route must precede the generic static-condition
 /// route, because the generic route would parse the same tail as a plain
-/// `SpellsCastThisTurn >= 2` WITHOUT the own-cast exclusion marker that
+/// `SpellsCast >= 2` WITHOUT the own-cast exclusion marker that
 /// "another" requires (per Gatherer ruling — a permanent's own cast does not
 /// count as "another spell").
 fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
@@ -5782,9 +6345,10 @@ fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithGate) {
                 head,
                 EntersWithGate::Parsed(ReplacementCondition::UnlessQuantity {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -5885,82 +6449,302 @@ fn parse_enters_counter_rounding_postmodifier(after_counter: &str) -> Option<Rou
     Some(rounding)
 }
 
-fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityExpr> {
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
-        .parse(after_counter)
-        .ok()?;
+/// The per-each scaling of an enters-with counter clause: the leading
+/// "for each <filter>" count, plus one term per further conjunct
+/// "and <N> <kind> counter[s] on <pronoun> for each <filter>" (Ulasht, the
+/// Hate Seed). `extra` is empty for the single-clause form.
+struct EntersForEachTerms {
+    first: QuantityExpr,
+    extra: Vec<QuantityExpr>,
+}
+
+/// The connective that opens an enters-with per-each tail after its recipient.
+#[derive(Clone, Copy)]
+enum EntersPerEachConnective {
+    /// "… on <pronoun> for each <filter>": the leading amount is placed once per
+    /// object.
+    ForEach,
+    /// "… on <pronoun> plus <an|M> additional …": the leading amount is a base,
+    /// followed by a per-object bonus.
+    Plus,
+}
+
+/// The per-each connective word: "for each " or "plus ". Shared by the
+/// structural head below and by the sentence scan that guards a dynamic amount.
+fn parse_enters_per_each_connective(input: &str) -> OracleResult<'_, EntersPerEachConnective> {
+    alt((
+        value(EntersPerEachConnective::ForEach, tag("for each ")),
+        value(EntersPerEachConnective::Plus, tag("plus ")),
+    ))
+    .parse(input)
+}
+
+/// CR 614.1c + CR 614.12: The structural head of an enters-with per-each tail,
+/// read from the slice after a "<type> counter" token — the optional plural
+/// "s", " on <pronoun> ", then the per-each connective — independently of
+/// whether the rest of the tail parses. Every per-each tail parser (the
+/// leading clause, a further "and …" conjunct, the "plus an additional" bonus)
+/// consumes it, so they cannot drift on the head.
+fn parse_enters_per_each_head(after_counter: &str) -> OracleResult<'_, EntersPerEachConnective> {
+    let (rest, _) = opt(tag("s")).parse(after_counter)?;
     // CR 614.1c + CR 614.12: "[this permanent] enters with … counter on <pronoun>"
     // is a replacement effect placing counters on the entering permanent(s). The
     // self-referential recipient (it/them/him/her — Batroc the Leaper uses "him")
-    // precedes the per-each scaling clause identically for every pronoun in the
-    // set. Routed through `nom_primitives::parse_object_recipient_pronoun` (the
-    // single authority for the recipient-pronoun set) so it cannot drift.
+    // precedes the per-each clause identically for every pronoun in the set.
+    // Routed through `nom_primitives::parse_object_recipient_pronoun` (the single
+    // authority for the recipient-pronoun set) so it cannot drift.
     let (rest, _) = (
-        tag::<_, _, OracleError<'_>>(" on "),
+        tag(" on "),
         nom_primitives::parse_object_recipient_pronoun,
-        tag(" for each "),
+        tag(" "),
     )
-        .parse(rest)
-        .ok()?;
+        .parse(rest)?;
+    parse_enters_per_each_connective(rest)
+}
+
+/// The per-each head ([`parse_enters_per_each_head`]) opening "for each".
+fn parse_enters_for_each_head(after_counter: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        verify(parse_enters_per_each_head, |connective| {
+            matches!(connective, EntersPerEachConnective::ForEach)
+        }),
+    )
+    .parse(after_counter)
+}
+
+/// The per-each head ([`parse_enters_per_each_head`]) opening "plus".
+fn parse_enters_plus_head(after_counter: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        verify(parse_enters_per_each_head, |connective| {
+            matches!(connective, EntersPerEachConnective::Plus)
+        }),
+    )
+    .parse(after_counter)
+}
+
+/// Whether an enters-with clause places any dynamic number of counters: its
+/// leading amount, or any element of a conjoined counter list.
+fn enters_counter_amount_is_dynamic(
+    count_expr: &QuantityExpr,
+    counter_entries: Option<&[(CounterType, QuantityExpr)]>,
+) -> bool {
+    !matches!(count_expr, QuantityExpr::Fixed { .. })
+        || counter_entries.is_some_and(counter_entries_have_dynamic_count)
+}
+
+/// Whether any element of a conjoined counter list places a dynamic number of
+/// counters.
+fn counter_entries_have_dynamic_count(entries: &[(CounterType, QuantityExpr)]) -> bool {
+    entries
+        .iter()
+        .any(|(_, count)| !matches!(count, QuantityExpr::Fixed { .. }))
+}
+
+/// Whether the clause carries an amount override — an "equal to <quantity>"
+/// count or a ", where X is <quantity>" definition — that
+/// `parse_enters_with_counters` applies to the single-counter count wholesale.
+fn enters_counter_amount_override_present(work_text: &str) -> bool {
+    nom_primitives::split_once_on(work_text, "equal to ").is_ok()
+        || nom_primitives::split_once_on(work_text, ", where x is ").is_ok()
+}
+
+/// Whether the rest of the counter clause's sentence carries a per-each
+/// connective ("for each" / "plus") at any word boundary. `after_counter` is
+/// the slice after the clause's counters — its first "<type> counter" token,
+/// or the end of a conjoined counter list — with any ", where X is …"
+/// definition already cut; the scan stops at the first sentence end, so a
+/// later sentence's "for each" never counts. An "equal to <quantity>" count is
+/// the count itself, read wholesale by `parse_enters_counter_equal_to_quantity`
+/// (CR 122.6), so the scan also stops there: its arithmetic ("equal to one plus
+/// the number of other creatures you control" — Boss's Chauffeur) is the
+/// quantity, not a per-each connective.
+fn enters_counter_sentence_has_per_each_connective(after_counter: &str) -> bool {
+    let sentence = nom_primitives::split_once_on(after_counter, ".")
+        .map_or(after_counter, |(_, (before, _))| before);
+    let sentence = nom_primitives::split_once_on(sentence, "equal to ")
+        .map_or(sentence, |(_, (before, _))| before);
+    nom_primitives::scan_at_word_boundaries(sentence, parse_enters_per_each_connective).is_some()
+}
+
+/// CR 614.1c + CR 614.12: Parse the "[s] on <pronoun> for each <filter>[ and
+/// <N> <kind> counter[s] on <pronoun> for each <filter>]…" tail of an
+/// enters-with clause (the slice after its "<type> counter" token). Every
+/// conjunct must name `base_type` — a conjunct placing a different kind of
+/// counter is a separate placement this count cannot express, so this parser
+/// returns `None`. `parse_enters_with_counters` then declines the whole
+/// replacement when the leading amount is dynamic; a fixed leading amount keeps
+/// its count, and the `DynamicQty` swallow detector surfaces the unread tail.
+fn parse_enters_counter_for_each_suffix(
+    after_counter: &str,
+    base_type: &CounterType,
+) -> Option<EntersForEachTerms> {
+    let (rest, ()) = parse_enters_for_each_head(after_counter).ok()?;
     if let Ok((rest, qty)) = parse_for_each_convoked_creature_clause(rest) {
         if rest.trim().is_empty() {
-            return Some(qty);
+            return Some(EntersForEachTerms {
+                first: qty,
+                extra: Vec::new(),
+            });
         }
     }
-    let clause = match nom_primitives::split_once_on(rest, ".") {
+    let (first, extra) = parse_enters_for_each_conjuncts(rest, base_type)?;
+    Some(EntersForEachTerms { first, extra })
+}
+
+/// Split a "for each" clause list at its first
+/// "and <N> <kind> counter[s] on <pronoun> for each " conjunct and parse each
+/// clause, recursing over the remaining conjuncts. Returns the first clause's
+/// count and the further conjuncts' counts (each scaled by its own N).
+fn parse_enters_for_each_conjuncts(
+    text: &str,
+    base_type: &CounterType,
+) -> Option<(QuantityExpr, Vec<QuantityExpr>)> {
+    let Some((before, (count, kind), after)) =
+        nom_primitives::scan_preceded(text, parse_enters_counter_conjunct)
+    else {
+        return Some((parse_enters_for_each_clause(text)?, Vec::new()));
+    };
+    if &kind != base_type {
+        return None;
+    }
+    let first = parse_enters_for_each_clause(before)?;
+    let (next, mut extra) = parse_enters_for_each_conjuncts(after, base_type)?;
+    extra.insert(0, next.scaled_by(count));
+    Some((first, extra))
+}
+
+/// "and <N> <kind> counter[s] on <pronoun> for each " — the head of a further
+/// per-each conjunct. Yields the conjunct's count and counter kind.
+fn parse_enters_counter_conjunct(input: &str) -> OracleResult<'_, (u32, CounterType)> {
+    let (rest, _) = tag("and ").parse(input)?;
+    let (rest, count) = alt((
+        value(1, alt((tag("a "), tag("an ")))),
+        terminated(nom_primitives::parse_number, tag(" ")),
+    ))
+    .parse(rest)?;
+    let (rest, kind) = nom_primitives::parse_counter_type_typed(rest)?;
+    let (rest, _) = (tag(" counter"), parse_enters_for_each_head).parse(rest)?;
+    Ok((rest, (count, kind)))
+}
+
+/// One "for each <filter>" clause of an enters-with tail, with a sentence-final
+/// period trimmed.
+fn parse_enters_for_each_clause(text: &str) -> Option<QuantityExpr> {
+    let clause = match nom_primitives::split_once_on(text, ".") {
         Ok((_, (before_period, after_period))) if after_period.trim().is_empty() => {
             before_period.trim()
         }
-        _ => rest.trim(),
+        _ => text.trim(),
     };
     super::oracle_quantity::parse_for_each_clause_expr(clause)
 }
 
-/// Parse the "<type> counter[s] on it/them plus an additional <M> <type>
-/// counter[s] on it/them for each <filter>" enters-with pattern into the total
-/// count expression (base + M × per-each dynamic count).
+/// The per-each tail of an enters-with counter clause, read independently of
+/// the clause's leading amount. `parse_enters_with_counters` combines the two,
+/// declining a dynamic amount wherever it would be a factor.
+enum EntersPerEachTail {
+    /// "… counter[s] on <pronoun> for each <filter>[ and <N> <kind> counter[s]
+    /// on <pronoun> for each <filter>]…": the leading amount is the number of
+    /// counters per object of the first clause.
+    ForEach(EntersForEachTerms),
+    /// "… counter[s] on <pronoun> plus <an|M> additional <kind> counter[s] on
+    /// <pronoun> for each <filter>": the leading amount is a base placed once,
+    /// plus `multiplier` counters per object.
+    BasePlusAdditional {
+        multiplier: u32,
+        per_each: QuantityExpr,
+    },
+}
+
+impl EntersForEachTerms {
+    /// CR 614.1c: the total counters placed for a fixed number of counters per
+    /// object of the first clause — `leading × first + Σ conjuncts`. The
+    /// replacement places the counters each 'for each' conjunct names, so an
+    /// object matching both is counted by both (Ulasht ruling).
+    fn total(self, leading: u32) -> QuantityExpr {
+        let first = self.first.scaled_by(leading);
+        if self.extra.is_empty() {
+            first
+        } else {
+            QuantityExpr::Sum {
+                exprs: std::iter::once(first).chain(self.extra).collect(),
+            }
+        }
+    }
+}
+
+/// CR 614.1c: `base + multiplier × per_each` for the "plus an additional … for
+/// each" tail. A fixed base folds into an `Offset`; a dynamic base (an addend,
+/// never a factor) is summed.
+fn base_plus_additional_total(
+    base: QuantityExpr,
+    multiplier: u32,
+    per_each: QuantityExpr,
+) -> QuantityExpr {
+    let inner = per_each.scaled_by(multiplier);
+    match base {
+        QuantityExpr::Fixed { value: 0 } => inner,
+        QuantityExpr::Fixed { value: offset } => QuantityExpr::Offset {
+            inner: Box::new(inner),
+            offset,
+        },
+        base => QuantityExpr::Sum {
+            exprs: vec![base, inner],
+        },
+    }
+}
+
+/// CR 614.1c: Read the per-each tail following the FIRST "<type> counter" token
+/// of an enters-with clause, in either shape. `None` means the clause has no
+/// per-each tail this grammar reads.
+fn parse_enters_per_each_tail(
+    after_counter: &str,
+    counter_type: &CounterType,
+) -> Option<EntersPerEachTail> {
+    parse_enters_base_plus_additional_for_each(after_counter, counter_type)
+        .map(
+            |(multiplier, per_each)| EntersPerEachTail::BasePlusAdditional {
+                multiplier,
+                per_each,
+            },
+        )
+        .or_else(|| {
+            parse_enters_counter_for_each_suffix(after_counter, counter_type)
+                .map(EntersPerEachTail::ForEach)
+        })
+}
+
+/// Parse the "<type> counter[s] on <recipient pronoun> plus <an additional |
+/// M additional> <type> counter[s] on <recipient pronoun> for each <filter>"
+/// enters-with tail into its per-each multiplier M and per-each dynamic count;
+/// the base is the clause's leading amount, composed by
+/// [`base_plus_additional_total`].
 ///
-/// CR 122.1 + CR 614.1c: an "enters with N counters plus an additional counter
-/// for each <filter>" replacement places a fixed base plus a per-object bonus.
+/// CR 614.1c: an "enters with N counters plus an additional counter for each
+/// <filter>" replacement places a base plus a per-object bonus.
 /// CR 107.1: only integer amounts — the total resolves as `base + M * count`.
 ///
 /// `after_counter` is the slice immediately after the FIRST "<type> counter"
 /// token (same contract as [`parse_enters_counter_for_each_suffix`], which the
 /// tail is delegated to so " counter" is consumed exactly once). Parameterized
-/// over the base N (`base_count_expr`), the per-each multiplier M, and the
-/// `for each` filter. The additional counter type must equal the base type;
-/// otherwise the two clauses name different counters and this pattern does not
-/// apply (caller falls back). Returns `None` (not this pattern) when any token
-/// fails to match, so a non-matching input leaves the caller's existing
-/// single-suffix path intact.
+/// over the per-each multiplier M and the `for each` filter; the base is
+/// supplied by the caller. The additional counter type must equal the base
+/// type; otherwise the two clauses name different counters and this pattern
+/// does not apply. Returns `None` (not this pattern) when any token fails to
+/// match, so a non-matching input leaves the single-suffix shape to be tried.
 fn parse_enters_base_plus_additional_for_each(
     after_counter: &str,
     base_counter_type: &CounterType,
-    base_count_expr: &QuantityExpr,
-) -> Option<QuantityExpr> {
-    // The base only composes as a fixed integer offset; a dynamic base does not
-    // occur in this "base plus additional per-each" class.
-    let QuantityExpr::Fixed { value: base } = base_count_expr else {
-        return None;
-    };
-
+) -> Option<(u32, QuantityExpr)> {
     // Consume the optional plural "s" of the base counter word, then the base
-    // recipient (any pronoun in `nom_primitives::parse_object_recipient_pronoun`)
-    // and the " plus " bridge to the additional clause.
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
-        .parse(after_counter)
-        .ok()?;
-    let (rest, _) = (
-        tag::<_, _, OracleError<'_>>(" on "),
-        nom_primitives::parse_object_recipient_pronoun,
-        tag(" plus "),
-    )
-        .parse(rest)
-        .ok()?;
+    // recipient and the " plus " bridge to the additional clause.
+    let (rest, ()) = parse_enters_plus_head(after_counter).ok()?;
 
     // Per-each multiplier M: "an additional" (M = 1) or "<N> additional" (M > 1).
     let (rest, multiplier) = alt((
-        value(1u32, tag::<_, _, OracleError<'_>>("an additional ")),
+        value(1, tag::<_, _, OracleError<'_>>("an additional ")),
         terminated(nom_primitives::parse_number, tag(" additional ")),
     ))
     .parse(rest)
@@ -5970,35 +6754,22 @@ fn parse_enters_base_plus_additional_for_each(
     // describe different counters and this composition does not apply.
     let (rest, additional_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
     let (after_additional_counter, _) =
-        alt((tag::<_, _, OracleError<'_>>(" counters"), tag(" counter")))
-            .parse(rest)
-            .ok()?;
+        tag::<_, _, OracleError<'_>>(" counter").parse(rest).ok()?;
     if &additional_type != base_counter_type {
         return None;
     }
 
-    // Delegate the " counter[s] on it/them for each <filter>" tail to the
-    // existing suffix parser — it consumes the plural "s" and the connective,
-    // then parses the for-each filter into the per-each dynamic count.
-    let per_each = parse_enters_counter_for_each_suffix(after_additional_counter)?;
-
-    let inner = if multiplier == 1 {
-        per_each
-    } else {
-        QuantityExpr::Multiply {
-            factor: multiplier as i32,
-            inner: Box::new(per_each),
-        }
-    };
-
-    Some(if *base == 0 {
-        inner
-    } else {
-        QuantityExpr::Offset {
-            inner: Box::new(inner),
-            offset: *base,
-        }
-    })
+    // Delegate the "[s] on <recipient pronoun> for each <filter>" tail to the
+    // existing suffix parser — its shared head consumes the plural "s", the
+    // recipient, and the connective, then it parses the for-each filter into
+    // the per-each dynamic count.
+    let per_each =
+        parse_enters_counter_for_each_suffix(after_additional_counter, &additional_type)?;
+    // A further conjunct would place counters this offset form cannot express.
+    if !per_each.extra.is_empty() {
+        return None;
+    }
+    Some((multiplier, per_each.first))
 }
 
 fn parse_for_each_convoked_creature_clause(
@@ -6039,8 +6810,9 @@ fn strip_additional_counter_qualifier(input: &str) -> &str {
         .map_or(input, |(rest, _)| rest)
 }
 
-/// Read a conjoined "enters with" counter list, returning its entries and the text
-/// left AFTER the list's `" on it"` terminator.
+/// Parse a conjoined "enters with" counter list ("two +1/+1 counters and a
+/// lifelink counter on it") into its `(counter_type, count)` entries — at least
+/// two — and the text left AFTER the list's `" on it"` terminator.
 ///
 /// The remainder is what lets a caller tell a complete clause from one that
 /// still has a printed instruction attached — "…counter and deathtouch counter
@@ -6756,8 +7528,9 @@ fn parse_whenever_you_cast_enters_with(
             // rider this route cannot compose stays an honest gap. (The
             // dynamic-X arm already fails closed via `?`.)
             let fixed = QuantityExpr::Fixed { value: n as i32 };
-            if let Some(population) = parse_enters_counter_for_each_suffix(after_counter) {
-                multiply_counter_count_by_for_each(fixed, population)
+            if let Some(terms) = parse_enters_counter_for_each_suffix(after_counter, &counter_type)
+            {
+                terms.total(n)
             } else if counter_list_remainder_is_exhausted(rest) {
                 fixed
             } else {
@@ -7180,6 +7953,15 @@ fn replacement_condition_from_static(
             GatePolarity::OnlyIf => Some(ReplacementCondition::HasMaxSpeed),
             GatePolarity::Unless => None,
         },
+        // CR 725.1 + CR 301.5a: read live by the static-condition authority.
+        condition @ (StaticCondition::IsMonarch { .. } | StaticCondition::SourceIsEquipped) => {
+            match polarity {
+                GatePolarity::OnlyIf => Some(ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(condition),
+                }),
+                GatePolarity::Unless => None,
+            }
+        }
         StaticCondition::ClassLevelGE { level } => match polarity {
             GatePolarity::OnlyIf => Some(ReplacementCondition::ClassLevelGE { level }),
             GatePolarity::Unless => None,
@@ -7227,7 +8009,6 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -7237,6 +8018,7 @@ fn replacement_condition_from_static(
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
@@ -7252,7 +8034,6 @@ fn replacement_condition_from_static(
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
-        | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceIsHarnessed
@@ -7275,9 +8056,6 @@ fn replacement_condition_from_static(
         // CR 500.8 + CR 506.1 + CR 608.2c: a per-turn phase-occurrence gate is
         // not a replacement condition; fail closed.
         | StaticCondition::FirstCombatPhaseOfTurn
-        // CR 701.27 + CR 509.1b: defending player poison status has no
-        // `ReplacementCondition` carrier.
-        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => None,
     }
 }
@@ -7493,7 +8271,8 @@ fn parse_external_enters_tapped(
 fn parse_creature_die_exile_replacement(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
+    let mut history = Vec::new();
     // Must contain "would die" and "instead" (exile-instead pattern).
     let (before_die, _) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("would die").parse(i)
@@ -7572,10 +8351,12 @@ fn parse_creature_die_exile_replacement(
         let mut exile_self = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,
                 owner_library: false,
+                library_shuffle: Default::default(),
                 enter_transformed: false,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -7596,8 +8377,15 @@ fn parse_creature_die_exile_replacement(
         // strips a leading "and " automatically.
         let continuation = anaphor.continuation.original.trim();
         if !continuation.is_empty() {
-            let chain = parse_effect_chain(continuation, AbilityKind::Spell);
-            exile_self = exile_self.sub_ability(chain);
+            let mut lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+                continuation,
+                AbilityKind::Spell,
+            );
+            for record in &mut lowered.history {
+                record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+            }
+            history.extend(lowered.history);
+            exile_self = exile_self.sub_ability(lowered.value);
         }
         exile_self
     } else {
@@ -7611,7 +8399,12 @@ fn parse_creature_die_exile_replacement(
             } else {
                 anaphor.continuation.original.trim()
             };
-        parse_effect_chain(orig_effect, AbilityKind::Spell)
+        let lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+            orig_effect,
+            AbilityKind::Spell,
+        );
+        history.extend(lowered.history);
+        lowered.value
     };
 
     // CR 700.4 + CR 614.1a: Dying is any battlefield-to-graveyard move,
@@ -7625,7 +8418,10 @@ fn parse_creature_die_exile_replacement(
     if let Some(cond) = replacement_condition {
         def = def.condition(cond);
     }
-    Some(def)
+    Some(Lowered {
+        value: def,
+        history,
+    })
 }
 
 /// CR 614.1a + CR 614.1d + CR 614.12: "If a [filter] would enter and it wasn't
@@ -7718,10 +8514,12 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
     let exile_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination: Zone::Exile,
             origin: None,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -7938,7 +8736,8 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> 
 fn self_die_exile_anaphor_execute(
     normalized: &str,
     original_text: &str,
-) -> Option<AbilityDefinition> {
+) -> Option<Lowered<AbilityDefinition>> {
+    let mut history = Vec::new();
     // Find the boundary `, ` that separates "If ~ would die" from the
     // replacement effect text.
     let (_, (_before, after_norm)) = nom_primitives::split_once_on(normalized, ", ").ok()?;
@@ -7968,10 +8767,12 @@ fn self_die_exile_anaphor_execute(
     let mut exile_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination: Zone::Exile,
             origin: None,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -7985,10 +8786,20 @@ fn self_die_exile_anaphor_execute(
     );
     let continuation = anaphor.continuation.original.trim();
     if !continuation.is_empty() {
-        let chain = parse_effect_chain(continuation, AbilityKind::Spell);
-        exile_self = exile_self.sub_ability(chain);
+        let mut lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+            continuation,
+            AbilityKind::Spell,
+        );
+        for record in &mut lowered.history {
+            record.prepend(super::oracle_ir::history_provenance::InstructionStep::SubAbility);
+        }
+        history.extend(lowered.history);
+        exile_self = exile_self.sub_ability(lowered.value);
     }
-    Some(exile_self)
+    Some(Lowered {
+        value: exile_self,
+        history,
+    })
 }
 
 /// Parse graveyard-destination zone-change replacements (CR 614.6).
@@ -8110,12 +8921,12 @@ fn graveyard_replacement_subject_filter(subject: &str) -> Option<TargetFilter> {
 /// CR 108.2b + CR 111.1: does this folded subject filter say anything the
 /// caller's own token axis does not?
 ///
-/// The bare card/token nouns ARE the token axis: "a card or token" is every
-/// object that can reach a graveyard (Rest in Peace) and "a card" is that minus
-/// tokens (Leyline of the Void), which `TokenScope` already encodes as a
-/// `NonToken` property. Re-expressing them as a type filter would narrow those
-/// two cards by whatever the `Card` type filter happens not to match, so this
-/// predicate declines them and leaves the axis to its owner.
+/// The caller handles bare card and token nouns through `TokenScope`. "A card"
+/// (Leyline of the Void) maps to `RepresentedByCard`, excluding tokens and spell
+/// copies. "A card or token" (Rest in Peace) currently maps to an unfiltered
+/// `Any` scope. That branch also admits spell copies, which are outside the
+/// printed subject and can reach a graveyard before ceasing to exist
+/// (CR 608.2n + CR 704.5e). This predicate only keeps additional constraints.
 fn filter_constrains_beyond_token_axis(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => {
@@ -8282,9 +9093,12 @@ fn parse_graveyard_redirect_replacement(
     // * `Unscoped` — "a card or token" (Rest in Peace) names both sides, so it
     //   constrains nothing, and any subject that says nothing about the axis
     //   (`~`, "that spell", "a permanent") lands here too.
-    // * `NonToken` — "a card" without an "or token" rider (Leyline of the Void)
-    //   is token-EXCLUDING, so a dying token reaches the graveyard and its
-    //   dies-triggers fire instead of being wrongly redirected.
+    // * `CardOnly` — "a card" without an "or token" rider (Leyline of the Void)
+    //   names only objects represented by a card (CR 108.2): it excludes tokens
+    //   (CR 108.2b), so a dying token reaches the graveyard and its dies-triggers
+    //   fire, and it excludes a cast copy of a card (CR 707.12, Mizzix's
+    //   Mastery), which goes to the graveyard and then ceases to exist
+    //   (CR 704.5e).
     // * `TokenOnly` — "a token" is card-EXCLUDING. Without this reading the
     //   subject was dropped on the floor: the bare token noun says nothing the
     //   OTHER two readings encode, so `filter_constrains_beyond_token_axis`
@@ -8294,7 +9108,7 @@ fn parse_graveyard_redirect_replacement(
     #[derive(Clone, Copy)]
     enum TokenScope {
         Unscoped,
-        NonToken,
+        CardOnly,
         TokenOnly,
     }
 
@@ -8340,7 +9154,7 @@ fn parse_graveyard_redirect_replacement(
             let names_token_terminal =
                 subject_ends_with(subject, " token") || subject_ends_with(subject, " tokens");
             let token_scope = if names_card && !names_token {
-                TokenScope::NonToken
+                TokenScope::CardOnly
             } else if names_token_terminal && !names_token && !names_card {
                 // CR 108.2b: card-EXCLUDING. Guarded by `!names_token` so the
                 // inclusive "a card or token" rider — which also ends in
@@ -8365,11 +9179,11 @@ fn parse_graveyard_redirect_replacement(
                 ),
             ))
             .parse(i)?;
-            // CR 400.1 + CR 700.4: the optional stated origin. `Some(None)` is
-            // "from anywhere" (no narrowing); `Some(Some(zone))` narrows the
-            // affected-object filter to that zone below.
+            // CR 400.1 + CR 700.4: the optional stated origin. `None` = no "from"
+            // clause; `Some(None)` = "from anywhere" (explicit, no narrowing, but
+            // sets active_zones to all zones per CR 113.6b); `Some(Some(zone))`
+            // = specific zone (narrows filter AND sets active_zones to that zone).
             let (i, origin) = opt(parse_graveyard_move_origin).parse(i)?;
-            let origin = origin.flatten();
             // CR 614.1a + CR 611.2a + CR 514.2: a stated window may sit INSIDE
             // the antecedent — "if a card would be put into your graveyard from
             // anywhere THIS TURN, exile that card instead" (Yawgmoth's Will /
@@ -8439,10 +9253,11 @@ fn parse_graveyard_redirect_replacement(
 
     // CR 400.3 + CR 108.3: "opponent's graveyard" means cards owned by an opponent
     // (cards go to owner's graveyard, so ownership is the stable discriminant).
-    // CR 108.2b + CR 111.1: a token-excluding subject ("a card") adds `NonToken`
-    // so a dying token is NOT redirected (Leyline of the Void must let an
-    // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
-    // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
+    // CR 108.2 + CR 108.2b: a card-only subject ("a card") adds
+    // `RepresentedByCard`, so neither a dying token (Leyline of the Void must let
+    // an opponent's token reach the graveyard so dies-triggers fire — Blood Artist
+    // class) nor a resolved spell copy is redirected. Both axes are leaf
+    // `FilterProp`s on one `TypedFilter`.
     let mut props = Vec::new();
     match scope {
         // CR 400.3: "your graveyard" ⇒ You-owned cards only (Forbidden Crypt).
@@ -8458,7 +9273,7 @@ fn parse_graveyard_redirect_replacement(
     // merged filter, so every reading that constrains it must emit its property
     // here. `Unscoped` names both sides and emits nothing.
     match token_scope {
-        TokenScope::NonToken => props.push(FilterProp::NonToken),
+        TokenScope::CardOnly => props.push(FilterProp::RepresentedByCard),
         TokenScope::TokenOnly => props.push(FilterProp::Token),
         TokenScope::Unscoped => {}
     }
@@ -8467,12 +9282,13 @@ fn parse_graveyard_redirect_replacement(
     // host and admits no type phrase; every other subject is read by
     // `graveyard_replacement_subject_filter`, which declines the bare card/token
     // nouns the token axis already owns.
-    let subject_filter = (!graveyard_replacement_subject_is_self_referential(subject))
+    let is_self_replacement = graveyard_replacement_subject_is_self_referential(subject);
+    let subject_filter = (!is_self_replacement)
         .then(|| graveyard_replacement_subject_filter(subject))
         .flatten();
     let props_filter =
         (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
-    let valid_card = if graveyard_replacement_subject_is_self_referential(subject) {
+    let valid_card = if is_self_replacement {
         Some(TargetFilter::SelfRef)
     } else {
         match (subject_filter, props_filter) {
@@ -8485,8 +9301,10 @@ fn parse_graveyard_redirect_replacement(
         }
     };
     // CR 400.1 + CR 700.4: fold the stated origin in last, so it applies to
-    // whichever shape the subject/ownership axes produced.
-    let valid_card = match origin {
+    // whichever shape the subject/ownership axes produced. `origin.flatten()`
+    // converts `Some(None)` ("from anywhere") to `None` (no filter narrowing),
+    // while preserving `Some(Some(zone))` as `Some(zone)`.
+    let valid_card = match origin.flatten() {
         Some(zone) => Some(constrain_filter_to_origin_zone(valid_card, zone)),
         None => valid_card,
     };
@@ -8509,10 +9327,12 @@ fn parse_graveyard_redirect_replacement(
     let redirect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination,
             origin: None,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -8586,6 +9406,45 @@ fn parse_graveyard_redirect_replacement(
         .description(original_text.to_string());
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
+    }
+
+    // CR 113.6b: "An ability that states which zones it functions in functions
+    // only from those zones." When the antecedent explicitly states a "from"
+    // clause, the replacement functions only from the stated zone(s).
+    // - `origin == Some(None)` = explicit "from anywhere" → all zones except Graveyard
+    // - `origin == Some(Some(zone))` = explicit "from <zone>" → only that zone
+    // - `origin == None` = no "from" clause → default (battlefield/command)
+    //
+    // CR 113.6b + Rest in Peace ruling: `active_zones` gates the object that HOSTS
+    // the ability. The antecedent's "from" clause describes the object MOVING to the
+    // graveyard. These are the same object for printed self-replacements (Darksteel
+    // Colossus, Nexus of Fate), but NOT for printed replacements affecting other
+    // objects (Rest in Peace, Leyline of the Void). For the latter, the host's
+    // default functioning zones (battlefield/command) are preserved, and the named
+    // origin is applied only to the affected-card filter (done above via
+    // `constrain_filter_to_origin_zone`).
+    if let Some(inner) = origin {
+        if is_self_replacement {
+            match inner {
+                None => {
+                    // "from anywhere" — functions from all zones except Graveyard
+                    def = def.active_zones(
+                        crate::types::zones::Zone::ALL
+                            .iter()
+                            .copied()
+                            .filter(|z| *z != crate::types::zones::Zone::Graveyard)
+                            .collect(),
+                    );
+                }
+                Some(zone) => {
+                    // "from <specific zone>" — functions only from that zone
+                    def = def.active_zones(vec![zone]);
+                }
+            }
+        }
+        // For non-self replacements (Rest in Peace, etc.), preserve the host's
+        // default functioning zones. The origin is already applied to the affected-
+        // card filter via `constrain_filter_to_origin_zone` above.
     }
 
     // CR 514.2 + CR 611.2a + CR 604.2: stamp the stated antecedent window onto
@@ -8754,6 +9613,216 @@ fn parse_damage_modification_replacement(
         WhileAntecedent::Absent => {}
     }
     Some(def)
+}
+
+/// CR 614.1a + CR 614.6 + CR 122.1: Parse a damage-to-counters SUBSTITUTION —
+///
+///   "If a source you control would deal noncombat damage to a creature an
+///    opponent controls, put that many -1/-1 counters on that creature
+///    instead."  (Soul-Scar Mage)
+///   "If ~ would deal combat damage to a player, instead put that many +1/+1
+///    counters on ~ and that player mills that many cards."  (Szadek, Lord of
+///    Secrets)
+///   "If a Zombie you control would deal combat damage to a player, instead
+///    that player mills that many cards."  (Undead Alchemist)
+///
+/// This is a replacement, not a prevention (CR 615): the damage event is
+/// replaced by the substitute event(s) (CR 614.6 — the replaced event never
+/// happens), so the shield is unaffected by "damage can't be prevented"
+/// (CR 615.12 suppresses prevention only) and emits no `DamagePrevented`.
+///
+/// Grammar (positional nom spine, no scanning):
+///   `"if " <source subject> " would deal " ["noncombat " | "combat "]
+///    "damage " <recipient> ", " ( <substitute> " instead"
+///                               | "instead " <substitute> )`
+///
+/// * the source subject reuses `parse_damage_source_filter` (the same authority
+///   the damage-modification sibling uses — "a source you control" →
+///   `Typed { controller: You }`, "~" → `SelfRef`);
+/// * a player recipient ("to a player", "to an opponent", "to you") is the
+///   shared `parse_damage_target_phrase` grammar → `damage_target_filter`;
+///   otherwise "to <type phrase>" becomes `valid_card` (a typed `TargetFilter`,
+///   evaluated against the damage event's recipient object — a player
+///   recipient never matches a typed object filter);
+/// * the substitute is lowered by the ordinary effect-chain parser; "that
+///   many" is the replaced event's amount (`EventContextAmount`), and the
+///   "that <noun>" / "that player" anaphors are rewritten to the replaced
+///   event's recipient (`PostReplacementDamageTarget`). Every link of the
+///   chain must be a counter placement or a mill sized by that amount (see
+///   `is_damage_substitute_link`).
+///
+/// Returns `None` (fall through to the stub) for any other shape, so the
+/// substitution never claims an unrelated "instead" clause.
+fn parse_damage_to_counters_substitution(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    type E<'a> = OracleError<'a>;
+    let (after_verb, _) = (
+        tag::<_, _, E<'_>>("if "),
+        take_until(" would deal "),
+        tag(" would deal "),
+    )
+        .parse(norm_lower)
+        .ok()?;
+    // CR 120.2a: optional combat scope, positionally before the damage noun.
+    let (after_noun, combat_scope) = terminated(
+        opt(alt((
+            value(
+                CombatDamageScope::NoncombatOnly,
+                tag::<_, _, E<'_>>("noncombat "),
+            ),
+            value(CombatDamageScope::CombatOnly, tag("combat ")),
+        ))),
+        tag("damage "),
+    )
+    .parse(after_verb)
+    .ok()?;
+    let (substitute_text, recipient_text) = terminated(take_until::<_, _, E<'_>>(", "), tag(", "))
+        .parse(after_noun)
+        .ok()?;
+    // CR 614.1a: "instead" may trail the substitute ("put … instead") or lead
+    // it ("instead put …"); both mark the same replacement.
+    let (_, effect_text) = alt((
+        preceded(tag::<_, _, E<'_>>("instead "), rest),
+        terminated(
+            take_until(" instead"),
+            (tag(" instead"), opt(char('.')), multispace0, eof),
+        ),
+    ))
+    .parse(substitute_text)
+    .ok()?;
+
+    // CR 614.1a: the replaced recipient — a player scope, or a typed object scope.
+    let recipient_text = recipient_text.trim();
+    let player_recipient = all_consuming(parse_damage_target_phrase)
+        .parse(recipient_text)
+        .ok()
+        .and_then(|(_, filter)| {
+            matches!(filter, DamageTargetFilter::Player { .. }).then_some(filter)
+        });
+    let object_recipient = if player_recipient.is_some() {
+        None
+    } else {
+        let (type_phrase, _) = tag::<_, _, E<'_>>("to ").parse(recipient_text).ok()?;
+        let (recipient, rest) = parse_type_phrase_folding(type_phrase.trim());
+        if !rest.trim().is_empty() || matches!(recipient, TargetFilter::Any) {
+            return None;
+        }
+        Some(recipient)
+    };
+
+    // CR 614.1a: an unscoped substitution would replace every damage event in
+    // the game — fail closed when the source subject is not recognized.
+    let source_filter = parse_damage_source_filter(norm_lower)?;
+
+    let effect_text = effect_text.trim().trim_end_matches('.');
+    // CR 614.1a + CR 608.2c: a bare object pronoun in the substitute ("put that
+    // many -1/-1 counters on it instead") refers back to an object of the
+    // replaced event, never by default to the replacement's own source. With an
+    // object recipient the antecedent is that recipient. With a player
+    // recipient the only object antecedent is the damage source: the
+    // replacement's own source when the subject is "~", otherwise the event's
+    // damage source, which no supported substitute link accepts, so the line
+    // fails closed below.
+    let pronoun_antecedent = if object_recipient.is_some() {
+        TargetFilter::PostReplacementDamageTarget
+    } else if matches!(source_filter, TargetFilter::SelfRef) {
+        TargetFilter::SelfRef
+    } else {
+        TargetFilter::PostReplacementDamageSource
+    };
+    let mut substitute_ctx = ParseContext {
+        object_pronoun_ref: Some(pronoun_antecedent),
+        in_replacement: true,
+        ..ParseContext::default()
+    };
+    let mut execute = lower_ability_ir(&parse_ability_ir(
+        effect_text,
+        AbilityKind::Spell,
+        ChainLoweringMode::Standalone,
+        &mut substitute_ctx,
+    ));
+    // CR 608.2c: "that <noun>" lowers to `ParentTarget`; in a passive
+    // replacement it names the replaced event's damage recipient.
+    rewrite_parent_target_to_post_replacement_damage_target(&mut execute);
+    if player_recipient.is_some() {
+        // CR 608.2c: "that player" (the damaged player) names the replaced
+        // event's player recipient.
+        rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
+    }
+    if !damage_substitute_chain_is_supported(&execute, player_recipient.is_some()) {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_source_filter(source_filter)
+        .execute(execute)
+        .description(original_text.to_string());
+    if let Some(recipient) = object_recipient {
+        def = def.valid_card(recipient);
+    }
+    if let Some(recipient) = player_recipient {
+        def = def.damage_target_filter(recipient);
+    }
+    if let Some(cs) = combat_scope {
+        def = def.combat_scope(cs);
+    }
+    Some(def)
+}
+
+/// CR 614.1a + CR 614.6: True iff every link of a damage substitute chain is a
+/// supported substitute event sized by the replaced damage ("that many" →
+/// `EventContextAmount`):
+/// * `PutCounter` on the replaced event's object recipient
+///   (`PostReplacementDamageTarget`, object recipients only) or on the
+///   replacement's own source (`SelfRef`);
+/// * `Mill` by the replaced event's player recipient
+///   (`PostReplacementDamageTarget`, player recipients only).
+///
+/// Any other link (an unrecognized anaphor, a fixed count, `Unimplemented`)
+/// rejects the whole line so it stays on the honest no-op stub.
+fn damage_substitute_chain_is_supported(def: &AbilityDefinition, player_recipient: bool) -> bool {
+    let that_many = |count: &QuantityExpr| {
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }
+        )
+    };
+    let link_ok = match &*def.effect {
+        Effect::PutCounter { count, target, .. } => {
+            that_many(count)
+                && match target {
+                    TargetFilter::SelfRef => true,
+                    TargetFilter::PostReplacementDamageTarget => !player_recipient,
+                    _ => false,
+                }
+        }
+        Effect::Mill {
+            count,
+            target,
+            destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
+        } => {
+            that_many(count)
+                && player_recipient
+                && matches!(target, TargetFilter::PostReplacementDamageTarget)
+        }
+        _ => false,
+    };
+    // CR 614.6: the substitute is the modified event that happens instead; an
+    // optional link ("you may put …") would let the replaced event vanish with
+    // nothing in its place, which this mandatory definition cannot express.
+    link_ok
+        && !def.optional
+        && def.else_ability.is_none()
+        && def.condition.is_none()
+        && def
+            .sub_ability
+            .as_deref()
+            .is_none_or(|sub| damage_substitute_chain_is_supported(sub, player_recipient))
 }
 
 /// CR 614.1: Parse static damage modification abilities without "instead" keyword.
@@ -9128,11 +10197,7 @@ fn parse_oneshot_prevent_damage_tail(
     all_consuming(delimited(
         multispace0,
         pair(
-            map_opt(parse_damage_noun_with_scope, |scope| match scope {
-                Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
-                None => Some(PreventionScope::AllDamage),
-                Some(CombatDamageScope::NoncombatOnly) => None,
-            }),
+            parse_prevention_damage_noun,
             opt(preceded(char(' '), parse_damage_target_phrase)),
         ),
         multispace0,
@@ -9321,21 +10386,22 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
 }
 
 /// CR 614.11 + CR 614.6 + CR 514.2: Parse a one-shot delayed DRAW replacement —
-/// "the next time you would draw a card this turn, [effect] instead" (Words of
-/// Worship: "you gain 5 life"; Words of Wilding: "create a 2/2 green Bear
-/// creature token"). Mirrors `parse_oneshot_damage_replacement` for the Draw
-/// event class, lowering to `Effect::CreateDrawReplacement { replacement_effect }`.
+/// "the next time you would draw a card this turn, [effect] instead" (the Words
+/// cycle: Worship "you gain 5 life"; Wilding "create a 2/2 green Bear creature
+/// token"; War "~ deals 2 damage to any target"; Wind "each player returns a
+/// permanent they control to its owner's hand"; Waste "each opponent discards a
+/// card"). Mirrors `parse_oneshot_damage_replacement` for the Draw event class,
+/// lowering to `Effect::CreateDrawReplacement { replacement_effect }`.
 ///
 /// The detector IS the parser: the branch is gated by the `tag("the next time ")`
 /// prefix combinator + a `peek` for "would draw"; it returns `None` on any
 /// mismatch so it never shadows other "the next time" effects.
 ///
-/// SCOPE: the substitute payload is parsed by the generic `parse_effect`, which
-/// does NOT honor a player-scoped subject ("each player", "each opponent", "that
-/// player"). Words of Wind ("each player returns a permanent...") and Words of
-/// Waste ("each opponent discards...") would mis-lower to a `Controller`-scoped
-/// effect, so those subject-scoped payloads are REJECTED here (return `None`) to
-/// stay an honest Unimplemented gap rather than a silently-wrong parse.
+/// The substitute payload is parsed by the full effect-chain parser
+/// (`parse_effect_chain`), NOT the single-clause `parse_effect`, so a
+/// player-scoped subject ("each player …", "each opponent …") lowers onto the
+/// payload definition's `player_scope` exactly as it does for a standalone
+/// sentence (Curfew, Liliana's Specter).
 pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect> {
     // CR 614.1a: "the next time ... would draw ... this turn ... instead".
     let (after_prefix, _) = preceded(
@@ -9363,31 +10429,47 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     }
     .trim();
 
-    let payload = crate::parser::oracle_effect::parse_effect(payload_text);
-    // Honest-gap guard 1: an Unimplemented payload is not a clean replacement.
-    if matches!(payload, Effect::Unimplemented { .. }) {
+    let payload = parse_effect_chain(payload_text, AbilityKind::Spell);
+    // Honest-gap guard: a payload with an Unimplemented anywhere in its chain
+    // is not a clean replacement — leave the whole line an honest gap.
+    if super::oracle::has_unimplemented(&payload) {
         return None;
     }
-    // Honest-gap guard 2: player-scoped subjects ("each player", "each
-    // opponent", "that player", "target player/opponent") are NOT honored by
-    // bare `parse_effect` (it would emit a Controller-scoped effect, dropping
-    // the scope). Reject so Words of Wind/Waste stay honest Unimplemented gaps
-    // rather than silently-wrong parses. This is a leaf reject-check on the
-    // already-split payload, not dispatch.
-    if payload_text.starts_with("each ") // allow-noncombinator: leaf reject-guard on split payload
-        || payload_text.starts_with("target player") // allow-noncombinator
-        || payload_text.starts_with("target opponent") // allow-noncombinator
-        || payload_text.starts_with("that player") // allow-noncombinator
-        || payload_text.starts_with("each opponent") // allow-noncombinator
-        || payload_text.starts_with("each player")
-    // allow-noncombinator
-    {
+    // Honest-gap guard: CR 115.1c + CR 602.2b — the creating ability announces
+    // exactly the substitute HEAD's single target slot (see
+    // `extract_target_filter_from_effect`). A multi-target head or a
+    // targeted later clause would be announced without its slots and resolve
+    // with no target, so leave such a payload an honest gap.
+    if !draw_replacement_payload_targets_fit_head_slot(&payload) {
         return None;
     }
 
     Some(Effect::CreateDrawReplacement {
         replacement_effect: Box::new(payload),
     })
+}
+
+/// CR 115.1c + CR 602.2b: whether every target a draw-replacement substitute
+/// names can be announced through the single slot its head surfaces — no
+/// multi-target head, and no target in any other instruction the substitute
+/// follows during its own resolution (a later `sub_ability`/`else_ability`
+/// clause, a mode, or a selectable `ChooseOneOf` branch, which exposes no slot
+/// of its own). The walk stops at the CR 603.3 boundary
+/// (`ResolutionScope::OwnResolutionOnly`): a payload merely registered to
+/// resolve later is announced when that ability is created, not here.
+fn draw_replacement_payload_targets_fit_head_slot(payload: &AbilityDefinition) -> bool {
+    use crate::types::ability::extract_target_filter_from_effect;
+    use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
+
+    let mut targeted_instructions = 0usize;
+    let _ = visit_ability_def_scoped(payload, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        if extract_target_filter_from_effect(effect).is_some() {
+            targeted_instructions += 1;
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    let head_slots = usize::from(extract_target_filter_from_effect(&payload.effect).is_some());
+    payload.multi_target.is_none() && targeted_instructions == head_slots
 }
 
 fn parse_entering_copy_subject(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -11166,13 +12248,15 @@ fn strip_optional_draw_skip<'a>(lower_body: &str, original_body: &'a str) -> Opt
 fn attach_optional_draw_skip_rider(
     def: ReplacementDefinition,
     remainder: &str,
+    history: &mut Vec<HistoryProvenance>,
 ) -> Option<ReplacementDefinition> {
     let trimmed = remainder.trim_start_matches(['.', ' ']);
     if trimmed.is_empty() {
         return Some(def);
     }
     let rider = parse_post_replacement_rider(remainder).ok()??;
-    Some(def.execute(rider))
+    history.extend(rider.history);
+    Some(def.execute(rider.value))
 }
 
 /// CR 614.1a: Assign the replacement's player scope from the antecedent subject
@@ -11215,11 +12299,27 @@ fn apply_draw_player_scope(lower: &str, def: &mut ReplacementDefinition) {
 /// "as long as" gate, or a substitute `execute`, each with its player scope
 /// and antecedent conditions. A count-form threshold is composed by the caller,
 /// once, after whichever form succeeds.
-fn parse_draw_replacement(
+fn parse_draw_replacement_with_provenance(
     text: &str,
     normalized: &str,
     lower: &str,
     draw_scope: DrawReplacementScope,
+) -> Option<Lowered<ReplacementDefinition>> {
+    let mut history = Vec::new();
+    let definition =
+        parse_draw_replacement_inner(text, normalized, lower, draw_scope, &mut history)?;
+    Some(Lowered {
+        value: definition,
+        history,
+    })
+}
+
+fn parse_draw_replacement_inner(
+    text: &str,
+    normalized: &str,
+    lower: &str,
+    draw_scope: DrawReplacementScope,
+    history: &mut Vec<HistoryProvenance>,
 ) -> Option<ReplacementDefinition> {
     // CR 614.1a: An "As long as <state>, if you would draw a
     // card, ..." gate (Archmage Ascension) precedes the draw antecedent with
@@ -11251,7 +12351,7 @@ fn parse_draw_replacement(
         if let Some(remainder) = strip_optional_draw_skip(&effect_lower, effect) {
             def = def.mode(ReplacementMode::Optional { decline: None });
             def = def.quantity_modification(QuantityModification::Prevent);
-            def = attach_optional_draw_skip_rider(def, remainder)?;
+            def = attach_optional_draw_skip_rider(def, remainder, history)?;
             apply_draw_player_scope(lower, &mut def);
             // CR 504.1 + CR 614.1a + CR 614.11: draw-step timing and "while …"
             // quantity gates are independent antecedent dimensions — compose
@@ -11320,7 +12420,12 @@ fn parse_draw_replacement(
         if optional_modal_present {
             def = def.mode(ReplacementMode::Optional { decline: None });
         }
-        let mut execute = parse_effect_chain(effect_after_modal, AbilityKind::Spell);
+        let lowered = super::oracle_effect::parse_effect_chain_with_provenance(
+            effect_after_modal,
+            AbilityKind::Spell,
+        );
+        history.extend(lowered.history);
+        let mut execute = lowered.value;
         rewrite_draw_replacement_execute_referents(&mut execute, effect_after_modal);
         def = def.execute(execute);
     }
@@ -11476,6 +12581,7 @@ fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<Repl
                 count,
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         ))
         .description(original_text.to_string());
@@ -11644,21 +12750,27 @@ fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<Repl
 /// CR 701.44 + CR 614.1a: Parse explore replacement effects such as Twists and
 /// Turns ("instead you scry 1, then that creature explores") and Topography
 /// Tracker ("instead it explores, then it explores again").
-fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+fn parse_explore_replacement_with_provenance(
+    lower: &str,
+    original_text: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     if !nom_primitives::scan_contains(lower, "if a creature you control would explore") {
         return None;
     }
     let (_, execute_text) = split_once_on_lower(original_text, lower, "instead ")?;
     let execute_text = execute_text.trim().trim_end_matches('.');
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Explore)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(execute_text, AbilityKind::Spell);
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Explore)
             .valid_card(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
             ))
-            .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
+            .execute(lowered.value)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 701.50a + CR 614.1a: "If a creature you control would connive, instead
@@ -11667,21 +12779,27 @@ fn parse_explore_replacement(lower: &str, original_text: &str) -> Option<Replace
 /// `valid_card` filter scopes the conniving permanent ("a creature you control")
 /// and the `execute` chain after "instead" is the modified action the connive
 /// applier runs in place of the bare connive.
-fn parse_connive_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+fn parse_connive_replacement_with_provenance(
+    lower: &str,
+    original_text: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     if !nom_primitives::scan_contains(lower, "if a creature you control would connive") {
         return None;
     }
     let (_, execute_text) = split_once_on_lower(original_text, lower, "instead ")?;
     let execute_text = execute_text.trim().trim_end_matches('.');
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Connive)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(execute_text, AbilityKind::Spell);
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Connive)
             .valid_card(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
             ))
-            .execute(parse_effect_chain(execute_text, AbilityKind::Spell))
+            .execute(lowered.value)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 502.3 + CR 502.4 + CR 614.1a: untap-step replacement —
@@ -11701,7 +12819,10 @@ fn parse_connive_replacement(lower: &str, original_text: &str) -> Option<Replace
 /// external target choice during the turn-up (Gift of Doom "you may attach it to
 /// a creature") are gapped by `turn_face_up_effect_is_self_resolving` rather than
 /// mis-resolved. `norm_lower` has self-references normalized to `~`.
-fn parse_turned_face_up_replacement(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
+fn parse_turned_face_up_replacement_with_provenance(
+    norm_lower: &str,
+    text: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     // Anchored self-referential lead.
     tag::<_, _, OracleError<'_>>("as ~ is turned face up, ")
         .parse(norm_lower)
@@ -11722,17 +12843,20 @@ fn parse_turned_face_up_replacement(norm_lower: &str, text: &str) -> Option<Repl
     // Effects that need an external target choice (Gift of Doom's "you may attach
     // it to a creature") would require a turn-up-time choice the apply path does
     // not provide; gap them rather than silently mis-resolve the host.
-    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    let execute = lowered.value;
     if !turn_face_up_effect_is_self_resolving(&execute) {
         return None;
     }
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::TurnFaceUp)
             .valid_card(TargetFilter::SelfRef)
             .execute(execute)
             .description(text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 /// CR 708.11: True when every effect in an "As ~ is turned face up" chain resolves
@@ -11775,10 +12899,19 @@ pub(crate) fn is_as_self_enters_frame(lower: &str) -> bool {
 /// the permanent onto the battlefield (the post-replacement drain, before SBAs,
 /// triggers or priority). CR 614.12: the permanent's own replacement applies to
 /// its own entry. Scoped by `as_enters_one_shot_is_admissible`.
+#[cfg(test)]
 pub(crate) fn parse_as_enters_one_shot_replacement(
     text: &str,
     card_name: &str,
 ) -> Option<ReplacementDefinition> {
+    parse_as_enters_one_shot_replacement_with_provenance(text, card_name)
+        .map(|lowered| lowered.value)
+}
+
+pub(crate) fn parse_as_enters_one_shot_replacement_with_provenance(
+    text: &str,
+    card_name: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     let text = strip_reminder_text(text);
     let normalized = replace_self_refs(&text, card_name);
     let lower = normalized.to_lowercase();
@@ -11788,17 +12921,19 @@ pub(crate) fn parse_as_enters_one_shot_replacement(
     if body.is_empty() {
         return None;
     }
-    let execute = parse_effect_chain(body, AbilityKind::Spell);
-    if !as_enters_one_shot_is_admissible(&execute) {
+    let execute =
+        super::oracle_effect::parse_effect_chain_with_provenance(body, AbilityKind::Spell);
+    if !as_enters_one_shot_is_admissible(&execute.value) {
         return None;
     }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Moved)
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Battlefield)
-            .execute(execute)
+            .execute(execute.value)
             .description(text.to_string()),
-    )
+        history: execute.history,
+    })
 }
 
 /// CR 614.1c + CR 603.6d: the instruction happens as part of the entry event,
@@ -11890,7 +13025,10 @@ fn amount_reads_only_controller_life(amount: &QuantityExpr) -> bool {
     })
 }
 
-fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<ReplacementDefinition> {
+fn parse_untap_step_replacement_with_provenance(
+    original_text: &str,
+    lower: &str,
+) -> Option<Lowered<ReplacementDefinition>> {
     if !nom_primitives::scan_contains(lower, "untap step")
         || !nom_primitives::scan_contains(lower, "instead")
     {
@@ -11928,13 +13066,16 @@ fn parse_untap_step_replacement(original_text: &str, lower: &str) -> Option<Repl
         return None;
     }
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Untap)
+    let lowered =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::Untap)
             .valid_card(filter)
             .condition(ReplacementCondition::DuringUntapStep)
-            .execute(parse_effect_chain(effect_text, AbilityKind::Spell))
+            .execute(lowered.value)
             .description(original_text.to_string()),
-    )
+        history: lowered.history,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -12027,29 +13168,7 @@ enum WhileAntecedent {
 /// twice that much life instead." → `Parsed(OnlyIfQuantity { lhs: LifeTotal,
 /// comparator: LE, rhs: Fixed{5}, active_player_req: None })`.
 fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
-    // Locate the antecedent's "while " clause: it appears between
-    // " {verb_anchor} while " and the comma terminating the antecedent.
-    // Single nom combinator chain — locate verb anchor, consume gate marker,
-    // capture condition body in one pass.
-    let Ok((after_verb, _)) = (
-        take_until::<_, _, OracleError<'_>>(verb_anchor),
-        tag::<_, _, OracleError<'_>>(verb_anchor),
-    )
-        .parse(lower)
-    else {
-        return WhileAntecedent::Absent;
-    };
-    // The " while " gate need not be flush against the verb anchor: for damage
-    // replacements the recipient clause ("noncombat damage to a permanent or
-    // player") sits between the anchor and the gate, so scan forward to the gate
-    // marker. The life-gain caller's flush case is the empty-prefix match.
-    let Ok((_, (_, _, condition_text))) = (
-        take_until::<_, _, OracleError<'_>>(" while "),
-        tag::<_, _, OracleError<'_>>(" while "),
-        take_until::<_, _, OracleError<'_>>(","),
-    )
-        .parse(after_verb)
-    else {
+    let Some(condition_text) = while_antecedent_clause(lower, verb_anchor) else {
         return WhileAntecedent::Absent;
     };
     // A guard clause IS present from here on; every failure path below must fail
@@ -12077,6 +13196,33 @@ fn parse_while_antecedent(lower: &str, verb_anchor: &str) -> WhileAntecedent {
         rhs,
         active_player_req: None,
     })
+}
+
+/// CR 614.1a: the text of a "while <condition>" antecedent: after `verb_anchor`, up to the
+/// comma that ends the antecedent.
+fn while_antecedent_clause<'a>(lower: &'a str, verb_anchor: &str) -> Option<&'a str> {
+    // Locate the verb anchor, then take the antecedent: everything after the
+    // anchor up to the comma that ends it.
+    let (_, (_, _, antecedent)) = (
+        take_until::<_, _, OracleError<'_>>(verb_anchor),
+        tag::<_, _, OracleError<'_>>(verb_anchor),
+        take_until::<_, _, OracleError<'_>>(","),
+    )
+        .parse(lower)
+        .ok()?;
+    // The " while " gate need not be flush against the verb anchor: for damage
+    // replacements the recipient clause ("noncombat damage to a permanent or
+    // player") sits between the anchor and the gate, so scan forward to the gate
+    // marker. The life-gain caller's flush case is the empty-prefix match. The
+    // scan runs only inside the antecedent, so a " while " after its comma is
+    // not this antecedent's guard.
+    let (condition_text, _) = (
+        take_until::<_, _, OracleError<'_>>(" while "),
+        tag::<_, _, OracleError<'_>>(" while "),
+    )
+        .parse(antecedent)
+        .ok()?;
+    Some(condition_text)
 }
 
 /// CR 604.2 + CR 614.1a: Result of splitting a leading "As long as <state>, "
@@ -13258,8 +14404,16 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
         .quantity_modification(modification)
         .description(original_text.to_string());
-    if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
+    if let Some((valid_card, anchor)) = parse_counter_replacement_valid_card(lower) {
         def = def.valid_card(valid_card);
+        // CR 614.16: effect-worded doublers ("if an effect would put ...",
+        // Doubling Season) apply only to effect-caused placements; bare
+        // wordings ("counters would be put on ...", Constrictor) stay
+        // cause-blind. The gate arm reads the placement's `CounterCause` at
+        // runtime.
+        if matches!(anchor, CounterScopeAnchor::EffectWorded) {
+            def = def.condition(ReplacementCondition::EffectCausedPlacement);
+        }
     }
     // CR 614.1a: Vorinclex/Halving Season count doublers-and-halvers scope by the
     // player *putting* the counters (the actor), per the official Vorinclex ruling
@@ -13292,8 +14446,18 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     Some(def)
 }
 
-fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
-    let (_, (), after_anchor) =
+/// CR 614.16: which counter-replacement scope wording the anchor matched —
+/// the effect-worded branch ("an effect would put ...", Doubling Season)
+/// stamps `ReplacementCondition::EffectCausedPlacement` on the def, the bare
+/// branch ("counters would be put on ...", Constrictor) leaves it untagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CounterScopeAnchor {
+    EffectWorded,
+    Bare,
+}
+
+fn parse_counter_replacement_valid_card(lower: &str) -> Option<(TargetFilter, CounterScopeAnchor)> {
+    let (_, anchor, after_anchor) =
         nom_primitives::scan_preceded(lower, parse_counter_replacement_scope_anchor)?;
     let (filter, rest) = parse_type_phrase_folding(after_anchor);
     if !is_counter_replacement_object_scope(&filter)
@@ -13301,7 +14465,7 @@ fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
     {
         return None;
     }
-    Some(filter)
+    Some((filter, anchor))
 }
 
 fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
@@ -13315,16 +14479,22 @@ fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
     }
 }
 
-fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
+fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, CounterScopeAnchor> {
+    alt((
+        value(
+            CounterScopeAnchor::Bare,
             tag::<_, _, OracleError<'_>>("counters would be put on "),
-            tag("counter would be put on "),
+        ),
+        value(CounterScopeAnchor::Bare, tag("counter would be put on ")),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put one or more counters on "),
+        ),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put a counter on "),
-        )),
-    )
+        ),
+    ))
     .parse(input)
 }
 
@@ -13399,9 +14569,13 @@ fn parse_global_object_counter_prohibition(
 }
 
 /// CR 614.17 + CR 614.6 + CR 122.1: Parse inverted type-scoped counter
-/// prohibitions such as "Creatures can't have counters put on them." Lowers to
-/// the same `AddCounter` + `Prevent` replacement as Solemnity's object-counter
-/// line, scoped to a single permanent type on the battlefield.
+/// prohibitions such as "Creatures can't have counters put on them." (bare),
+/// "Creatures you control can't have -1/-1 counters put on them." (Darksteel
+/// Angel; Melira, Sylvok Outcast), and "Creatures your opponents control
+/// can't have +1/+1 counters put on them." (Blightbeetle). Lowers to the same
+/// `AddCounter` + `Prevent` replacement as Solemnity's object-counter line,
+/// scoped to the named population on the battlefield and — when the text
+/// names a counter type — to that type via `counter_match`.
 fn parse_inverted_typed_counter_prohibition(
     lower: &str,
     original_text: &str,
@@ -13411,32 +14585,67 @@ fn parse_inverted_typed_counter_prohibition(
     // put on them") rather than the object ("Counters can't be put on
     // creatures"). Same replacement class, so it reuses the shared type-list
     // combinators and covers every permanent type (and comma/or-separated
-    // lists) in one arm.
+    // lists) in one arm. Two optional axes compose inside it: a controller
+    // qualifier on the subject and a counter-type restriction on the
+    // prohibition.
     let mut combinator = all_consuming(terminated(
-        terminated(
+        (
             separated_list1(
                 parse_counter_prohibition_type_separator,
                 parse_counter_prohibition_type,
             ),
-            tag::<_, _, OracleError<'_>>(" can't have counters put on them"),
+            // Optional controller qualifier. `opt` never fails and never
+            // partially consumes, so the bare form falls through to
+            // " can't have …" unchanged.
+            opt(preceded(
+                tag(" "),
+                verify(parse_controller_suffix, |controller| {
+                    matches!(controller, ControllerRef::You | ControllerRef::Opponent)
+                }),
+            )),
+            tag::<_, _, OracleError<'_>>(" can't have "),
+            // Optional counter type. An `alt` (typed arm first), not `opt` +
+            // tag: nom sequences do not backtrack into a succeeded `opt`, so
+            // if the type parser ever consumed "counters" as a `Generic`
+            // token the bare form would fail closed. Separate arms retry the
+            // bare form from the start.
+            alt((
+                map(
+                    terminated(
+                        terminated(nom_primitives::parse_counter_type_typed, tag(" ")),
+                        tag("counters put on them"),
+                    ),
+                    Some,
+                ),
+                value(None, tag("counters put on them")),
+            )),
         ),
         opt(tag(".")),
     ));
-    let (_rest, type_filters) = combinator.parse(lower.trim()).ok()?;
+    let (_, (type_filters, controller, _, counter_type)) = combinator.parse(lower.trim()).ok()?;
     let type_filter = match type_filters.as_slice() {
         [single] => single.clone(),
         _ => TypeFilter::AnyOf(type_filters),
     };
+    let typed = match controller {
+        Some(ctrl) => TypedFilter::new(type_filter).controller(ctrl),
+        None => TypedFilter::new(type_filter),
+    };
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .valid_card(attach_zone_to_filter(
-                TargetFilter::Typed(TypedFilter::new(type_filter)),
-                Zone::Battlefield,
-            ))
-            .quantity_modification(QuantityModification::Prevent)
-            .description(original_text.to_string()),
-    )
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .valid_card(attach_zone_to_filter(
+            TargetFilter::Typed(typed),
+            Zone::Battlefield,
+        ))
+        .quantity_modification(QuantityModification::Prevent)
+        .description(original_text.to_string());
+    // CR 122.1 + CR 614.1a: a named counter type restricts the replacement to
+    // that type; the counter-agnostic wording leaves `counter_match` unset
+    // (any-counter behavior, as before).
+    if let Some(ct) = counter_type {
+        def = def.counter_match(CounterMatch::OfType(ct));
+    }
+    Some(def)
 }
 
 fn parse_counter_prohibition_type_separator(input: &str) -> OracleResult<'_, &str> {
@@ -13694,6 +14903,19 @@ fn parse_damage_noun_with_scope(input: &str) -> OracleResult<'_, Option<CombatDa
     .parse(input)
 }
 
+/// CR 615.1a + CR 120.2a: the damage noun of a prevention clause through the shared
+/// [`parse_damage_noun_with_scope`] authority, narrowed to the scopes a prevention
+/// shield carries: "combat damage" -> `CombatDamage`, bare "damage" -> `AllDamage`;
+/// "noncombat damage" has no `PreventionScope` and is an `Err`.
+pub(crate) fn parse_prevention_damage_noun(input: &str) -> OracleResult<'_, PreventionScope> {
+    map_opt(parse_damage_noun_with_scope, |scope| match scope {
+        Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
+        None => Some(PreventionScope::AllDamage),
+        Some(CombatDamageScope::NoncombatOnly) => None,
+    })
+    .parse(input)
+}
+
 /// CR 614.9 + CR 301.5a + CR 303.4b: the recipient slot of a DURABLE (printed,
 /// object-hosted) redirection — the "... is dealt to <recipient> instead" tail of
 /// [`parse_redirection_spine`]. Returns the `TargetFilter` stored in
@@ -13937,11 +15159,15 @@ fn parse_damage_heal_self_replacement(
     )
 }
 
-fn parse_damage_to_self_instead_followup(
+/// CR 614.1a + CR 614.6: "If damage would be dealt to ~ / you, <effect> that many …
+/// instead" replaces the damage event with `<effect>` (Phytohydra, Force Bubble). This is
+/// a substitution, not a prevention effect (CR 615.1a), so damage that can't be prevented
+/// is still replaced.
+fn parse_damage_to_self_instead_followup_with_provenance(
     norm_lower: &str,
     normalized: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let total_len = norm_lower.len();
     let ((effect_start, effect_len, recipient_scope), rest) =
         nom_on_lower(normalized, norm_lower, |i| {
@@ -13999,12 +15225,20 @@ fn parse_damage_to_self_instead_followup(
     };
     // CR 614.1a: this substitutes the affected event inside the same ability;
     // it is not a new activated/triggered ability body.
-    let followup = parse_effect_chain_with_context(&followup_text, AbilityKind::Spell, &mut ctx);
+    let followup = parse_effect_chain_with_context_and_provenance(
+        &followup_text,
+        AbilityKind::Spell,
+        &mut ctx,
+    );
 
-    let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
-        .prevention_shield(PreventionAmount::All)
-        .execute(followup)
+    // `DamageDone`, not `DealtDamage`: `dealt_damage_applier` returns the event unchanged,
+    // so on that event these lines replaced nothing.
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .execute(followup.value)
         .description(original_text.to_string());
+    if recipient_scope.is_none() {
+        def = def.damage_target_filter(damage_target_controller());
+    }
     if let Some(scope) = recipient_scope {
         // CR 614.1: scope the replacement to damage dealt TO the source's own
         // object (the "shield around whatever it's affecting"). The runtime
@@ -14015,13 +15249,26 @@ fn parse_damage_to_self_instead_followup(
         // source's own combat damage (#5652).
         def = def.valid_card(scope);
     }
-    Some(def)
+    Some(Lowered {
+        value: def,
+        history: followup.history,
+    })
+}
+
+#[cfg(test)]
+fn parse_damage_to_self_instead_followup(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    parse_damage_to_self_instead_followup_with_provenance(norm_lower, normalized, original_text)
+        .map(|lowered| lowered.value)
 }
 
 fn parse_damage_to_player_instead_followup(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let total_len = norm_lower.len();
     let ((effect_start, effect_len), rest) = nom_on_lower(original_text, norm_lower, |i| {
         let (i, _) = tag("if damage would be dealt to a player, ").parse(i)?;
@@ -14038,16 +15285,17 @@ fn parse_damage_to_player_instead_followup(
     }
 
     let effect_text = original_text.get(effect_start..effect_start + effect_len)?;
-    let mut followup = parse_effect_chain(effect_text, AbilityKind::Spell);
-    rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup);
+    let mut followup =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup.value);
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .prevention_shield(PreventionAmount::All)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .damage_target_filter(damage_target_any_player())
-            .execute(followup)
+            .execute(followup.value)
             .description(original_text.to_string()),
-    )
+        history: followup.history,
+    })
 }
 
 /// CR 604.2: Strip a leading "as long as <condition>, " gate — a printed static
@@ -14544,6 +15792,10 @@ pub(crate) enum PreventionFailClosed {
     SourceScope,
     /// A coordinated "and it <verb> …" clause after the prevention clause.
     CoordinatedConjunct,
+    /// Additional effects listed after a comma.
+    ListedRider,
+    /// A printed "while <state>" guard that does not lift to a `ReplacementCondition`.
+    WhileGuard,
 }
 
 impl PreventionFailClosed {
@@ -14552,6 +15804,8 @@ impl PreventionFailClosed {
         match self {
             Self::SourceScope => "prevention_source_scope",
             Self::CoordinatedConjunct => "prevention_conjunct",
+            Self::ListedRider => "prevention_listed_rider",
+            Self::WhileGuard => "prevention_while_guard",
         }
     }
 }
@@ -14566,7 +15820,7 @@ pub(crate) fn damage_prevention_fails_closed(
 ) -> Option<PreventionFailClosed> {
     let text = strip_reminder_text(text);
     let norm_lower = replace_self_refs(&text, card_name).to_lowercase();
-    match parse_damage_prevention_replacement(&norm_lower, &text) {
+    match parse_damage_prevention_replacement_with_provenance(&norm_lower, &text) {
         Err(PreventionDecline::FailsClosed(reason)) => Some(reason),
         Ok(_) | Err(PreventionDecline::NotThisShape) => None,
     }
@@ -14622,10 +15876,10 @@ fn has_coordinated_predicate_conjunct(working_lower: &str) -> bool {
 /// Declines are typed (`PreventionDecline`) so the route can tell "not my shape"
 /// from "my shape, a printed part of it cannot be carried"
 /// (`damage_prevention_fails_closed`).
-fn parse_damage_prevention_replacement(
+fn parse_damage_prevention_replacement_with_provenance(
     norm_lower: &str,
     original_text: &str,
-) -> Result<ReplacementDefinition, PreventionDecline> {
+) -> Result<Lowered<ReplacementDefinition>, PreventionDecline> {
     // CR 614.1a: An "as long as <cond>, " prefix on a prevention replacement gates
     // the shield itself, not its post-replacement followup. Strip the gate first
     // and lift it to a typed `ReplacementCondition` so the rest of the parser
@@ -14682,6 +15936,16 @@ fn parse_damage_prevention_replacement(
     if has_coordinated_predicate_conjunct(working_lower) {
         return Err(PreventionDecline::FailsClosed(
             PreventionFailClosed::CoordinatedConjunct,
+        ));
+    }
+
+    // CR 615.5: "prevent that damage, remove that many …, then …" lists additional
+    // effects this parser can't carry (Bloatfly Swarm, Sekki, Seasons' Guide). Fail
+    // closed: a shield without them reads as supported, and a gate quantity on the
+    // same line would discharge the swallow audit.
+    if nom_primitives::scan_contains(working_lower, "prevent that damage, ") {
+        return Err(PreventionDecline::FailsClosed(
+            PreventionFailClosed::ListedRider,
         ));
     }
 
@@ -15011,12 +16275,36 @@ fn parse_damage_prevention_replacement(
     // because a `valid_card`-less pure-event shield is neither self- nor object-
     // scoped and must not take the self-scoped branch.
     let recipient_is_self_scoped = matches!(&valid_card_filter, Some(TargetFilter::SelfRef));
+    // CR 604.2 + CR 611.3a: a "while <state>" antecedent gates the shield itself, so the
+    // effect isn't applicable (CR 615.12) while the state doesn't hold: Jared Carthalion
+    // outside the monarchy takes the damage and gains nothing. `valid_card` scopes the
+    // pronoun: "it" is the source only on a self-scoped shield. An uncarriable guard
+    // must not become an unconditional shield, here or in a later route: it fails
+    // closed, and the route lands the line as `Effect::unimplemented`.
+    let while_condition = while_antecedent_clause(working_lower, "would ")
+        .map(|clause| {
+            crate::parser::oracle_static::parse_affected_scoped_static_condition(
+                clause,
+                valid_card_filter.as_ref(),
+            )
+            .and_then(|condition| {
+                replacement_condition_from_static(condition, GatePolarity::OnlyIf)
+            })
+            .ok_or(PreventionDecline::FailsClosed(
+                PreventionFailClosed::WhileGuard,
+            ))
+        })
+        .transpose()?;
     if let Some(vc) = valid_card_filter {
         def = def.valid_card(vc);
     }
-    if let Some(cond) = prefix_condition {
-        def = def.condition(cond);
-    }
+    def = match (prefix_condition, while_condition) {
+        (Some(prefix), Some(guard)) => def.condition(ReplacementCondition::And {
+            conditions: vec![prefix, guard],
+        }),
+        (Some(condition), None) | (None, Some(condition)) => def.condition(condition),
+        (None, None) => def,
+    };
 
     // CR 615.5: A prevention effect may include an additional effect referring to
     // the prevented amount ("Put a -1/-1 counter on ~ for each 1 damage prevented
@@ -15025,6 +16313,7 @@ fn parse_damage_prevention_replacement(
     // which the runtime fires as a post-replacement follow-up after the shield
     // consumes the damage. Class members: Phyrexian Hydra, Vigor, Stormwild
     // Capridor, Hostility.
+    let mut history = Vec::new();
     if let Some(followup) = extract_prevention_followup(original_text) {
         // CR 608.2k: Static self-prevention replacements split into two
         // anaphor cohorts depending on what the rider counter/effect targets:
@@ -15056,8 +16345,13 @@ fn parse_damage_prevention_replacement(
         };
         // CR 615.5: the additional effect continues this prevention effect.
         // In particular, a spell-driven shield may already declare a target.
-        let mut followup_def =
-            parse_effect_chain_with_context(&followup, AbilityKind::Spell, &mut followup_ctx);
+        let lowered = parse_effect_chain_with_context_and_provenance(
+            &followup,
+            AbilityKind::Spell,
+            &mut followup_ctx,
+        );
+        history.extend(lowered.history);
+        let mut followup_def = lowered.value;
         // CR 615.5 + CR 609.7: `parse_target` maps "the source's controller" /
         // "that source's controller" to `ParentTargetController` (correct for
         // anaphoric "its controller" in non-prevention contexts). Inside a
@@ -15108,7 +16402,19 @@ fn parse_damage_prevention_replacement(
         def = def.execute(followup_def);
     }
 
-    Ok(def)
+    Ok(Lowered {
+        value: def,
+        history,
+    })
+}
+
+#[cfg(test)]
+fn parse_damage_prevention_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Result<ReplacementDefinition, PreventionDecline> {
+    parse_damage_prevention_replacement_with_provenance(norm_lower, original_text)
+        .map(|lowered| lowered.value)
 }
 
 /// CR 615.1a: Extract the typed event-recipient filter from a damage-prevention
@@ -15313,6 +16619,26 @@ fn rewrite_parent_target_to_post_replacement_damage_target(def: &mut AbilityDefi
     // unrelated cards (Thada Adel, Acquisitor; Earwig Squad — both carry
     // `Shuffle { target: TriggeringPlayer }`). The `Shuffle.target` anaphor is
     // therefore rewritten LOCALLY below, scoped to this prevention follow-up.
+    // CR 615.5 + CR 108.3: a prevention follow-up has one damage recipient, so
+    // the owner-routed ChangeZone settles through that recipient's owner rather
+    // than the generic tracked-owner scope used for multi-owner moves.
+    if matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::PostReplacementDamageTarget | TargetFilter::ParentTarget,
+            owner_library: true,
+            ..
+        }
+    ) {
+        if let Some(sub) = def.sub_ability.as_deref_mut() {
+            if let Effect::Shuffle { target } = sub.effect.as_mut() {
+                if matches!(target, TargetFilter::ScopedPlayer) {
+                    *target = TargetFilter::PostReplacementDamageTargetOwner;
+                    sub.player_scope = None;
+                }
+            }
+        }
+    }
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| match f {
         TargetFilter::ParentTarget => *f = TargetFilter::PostReplacementDamageTarget,
         // CR 108.3 + CR 400.3: owner anaphor on a walker-visited effect
@@ -15446,10 +16772,11 @@ fn rewrite_draw_replacement_card_to_last_revealed(def: &mut AbilityDefinition) {
 /// head is rewritten: a later link's "that card" refers to whatever an earlier
 /// link produced (Zur's Weirding reveals first).
 ///
-/// CR 608.2c: the generic effect parser drops the clause's subject, so the
-/// acting player is read here from the head's own text: "that player" / "they"
-/// is the drawing player (whose library it is); "you" or a bare imperative is
-/// the replacement's controller. An unrecognized subject is left unrewritten
+/// CR 608.2c: `ExileTop` names its performer relative to the library owner
+/// (`LibraryPlayer`) rather than through the `ChangeZone` actor the generic
+/// parser stamped, so the acting player is re-derived here from the head's own
+/// text: "that player" / "they" is the drawing player (whose library it is);
+/// "you" or a bare imperative is the replacement's controller. An unrecognized subject is left unrewritten
 /// (fail closed).
 fn rewrite_exile_would_be_drawn_card_to_exile_top(def: &mut AbilityDefinition, text: &str) {
     if !matches!(
@@ -16325,6 +17652,8 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCostShard;
+    use crate::types::statics::StaticMode;
 
     #[test]
     fn damage_target_chosen_player_marker() {
@@ -16734,8 +18063,14 @@ mod tests {
         let matching = super::parse_enters_base_plus_additional_for_each(
             " on it plus an additional +1/+1 counter on it for each artifact you control.",
             &CounterType::Plus1Plus1,
-            &QuantityExpr::Fixed { value: 1 },
-        );
+        )
+        .map(|(multiplier, per_each)| {
+            super::base_plus_additional_total(
+                QuantityExpr::Fixed { value: 1 },
+                multiplier,
+                per_each,
+            )
+        });
         assert!(
             matches!(matching, Some(QuantityExpr::Offset { offset: 1, .. })),
             "matching counter types compose to Offset, got {matching:?}"
@@ -16744,12 +18079,106 @@ mod tests {
         let mismatched = super::parse_enters_base_plus_additional_for_each(
             " on it plus an additional stun counter on it for each artifact you control.",
             &CounterType::Plus1Plus1,
-            &QuantityExpr::Fixed { value: 1 },
-        );
+        )
+        .map(|(multiplier, per_each)| {
+            super::base_plus_additional_total(
+                QuantityExpr::Fixed { value: 1 },
+                multiplier,
+                per_each,
+            )
+        });
         assert_eq!(
             mismatched, None,
             "a mismatched additional counter type must not compose"
         );
+    }
+
+    /// A further "and … for each" conjunct after the additional per-each
+    /// clause places counters the base-plus-offset form cannot express, so the
+    /// combinator declines rather than dropping the second conjunct.
+    #[test]
+    fn enters_base_plus_additional_declines_a_further_conjunct() {
+        let conjoined = super::parse_enters_base_plus_additional_for_each(
+            " on it plus an additional +1/+1 counter on it for each artifact you control \
+             and a +1/+1 counter on it for each enchantment you control.",
+            &CounterType::Plus1Plus1,
+        )
+        .map(|(multiplier, per_each)| {
+            super::base_plus_additional_total(
+                QuantityExpr::Fixed { value: 1 },
+                multiplier,
+                per_each,
+            )
+        });
+        assert_eq!(
+            conjoined, None,
+            "a second per-each conjunct must not be silently dropped"
+        );
+    }
+
+    /// CR 614.1c: Ulasht, the Hate Seed — two conjoined "for each"
+    /// placements of the same counter kind sum; a creature that is both red and
+    /// green is counted by both conjuncts (Ulasht ruling).
+    #[test]
+    fn enters_with_conjoined_for_each_counters_sum() {
+        let def = parse_replacement_line(
+            "Ulasht enters with a +1/+1 counter on it for each other red creature you control \
+             and a +1/+1 counter on it for each other green creature you control.",
+            "Ulasht, the Hate Seed",
+        )
+        .expect("conjoined per-each enters-with must parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*def.execute.as_deref().unwrap().effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(target, &TargetFilter::SelfRef);
+        let red = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other red creature you control",
+        )
+        .expect("red clause parses");
+        let green = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other green creature you control",
+        )
+        .expect("green clause parses");
+        assert!(matches!(
+            red,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+        assert_eq!(
+            count,
+            &QuantityExpr::Sum {
+                exprs: vec![red, green],
+            }
+        );
+    }
+
+    /// A conjunct placing a different counter kind is a separate placement the
+    /// count cannot express: the tail declines and the base count stays.
+    #[test]
+    fn enters_with_mixed_kind_conjunct_declines_the_for_each_tail() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it for each other red creature you \
+             control and a -1/-1 counter on it for each other green creature you control.",
+            "Mixed Hellion",
+        )
+        .expect("enters-with still parses to a replacement");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &*def.execute.as_deref().unwrap().effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
     }
 
     /// Reach-guard: a pure per-each enters-with (Aeve — no "plus an additional")
@@ -16803,13 +18232,14 @@ mod tests {
         let rep = parsed
             .replacements
             .iter()
-            .find(|r| matches!(r.event, ReplacementEvent::DealtDamage))
+            .find(|r| matches!(r.event, ReplacementEvent::DamageDone))
             .expect("damage-substitution replacement must exist (was inert on main)");
-        assert!(
-            matches!(rep.shield_kind, ShieldKind::Prevention { .. }),
-            "the substituted damage must be prevented, got {:?}",
-            rep.shield_kind
+        assert_eq!(
+            rep.shield_kind,
+            ShieldKind::None,
+            "CR 614.1a: the damage is replaced, not prevented"
         );
+        assert!(rep.damage_modification.is_none());
         let execute = rep
             .execute
             .as_ref()
@@ -17128,6 +18558,7 @@ mod tests {
                 counter_type,
                 count,
                 target,
+                scope: crate::types::ability::EffectScope::Single,
             } => {
                 assert_eq!(*counter_type, Some(CounterType::Plus1Plus1));
                 assert_eq!(*target, TargetFilter::SelfRef, "\"from it\" = the source");
@@ -17404,9 +18835,10 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(filter),
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -17772,25 +19204,48 @@ mod tests {
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::ChangeZone {
+                Effect::TargetOnly {
+                    target: TargetFilter::PostReplacementDamageTarget
+                }
+            ),
+            "the follow-up must declare the damaged creature as its target, got {:?}",
+            execute.effect
+        );
+        let movement = execute.sub_ability.as_ref().expect("owner-library move");
+        assert!(
+            matches!(
+                &*movement.effect,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Library,
                     target: TargetFilter::PostReplacementDamageTarget,
-                    owner_library: true,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
                     ..
                 }
             ),
-            "ChangeZone must move the damaged creature to its owner's library, got {:?}",
-            execute.effect
+            "the move must return the damaged creature to its owner's library, got {:?}",
+            movement.effect
         );
-        let shuffle = execute.sub_ability.as_ref().expect("shuffle sub-ability");
+        let shuffle = movement.sub_ability.as_ref().expect("shuffle sub-ability");
         assert!(
             matches!(
                 &*shuffle.effect,
                 Effect::Shuffle {
-                    target: TargetFilter::PostReplacementDamageTargetOwner
+                    target: TargetFilter::ScopedPlayer
                 }
             ),
-            "Shuffle must resolve to the recipient's owner, got {:?}",
+            "Shuffle must resolve through the tracked owner scope, got {:?}",
             shuffle.effect
+        );
+        assert!(
+            matches!(
+                shuffle.player_scope,
+                Some(PlayerFilter::TrackedSetPossessor {
+                    possession: crate::types::ability::PossessionAxis::Owner,
+                    ..
+                })
+            ),
+            "the terminal shuffle must carry the owner scope, got {:?}",
+            shuffle.player_scope
         );
     }
 
@@ -18324,13 +19779,9 @@ mod tests {
         )
         .expect("damage-to-self counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -18352,7 +19803,9 @@ mod tests {
         )
         .expect("damage-to-controller counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -18375,12 +19828,8 @@ mod tests {
         .expect("damage-to-player exile-top replacement should parse");
 
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(def.damage_modification.is_none());
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         let execute = def.execute.as_ref().expect("execute present");
         assert!(
@@ -18396,9 +19845,128 @@ mod tests {
                     actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 }
             ),
-            "expected ExileTop against prevented damage recipient, got {:?}",
+            "expected ExileTop against replaced damage recipient, got {:?}",
             execute.effect
         );
+    }
+
+    /// CR 614.1a + CR 615.1a: every "...instead" damage line is a substitution on
+    /// `DamageDone`, whatever the recipient. A line with "prevent" and no "instead"
+    /// stays a prevention effect.
+    #[test]
+    fn damage_instead_lines_are_substitutions_scoped_to_their_recipient() {
+        for (name, text) in [
+            (
+                "Phytohydra",
+                "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            ),
+            (
+                "Lichenthrope",
+                "If damage would be dealt to this creature, put that many -1/-1 counters on it instead.",
+            ),
+            (
+                "Dralnu, Lich Lord",
+                "If damage would be dealt to Dralnu, sacrifice that many permanents instead.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("object line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+            assert_eq!(def.damage_target_filter, None, "{name}");
+        }
+        for (name, text) in [
+            (
+                "Force Bubble",
+                "If damage would be dealt to you, put that many depletion counters on this enchantment instead.",
+            ),
+            (
+                "Delaying Shield",
+                "If damage would be dealt to you, put that many delay counters on this enchantment instead.",
+            ),
+            (
+                "Nefarious Lich",
+                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("player line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::None, "{name}");
+            assert!(def.damage_modification.is_none(), "{name}");
+            assert_eq!(def.valid_card, None, "{name}");
+            assert_eq!(
+                def.damage_target_filter,
+                Some(damage_target_controller()),
+                "{name}"
+            );
+        }
+
+        // Phantom Centaur's line says "prevent", so it stays a CR 615 prevention effect.
+        let def = parse_replacement_line(
+            "If damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+            "Phantom Centaur",
+        )
+        .expect("prevention line should parse");
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+    }
+
+    /// CR 301.5a + CR 701.21a: "sacrifice an Equipment attached to ~" names a population,
+    /// in replacement and triggered text alike.
+    #[test]
+    fn sacrifice_attached_to_source_on_an_effect_keeps_the_relation() {
+        fn has_attached_to_source(target: &TargetFilter) -> bool {
+            matches!(
+                target,
+                TargetFilter::Typed(typed) if typed.properties.contains(&FilterProp::AttachedTo {
+                    to: crate::types::ability::AttachmentReferent::Source,
+                })
+            )
+        }
+
+        let jouster = parse_oracle_text(
+            "If damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = jouster.replacements[0]
+            .execute
+            .as_ref()
+            .expect("rider present");
+        assert!(
+            matches!(&*execute.effect, Effect::Sacrifice { target, .. } if has_attached_to_source(target)),
+            "got {:?}",
+            execute.effect
+        );
+
+        let three_dog = parse_oracle_text(
+            "Whenever you attack, you may pay {2} and sacrifice an Aura attached to Three Dog. When you sacrifice an Aura this way, for each other attacking creature you control, create a token that's a copy of that Aura attached to that creature.",
+            "Three Dog, Galaxy News DJ",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut found = false;
+        for trigger in &three_dog.triggers {
+            let Some(execute) = trigger.execute.as_deref() else {
+                continue;
+            };
+            let mut node = Some(execute);
+            while let Some(ability) = node {
+                if let Effect::Sacrifice { target, .. } = &*ability.effect {
+                    found |= has_attached_to_source(target);
+                }
+                node = ability.sub_ability.as_deref();
+            }
+        }
+        assert!(found, "got {:?}", three_dog.triggers);
     }
 
     #[test]
@@ -19000,6 +20568,238 @@ mod tests {
             "a non-adjacent 'of that damage' phrase must not satisfy the anchored \
              'prevent N of that damage' grammar, got {def:?}"
         );
+    }
+
+    /// CR 614.1a + CR 614.6: Soul-Scar Mage — "If a source you control would
+    /// deal noncombat damage to a creature an opponent controls, put that many
+    /// -1/-1 counters on that creature instead." A damage-to-counters
+    /// SUBSTITUTION (not a CR 615 prevention): source scope `controller: You`,
+    /// recipient `valid_card` = creature an opponent controls, noncombat only,
+    /// and an `execute` that puts `EventContextAmount` -1/-1 counters on the
+    /// replaced event's recipient. No prevention shield, no amount modification.
+    #[test]
+    fn soul_scar_mage_damage_to_minus_counters_substitution() {
+        let def = parse_replacement_line(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+            "Soul-Scar Mage",
+        )
+        .expect("Soul-Scar Mage should parse as a damage replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert!(matches!(def.shield_kind, ShieldKind::None));
+        assert!(def.damage_modification.is_none());
+        assert!(def.damage_target_filter.is_none());
+
+        match def.damage_source_filter.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected typed source filter (you control), got {other:?}"),
+        }
+        match def.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected creature-an-opponent-controls recipient, got {other:?}"),
+        }
+
+        let execute = def.execute.as_ref().expect("substitute effect present");
+        assert!(execute.sub_ability.is_none());
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Minus1Minus1);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a + CR 614.6: Szadek, Lord of Secrets — "If Szadek would deal
+    /// combat damage to a player, instead put that many +1/+1 counters on
+    /// Szadek and that player mills that many cards." A leading-"instead"
+    /// damage SUBSTITUTION with a compound substitute: source `SelfRef`,
+    /// recipient = any player (`damage_target_filter`, no `valid_card`), combat
+    /// only, and an `execute` chain PutCounter(+1/+1 × that many, on Szadek) →
+    /// Mill(that many, by the damaged player).
+    #[test]
+    fn szadek_combat_damage_to_counters_and_mill_substitution() {
+        let def = parse_replacement_line(
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player mills that many cards.",
+            "Szadek, Lord of Secrets",
+        )
+        .expect("Szadek should parse as a damage replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert!(matches!(def.shield_kind, ShieldKind::None));
+        assert!(def.damage_modification.is_none());
+        assert!(def.valid_card.is_none());
+        assert_eq!(def.damage_source_filter, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Any,
+            })
+        );
+
+        let that_many = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let execute = def.execute.as_ref().expect("substitute effect present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert_eq!(*count, that_many);
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+        let mill = execute
+            .sub_ability
+            .as_deref()
+            .expect("mill continuation present");
+        assert!(mill.sub_ability.is_none());
+        match &*mill.effect {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+                position,
+            } => {
+                assert_eq!(*count, that_many);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(*position, LibraryPosition::Top);
+            }
+            other => panic!("expected Effect::Mill, got {other:?}"),
+        }
+    }
+
+    /// The card name the damage-substitution probes below are parsed under, so
+    /// their "Szadek" subject normalizes to `~`.
+    const SUBSTITUTION_PROBE: &str = "Szadek, Lord of Secrets";
+
+    /// The substitute's first link, for the damage-substitution tests below.
+    fn damage_substitute_counter_target(text: &str) -> Option<TargetFilter> {
+        let def = parse_replacement_line(text, SUBSTITUTION_PROBE)?;
+        match &*def.execute?.effect {
+            Effect::PutCounter { target, .. } => Some(target.clone()),
+            _ => None,
+        }
+    }
+
+    /// CR 614.1a + CR 608.2c: a bare "it" in a damage substitute names an
+    /// object of the replaced event, never by default the replacement's own
+    /// source. With an object recipient it is the damaged object — the same
+    /// binding "that creature" receives — so the counters land on the
+    /// creature that would have been dealt damage.
+    #[test]
+    fn damage_substitute_bare_pronoun_binds_the_object_recipient() {
+        // SHAPE: Soul-Scar Mage supplies the printed "that creature" control;
+        // replacing that anaphor with "it" is a synthetic grammar mutation,
+        // not a printed card or an additional runtime-support claim.
+        let by_pronoun = damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on it instead.",
+        );
+        let by_anaphor = damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+        );
+        assert_eq!(by_pronoun, Some(TargetFilter::PostReplacementDamageTarget));
+        assert_eq!(by_pronoun, by_anaphor);
+    }
+
+    /// CR 614.1a + CR 608.2c: with a player recipient the only object
+    /// antecedent of a bare "it" is the damage source. Under a "~" subject that
+    /// is the replacement's own source (the same tree as "on ~"); under any
+    /// other subject it is the event's damage source, which no supported
+    /// substitute link accepts, so the line stays on the honest stub instead of
+    /// putting the counters on the replacement's source.
+    #[test]
+    fn damage_substitute_bare_pronoun_with_player_recipient_binds_the_source() {
+        // SHAPE: synthetic pronoun mutations of Szadek, Lord of Secrets and
+        // Undead Alchemist. Szadek's printed self-name becomes "it"; the Zombie
+        // damage subject from Undead Alchemist is paired with an invented
+        // counter substitute to require fail-closed handling of that binding.
+        assert_eq!(
+            damage_substitute_counter_target(
+                "If Szadek would deal combat damage to a player, instead put that many \
+                 +1/+1 counters on it and that player mills that many cards.",
+            ),
+            Some(TargetFilter::SelfRef),
+        );
+        assert_eq!(
+            damage_substitute_counter_target(
+                "If a Zombie you control would deal combat damage to a player, instead \
+                 put that many +1/+1 counters on it.",
+            ),
+            None,
+            "the dealing Zombie is not a supported substitute recipient: fail closed"
+        );
+    }
+
+    /// CR 614.1a + CR 614.6: every shape the substitution cannot express stays
+    /// on the unclaimed stub (no `execute`), next to a supported positive
+    /// control so the negatives are not vacuous.
+    #[test]
+    fn damage_substitute_rejects_unsupported_links() {
+        // SHAPE: printed Soul-Scar Mage/Szadek controls precede deliberately
+        // unprinted mutations (fixed count, controller mill, player counters,
+        // optional substitution and discard tail). They discriminate the
+        // parser's supported-link boundary, not real-card gameplay failures.
+        assert!(damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+        )
+        .is_some());
+        assert!(damage_substitute_counter_target(
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player mills that many cards.",
+        )
+        .is_some());
+        for text in [
+            // A fixed count is not the replaced amount.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put two -1/-1 counters on that creature instead.",
+            // A creature recipient cannot mill.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, that creature's controller mills that many cards instead.",
+            // A player recipient cannot receive counters as "that player".
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on that player.",
+            // An optional substitute could leave nothing in the event's place.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, you may put that many -1/-1 counters on that creature \
+             instead.",
+            // An unsupported second link.
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player discards that many cards.",
+        ] {
+            let def = parse_replacement_line(text, SUBSTITUTION_PROBE);
+            assert!(
+                def.as_ref().is_none_or(|def| def.execute.is_none()),
+                "{text:?} must not claim a substitution, got {def:?}"
+            );
+        }
     }
 
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
@@ -20103,6 +21903,68 @@ mod tests {
         );
     }
 
+    /// CR 113.6b: "An ability that states which zones it functions in functions
+    /// only from those zones." When the antecedent explicitly says "from
+    /// anywhere", the replacement's `active_zones` must include all zones (except
+    /// Graveyard) so it functions from Library (mill), Hand (discard), Stack
+    /// (counter), Exile, Command, and Battlefield.
+    #[test]
+    fn replacement_from_anywhere_sets_active_zones() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from anywhere, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-anywhere shuffle-back must parse");
+
+        // Verify active_zones is set to all zones except Graveyard
+        let expected_zones: Vec<Zone> = Zone::ALL
+            .iter()
+            .copied()
+            .filter(|z| *z != Zone::Graveyard)
+            .collect();
+        assert_eq!(
+            def.active_zones, expected_zones,
+            "from anywhere must set active_zones to all zones except Graveyard"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_battlefield_sets_active_zones_to_battlefield() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from the battlefield, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-battlefield shuffle-back must parse");
+
+        // Verify active_zones is set to only Battlefield
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Battlefield],
+            "from the battlefield must set active_zones to only Battlefield"
+        );
+    }
+
+    /// CR 113.6b: a specific "from <zone>" clause should set active_zones to only that zone.
+    #[test]
+    fn replacement_from_library_sets_active_zones_to_library() {
+        let def = parse_replacement_line(
+            "If ~ would be put into a graveyard from a library, shuffle it into its owner's \
+             library instead.",
+            "Synthetic",
+        )
+        .expect("from-library shuffle-back must parse");
+
+        // Verify active_zones is set to only Library
+        assert_eq!(
+            def.active_zones,
+            vec![Zone::Library],
+            "from a library must set active_zones to only Library"
+        );
+    }
+
     /// CR 608.2n + CR 614.1a (issue #2897): card-name subjects normalize to `~`
     /// and must carry `valid_card: SelfRef`, not an absent filter that the
     /// stack-self-move gate would reject.
@@ -20539,6 +22401,9 @@ mod tests {
             "as ~ enters, pay 2 life.",
             "as ~ enters, pay {2}{b}.",
             "as ~ enters, pay any amount of {e}.",
+            // A per-unit scaled mana residue: this builder has no scale
+            // surface, so it declines rather than dropping the scale.
+            "as ~ enters, pay any amount of {r}.",
             // Cap sentence without the payment sentence.
             "as ~ enters. the amount you pay can't be more than the total number of white cards in their graveyards.",
             // Cap head with an unparseable body.
@@ -20647,7 +22512,7 @@ mod tests {
             matches!(
                 *sub.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -20678,7 +22543,7 @@ mod tests {
             matches!(
                 &*execute.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -20761,7 +22626,7 @@ mod tests {
             matches!(
                 *choose.effect,
                 Effect::Choose {
-                    choice_type: ChoiceType::CardName,
+                    choice_type: ChoiceType::CardName { .. },
                     persist: true,
                     ..
                 }
@@ -21976,10 +23841,10 @@ mod tests {
                     matches!(
                         count,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn { .. },
+                            qty: QuantityRef::LifeLost { .. },
                         }
                     ),
-                    "count should use LifeLostThisTurn, got {count:?}"
+                    "count should use LifeLost, got {count:?}"
                 );
             }
             other => panic!("Expected PutCounter, got {other:?}"),
@@ -24090,20 +25955,35 @@ mod tests {
         );
     }
 
-    /// CR 614.1c: once a leading keyword chain makes a line claimable, a quoted
-    /// granted ability in the payload is a printed part of the replacement the
-    /// parser cannot carry, so the clause fails closed. Twin: the same line
-    /// without the quote is supported.
+    /// CR 614.1c + CR 611.2a: a leading keyword chain AND a quoted rider compose
+    /// onto the same replacement — the line that used to fail closed on its
+    /// quoted half (no printed card pairs the two; the quoted class is
+    /// trailing-only in the corpus). Twin: the same line without the quote.
     #[test]
-    fn leading_keyword_rider_with_a_quoted_rider_fails_closed() {
+    fn leading_keyword_rider_with_a_quoted_rider_carries_both() {
         let quoted = "If this creature was kicked, it enters with flying and with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"";
+        let def = parse_replacement_line(quoted, "Synthetic Quoted Rider")
+            .expect("leading keywords and a quoted rider compose");
         assert_eq!(
-            parse_replacement_line(quoted, "Synthetic Quoted Rider"),
-            None
+            put_counters_in_chain(&def),
+            vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })]
         );
-        assert_eq!(
-            enters_with_fails_closed(quoted, "Synthetic Quoted Rider"),
-            Some(EntersWithGap::Clause)
+        let grants = quoted_entry_grants(&def);
+        assert_eq!(grants.len(), 2, "got {grants:?}");
+        assert!(
+            matches!(
+                grants[0],
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
+                }
+            ),
+            "got {:?}",
+            grants[0]
+        );
+        assert!(
+            matches!(grants[1], ContinuousModification::GrantAbility { .. }),
+            "got {:?}",
+            grants[1]
         );
 
         let unquoted =
@@ -24716,6 +26596,48 @@ mod tests {
         );
     }
 
+    /// CR 614.1c: a bare-keyword rider printed AFTER a quoted sibling rider in
+    /// the same sentence must still lift. The quoted ability's own period
+    /// ("…Regenerate this creature.\"") is not the sentence end; a naive
+    /// first-period clip ends the scan inside the quote and `haste` is never
+    /// reached. No printed card chains a quoted rider with a bare one, so the
+    /// frame is synthetic — but both halves are verbatim printed rider shapes
+    /// (Anavolver's regeneration grant, the kicker cycle's bare keywords).
+    #[test]
+    fn enters_with_keyword_rider_after_a_quoted_rider_is_kept() {
+        // Scanner level: the quote's period must not end the entering sentence.
+        assert_eq!(
+            parse_enters_with_keyword_riders(
+                "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with haste."
+            ),
+            vec![Keyword::Haste],
+            "a bare rider after a quoted sibling must survive the sentence clip"
+        );
+
+        // Composed level: both riders land on the one kicker-gated replacement.
+        let def = parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with haste.",
+            "Synthetic Quoted Then Bare Rider",
+        )
+        .expect("the composed line is claimed");
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_eq!(
+            collect_granted_keywords(execute),
+            vec![Keyword::Haste],
+            "the bare half grants Haste"
+        );
+        assert!(
+            quoted_entry_grants(&def)
+                .iter()
+                .any(|grant| matches!(grant, ContinuousModification::GrantAbility { .. })),
+            "the quoted half still grants the regeneration ability"
+        );
+        assert!(
+            find_put_counter(execute).is_some(),
+            "the counters must still be placed"
+        );
+    }
+
     /// Every `AddKeyword` granted anywhere in `ability`'s sub-ability chain.
     fn collect_granted_keywords(ability: &AbilityDefinition) -> Vec<Keyword> {
         let mut found = Vec::new();
@@ -24888,9 +26810,13 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // CR 108.2b + CR 111.1: "a card or token" names tokens explicitly — token-inclusive,
-        // so NO `NonToken` constraint and (with `Any` scope) no `valid_card` at all.
-        assert!(def.valid_card.is_none()); // matches all objects, tokens included
+        // The unfiltered `Any` scope includes tokens and currently also admits spell
+        // copies, which the printed "a card or token" subject excludes.
+        assert!(def.valid_card.is_none());
+        assert!(
+            def.active_zones.is_empty(),
+            "non-self 'from anywhere' replacement must keep default active_zones (CR 113.6b)"
+        );
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -24910,21 +26836,26 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // valid_card should scope to opponent-owned cards AND exclude tokens:
-        // CR 108.2b + CR 111.1 — "a card" (no "or token") is token-excluding, so a
-        // dying token reaches the graveyard (dies-triggers fire — Blood Artist
-        // class) instead of being wrongly exiled.
+        assert!(
+            def.active_zones.is_empty(),
+            "non-self 'from anywhere' replacement must keep default active_zones (CR 113.6b)"
+        );
+        // valid_card should scope to opponent-owned cards AND admit only objects
+        // represented by a card: CR 108.2 + CR 108.2b — "a card" (no "or token")
+        // excludes tokens, so a dying token reaches the graveyard (dies-triggers
+        // fire — Blood Artist class) instead of being wrongly exiled. It also
+        // excludes a cast copy of a card (CR 707.12).
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
                 assert!(
-                    properties.contains(&FilterProp::NonToken),
-                    "'a card' subject must exclude tokens (CR 108.2b + CR 111.1)"
+                    properties.contains(&FilterProp::RepresentedByCard),
+                    "'a card' subject must admit only card-represented objects (CR 108.2)"
                 );
             }
-            other => panic!("Expected Typed filter with Owned + NonToken, got {other:?}"),
+            other => panic!("Expected Typed filter with Owned + RepresentedByCard, got {other:?}"),
         }
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
@@ -24951,15 +26882,15 @@ mod tests {
         .expect("Dauthi's graveyard-exile-with-counter replacement must parse");
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // Opponent-owned, token-excluding (CR 108.2b + CR 111.1) — same subject scope as Leyline.
+        // Opponent-owned, card-represented only (CR 108.2 + CR 108.2b) — same subject scope as Leyline.
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
-                assert!(properties.contains(&FilterProp::NonToken));
+                assert!(properties.contains(&FilterProp::RepresentedByCard));
             }
-            other => panic!("Expected Typed(Owned Opponent + NonToken), got {other:?}"),
+            other => panic!("Expected Typed(Owned Opponent + RepresentedByCard), got {other:?}"),
         }
         // Exile redirect carries the void counter.
         match def.execute.as_deref().map(|a| &*a.effect) {
@@ -25008,10 +26939,10 @@ mod tests {
                 assert!(!properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
-                // "a card" is still token-excluding (CR 108.2b + CR 111.1).
-                assert!(properties.contains(&FilterProp::NonToken));
+                // "a card" still admits only card-represented objects (CR 108.2 + CR 108.2b).
+                assert!(properties.contains(&FilterProp::RepresentedByCard));
             }
-            other => panic!("Expected Typed(Owned You + NonToken), got {other:?}"),
+            other => panic!("Expected Typed(Owned You + RepresentedByCard), got {other:?}"),
         }
     }
 
@@ -25037,10 +26968,10 @@ mod tests {
         }
     }
 
-    /// CR 108.2b + CR 111.1: a card-only subject targeting ANY graveyard ("a
-    /// card would be put into a graveyard") is token-EXCLUDING with no
-    /// controller scope — `valid_card` is `NonToken` alone. This is the live
-    /// Leyline-class bug fix: without the `NonToken` axis a dying token was
+    /// CR 108.2 + CR 108.2b: a card-only subject targeting ANY graveyard ("a
+    /// card would be put into a graveyard") admits only objects represented by a
+    /// card, with no controller scope — `valid_card` is `RepresentedByCard` alone.
+    /// This is the live Leyline-class bug fix: without this axis a dying token was
     /// wrongly redirected (exiled), suppressing dies-triggers.
     #[test]
     fn card_only_any_graveyard_excludes_tokens() {
@@ -25051,13 +26982,13 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // Exact equality: the "a card" subject must exclude tokens (CR 108.2b + CR 111.1) and the
-        // any-graveyard scope must add no owner constraint — so `NonToken` alone, with
-        // no `Owned { Opponent }` and no other property.
+        // Exact equality: the "a card" subject must admit only card-represented objects
+        // (CR 108.2 + CR 108.2b) and the any-graveyard scope must add no owner constraint —
+        // so `RepresentedByCard` alone, with no `Owned { Opponent }` and no other property.
         assert_eq!(
             def.valid_card,
             Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::NonToken])
+                TypedFilter::default().properties(vec![FilterProp::RepresentedByCard])
             ))
         );
         // Regression: the exile branch stays backward-compatible after the dispatcher
@@ -27408,6 +29339,60 @@ mod tests {
         // CR 122.1a + CR 614.1a: Doubling Season's modern wording uses "those
         // counters" — counter-agnostic, so no `counter_match` is set.
         assert_eq!(def.counter_match, None);
+        // CR 614.16 (V8): the effect-worded branch stamps the eligibility
+        // gate — combat wither, costs, and turn-based actions stay undoubled.
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::EffectCausedPlacement)
+            ),
+            "Doubling Season's counter clause must carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_bare_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Winding Constrictor's bare "counters would be put
+        // on" wording carries no "effect" restriction, so the def stays
+        // untagged and keeps doubling combat wither.
+        let def = parse_replacement_line(
+            "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.",
+            "Winding Constrictor",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.condition, None,
+            "bare-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_actor_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Vorinclex's actor-worded "if you would put"
+        // wording carries no "effect" restriction, so the def stays untagged
+        // and keeps doubling loyalty costs and lore counters.
+        let def = parse_replacement_line(
+            "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(
+            def.condition, None,
+            "actor-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
     }
 
     #[test]
@@ -27660,6 +29645,111 @@ mod tests {
                 ),
                 "{oracle_type} must scope to {expected:?} on the battlefield"
             );
+        }
+    }
+
+    #[test]
+    fn controlled_population_counter_type_prohibition_parses() {
+        // CR 614.6 + CR 122.1 + CR 614.17: "Creatures you control can't have
+        // -1/-1 counters put on them." (Darksteel Angel; Melira, Sylvok
+        // Outcast) and "Creatures your opponents control can't have +1/+1
+        // counters put on them." (Blightbeetle) lower to the AddCounter+Prevent
+        // replacement scoped to that controller's creatures on the
+        // battlefield, matching only the named counter type.
+        for (text, controller, counter_type) in [
+            (
+                "Creatures you control can't have -1/-1 counters put on them.",
+                ControllerRef::You,
+                CounterType::Minus1Minus1,
+            ),
+            (
+                "Creatures your opponents control can't have +1/+1 counters put on them.",
+                ControllerRef::Opponent,
+                CounterType::Plus1Plus1,
+            ),
+        ] {
+            let def =
+                parse_replacement_line(text, "T").unwrap_or_else(|| panic!("{text:?} must parse"));
+            assert_eq!(def.event, ReplacementEvent::AddCounter);
+            assert_eq!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent)
+            );
+            assert!(
+                matches!(
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.type_filters == vec![TypeFilter::Creature]
+                            && tf.controller == Some(controller)
+                            && tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::InZone { zone: Zone::Battlefield }
+                            ))
+                ),
+                "{text:?} must scope to its controller's creatures on the battlefield"
+            );
+            assert_eq!(
+                def.counter_match,
+                Some(CounterMatch::OfType(counter_type)),
+                "{text:?} must match only its named counter type"
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_population_prohibition_rejects_unattested_shapes() {
+        // Positive reach-guard: the attested shape parses. Without it, an arm
+        // that rejects everything would pass these negatives vacuously.
+        parse_replacement_line(
+            "Creatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+        )
+        .expect("attested prohibition must parse (reach-guard)");
+        // No printed card quantifies the population ("All creatures …") or
+        // uses "placed on" in this shape (MTGJSON census 5.3.0+20261116) —
+        // the arm stays tight to the class.
+        for text in [
+            "All creatures you control can't have -1/-1 counters put on them.",
+            "Creatures you control can't have -1/-1 counters placed on them.",
+        ] {
+            assert!(
+                parse_replacement_line(text, "T").is_none(),
+                "{text:?} must not parse (no printed card exhibits it)"
+            );
+        }
+    }
+
+    #[test]
+    fn darksteel_angel_full_oracle_routes_counter_line_to_replacement() {
+        use crate::types::ability::Effect;
+
+        // CR 614.17 + CR 122.1: the full Darksteel Angel oracle routes line 3
+        // through priority 8 to the counter-prohibition arm: one AddCounter
+        // Prevent replacement, and no Unimplemented gap on the counters line.
+        let parsed = parse_oracle_text(
+            "Flying, indestructible\nYou can't lose the game and your opponents can't win the game.\nCreatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+            &["Flying".to_string(), "Indestructible".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Angel".to_string()],
+        );
+        assert!(
+            parsed.replacements.iter().any(|d| {
+                d.event == ReplacementEvent::AddCounter
+                    && d.quantity_modification == Some(QuantityModification::Prevent)
+            }),
+            "line 3 must lower to an AddCounter Prevent replacement; replacements = {:?}",
+            parsed.replacements
+        );
+        for ability in &parsed.abilities {
+            if let Effect::Unimplemented { description, .. } = ability.effect.as_ref() {
+                let text = description.as_deref().unwrap_or("");
+                assert!(
+                    // allow-noncombinator: string assertion in a test, not parsing dispatch.
+                    !text.to_lowercase().contains("counter"),
+                    "no Unimplemented gap may remain on the counters line: {text:?}"
+                );
+            }
         }
     }
 
@@ -30831,6 +32921,7 @@ mod tests {
                 count,
                 target,
                 destination,
+                ..
             } => {
                 assert_eq!(target, &TargetFilter::Controller);
                 assert_eq!(destination, &Zone::Graveyard);
@@ -32294,6 +34385,302 @@ mod tests {
             .any(|p| matches!(p, FilterProp::Attacking { .. })));
     }
 
+    /// The one `DamageDone` definition a printed prevention line produced.
+    fn damage_done_definition(
+        text: &str,
+        name: &str,
+        keywords: &[&str],
+    ) -> Option<ReplacementDefinition> {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+        let mut damage = parsed
+            .replacements
+            .into_iter()
+            .filter(|r| r.event == ReplacementEvent::DamageDone);
+        let definition = damage.next();
+        assert!(damage.next().is_none(), "{name}: one DamageDone definition");
+        definition
+    }
+
+    /// CR 604.2 + CR 611.3a: a printed "while <state>" antecedent gates the shield
+    /// itself. The four "while it has a +1/+1 counter on it" cards carry a counter
+    /// gate on the host; Jared Carthalion's "while you're the monarch" and Outfitted
+    /// Jouster's "while it's equipped" carry the static condition. Every one keeps
+    /// its unconditional-amount, self-scoped shield.
+    #[test]
+    fn printed_while_guards_gate_their_prevention_shields() {
+        let counter_gate = ReplacementCondition::OnlyIfQuantity {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: crate::types::ability::ObjectScope::Source,
+                    counter_type: Some(CounterType::Plus1Plus1),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+            active_player_req: None,
+        };
+        let cases = [
+            (
+                "Undergrowth Champion",
+                "If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from this creature.\nLandfall — Whenever a land you control enters, put a +1/+1 counter on this creature.",
+                counter_gate.clone(),
+            ),
+            (
+                "Oathsworn Knight",
+                "This creature enters with four +1/+1 counters on it.\nThis creature attacks each combat if able.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from it.",
+                counter_gate.clone(),
+            ),
+            (
+                "Polukranos, Unchained",
+                "Polukranos enters with six +1/+1 counters on it. It escapes with twelve +1/+1 counters on it instead.\nIf damage would be dealt to Polukranos while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it.\n{1}{B}{G}: Polukranos fights another target creature.\nEscape—{4}{B}{G}, Exile six other cards from your graveyard.",
+                counter_gate.clone(),
+            ),
+            (
+                "Ugin's Conjurant",
+                "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from this creature.",
+                counter_gate,
+            ),
+            (
+                "Jared Carthalion, True Heir",
+                "When Jared Carthalion enters, target opponent becomes the monarch. You can't become the monarch this turn.\nIf damage would be dealt to Jared Carthalion while you're the monarch, prevent that damage and put that many +1/+1 counters on it.",
+                ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(StaticCondition::IsMonarch {
+                        player: PlayerScope::Controller,
+                    }),
+                },
+            ),
+            (
+                "Outfitted Jouster",
+                "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+                ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(StaticCondition::SourceIsEquipped),
+                },
+            ),
+        ];
+        for (name, text, guard) in cases {
+            let def = damage_done_definition(text, name, &[])
+                .unwrap_or_else(|| panic!("{name}: the prevention shield must parse"));
+            assert_eq!(def.condition, Some(guard), "{name}");
+            assert_eq!(
+                def.shield_kind,
+                ShieldKind::Prevention {
+                    amount: PreventionAmount::All
+                },
+                "{name}"
+            );
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        }
+
+        // Negatives: the same shield shape with no "while" stays ungated.
+        for (name, text) in [
+            (
+                "Protean Hydra",
+                "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage and remove that many +1/+1 counters from it.\nWhenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+            ),
+            (
+                "Ironscale Hydra",
+                "If a creature would deal combat damage to this creature, prevent that damage and put a +1/+1 counter on this creature.",
+            ),
+            (
+                "Gloom Surgeon",
+                "If combat damage would be dealt to this creature, prevent that damage and exile that many cards from the top of your library.",
+            ),
+        ] {
+            let def = damage_done_definition(text, name, &[])
+                .unwrap_or_else(|| panic!("{name}: the prevention shield must parse"));
+            assert_eq!(def.condition, None, "{name}");
+        }
+        let centaur = damage_done_definition(
+            "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+            "Phantom Centaur",
+            &["Protection"],
+        )
+        .expect("Phantom Centaur: the prevention shield must parse");
+        assert_eq!(centaur.condition, None);
+
+        // Sanwell's prefix gate is still the line's only condition.
+        let sanwell = damage_done_definition(
+            "As long as an artifact creature you control is attacking, prevent all damage that would be dealt to Sanwell.\nWhenever Sanwell becomes tapped, exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.",
+            "Sanwell, Avenger Ace",
+            &[],
+        )
+        .expect("Sanwell: the prevention shield must parse");
+        assert!(
+            matches!(
+                &sanwell.condition,
+                Some(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. }
+                    },
+                    ..
+                })
+            ),
+            "got {:?}",
+            sanwell.condition
+        );
+
+        // Magma Pummeler declines before the shield route: its "When one or more
+        // counters are removed … this way" sentence keeps it a static gap.
+        let pummeler = parse_oracle_text(
+            "This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it. When one or more counters are removed from this creature this way, it deals that much damage to any target.",
+            "Magma Pummeler",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(pummeler
+            .replacements
+            .iter()
+            .all(|r| r.event != ReplacementEvent::DamageDone));
+        assert!(pummeler.abilities.iter().any(|a| matches!(
+            &*a.effect,
+            Effect::Unimplemented { name, .. } if name == "static_structure"
+        )));
+    }
+
+    /// `while_antecedent_clause` returns the guard text between the verb anchor's
+    /// " while " and the comma, and nothing for a line with no such guard.
+    #[test]
+    fn while_antecedent_clause_reads_only_a_guard_after_the_anchor() {
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~ while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from ~.",
+                "would ",
+            ),
+            Some("it has a +1/+1 counter on it")
+        );
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~, prevent that damage and remove that many +1/+1 counters from it.",
+                "would ",
+            ),
+            None
+        );
+        // A " while " before the anchor is not this antecedent's guard.
+        assert_eq!(
+            while_antecedent_clause(
+                "while ~ is tapped, damage that would be dealt to ~ is prevented, then",
+                "would "
+            ),
+            None
+        );
+        // No comma ends the antecedent.
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~ while it's equipped prevent that damage.",
+                "would ",
+            ),
+            None
+        );
+    }
+
+    /// `while_antecedent_clause` reads a guard only inside the antecedent: a
+    /// " while " after the comma that ends it is not the shield's guard. No
+    /// printed Oracle line has " while " after the antecedent's comma, so this is
+    /// a building-block test on a phrase. The nearest printed card carries its
+    /// guard inside the antecedent: Undergrowth Champion, "If damage would be
+    /// dealt to this creature while it has a +1/+1 counter on it, prevent that
+    /// damage and remove a +1/+1 counter from this creature." (CR 614.1a).
+    #[test]
+    fn while_antecedent_clause_ignores_a_while_after_the_antecedent_comma() {
+        assert_eq!(
+            while_antecedent_clause(
+                "if damage would be dealt to ~, prevent that damage while it's untapped, then draw a card.",
+                "would ",
+            ),
+            None
+        );
+    }
+
+    /// CR 615.5: additional effects listed after "prevent that damage," fail closed
+    /// as a line-owned gap, not a shield missing its riders. Bloatfly Swarm and
+    /// Sekki, Seasons' Guide are the printed cards with that list.
+    #[test]
+    fn prevention_listed_riders_fail_closed() {
+        for (name, text, keywords, line) in [
+            (
+                "Bloatfly Swarm",
+                "Flying\nThis creature enters with five +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters from it, then give each player a rad counter for each +1/+1 counter removed this way.",
+                vec!["Flying".to_string()],
+                "If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters from it, then give each player a rad counter for each +1/+1 counter removed this way.",
+            ),
+            (
+                "Sekki, Seasons' Guide",
+                "Sekki enters with eight +1/+1 counters on it.\nIf damage would be dealt to Sekki, prevent that damage, remove that many +1/+1 counters from Sekki, and create that many 1/1 colorless Spirit creature tokens.\nSacrifice eight Spirits: Return this card from your graveyard to the battlefield.",
+                Vec::new(),
+                "If damage would be dealt to Sekki, prevent that damage, remove that many +1/+1 counters from Sekki, and create that many 1/1 colorless Spirit creature tokens.",
+            ),
+        ] {
+            assert_eq!(
+                damage_prevention_fails_closed(line, name),
+                Some(PreventionFailClosed::ListedRider),
+                "{name}"
+            );
+            let parsed = parse_oracle_text(text, name, &keywords, &["Creature".to_string()], &[]);
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .all(|r| r.event != ReplacementEvent::DamageDone),
+                "{name}: no shield may stand in for the listed riders: {:?}",
+                parsed.replacements
+            );
+            assert!(
+                parsed.abilities.iter().any(|a| matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "prevention_listed_rider"
+                )),
+                "{name}: {:?}",
+                parsed.abilities
+            );
+            // Reach guard: the line's neighbour, "enters with … +1/+1 counters", still
+            // parses through the same pass.
+            assert!(
+                parsed
+                    .replacements
+                    .iter()
+                    .any(|r| r.event == ReplacementEvent::Moved),
+                "{name}: {:?}",
+                parsed.replacements
+            );
+        }
+    }
+
+    /// CR 604.2 + CR 611.3a: a "while <state>" guard that does not lift to a
+    /// `ReplacementCondition` fails closed as a line-owned gap, never an unconditional
+    /// shield. Every printed guarded prevention line lifts its guard (Jared Carthalion,
+    /// "If damage would be dealt to Jared Carthalion while you're the monarch, prevent that
+    /// damage and put that many +1/+1 counters on it.", in
+    /// `printed_while_guards_gate_their_prevention_shields`), so this building-block test
+    /// uses a guard no printed card has.
+    #[test]
+    fn an_uncarriable_while_guard_fails_closed() {
+        const LINE: &str =
+            "If damage would be dealt to this creature while it's attacking, prevent that damage.";
+        assert_eq!(
+            damage_prevention_fails_closed(LINE, "Probe Card"),
+            Some(PreventionFailClosed::WhileGuard)
+        );
+        let parsed = parse_oracle_text(LINE, "Probe Card", &[], &["Creature".to_string()], &[]);
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .all(|r| r.event != ReplacementEvent::DamageDone),
+            "{:?}",
+            parsed.replacements
+        );
+        assert!(
+            parsed.abilities.iter().any(|a| matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "prevention_while_guard"
+            )),
+            "{:?}",
+            parsed.abilities
+        );
+    }
+
     /// CR 604.2 + CR 611.3a: an unbridgeable "as long as" gate on a replacement
     /// line lands as a line-owned `Effect::unimplemented` instead of the static
     /// chain's modification-less fallback.
@@ -32545,10 +34932,11 @@ mod tests {
             def.condition,
             Some(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::LifeLostThisTurn {
+                    qty: QuantityRef::LifeLost {
                         player: PlayerScope::Opponent {
                             aggregate: crate::types::ability::AggregateFunction::Sum,
                         },
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -32737,6 +35125,100 @@ mod tests {
             "{:?}",
             packleader.abilities
         );
+    }
+
+    fn roll_norm(line: &str) -> String {
+        replace_self_refs(&strip_reminder_text(line), "Roll Witness").to_lowercase()
+    }
+
+    /// R2/R3 helper rows. CR 614.1c + CR 603.6d + CR 706.4: the composition
+    /// claims an ungated self-only roll line, and the dispatcher gate then no
+    /// longer owns it; every line it declines keeps `Clause` and stays
+    /// line-owned. The gated, distributive and non-modifier lines reach the new
+    /// composition check (`split_as_enters_roll_prefix` admits them, and their
+    /// enters-with sentence parses alone), so their gap is that check's, not an
+    /// upstream decline.
+    #[test]
+    fn as_enters_roll_composition_claims_and_declines() {
+        for line in [
+            "As this creature enters, roll X d6. It enters with a number of +1/+1 counters on it equal to the total of those results.",
+            "As this creature enters, roll a six-sided die. This creature enters with a number of funk counters on it equal to the result.",
+        ] {
+            let norm = roll_norm(line);
+            assert!(
+                matches!(as_enters_roll_enters_with_outcome(&norm), Some(Ok(_))),
+                "{norm}"
+            );
+            assert!(!is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(multi_sentence_enters_with_decline(&norm), None, "{norm}");
+        }
+        // `(line, admitted by the split, reaches the composition's own check)`.
+        for (line, admitted, reaches_check) in [
+            // A gate the enters-with reader carries as a condition: the
+            // composition's ungated check declines it.
+            (
+                "As this creature enters, roll a six-sided die. If this creature was kicked, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A gate the enters-with reader itself declines.
+            (
+                "As this creature enters, roll a six-sided die. If you cast it, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                false,
+            ),
+            // A distributive subject: not this permanent (CR 614.12).
+            (
+                "As this creature enters, roll a six-sided die. Each other creature you control enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A non-modifier node (the keyword grant) in the execute.
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with flying and with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result. This creature enters with a number of charge counters on it equal to the result.",
+                false,
+                false,
+            ),
+        ] {
+            let norm = roll_norm(line);
+            assert!(is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(
+                as_enters_roll_enters_with_outcome(&norm).map(Result::err),
+                admitted.then_some(Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))),
+                "{norm}"
+            );
+            let split = split_as_enters_roll_prefix(&norm);
+            assert_eq!(split.is_some(), admitted, "{norm}");
+            if let Some((_, sentence)) = split {
+                assert_eq!(
+                    enters_with_counters_outcome(sentence, sentence).is_ok(),
+                    reaches_check,
+                    "reach guard, the enters-with sentence parses alone: {sentence}"
+                );
+            }
+        }
+        // A results table is out of class (CR 706.3): the roll prefix declines.
+        let mut table_roll = parse_effect_chain("roll a d20", AbilityKind::Spell);
+        assert!(is_as_enters_roll_prefix(&table_roll));
+        if let Effect::RollDie { results, .. } = &mut *table_roll.effect {
+            results.push(crate::types::ability::DieResultBranch {
+                min: 1,
+                max: 20,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+            });
+        }
+        assert!(!is_as_enters_roll_prefix(&table_roll));
     }
 
     /// CR 614.1c: the typed decline separates "my shape, gate fails closed" and
@@ -33451,29 +35933,476 @@ mod tests {
         assert_eq!(plain.valid_card, Some(TargetFilter::SelfRef));
     }
 
-    /// Pending the quoted-rider fix. Anavolver's {B} half prints a counter AND a quoted granted ability ("Pay 3 life:
-    /// Regenerate this creature."); the parser keeps only the counter, a known
-    /// pre-existing defect tracked outside #9658. This pin asserts only that the
-    /// quote-masked sentence count keeps the line a single sentence (so it is
-    /// not reclassified by this change); it does NOT assert the reading correct.
-    /// Pending the quoted-rider follow-up: Anavolver, Degavolver, Necravolver,
-    /// Rakavolver and Prison Barricade keep only their counters and drop the
-    /// quoted granted ability (see the 'quoted rider' note near the keyword-rider
-    /// scanner).
+    /// Collect the entry-grant modifications (`AddKeyword` riders and quoted-ability
+    /// riders) composed onto an enters-with execute chain.
+    fn quoted_entry_grants(def: &ReplacementDefinition) -> Vec<ContinuousModification> {
+        let mut grants = Vec::new();
+        let mut cursor = def.execute.as_deref();
+        while let Some(node) = cursor {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*node.effect
+            {
+                for static_ability in static_abilities {
+                    grants.extend(static_ability.modifications.iter().cloned());
+                }
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        grants
+    }
+
+    /// CR 614.1c + CR 611.2a: Anavolver's {B} half prints a counter AND a quoted
+    /// granted ability ("Pay 3 life: Regenerate this creature."); both ride the
+    /// one kicker-gated replacement. Replaces the counters-only pin: reverting
+    /// the quoted-rider composition leaves a bare PutCounter head and fails the
+    /// grant assertion while the counter reach-guard still passes.
     #[test]
-    fn anavolver_quoted_rider_unchanged_from_base_pending_quoted_rider_fix() {
+    fn anavolver_quoted_rider_grants_regenerate_ability() {
         let def = parse_replacement_line(
             "If this creature was kicked with its {B} kicker, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"",
             "Anavolver",
         )
         .expect("the line is still claimed");
+        // Reach-guard: the counter half still lands, so a failing grant
+        // assertion below means the rider specifically was dropped.
+        assert_eq!(
+            put_counters_in_chain(&def),
+            vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })]
+        );
+        // Line level: the gate carries the printed kicker cost; First/Second
+        // variant resolution is a full-card synthesis step (it needs the kicker
+        // line), pinned end-to-end by the runtime tests.
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::CastViaKicker {
+                    variant: None,
+                    kicker_cost: Some(ManaCost::Cost { .. }),
+                })
+            ),
+            "the gate must carry the {{B}} kicker cost, got {:?}",
+            def.condition
+        );
+        // The grant wrapper heads the execute chain: one SelfRef static carrying
+        // the classified quoted ability, lasting until the host leaves play.
+        let head = def.execute.as_deref().expect("execute");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            ..
+        } = &*head.effect
+        else {
+            panic!("expected the entry-grant wrapper, got {:?}", head.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilHostLeavesPlay));
+        assert_eq!(*target, Some(TargetFilter::SelfRef));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::SelfRef));
+        let [ContinuousModification::GrantAbility { definition }] =
+            static_abilities[0].modifications.as_slice()
+        else {
+            panic!(
+                "expected one granted activated ability, got {:?}",
+                static_abilities[0].modifications
+            );
+        };
+        assert_eq!(definition.kind, AbilityKind::Activated);
+        assert!(
+            matches!(
+                &*definition.effect,
+                Effect::Regenerate {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "got {:?}",
+            definition.effect
+        );
+        assert!(
+            matches!(
+                &definition.cost,
+                Some(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 }
+                })
+            ),
+            "got {:?}",
+            definition.cost
+        );
+        assert_eq!(
+            definition.description.as_deref(),
+            Some("Pay 3 life: Regenerate this creature.")
+        );
+        // Tail: the counter the reach-guard counted above.
         assert!(matches!(
-            &*def.execute.as_deref().unwrap().effect,
-            Effect::PutCounter {
-                counter_type: CounterType::Plus1Plus1,
-                ..
+            &*head.sub_ability.as_deref().expect("counter tail").effect,
+            Effect::PutCounter { .. }
+        ));
+    }
+
+    /// CR 614.1c: all five quoted-rider lines carry their counters AND their
+    /// granted ability. Verbatim Oracle lines (Scryfall); each row names the
+    /// expected counter count, kicker cost, and grant shape. Line level: the
+    /// gate carries the printed kicker cost with no resolved variant —
+    /// First/Second resolution is a full-card synthesis step, pinned end-to-end
+    /// by the runtime tests.
+    #[test]
+    fn quoted_rider_lines_carry_counters_and_grants() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ExpectedGrant {
+            Regenerate,
+            DamageLifegain,
+            CanAttack,
+        }
+        for (card, line, count, cost, expected) in [
+            (
+                "Anavolver",
+                "If this creature was kicked with its {B} kicker, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"",
+                1,
+                Some(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::Black],
+                }),
+                ExpectedGrant::Regenerate,
+            ),
+            (
+                "Degavolver",
+                "If this creature was kicked with its {1}{B} kicker, it enters with two +1/+1 counters on it and with \"Pay 3 life: Regenerate this creature.\"",
+                2,
+                Some(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::Black],
+                }),
+                ExpectedGrant::Regenerate,
+            ),
+            (
+                "Necravolver",
+                "If this creature was kicked with its {W} kicker, it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, you gain that much life.\"",
+                1,
+                Some(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::White],
+                }),
+                ExpectedGrant::DamageLifegain,
+            ),
+            (
+                "Rakavolver",
+                "If this creature was kicked with its {1}{W} kicker, it enters with two +1/+1 counters on it and with \"Whenever this creature deals damage, you gain that much life.\"",
+                2,
+                Some(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![ManaCostShard::White],
+                }),
+                ExpectedGrant::DamageLifegain,
+            ),
+            (
+                "Prison Barricade",
+                "If this creature was kicked, it enters with a +1/+1 counter on it and with \"This creature can attack as though it didn't have defender.\"",
+                1,
+                None,
+                ExpectedGrant::CanAttack,
+            ),
+        ] {
+            let def = parse_replacement_line(line, card)
+                .unwrap_or_else(|| panic!("{card}: the line is claimed"));
+            assert_eq!(
+                put_counters_in_chain(&def),
+                vec![(
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: count }
+                )],
+                "{card}: counter half"
+            );
+            assert!(
+                matches!(
+                    def.condition,
+                    Some(ReplacementCondition::CastViaKicker {
+                        variant: None,
+                        kicker_cost: ref parsed,
+                    }) if parsed == &cost
+                ),
+                "{card}: kicker gate, got {:?}",
+                def.condition
+            );
+            let grants = quoted_entry_grants(&def);
+            assert_eq!(grants.len(), 1, "{card}: one quoted grant, got {grants:?}");
+            match (&grants[0], expected) {
+                (
+                    ContinuousModification::GrantAbility { definition },
+                    ExpectedGrant::Regenerate,
+                ) => {
+                    assert_eq!(definition.kind, AbilityKind::Activated);
+                    assert!(
+                        matches!(
+                            &*definition.effect,
+                            Effect::Regenerate {
+                                target: TargetFilter::SelfRef
+                            }
+                        ),
+                        "{card}: got {:?}",
+                        definition.effect
+                    );
+                    assert!(
+                        matches!(
+                            &definition.cost,
+                            Some(AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 3 }
+                            })
+                        ),
+                        "{card}: got {:?}",
+                        definition.cost
+                    );
+                }
+                (
+                    ContinuousModification::GrantTrigger { trigger },
+                    ExpectedGrant::DamageLifegain,
+                ) => {
+                    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+                    assert_eq!(trigger.valid_source, Some(TargetFilter::SelfRef));
+                    let execute = trigger.execute.as_deref().expect("execute");
+                    assert!(
+                        matches!(
+                            &*execute.effect,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Ref {
+                                    qty: QuantityRef::EventContextAmount
+                                },
+                                ..
+                            }
+                        ),
+                        "{card}: got {:?}",
+                        execute.effect
+                    );
+                }
+                (
+                    ContinuousModification::AddStaticMode { mode },
+                    ExpectedGrant::CanAttack,
+                ) => {
+                    assert_eq!(*mode, StaticMode::CanAttackWithDefender);
+                }
+                (other, _) => panic!("{card}: wrong grant shape, got {other:?}"),
+            }
+        }
+    }
+
+    /// The normalized (`~`) self-reference form classifies identically: when
+    /// invoked via `parse_oracle_text` the quoted body already reads "Regenerate
+    /// ~", and the grant must still bind SelfRef.
+    #[test]
+    fn quoted_rider_normalized_self_reference_form() {
+        let def = parse_replacement_line(
+            "If ~ was kicked with its {B} kicker, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\"",
+            "Anavolver",
+        )
+        .expect("the normalized line is claimed");
+        let grants = quoted_entry_grants(&def);
+        assert_eq!(grants.len(), 1, "got {grants:?}");
+        let ContinuousModification::GrantAbility { definition } = &grants[0] else {
+            panic!(
+                "expected the granted regenerate ability, got {:?}",
+                grants[0]
+            );
+        };
+        assert!(matches!(
+            &*definition.effect,
+            Effect::Regenerate {
+                target: TargetFilter::SelfRef
             }
         ));
+    }
+
+    /// CR 614.1c: a quoted rider the extractor cannot read fails the clause
+    /// closed — the counters-only claim must not come back through a malformed
+    /// span, an empty span, a stray span inside the rider region, or an
+    /// unmatched trailing opener after a valid grant.
+    #[test]
+    fn enters_with_quoted_rider_unread_fails_closed() {
+        // `~`-normalized: the typed outcome takes normalized input, like every
+        // other direct caller (`parse_replacement_line` accepts the same form —
+        // normalization is idempotent on `~`).
+        for line in [
+            // Unterminated span after the marker.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.",
+            // Empty span classifies to nothing.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"\".",
+            // A stray span inside the rider region the marker loop never consumes.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\" \"stray words\".",
+            // An unmatched trailing opener after a valid grant: the
+            // complete-span count still matches the consumed count, so only
+            // the unmatched-opener check fails it closed.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\" \"stray text.",
+        ] {
+            assert_eq!(
+                enters_with_counters_outcome(&line.to_lowercase(), line).err(),
+                Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause)),
+                "{line:?}"
+            );
+            assert!(
+                parse_replacement_line(line, "Test Creature").is_none(),
+                "{line:?}: the Clause decline must be preserved at the replacement boundary"
+            );
+        }
+        // Reach-guards: the decline is about the QUOTES, not the frame — the
+        // same frames without quotes are claimed.
+        assert!(parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it.",
+            "Test Creature"
+        )
+        .is_some());
+        assert!(parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it.",
+            "Test Creature"
+        )
+        .is_some());
+    }
+
+    /// CR 614.1c: a quoted rider that classifies NONEMPTY but whose granted
+    /// body is unimplemented fails the clause closed — the acceptance check
+    /// must not publish the line as supported while the grant is silently
+    /// lost. Pins both grant arms (activated fallback, triggered) at the
+    /// classifier level, then at the scan level, with supported-body
+    /// reach-guards proving the frames themselves still lift.
+    #[test]
+    fn enters_with_quoted_rider_unsupported_body_fails_closed() {
+        // Classifier level: both bodies classify nonempty, and both granted
+        // bodies are unbuildable — the exact shape the scan must reject.
+        let activated =
+            crate::parser::oracle_static::classify_quoted_inner("Blah blah xyzzy nonsense.");
+        assert_eq!(activated.len(), 1, "got {activated:?}");
+        let ContinuousModification::GrantAbility { definition } = &activated[0] else {
+            panic!("expected the GrantAbility fallback, got {:?}", activated[0]);
+        };
+        assert!(
+            crate::parser::oracle::has_unimplemented(definition),
+            "the control body must be unimplemented"
+        );
+
+        let triggered = crate::parser::oracle_static::classify_quoted_inner(
+            "Whenever this creature deals damage, xyzzy nonsense.",
+        );
+        assert_eq!(triggered.len(), 1, "got {triggered:?}");
+        let ContinuousModification::GrantTrigger { trigger } = &triggered[0] else {
+            panic!("expected GrantTrigger, got {:?}", triggered[0]);
+        };
+        assert!(
+            trigger
+                .execute
+                .as_deref()
+                .is_none_or(crate::parser::oracle::has_unimplemented),
+            "the control trigger must be unimplemented or missing its execute"
+        );
+
+        // Scan level: both frames fail closed.
+        for line in [
+            "it enters with a +1/+1 counter on it and with \"Blah blah xyzzy nonsense.\".",
+            "it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, xyzzy nonsense.\".",
+        ] {
+            assert_eq!(
+                parse_enters_with_quoted_riders(line).err(),
+                Some(EntersWithGap::Clause),
+                "{line:?}"
+            );
+        }
+
+        // Reach-guards: the same frames with supported bodies still lift.
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"."
+            )
+            .expect("supported activated body lifts")
+            .len(),
+            1
+        );
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, you gain that much life.\"."
+            )
+            .expect("supported trigger body lifts")
+            .len(),
+            1
+        );
+    }
+
+    /// CR 614.1c: a quoted span inside the counter clause is not a rider.
+    /// Baron Von Count's verbatim line carries `"5."` (the doom counter's
+    /// numeral) with no rider marker; the quoted scan must return no riders
+    /// and leave the line claimed with its doom counter — the span-count
+    /// guard's first version failed this line closed (PR #10722 regression).
+    #[test]
+    fn baron_von_count_counter_clause_quote_is_not_a_rider() {
+        assert_eq!(
+            parse_enters_with_quoted_riders("Baron Von Count enters with a doom counter on \"5.\"")
+                .expect("no rider marker, no riders"),
+            Vec::new()
+        );
+        let def = parse_replacement_line(
+            "Baron Von Count enters with a doom counter on \"5.\"",
+            "Baron Von Count",
+        )
+        .expect("the counter-clause quote must not fail the line closed");
+        assert_eq!(
+            put_counters_in_chain(&def),
+            vec![(
+                CounterType::Generic("doom".to_string()),
+                QuantityExpr::Fixed { value: 1 }
+            )],
+            "doom counter half"
+        );
+        assert!(
+            quoted_entry_grants(&def).is_empty(),
+            "no riders: got {:?}",
+            quoted_entry_grants(&def)
+        );
+    }
+
+    /// Helper level: the quoted scan lifts every ` and with "<ability>"` rider
+    /// in the entering sentence and nothing else. No printed card chains two
+    /// quoted riders; the chain row asserts the supported shape, mirroring the
+    /// bare-keyword chain test.
+    #[test]
+    fn quoted_rider_scan_lifts_riders_in_sentence_only() {
+        // Single rider, original case preserved for the grant authority.
+        let single = parse_enters_with_quoted_riders(
+            "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"",
+        )
+        .expect("one rider");
+        assert_eq!(single.len(), 1);
+        assert!(matches!(
+            single[0],
+            ContinuousModification::GrantAbility { .. }
+        ));
+
+        // Chained riders both lift, in printed order.
+        let chained = parse_enters_with_quoted_riders(
+            "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with \"Whenever ~ deals damage, you gain that much life.\"",
+        )
+        .expect("two riders");
+        assert_eq!(chained.len(), 2);
+        assert!(matches!(
+            chained[0],
+            ContinuousModification::GrantAbility { .. }
+        ));
+        assert!(matches!(
+            chained[1],
+            ContinuousModification::GrantTrigger { .. }
+        ));
+
+        // A later sentence's rider is not lifted...
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with two +1/+1 counters on it. exile it and with \"Pay 3 life: Regenerate this creature.\""
+            )
+            .expect("no rider in the entering sentence"),
+            Vec::new()
+        );
+        // ...nor is a bare-keyword rider (the sibling scan's class).
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with three +1/+1 counters on it and with trample."
+            )
+            .expect("bare keywords are not quoted spans"),
+            Vec::new()
+        );
     }
 
     // ── "As ~ enters, <one-shot>" (CR 614.1c + CR 603.6d) ──────────────────
@@ -34314,7 +37243,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDrawReplacement { replacement_effect } => {
                 assert!(
-                    matches!(*replacement_effect, Effect::GainLife { .. }),
+                    matches!(*replacement_effect.effect, Effect::GainLife { .. }),
                     "payload must be GainLife, got {replacement_effect:?}"
                 );
             }
@@ -34346,7 +37275,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDrawReplacement { replacement_effect } => {
                 assert!(
-                    matches!(*replacement_effect, Effect::Token { .. }),
+                    matches!(*replacement_effect.effect, Effect::Token { .. }),
                     "payload must be a Token, got {replacement_effect:?}"
                 );
             }
@@ -34355,25 +37284,121 @@ mod snapshot_tests {
     }
 
     #[test]
-    fn oneshot_draw_replacement_rejects_player_scoped_payload() {
-        // GUARD: Words of Wind ("each player returns a permanent...") and Words
-        // of Waste ("each opponent discards...") have player-scoped payloads
-        // that bare `parse_effect` mis-scopes — they must stay HONEST
-        // Unimplemented gaps (return None), NOT silently-wrong CreateDrawReplacement.
-        assert!(
-            parse_oneshot_draw_replacement(
-                "the next time you would draw a card this turn, each player returns a permanent they control to its owner's hand instead"
-            )
-            .is_none(),
-            "Words of Wind (each-player payload) must remain an honest gap"
+    fn oneshot_draw_replacement_carries_player_scoped_payload() {
+        // CR 614.6: Words of Wind ("each player returns a permanent...") and
+        // Words of Waste ("each opponent discards...") lower their subject onto
+        // the payload's `player_scope`, exactly like a standalone sentence.
+        let scope_of = |text: &str| match parse_oneshot_draw_replacement(text) {
+            Some(Effect::CreateDrawReplacement { replacement_effect }) => {
+                (replacement_effect.player_scope, *replacement_effect.effect)
+            }
+            other => panic!("expected CreateDrawReplacement for {text:?}, got {other:?}"),
+        };
+
+        let (wind_scope, wind_effect) = scope_of(
+            "the next time you would draw a card this turn, each player returns a permanent they control to its owner's hand instead",
         );
+        assert_eq!(wind_scope, Some(PlayerFilter::All));
         assert!(
-            parse_oneshot_draw_replacement(
-                "the next time you would draw a card this turn, each opponent discards a card instead"
-            )
-            .is_none(),
-            "Words of Waste (each-opponent payload) must remain an honest gap"
+            matches!(wind_effect, Effect::Bounce { .. }),
+            "Words of Wind payload must be a bounce, got {wind_effect:?}"
         );
+
+        let (waste_scope, waste_effect) = scope_of(
+            "the next time you would draw a card this turn, each opponent discards a card instead",
+        );
+        assert_eq!(waste_scope, Some(PlayerFilter::Opponent));
+        assert!(
+            matches!(waste_effect, Effect::Discard { .. }),
+            "Words of Waste payload must be a discard, got {waste_effect:?}"
+        );
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_rejects_targets_outside_head_slot() {
+        // Synthetic texts: no printed card has either shape. The nearest printed
+        // card is Words of War ("~ deals 2 damage to any target instead"); the
+        // riders only exercise the head-slot guard.
+        // Reach-guard: the same shape with an untargeted rider parses.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, ~ deals 2 damage to any target and you gain 2 life instead",
+        )
+        .is_some());
+        // A targeted later clause has no announced slot — stays an honest gap.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, you gain 2 life and ~ deals 2 damage to any target instead",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn draw_replacement_head_slot_guard_traverses_choose_one_of_branches() {
+        // Synthetic shape: no printed card is a modal draw replacement. A
+        // `ChooseOneOf` head surfaces no target slot, so a target-bearing branch
+        // could not be announced (CR 115.1c + CR 602.2b).
+        let damage = |kind| {
+            AbilityDefinition::new(
+                kind,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+        };
+        let gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let choose = |branches| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches,
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            )
+        };
+        assert!(
+            !draw_replacement_payload_targets_fit_head_slot(&choose(vec![
+                gain.clone(),
+                damage(AbilityKind::Spell),
+            ])),
+            "a target-bearing ChooseOneOf branch has no announced slot"
+        );
+        // Reach-guard: untargeted branches, and a plain targeted head, still fit.
+        assert!(draw_replacement_payload_targets_fit_head_slot(&choose(
+            vec![gain.clone(), gain]
+        )));
+        assert!(draw_replacement_payload_targets_fit_head_slot(&damage(
+            AbilityKind::Spell
+        )));
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_war_payload_targets_any() {
+        // Words of War: "~ deals 2 damage to any target" keeps its any-target
+        // filter on the payload head (CR 115.4), chosen at activation.
+        match parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, ~ deals 2 damage to any target instead",
+        ) {
+            Some(Effect::CreateDrawReplacement { replacement_effect }) => assert!(
+                matches!(
+                    *replacement_effect.effect,
+                    Effect::DealDamage {
+                        target: TargetFilter::Any,
+                        ..
+                    }
+                ),
+                "payload must be DealDamage to any target, got {replacement_effect:?}"
+            ),
+            other => panic!("expected CreateDrawReplacement, got {other:?}"),
+        }
     }
 
     #[test]
@@ -35882,9 +38907,12 @@ mod opposition_agent_parser_tests {
         );
 
         let execute = definition.execute.as_deref().expect("execute definition");
+        // CR 608.2c: "they exile each card they find" — the searcher, whose own
+        // library is searched, performs the exile.
         assert!(matches!(
             execute.effect.as_ref(),
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,

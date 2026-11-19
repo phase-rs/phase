@@ -18,14 +18,20 @@
 use engine::game::combat::{build_declare_attackers_waiting_for, AttackTarget};
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::visibility::{
+    filter_events_for_viewer, filter_state_for_unseated_viewer, filter_state_for_viewer,
+    HIDDEN_CARD_NAME,
+};
 use engine::types::ability::{TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{AutoPassRequest, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -805,6 +811,222 @@ fn destroy_the_evidence_mills_the_whole_revealed_pile_as_one_event() {
     );
 }
 
+/// CR 701.20a + CR 608.2c: Mind Funeral — "Target opponent reveals cards from the
+/// top of their library until four land cards are revealed. That player puts all
+/// cards revealed this way into their graveyard."
+///
+/// Mind Funeral must stop after the 4th land card is revealed (not after 1 land),
+/// and the entire revealed pile — both non-land misses and the 4 revealed lands —
+/// must be put into the target opponent's graveyard, while unrevealed library cards
+/// (including any remaining lands) stay in the library.
+#[test]
+fn mind_funeral_stops_at_four_lands_revealed() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Staged library for target opponent P1:
+    // miss1, land1, miss2, land2, miss3, land3, miss4, land4, filler_land (5th land), filler_spell
+    let miss_one = scenario.add_card_to_library_top(P1, "Grizzly Bears");
+    let land_one = scenario.add_land_to_library_top(P1, "Forest").id();
+    let miss_two = scenario.add_card_to_library_top(P1, "Counterspell");
+    let land_two = scenario.add_land_to_library_top(P1, "Island").id();
+    let miss_three = scenario.add_card_to_library_top(P1, "Lightning Bolt");
+    let land_three = scenario.add_land_to_library_top(P1, "Mountain").id();
+    let miss_four = scenario.add_card_to_library_top(P1, "Giant Growth");
+    let land_four = scenario.add_land_to_library_top(P1, "Swamp").id();
+    let filler_land = scenario.add_land_to_library_top(P1, "Plains").id();
+    let filler_spell = scenario.add_card_to_library_top(P1, "Divination");
+
+    // Mind Funeral in P0's hand loaded from the committed fixture
+    let db = crate::support::shared_card_db().expect("the fixture contains Mind Funeral");
+    let spell = scenario.add_real_card(P0, "Mind Funeral", Zone::Hand, db);
+
+    // Fund P0's mana pool with exactly {1}{U}{B}
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    arrange_library_top_first(
+        &mut runner,
+        &[
+            miss_one,
+            land_one,
+            miss_two,
+            land_two,
+            miss_three,
+            land_three,
+            miss_four,
+            land_four,
+            filler_land,
+            filler_spell,
+        ],
+    );
+
+    let outcome = runner.cast(spell).target_player(P1).resolve();
+    assert_stack_empty_priority(&runner);
+
+    // Assert explicit mana payment occurred
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "P0 paid {{1}}{{U}}{{B}} to cast Mind Funeral"
+    );
+
+    // CR 701.20a: Mind Funeral reveals cards until four land cards are revealed.
+    // The reveal event shows the visited prefix in library order (the order cards
+    // are actually revealed from the top), not grouped misses-then-hits.
+    let revealed_cards: Vec<ObjectId> = outcome
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CardsRevealed {
+                player, card_ids, ..
+            } if player == &P1 => Some(card_ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        revealed_cards,
+        vec![miss_one, land_one, miss_two, land_two, miss_three, land_three, miss_four, land_four,],
+        "Mind Funeral reveals visited prefix in library order"
+    );
+
+    // CR 404.3: moving multiple cards into the same graveyard simultaneously
+    // requires an owner-ordering choice that the engine does not provide for
+    // this mass remainder move (matching sequence.rs:6017 and reviving_vapors_hand_and_rest.rs:192).
+    // Rather than delivering in arbitrary engine order, the graveyard delivery is an honest
+    // unsupported gap; the cards remain in the library.
+    for (id, label) in [
+        (miss_one, "first revealed miss"),
+        (land_one, "first revealed land"),
+        (miss_two, "second revealed miss"),
+        (land_two, "second revealed land"),
+        (miss_three, "third revealed miss"),
+        (land_three, "third revealed land"),
+        (miss_four, "fourth revealed miss"),
+        (land_four, "fourth revealed land"),
+        (filler_land, "unrevealed 5th land"),
+        (filler_spell, "unrevealed filler spell"),
+    ] {
+        assert_zone(&runner, id, Zone::Library, label);
+    }
+    assert_eq!(
+        runner.state().players[P1.0 as usize].library.len(),
+        10,
+        "all 10 cards remain in P1's library because graveyard delivery is an honest gap"
+    );
+
+    // CR 701.20a: Mind Funeral's partial resolution finishes when the reveal loop
+    // terminates. Both opponent (P0) and spectator (unseated) snapshots conceal the
+    // revealed cards and library positions before any additional action.
+    for (label, projected) in [
+        ("opponent P0", filter_state_for_viewer(runner.state(), P0)),
+        (
+            "spectator",
+            filter_state_for_unseated_viewer(runner.state()),
+        ),
+    ] {
+        for &id in &revealed_cards {
+            assert_eq!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: revealed card must be concealed in library after Mind Funeral finishes"
+            );
+        }
+    }
+}
+
+/// CR 701.20a + CR 609.3: When the library is exhausted before 4 lands are found, the loop
+/// terminates with whatever was found and all revealed cards are put into the graveyard.
+/// CR 609.3 ("If an effect attempts to do something impossible, it does only as much
+/// as possible") governs stopping at an empty library with fewer than four lands.
+#[test]
+fn mind_funeral_exhausts_library_when_fewer_than_four_lands() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Staged library for target opponent P1: only 2 lands and 2 non-lands total
+    let miss_one = scenario.add_card_to_library_top(P1, "Grizzly Bears");
+    let land_one = scenario.add_land_to_library_top(P1, "Forest").id();
+    let miss_two = scenario.add_card_to_library_top(P1, "Counterspell");
+    let land_two = scenario.add_land_to_library_top(P1, "Island").id();
+
+    let db = crate::support::shared_card_db().expect("the fixture contains Mind Funeral");
+    let spell = scenario.add_real_card(P0, "Mind Funeral", Zone::Hand, db);
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    arrange_library_top_first(&mut runner, &[miss_one, land_one, miss_two, land_two]);
+
+    let outcome = runner.cast(spell).target_player(P1).resolve();
+    assert_stack_empty_priority(&runner);
+
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    let revealed_cards: Vec<ObjectId> = outcome
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::CardsRevealed {
+                player, card_ids, ..
+            } if player == &P1 => Some(card_ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        revealed_cards,
+        vec![miss_one, land_one, miss_two, land_two],
+        "Mind Funeral exhausts library after revealing all available cards in library order when fewer than 4 lands exist"
+    );
+
+    // CR 404.3: graveyard delivery is an honest gap, so cards remain in library.
+    for (id, label) in [
+        (miss_one, "first miss"),
+        (land_one, "first land"),
+        (miss_two, "second miss"),
+        (land_two, "second land"),
+    ] {
+        assert_zone(&runner, id, Zone::Library, label);
+    }
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].library.len(),
+        4,
+        "all 4 cards remain in P1's library because graveyard delivery is an honest gap"
+    );
+
+    // CR 701.20a: Immediate opponent and spectator views conceal the exhausted library prefix.
+    for (label, projected) in [
+        ("opponent P0", filter_state_for_viewer(runner.state(), P0)),
+        (
+            "spectator",
+            filter_state_for_unseated_viewer(runner.state()),
+        ),
+    ] {
+        for &id in &revealed_cards {
+            assert_eq!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: revealed card must be concealed in library after Mind Funeral finishes"
+            );
+        }
+    }
+}
+
 /// No double collection (CR 603.2c): a batched "one or more" observer with no
 /// once-per-turn limit triggers exactly once for the simultaneous entry of two
 /// matched Elves.
@@ -842,4 +1064,305 @@ fn kindred_summons_batched_observer_without_turn_limit_fires_once() {
         life_before + 1,
         "the batched observer must trigger exactly once for the one entry event"
     );
+}
+
+/// CR 701.20a: Mind Funeral's reveal lasts only while the effect needs it, so
+/// it ends at its resolution's completion boundary — before the resolved view
+/// is published, even when the same action goes on to resolve a spell that
+/// stops at a prompt keeping its own reveal open.
+///
+/// Calibrated Blast first reveals P0's Shock and its reflexive trigger holds a
+/// stack-bound lease on it (CR 701.20a: the card stays revealed until that
+/// triggered ability leaves the stack). Vedalken Orrery lets P0 cast Duress and
+/// then Mind Funeral above the reflexive. One stack-resolution session resolves
+/// Mind Funeral (its graveyard instruction is an explicit gap, so the eight
+/// revealed cards stay where they are) and then stops at Duress's choice of
+/// P1's revealed hand. Mind Funeral's pile is concealed from the opponent and
+/// spectators there, while Duress's hand reveal and Blast's lease stay visible
+/// and the event history keeps every revealed name.
+#[test]
+fn reveal_effect_concealed_before_later_resolution_prompt() {
+    let db = crate::support::shared_card_db().expect("the fixture contains the printed cards");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Vedalken Orrery", Zone::Battlefield, db);
+    let blast = scenario.add_real_card(P0, "Calibrated Blast", Zone::Hand, db);
+    let duress = scenario.add_real_card(P0, "Duress", Zone::Hand, db);
+    let mind_funeral = scenario.add_real_card(P0, "Mind Funeral", Zone::Hand, db);
+    // Calibrated Blast {2}{R} + Duress {B} + Mind Funeral {1}{U}{B}.
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Red,
+            ManaType::Black,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    // `add_real_card` appends to the library, so the first card added is on top.
+    let shock = scenario.add_real_card(P0, "Shock", Zone::Library, db);
+    let p0_forest = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    let pile: Vec<ObjectId> = [
+        "Grizzly Bears",
+        "Forest",
+        "Counterspell",
+        "Island",
+        "Opt",
+        "Mountain",
+        "Divination",
+        "Plains",
+    ]
+    .into_iter()
+    .map(|name| scenario.add_real_card(P1, name, Zone::Library, db))
+    .collect();
+    let deep = scenario.add_real_card(P1, "Ancestral Recall", Zone::Library, db);
+    let hand_bolt = scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, db);
+    let hand_counterspell = scenario.add_real_card(P1, "Counterspell", Zone::Hand, db);
+    let hand_swamp = scenario.add_real_card(P1, "Swamp", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let mut expected_library = pile.clone();
+    expected_library.push(deep);
+    assert_eq!(
+        runner.state().players[P1.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        expected_library,
+        "reach guard: P1's staged library order"
+    );
+
+    // Calibrated Blast reveals Shock; its reflexive targets P1 and leases Shock.
+    runner.cast(blast).commit();
+    for _ in 0..4 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass priority");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "Calibrated Blast's reflexive asks for its target; waiting_for={:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("target P1 with the reflexive");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the reflexive is on the stack"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![p0_forest, shock],
+        "Blast bottomed the revealed Shock"
+    );
+    assert!(
+        runner.state().holds_stack_bound_reveal(shock),
+        "reach guard: the reflexive leases Shock's occurrence"
+    );
+
+    // CR 702.8a: Vedalken Orrery lets P0 cast both sorceries as though they had
+    // flash, above the reflexive.
+    runner.cast(duress).target_player(P1).commit();
+    runner.cast(mind_funeral).target_player(P1).commit();
+    assert_eq!(
+        runner.state().stack.len(),
+        3,
+        "reflexive, Duress, Mind Funeral"
+    );
+    let pile_incarnations: Vec<u64> = pile
+        .iter()
+        .map(|id| runner.state().objects[id].incarnation)
+        .collect();
+
+    // One player action resolves Mind Funeral and Duress; nothing between them
+    // passes through the next action's entry.
+    let events = runner
+        .act(GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        })
+        .expect("resolve the stack in one stack-resolution session")
+        .events;
+    let WaitingFor::RevealChoice { player, cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "Duress must stop at its choice; waiting_for={:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(
+        cards,
+        vec![hand_bolt, hand_counterspell],
+        "Duress offers the noncreature, nonland cards"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { player, card_ids, .. }
+                if *player == P1 && *card_ids == pile
+        )),
+        "reach guard: Mind Funeral revealed the eight visited cards in this action"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| entry.id != mind_funeral && entry.source_id != mind_funeral),
+        "Mind Funeral has finished resolving"
+    );
+    assert_zone(&runner, mind_funeral, Zone::Graveyard, "Mind Funeral");
+
+    // The revealed cards stayed where they were: same order, same objects.
+    let state = runner.state();
+    assert_eq!(
+        state.players[P1.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        expected_library,
+        "Mind Funeral's revealed cards remain in place above the deep card"
+    );
+    assert_eq!(
+        pile.iter()
+            .map(|id| state.objects[id].incarnation)
+            .collect::<Vec<_>>(),
+        pile_incarnations,
+        "CR 701.20b: revealing moves nothing, so each card is the same object"
+    );
+
+    // Mind Funeral's reveal ended with its resolution; Duress's has not.
+    for id in &pile {
+        assert!(
+            !state.revealed_cards.contains(id),
+            "Mind Funeral's transient reveal ended at its completion"
+        );
+    }
+    let duress_hand = [hand_bolt, hand_counterspell, hand_swamp];
+    for (label, viewer) in [
+        ("opponent P0", Some(P0)),
+        ("owner P1", Some(P1)),
+        ("spectator", None),
+    ] {
+        let projected = match viewer {
+            Some(v) => filter_state_for_viewer(state, v),
+            None => filter_state_for_unseated_viewer(state),
+        };
+        for &id in pile.iter().chain([&deep, &shock]) {
+            assert_eq!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: library card {id:?} is concealed after Mind Funeral completes"
+            );
+        }
+        for &id in &duress_hand {
+            assert_ne!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: Duress's revealed hand card {id:?} is still revealed"
+            );
+        }
+        // CR 701.20a + CR 401.2: a stack-bound reveal lease on a library card
+        // does not disclose its library slot, but publishes its identity through
+        // derived stack revealed cards.
+        let derived = engine::game::derived_views::derive_filtered_views(state, &projected, viewer);
+        let leased_names: Vec<&str> = derived
+            .stack_revealed_cards
+            .values()
+            .flat_map(|names| names.iter().map(String::as_str))
+            .collect();
+        assert_eq!(
+            leased_names,
+            vec!["Shock"],
+            "{label}: the reflexive's lease publishes Shock through derived views"
+        );
+    }
+    assert!(
+        state.holds_stack_bound_reveal(shock),
+        "the reflexive's lease survives the completion boundary"
+    );
+
+    // The filtered history keeps every revealed name but no hidden library id.
+    for viewer in [P0, engine::types::player::PlayerId(9)] {
+        let filtered = filter_events_for_viewer(&events, state, viewer);
+        let funeral_reveal = filtered
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::CardsRevealed {
+                    player,
+                    card_ids,
+                    card_names,
+                    ..
+                } if *player == P1 && card_names.len() == pile.len() => {
+                    Some((card_ids.clone(), card_names.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{viewer:?}: Mind Funeral's reveal reaches the viewer"));
+        assert_eq!(
+            funeral_reveal,
+            (
+                Vec::new(),
+                [
+                    "Grizzly Bears",
+                    "Forest",
+                    "Counterspell",
+                    "Island",
+                    "Opt",
+                    "Mountain",
+                    "Divination",
+                    "Plains",
+                ]
+                .map(String::from)
+                .to_vec()
+            ),
+            "{viewer:?}: names survive, library positions do not"
+        );
+    }
+
+    // Duress finishes; the reflexive then leaves the stack and ends its lease.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![hand_bolt],
+        })
+        .expect("choose Lightning Bolt");
+    runner.advance_until_stack_empty();
+    assert_stack_empty_priority(&runner);
+    assert_zone(&runner, hand_bolt, Zone::Graveyard, "the chosen Bolt");
+    assert!(!runner.state().holds_stack_bound_reveal(shock));
+    for (label, projected) in [
+        ("owner P1", filter_state_for_viewer(runner.state(), P1)),
+        (
+            "spectator",
+            filter_state_for_unseated_viewer(runner.state()),
+        ),
+    ] {
+        assert_eq!(
+            projected.objects[&shock].name, HIDDEN_CARD_NAME,
+            "{label}: Shock is concealed once the reflexive leaves the stack"
+        );
+        for &id in &pile {
+            assert_eq!(
+                projected.objects[&id].name, HIDDEN_CARD_NAME,
+                "{label}: Mind Funeral's pile stays concealed"
+            );
+        }
+    }
 }

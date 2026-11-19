@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
@@ -16,14 +16,21 @@ import { UndoButton } from "../board/UndoButton.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, ConditionBadge, CounterBadge, DungeonBadge, EnduringStoryBadge, InitiativeBadge, MonarchBadge, PendingSpellBadge, PoisonCounterBadge, RingBenefitsBadge, StatusBadge, UnboundedBadge } from "./HudBadges.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { NextUpBadge } from "./NextUpBadge.tsx";
 import { StormCounter } from "./StormCounter.tsx";
 import { PlayerLatency } from "./PlayerLatency.tsx";
 
-export function PlayerHud() {
+interface PlayerHudProps {
+  /** The HUD's root node. The action rail measures it, together with the
+   *  `data-player-hud-side-controls` column, to keep its status row clear of
+   *  the plate, Manual and Undo on short landscape screens. */
+  ref?: Ref<HTMLDivElement>;
+}
+
+export function PlayerHud({ ref }: PlayerHudProps) {
   const { t } = useTranslation("game");
   const playerId = usePerspectivePlayerId();
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
@@ -72,6 +79,7 @@ export function PlayerHud() {
 
   return (
     <div
+      ref={ref}
       data-player-hud={playerId}
       data-phased-out={isPhasedOut ? "true" : undefined}
       className={`relative z-20 flex shrink-0 flex-row flex-nowrap items-center justify-center ${compact ? "gap-1 px-0.5 py-0.5" : "gap-1.5 px-1 py-1 lg:gap-2 lg:px-2"} ${
@@ -110,7 +118,7 @@ export function PlayerHud() {
               />
             ) : null}
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-            {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
             {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
@@ -147,8 +155,14 @@ export function PlayerHud() {
           collided with land stacks and the zone piles. Absolutely positioned
           off the right edge so the plate keeps its centered anchor. The
           pointer-events split keeps the column's empty bounding-box regions
-          (chip gap, short-chip gutter) tappable through to fanned hand cards. */}
-      <div className="pointer-events-none absolute left-full top-1/2 z-20 ml-1 flex -translate-y-1/2 flex-col items-start gap-1 [&>*]:pointer-events-auto">
+          (chip gap, short-chip gutter) tappable through to fanned hand cards.
+          Being out of flow, it sits outside the root's box, so the action
+          rail finds it by its data attribute to learn the cluster's right
+          edge. */}
+      <div
+        data-player-hud-side-controls=""
+        className="pointer-events-none absolute left-full top-1/2 z-20 ml-1 flex -translate-y-1/2 flex-col items-start gap-1 [&>*]:pointer-events-auto"
+      >
         <ManualManaToggle />
         <SandboxLifeCorrection />
         <UndoButton />

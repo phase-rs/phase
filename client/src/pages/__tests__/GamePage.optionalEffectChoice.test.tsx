@@ -224,9 +224,9 @@ describe("GamePage optional-effect routed player gate", () => {
     renderGamePage();
 
     const prompt = await screen.findByText("Choose a target");
-    // The DOM test checks the live inherited value; browser paint/layout is
-    // verified separately because the test environment does not lay out CSS.
-    const offsetSource = prompt.closest<HTMLElement>("[style*='--game-targeting-prompt-top']");
+    // Read the ancestor declaring the offset, rather than the prompt consuming
+    // it through var(). This environment does not lay out CSS.
+    const offsetSource = prompt.closest<HTMLElement>("[style*='--game-targeting-prompt-top:']");
     expect(offsetSource?.style.getPropertyValue("--game-targeting-prompt-top")).toBe("0.25rem");
 
     act(() => usePreferencesStore.setState({ multiplayerBoardLayout: "split" }));

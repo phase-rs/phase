@@ -137,7 +137,7 @@ vi.mock("../../network/draftPeerSession", () => ({
 
 vi.mock("../../services/draftPersistence", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../services/draftPersistence")>()),
-  loadDraftHostSession: vi.fn(async () => null),
+  loadDraftHostSession: vi.fn(async () => ({ type: "absent" })),
   saveDraftHostSession: vi.fn(async () => {}),
   clearDraftHostSession: vi.fn(async () => {}),
 }));

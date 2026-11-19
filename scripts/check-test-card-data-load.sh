@@ -40,12 +40,14 @@
 #      failed; no verdict.
 #   2  the added-line helper (scripts/lib/added-lines.py) could not read the
 #      diff; no verdict.
+#   2  the base ref does not resolve to a commit; no verdict.
 
 set -euo pipefail
 # shellcheck source=scripts/lib/added-lines.sh
 . "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
+added_lines_require_base "$BASE"
 
 # Test code lives both inline (`#[cfg(test)]` in crates/engine/src) and in
 # crates/engine/tests.
@@ -97,7 +99,7 @@ while IFS= read -r file; do
         # `case` globs (not grep args) so a content line starting with '-' is safe.
         case "$content" in *allow-full-card-db*) continue ;; esac
         if [ "$ln" -gt 1 ]; then
-            prev=$(sed -n "$((ln - 1))p" "$file")
+            prev=$(added_lines_text_at "$file" "$((ln - 1))")
             case "$prev" in *allow-full-card-db*) continue ;; esac
         fi
         report="${report}

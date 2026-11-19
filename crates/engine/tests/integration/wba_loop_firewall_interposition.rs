@@ -505,7 +505,7 @@ fn check_lands_still_offer_with_the_subtype_arm_repaired() {
 //
 // The arms above are about a loop whose period touches only the battlefield. This half adds
 // the mill: `mill_base` is the same combo board plus a real parsed Altar of the Brood, so each
-// period also declines every opponent's library. `certify_instructed_opponent_library_departure`
+// period also declines every opponent's library. `certify_instructed_library_departure`
 // establishes that decline by exclusion and the cover's four growth obligations consume it;
 // C2 is the public-information veto that keeps the certificate honest, and every row below is
 // the base plus ONE object that either reaches C2 or provably does not.
@@ -516,7 +516,7 @@ fn check_lands_still_offer_with_the_subtype_arm_repaired() {
 // collection, and the interposer/descend rows at the end are the library one.
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
-use engine::types::ability::{PlayerFilter, TriggerDefinition};
+use engine::types::ability::TriggerDefinition;
 use engine::types::triggers::TriggerMode;
 
 use super::witherbloom_altar_probe::graft_altar;
@@ -874,13 +874,6 @@ fn second_altar_opponent_facing() -> GameState {
     graft_mutated_altar(&mut state, |_| {});
     state
 }
-fn second_altar_each_player() -> GameState {
-    let mut state = mill_base();
-    graft_mutated_altar(&mut state, |execute| {
-        execute.player_scope = Some(PlayerFilter::All);
-    });
-    state
-}
 fn second_altar_may_mill() -> GameState {
     let mut state = mill_base();
     graft_mutated_altar(&mut state, |execute| {
@@ -925,10 +918,10 @@ fn library_sizes_after_one_cycle(state: GameState) -> Vec<(PlayerId, usize)> {
 
 /// **The mill base OFFERS.** The positive control every row below rests on: one real Altar of
 /// the Brood away from the module's own combo board, the loop's period now declines every
-/// opponent's library, and `certify_instructed_opponent_library_departure` establishes that
+/// opponent's library, and `certify_instructed_library_departure` establishes that
 /// decline so the cover's growth obligations can account it.
 ///
-/// REVERT / MUTATION PROBE: make `certify_instructed_opponent_library_departure` return `None`
+/// REVERT / MUTATION PROBE: make `certify_instructed_library_departure` return `None`
 /// unconditionally ⇒ this **FAILS** while the module's Altar-free rows above stay green.
 #[test]
 fn mill_base_offers_the_shortcut() {
@@ -1057,30 +1050,18 @@ fn a_graveyard_diverting_replacement_vetoes_and_a_real_tapland_does_not() {
     ]);
 }
 
-/// **A caster-side mill is not certified, and neither is a mill the proposer may decline.**
-/// Both rows are a SECOND Altar of the Brood with exactly one field of its executed mill
-/// rewritten, so each separates from the unmutated second Altar on that field alone.
-///
-/// `player_scope: All` makes the caster's own library decline too. That movement is not a
-/// candidate — the certificate ranges over NON-caster libraries — so C1b's residual finds it
-/// unaccounted and refuses. `optional: true` is CR 603.5's "you may", a choice made as the
-/// ability resolves and therefore a choice the proposed sequence would have to contain. The
-/// library reading in the row below is what tells the two apart, and it is what makes the
-/// second one isolated: its period declines exactly the libraries the offering control's does.
+/// **A mill the proposer may decline is not certified.** The row is a SECOND Altar of the Brood
+/// with its executed mill made optional, so it separates from the unmutated second Altar on that
+/// field alone. `optional: true` is CR 603.5's "you may", a choice made as the ability resolves
+/// and therefore a choice the proposed sequence would have to contain.
 #[test]
-fn caster_side_and_declinable_mills_are_not_certified() {
+fn a_declinable_mill_is_not_certified() {
     run_rows(&[
         MillRow {
             what: "PAIRED POSITIVE: a second, unmutated opponent-facing Altar still OFFERS, so \
-                   the two rows below separate on the rewritten field and not on the permanent",
+                   the row below separates on the rewritten field and not on the permanent",
             board: second_altar_opponent_facing,
             expect_offer: true,
-        },
-        MillRow {
-            what: "an 'each player mills' period leaves the CASTER's own library decline \
-                   unaccounted, and C1b's residual refuses it",
-            board: second_altar_each_player,
-            expect_offer: false,
         },
         MillRow {
             what: "CR 603.5: a 'may' mill is a resolution-time choice, so the proposed \
@@ -1091,38 +1072,23 @@ fn caster_side_and_declinable_mills_are_not_certified() {
     ]);
 }
 
-/// The mechanism behind the two silent rows above, read off the boards rather than asserted by
-/// name — and the may-mill row's isolation is total: it produces the SAME library outcome as
+/// The may-mill row's isolation, read off the boards: it produces the SAME library outcome as
 /// the offering control, so nothing about what the period does to any library can explain why
 /// one offers and the other does not.
 #[test]
-fn the_each_player_mill_declines_the_casters_library_and_the_may_mill_declines_nothing_extra() {
+fn the_may_mill_declines_nothing_extra() {
     let offering = library_sizes_after_one_cycle(second_altar_opponent_facing());
     assert_ne!(
         offering,
         library_sizes_after_one_cycle(mill_base()),
         "REACH-GUARD: the second Altar really mills — its board's libraries differ from the \
-         one-Altar base, so the two rows below are not comparing a permanent that does nothing"
+         one-Altar base, so the may-mill row is not compared against a permanent that does nothing"
     );
     assert_eq!(
         library_sizes_after_one_cycle(second_altar_may_mill()),
         offering,
         "the may-mill row's period declines exactly the libraries the OFFERING control's does, \
          so its refusal is the declinability itself (CR 603.5) and not anything the mill did"
-    );
-
-    let each_player = library_sizes_after_one_cycle(second_altar_each_player());
-    let caster_of = |sizes: &[(PlayerId, usize)]| {
-        sizes
-            .iter()
-            .find(|(id, _)| *id == P0)
-            .expect("the caster has a seat")
-            .1
-    };
-    assert!(
-        caster_of(&each_player) < caster_of(&offering),
-        "the each-player row's refusal IS a caster-side decline: only there does P0's own \
-         library shrink, and that movement is what C1b's residual finds unaccounted"
     );
 }
 

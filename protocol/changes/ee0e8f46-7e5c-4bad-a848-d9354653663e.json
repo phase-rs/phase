@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "QuantityRef SpellsCastThisTurn and LifeLostThisTurn are renamed to SpellsCast and LifeLost with a TurnWindow field and the SpellsCastLastTurn tag is removed; GameState.spells_cast_last_turn is removed and Player.spells_cast_last_turn is added; a legacy nonzero table-wide snapshot is refused at restore"
+}

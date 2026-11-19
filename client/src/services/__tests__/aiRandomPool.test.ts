@@ -120,6 +120,8 @@ function deck(id: string, overrides: Partial<AiDeckCandidate> = {}): AiDeckCandi
     coveragePct: 100,
     archetype: null,
     bracket: null,
+    declaredBracket: overrides.bracket ?? null,
+    comboDeclaration: { kind: "undeclared" },
     ...overrides,
   };
 }

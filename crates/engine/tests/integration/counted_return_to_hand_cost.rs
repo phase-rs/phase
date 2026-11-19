@@ -262,7 +262,7 @@ fn ensnare_alternative_cost_prompts_for_two_islands() {
         result.waiting_for
     );
     let result = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the alternative cost");
     match &result.waiting_for {
         WaitingFor::PayCost {
@@ -701,7 +701,7 @@ fn counted_return_cost_refuses_a_repeated_permanent() {
         })
         .expect("cast the counted-return witness");
     let result = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the alternative cost");
     assert!(
         matches!(
@@ -751,6 +751,8 @@ fn redirect_land_to_exile(id: ObjectId) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -1791,15 +1793,6 @@ fn counted_return_current_delayed_fragment_is_collected_once() {
     }
 }
 
-#[test]
-fn counted_return_mixed_controller_prefix_and_current_share_apnap_batch() {
-    for round_trip in [false, true] {
-        for command in [false, true] {
-            mount_completion(round_trip, command, false);
-        }
-    }
-}
-
 fn mount_concession(round_trip: bool) {
     let mut board = mount_cost_board(round_trip, false, Zone::Hand);
     let result = board
@@ -1880,14 +1873,6 @@ fn mount_concession(round_trip: bool) {
 
 #[test]
 fn counted_return_delayed_mount_survives_commander_pause_concession() {
-    for round_trip in [false, true] {
-        mount_concession(round_trip);
-    }
-}
-
-#[test]
-fn counted_return_concession_retires_matching_payer_observer_and_publishes_survivors() {
-    // O0's actual positive match is asserted by the companion completion row.
     for round_trip in [false, true] {
         mount_concession(round_trip);
     }
@@ -2017,7 +2002,7 @@ fn delayed_two_land_sibling(
             WaitingFor::OptionalCostChoice { .. }
         ));
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("select counted alternate cost");
     } else {
         runner

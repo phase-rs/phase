@@ -88,7 +88,7 @@ Full procedure, two tracks (developer / non-developer), and copy-paste prompts f
 - wasm32 target: `rustup target add wasm32-unknown-unknown` (Windows: see below)
 - wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.121` (must match the `wasm-bindgen` version in `Cargo.lock`)
 - wasm-opt (optional): `brew install binaryen` or `apt install binaryen`
-- [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/): `npm i -g pnpm`
+- [Node.js](https://nodejs.org/) 24+ (`.nvmrc` pins the exact version) and [pnpm](https://pnpm.io/): `npm i -g pnpm`
 
 #### Windows
 
@@ -223,7 +223,7 @@ get.
 
 ### Android APKs
 
-Android builds require Node.js 22, pnpm 9.15.9, JDK 17, Android SDK platform
+Android builds require Node.js 22 (exception to the general 24+ requirement), pnpm 9.15.9, JDK 17, Android SDK platform
 36/build-tools 36.0.0, Android NDK 28.2.13676358, and the Rust Android targets:
 
 ```bash
@@ -383,6 +383,154 @@ Transport-agnostic `EngineAdapter` interface with multiple implementations:
 - **WebSocketAdapter** — WebSocket (multiplayer)
 - **P2PHostAdapter / P2PGuestAdapter** — WebRTC peer-to-peer via PeerJS
 
+Default server game and draft sockets never wait for a shared codec lease before
+dialing. A cold WASM runtime warms in the background; a warm runtime can prepare
+its lease while the handshake proceeds. At the first `ServerHello`, only an
+already-ready lease can negotiate `StateCodecV1`. Otherwise that connection stays
+snapshot-only and a late lease is released, never used for a live upgrade.
+Explicit codec providers retain their bounded preparation wait. The codec wrapper
+runs after optional gzip decompression and preserves frame order. Canonical codec
+headers are read without materializing their payload; Rust validates the body.
+The wrapper limits outstanding receives to 64 messages (including the active
+decode) and text queued behind that active frame to 16 MiB of UTF-16. The active
+frame has no new individual-size ceiling, so a supported large spectator Full
+can bootstrap an empty queue. Overload closes and releases rather than dropping
+deltas. Leaving a local WASM game, including a native-AI fallback,
+resets game state without disposing the shared runtime or unrelated codec leases.
+Recovery notifications use the active UI language and distinguish an interrupted
+in-flight action from a new action that was never sent.
+Recovery reopens submissions only when the primary application handler returns
+`true` after committing that specific Full and its bootstrap is still accepted.
+A declined stale/foreign Full or a callback that throws before acknowledging it
+closes the transport; healthy-stream ignores are unchanged. The wrapper reports
+`CLOSED` before close callbacks, so synchronous reentrant submissions reject
+rather than occupying an unsent slot.
+
+A natural close is latched directly from the undecorated transport, before
+pending gzip inflation can hide its death. `readyState` immediately reports
+`CLOSED`; no new sends or raw frames are admitted. Already-received healthy
+frames may finish inflation and decoding in order before the close notification.
+An independent five-second event-loop timer starts at raw death, not at inflater
+completion or the 60-second decoder watchdog. A stalled inflater, decoder or
+missing consumer cannot retain the lease beyond that drain; late results are
+fenced. A codec rejection or resync request after network death settles the
+original network close instead of replacing its cause or downgrading reconnect
+policy. The timer cannot preempt synchronous main-thread WASM.
+
+Terminal attachment close also retires the gzip receive owner, immediately
+dropping queued compressed payload references even if its active inflater stays
+stalled. A late active result is ignored and no queued successor starts inflation.
+Raw death alone still permits healthy admitted frames to drain before that
+terminal boundary. This is attachment cleanup, not a new compressed-queue or
+total-heap size limit.
+
+During healthy traffic the gzip FIFO also reclaims its consumed prefix in place.
+Its storage scales with the pending tail rather than cumulative frame count;
+compacting only after half is consumed amortizes copying across the stream.
+This does not impose a new live compressed-backlog limit.
+
+Game transport adoption rejects predecessor-owned commands, previews, exports,
+seat mutations and abandon requests with `WS_CLOSED` before releasing the old
+wrapper and decoder lease; the server need not close the old peer. All request
+owners are cleared before listeners can claim replacement work. Join/game-start
+waiters instead follow the attachment handoff: while a reconnect candidate's
+interval is open, the incumbent's own transport error or close settles its
+requests and resources but not the initialization the candidate's episode owns.
+Each acquired candidate, including an initial join's or a Create's, is retired
+with its decoder lease as soon as its attachment is cancelled, not when a held
+setup write answers. Each acquired candidate keeps an
+idempotent cleanup owner through throwing, disposal and superseding callbacks,
+including requests claimed before that candidate is abandoned.
+
+A replacement transport stays private until its own `JoinGameWithPassword` or
+`CreateDraftWithSettings`/`JoinDraftWithPassword` has entered the serialized
+write order, and a `Reconnect`/`ReconnectDraft` candidate until its positive
+bootstrap (or, for a draft, the server's rejection) arrives; only then may
+`serverHello` or pending indicator consumers issue requests. The server
+replaces the seat's sender when it handles a reconnect, so between that write
+and the bootstrap neither socket is known to own the seat. The incumbent stays
+current for the replies it still owes, but new seat-bound submissions (game
+commands, draft picks, decisions and decks) are refused with the typed unsent
+error, and an `Error` it receives answers only its own request. A close, an
+`Error` refusal, an abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, counted
+from the write) retires both sockets and settles the incumbent's work (an abort
+while the write receipt is still pending retires the candidate and releases the
+gate at once, and the receipt's fate, under the same bound, decides the
+incumbent); the
+bound defers once to a decode already in flight, for at most one further
+bound of its own that does not depend on the decode settling; the codec socket
+also bounds each decoder call itself, and a setup receipt the transport holds
+is not waited for past the bound or once the server has answered, on initial
+attachments (the first frame received after the setup write) as on reconnects,
+and a cancellation raised synchronously inside the transport's setup send
+retires the candidate at once (a game reconnect can decode its bootstrap Full inside the interval; a
+draft reattach is answered by a plain frame first, so this server never puts a
+decode there). A draft `DraftActionRejected` adopts the candidate instead, as before:
+the server sends it both for refusals and after it has already moved the seat
+to the candidate, so the rejection replays there and rejects the reattach. A
+candidate's terminal codec failure moves the sticky snapshot-only policy: each
+adapter applies it when it retires the candidate (`retireSocket`,
+`abandonCandidate`), and a successor started meanwhile from a listener still
+opens snapshot-only because its codec lease is checked against the policy when
+it arrives. After a close or the bound the game adapter retries through
+`attemptReconnect`, a refusal ends the episode, and nothing retries a draft
+reattach. Two game attachments keep the write-time cutover: native sidecar
+sockets (`nativeAi` / `nativePregame`), whose transport this change leaves as it
+was, and the attempts of an active initial-join fallback, which start only
+after the previous socket closed and have their own deadline. The interval
+reads each frame's tag from the canonical type-first envelope (the frames a
+candidate buffers before its setup settles are bounded at the adapter: 64
+frames and 16 MiB of expanded text, not counting the attachment's bootstrap, which is recognized by its tag wherever it sits behind a prefix of small frames, and a
+candidate that exceeds it is cut off and handled like a close); a frame whose
+tag can settle it is parsed once there, must parse as that envelope, and is
+the envelope dispatched after adoption, so the bootstrap is parsed once.
+Frames already admitted for that candidate stay buffered through those
+callbacks and drain in wire order, so a synchronous
+peer reply cannot overtake an older bootstrap. While a reconnect interval is
+open, the game adapter refuses a submission with the typed unsent error; an
+ordinary game submission has no further accepted-bootstrap guard. The draft
+adapter refuses a command until the *current* socket has accepted its own
+validated `GameStarted`; a predecessor's Full never authorizes the replacement.
+The socket and its owning match key are bound together when the command is
+claimed, before pending-indicator listeners run, so a synchronous match change
+inside that callback cannot stamp the old command with the new match.
+
+Draft adapters explicitly own current and retired transports. Healthy replacement
+closes an idle predecessor immediately; a source with a permitted command,
+preview or sent draft reply remains owned until that work settles or the source
+closes, then releases its decoder lease. Interaction-preview IDs are scoped to
+their transport so a reused ID cannot overwrite another source's pending reply.
+Disposal rejects owned work and closes every current or retired transport even
+when the server never closes the old peer. Abandoning an adopted setup candidate
+also settles that source's owned work before releasing it, including synchronous
+`serverHello` reentry and setup-send failure. The only new reply bound is the
+reconnect interval above; Create and Join keep waiting without one.
+
+A draft view completes a pick only when its inventory proves the exact newly
+selected instance. Reply ownership and pick counters alone are not outcome
+evidence. A pick backed by the complete selection offered in the original
+authoritative view can be completed by a replacement's view too, if the
+replacement matches the original draft code/token. A pick without that
+evidence can be completed only by its own sending socket; once a different
+socket is adopted it is retired as unconfirmed with a recoverable error.
+Retired views can settle their own permitted reply but cannot overwrite the
+current view, phase or credentials, or publish themselves as the current view.
+This reports the selected-inventory outcome, not a new request-level
+acknowledgement: an automatic timer pick of the identical instance is
+indistinguishable on the existing wire.
+
+A command already sent for the outgoing match cannot complete once that same
+socket announces a replacement match: its addressed reply is fenced by the new
+match key, so the slot is released with a recoverable failure before listeners
+observe the new match and the next command can be claimed. A command still being
+claimed is instead released unsent by its own post-notification check.
+
+The codec socket reads the canonical type-first envelope header by prefix, so an
+ordinary frame is handed to the adapter without a throwaway parse; only a
+noncanonical field order or an escaped tag (for example `Fu\u006cl`) falls back
+to the JSON discriminator. `Full`/`Delta` still decode through the shared
+runtime, and Rust remains the only authority over bodies.
+
 ### Design Principles
 
 - **Pure reducers** — `apply(state, action) -> ActionResult` with no mutation
@@ -413,6 +561,39 @@ pnpm build                                 # TypeScript check + Vite build
 pnpm lint                                  # ESLint
 pnpm test                                  # Vitest
 ```
+
+### Large Codec Frame Proof
+
+The manual native producer uses 9,000 database-backed Llanowar Elves, the real
+spectator projection and frame guards, and the connection codec/gzip encoder.
+Its consumer proof uses real WASM reconstruction and the production spectator
+adapter for both initial and established delivery. This is a supported-size
+scenario, not an action replay or a claim that a 9,000-card deck is reachable.
+Run producer and consumer from the same committed source. Output is fixed at the
+gitignored `target/state-codec-fixtures/large-spectator-full` directory; no runtime
+environment variable selects a local input/output path. The producer refuses an
+existing fixture directory, so remove only that generated directory before
+regenerating. A missing directory visibly skips this manual consumer suite;
+an existing directory must contain complete, valid fixtures.
+
+The producer embeds the existing committed card fixture using the same
+source-relative `include_bytes!` pattern as the engine integration tests, without
+reading environment metadata. Its output is relative to
+[Cargo's documented package-root test working directory](https://doc.rust-lang.org/cargo/commands/cargo-test.html#working-directory-of-tests),
+so the Cargo invocation below is independent of the launcher's working directory.
+
+```bash
+cargo test -p phase-server \
+  --bin phase-server socket_io::large_full_tests::produce_native_large_spectator_full \
+  -- --ignored --exact --nocapture
+./scripts/build-wasm.sh wasm-dev
+pnpm --dir client exec vitest run \
+  --config vitest.integration.config.ts --coverage.enabled=false \
+  src/adapter/__tests__/largeSpectatorFull.integration.test.ts
+```
+
+If Cargo uses a relocated target directory, export `CARGO_TARGET_DIR` to that
+directory for `build-wasm.sh`.
 
 ### Cargo Aliases
 
@@ -472,6 +653,7 @@ If you believe content in this repository infringes your rights, please see
 - [MTGJSON](https://mtgjson.com/) — Card data (MIT licensed)
 - [Scryfall](https://scryfall.com/) — Card images and search API
 - [MTGGoldfish](https://www.mtggoldfish.com/) — Metagame deck data
+- [Tabler Icons](https://tabler.io/icons) — Turn-phase icon paths (MIT licensed)
 - [Wizards of the Coast](https://magic.wizards.com/) — Magic: The Gathering
 
 ## License

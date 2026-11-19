@@ -4,6 +4,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
     TargetFilter,
 };
+use crate::types::counter::parse_counter_type;
 
 use super::effect::translate_effect;
 use super::filter::translate_filter;
@@ -180,7 +181,8 @@ impl<'a> SvarResolver<'a> {
 
             // Count$CardCounters.<TYPE>
             b if b.starts_with("CardCounters.") => {
-                let counter_type = b.strip_prefix("CardCounters.").unwrap().to_lowercase();
+                let counter_type_str = b.strip_prefix("CardCounters.").unwrap();
+                let counter_type = parse_counter_type(counter_type_str);
                 Ok(QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: crate::types::ability::ObjectScope::Source,

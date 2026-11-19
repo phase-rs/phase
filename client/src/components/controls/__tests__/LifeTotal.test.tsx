@@ -186,4 +186,57 @@ describe("LifeTotal", () => {
     });
     expect(screen.getByText("20")).toBeInTheDocument();
   });
+
+  describe("a seat with no life total (the Horde)", () => {
+    function setHordeSeat(playerId: number, libraryLength: number) {
+      useGameStore.setState((s) => {
+        const prev = s.gameState ?? buildGameState();
+        const players = prev.players.map((p, i) =>
+          i === playerId
+            ? {
+                ...p,
+                has_no_life_total: true,
+                // Life stays at its frozen starting value — that's exactly the
+                // number we must NOT show.
+                life: 20,
+                library: Array.from({ length: libraryLength }, (_, n) => n + 1),
+              }
+            : p,
+        );
+        return { gameState: { ...prev, players } };
+      });
+    }
+
+    it("shows the library count instead of the frozen life total", () => {
+      setHordeSeat(0, 287);
+      render(<LifeTotal playerId={0} />);
+
+      expect(screen.getByText("287")).toBeInTheDocument();
+      // The whole point: the meaningless life total must not be rendered.
+      expect(screen.queryByText("20")).not.toBeInTheDocument();
+    });
+
+    it("tracks the library shrinking as the Horde is milled", () => {
+      setHordeSeat(0, 300);
+      render(<LifeTotal playerId={0} />);
+      expect(screen.getByText("300")).toBeInTheDocument();
+
+      // Damage/life loss on the Horde is redirected into milling, so progress
+      // shows up as the library dropping.
+      act(() => {
+        setHordeSeat(0, 296);
+      });
+      expect(screen.getByText("296")).toBeInTheDocument();
+    });
+
+    it("leaves normal seats rendering their life total", () => {
+      // Positive control: the branch must be scoped to flagged seats only, not
+      // applied to every player.
+      setHordeSeat(0, 287);
+      render(<LifeTotal playerId={1} />);
+
+      expect(screen.getByText("20")).toBeInTheDocument();
+      expect(screen.queryByText("287")).not.toBeInTheDocument();
+    });
+  });
 });

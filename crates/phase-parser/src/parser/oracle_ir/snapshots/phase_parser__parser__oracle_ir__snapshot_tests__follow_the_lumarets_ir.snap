@@ -239,6 +239,7 @@ expression: "&ir"
                             ]
                           },
                           "rest_destination": null,
+                          "rest_remainder": "stay_in_library",
                           "reveal": false,
                           "enter_tapped": false,
                           "enters_attacking": false
@@ -307,6 +308,7 @@ expression: "&ir"
                       ]
                     },
                     "rest_destination": null,
+                    "rest_remainder": "stay_in_library",
                     "reveal": false,
                     "enter_tapped": false,
                     "enters_attacking": false

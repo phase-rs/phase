@@ -17,25 +17,32 @@
 //! last test keeps a payment-sensitive line (Slaying Fire's adamant) open to
 //! the search.
 //!
+//! phase-rs/phase#10922: once passing already pays, a further self-cost mana
+//! activation the engine certifies as surplus (`surplus_mana_activation`) is
+//! rejected, so the sampled chooser pays exactly what the spell needs at every
+//! difficulty.
+//!
 //! Oracle text verbatim from Scryfall `cards/named`. "Card A".."Card F" are
 //! textless library placeholders, so the draw spells' resolution inside the
 //! search doesn't deck anyone.
 
 use engine::ai_support::{
-    activates_mana_ability, classify_payment_continuation, witness_payment_continuations,
-    PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationStep,
+    activates_mana_ability, classify_payment_continuation, surplus_mana_activation,
+    witness_payment_continuations, PaymentContinuationRoot, PaymentContinuationState,
+    PaymentContinuationStep, SurplusManaActivation, SurplusNotCertified,
 };
 use engine::game::engine::apply_as_current_for_simulation;
+use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-use phase_ai::config::AiConfig;
-use phase_ai::search::{choose_action, score_candidates};
+use phase_ai::config::{create_config, AiConfig, AiDifficulty, Platform};
+use phase_ai::search::{choose_action, score_candidates, select_safe_action_index_from_scores};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -46,9 +53,10 @@ const WORDS_OF_WISDOM: &str = "You draw two cards, then each other player draws 
 const DIVINATION: &str = "Draw two cards.";
 const DISFIGURE: &str = "Target creature gets -2/-2 until end of turn.";
 const SLAYING_FIRE: &str = "Slaying Fire deals 3 damage to any target.\nAdamant — If at least three red mana was spent to cast this spell, it deals 4 damage instead.";
+const WASTES: &str = "{T}: Add {C}.";
 
 const MAX_DECISIONS: usize = 20;
-const SWEEP_SEEDS: u64 = 30;
+const SWEEP_SEEDS: u64 = 10;
 
 fn cost(shards: Vec<ManaCostShard>, generic: u32) -> ManaCost {
     ManaCost::Cost { shards, generic }
@@ -103,65 +111,12 @@ enum Pick {
 }
 
 fn ai_pays(board: Board, pick: Pick) -> Paid {
-    let mut sc = GameScenario::new();
-    sc.at_phase(Phase::PreCombatMain);
-    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
-    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
-    let bears = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
-    let (sources, spell): (Vec<ObjectId>, ObjectId) = match board {
-        Board::IslandOgre {
-            spell,
-            text,
-            is_instant,
-            generic,
-            ogres,
-        } => {
-            sc.add_basic_land(P0, ManaColor::Blue);
-            let ogres = (0..ogres)
-                .map(|_| {
-                    sc.add_creature(P0, "Treasonous Ogre", 2, 3)
-                        .from_oracle_text_with_keywords(&["Dethrone"], TREASONOUS_OGRE)
-                        .with_mana_cost(cost(vec![ManaCostShard::Red], 3))
-                        .id()
-                })
-                .collect();
-            let spell = sc
-                .add_spell_to_hand_from_oracle(P0, spell, is_instant, text)
-                .with_mana_cost(cost(vec![ManaCostShard::Blue], generic))
-                .id();
-            (ogres, spell)
-        }
-        Board::SkirgeFamiliar => {
-            let familiar = sc
-                .add_creature(P0, "Skirge Familiar", 3, 2)
-                .from_oracle_text_with_keywords(&["Flying"], SKIRGE_FAMILIAR)
-                .with_mana_cost(cost(vec![ManaCostShard::Black], 4))
-                .id();
-            for _ in 0..3 {
-                sc.add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
-                    .with_mana_cost(cost(vec![ManaCostShard::Blue], 2));
-            }
-            let spell = sc
-                .add_spell_to_hand_from_oracle(P0, "Disfigure", true, DISFIGURE)
-                .with_mana_cost(cost(vec![ManaCostShard::Black], 0))
-                .id();
-            (vec![familiar], spell)
-        }
-    };
-    let mut state = sc.build().state().clone();
-    let card_id = state.objects[&spell].card_id;
-    apply_as_current_for_simulation(
-        &mut state,
-        GameAction::CastSpell {
-            object_id: spell,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
-        },
-    )
-    .expect("the Auto cast announces");
+    ai_pays_with(board, pick, &AiConfig::default())
+}
 
-    let config = AiConfig::default();
+fn ai_pays_with(board: Board, pick: Pick, config: &AiConfig) -> Paid {
+    let mut state = announced(board);
+    let (sources, spell, bears) = board_ids(&state, board);
     let mut rng = SmallRng::seed_from_u64(match pick {
         Pick::TopRanked => 0,
         Pick::Sampled(seed) => seed,
@@ -190,9 +145,9 @@ fn ai_pays(board: Board, pick: Pick) -> Paid {
             }
         } else {
             match pick {
-                Pick::TopRanked => top_ranked(&state, &config),
+                Pick::TopRanked => top_ranked(&state, config),
                 Pick::Sampled(_) => {
-                    choose_action(&state, P0, &config, &mut rng).expect("the AI decides")
+                    choose_action(&state, P0, config, &mut rng).expect("the AI decides")
                 }
             }
         };
@@ -209,6 +164,78 @@ fn ai_pays(board: Board, pick: Pick) -> Paid {
         apply_as_current_for_simulation(&mut state, action).expect("the AI's choice is legal");
     }
     panic!("the AI didn't finish the cast within {MAX_DECISIONS} decisions")
+}
+
+/// The board's costed mana sources, its spell, and P1's Grizzly Bears.
+fn board_ids(state: &GameState, board: Board) -> (Vec<ObjectId>, ObjectId, ObjectId) {
+    let named = |name: &str| -> Vec<ObjectId> {
+        let mut ids: Vec<_> = state
+            .objects
+            .values()
+            .filter(|object| object.name == name)
+            .map(|object| object.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let (source, spell) = match board {
+        Board::IslandOgre { spell, .. } => ("Treasonous Ogre", spell),
+        Board::SkirgeFamiliar => ("Skirge Familiar", "Disfigure"),
+    };
+    (named(source), named(spell)[0], named("Grizzly Bears")[0])
+}
+
+/// The board with its spell announced (Auto payment).
+fn announced(board: Board) -> GameState {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    sc.add_creature(P1, "Grizzly Bears", 2, 2);
+    let spell: ObjectId = match board {
+        Board::IslandOgre {
+            spell,
+            text,
+            is_instant,
+            generic,
+            ogres,
+        } => {
+            sc.add_basic_land(P0, ManaColor::Blue);
+            for _ in 0..ogres {
+                sc.add_creature(P0, "Treasonous Ogre", 2, 3)
+                    .from_oracle_text_with_keywords(&["Dethrone"], TREASONOUS_OGRE)
+                    .with_mana_cost(cost(vec![ManaCostShard::Red], 3));
+            }
+            sc.add_spell_to_hand_from_oracle(P0, spell, is_instant, text)
+                .with_mana_cost(cost(vec![ManaCostShard::Blue], generic))
+                .id()
+        }
+        Board::SkirgeFamiliar => {
+            sc.add_creature(P0, "Skirge Familiar", 3, 2)
+                .from_oracle_text_with_keywords(&["Flying"], SKIRGE_FAMILIAR)
+                .with_mana_cost(cost(vec![ManaCostShard::Black], 4));
+            for _ in 0..3 {
+                sc.add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION)
+                    .with_mana_cost(cost(vec![ManaCostShard::Blue], 2));
+            }
+            sc.add_spell_to_hand_from_oracle(P0, "Disfigure", true, DISFIGURE)
+                .with_mana_cost(cost(vec![ManaCostShard::Black], 0))
+                .id()
+        }
+    };
+    let mut state = sc.build().state().clone();
+    let card_id = state.objects[&spell].card_id;
+    apply_as_current_for_simulation(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("the Auto cast announces");
+    state
 }
 
 /// The first of the highest-scored actions, in the scorer's stable order.
@@ -288,35 +315,133 @@ fn targeted_cast_discards_one_card_for_its_one_mana() {
     );
 }
 
-/// The chooser samples a softmax over the scores, so a single seed can still
-/// pick a surplus activation (the same on the untargeted path; reported
-/// separately). The stall the issue reports was deterministic: every seed paid
-/// four activations. Across the sweep, the usual outcome is one activation and
-/// no seed reaches the stall.
+/// CR 601.2g–h + CR 605.3a: at every difficulty the sampled chooser pays
+/// exactly what the spell needs — the surplus Ogre activation is rejected
+/// (`SelfCostValuePolicy`'s payment arm), so no softmax draw (Medium/Hard) or
+/// tactical ranking (Easy, search off) can select it. phase-rs/phase#10922.
 #[test]
-fn sampled_targeted_cast_no_longer_stalls() {
-    for (name, board) in [
-        ("Unsubstantiate", UNSUBSTANTIATE_BOARD),
-        ("Words of Wisdom", WORDS_OF_WISDOM_BOARD),
-    ] {
-        let activations: Vec<_> = (0..SWEEP_SEEDS)
-            .map(|seed| ai_pays(board, Pick::Sampled(seed)).mana_activations)
-            .collect();
-        let one = activations.iter().filter(|&&count| count == 1).count();
-        eprintln!("[sweep] {name}: activations per seed {activations:?}");
+fn sampled_cast_pays_exactly_what_it_needs_at_every_difficulty() {
+    let divination = Board::IslandOgre {
+        spell: "Divination",
+        text: DIVINATION,
+        is_instant: false,
+        generic: 2,
+        ogres: 2,
+    };
+    for difficulty in [AiDifficulty::Easy, AiDifficulty::Medium, AiDifficulty::Hard] {
+        let config = create_config(difficulty, Platform::Native);
+        for (name, board, needed) in [
+            ("Unsubstantiate", UNSUBSTANTIATE_BOARD, 1),
+            ("Words of Wisdom", WORDS_OF_WISDOM_BOARD, 1),
+            ("Divination", divination, 2),
+        ] {
+            let paid: Vec<_> = (0..SWEEP_SEEDS)
+                .map(|seed| ai_pays_with(board, Pick::Sampled(seed), &config))
+                .collect();
+            assert!(
+                paid.iter().all(|paid| paid
+                    == &Paid {
+                        life: 20 - 3 * needed as i32,
+                        mana_activations: needed,
+                        cards_in_hand: 0,
+                    }),
+                "{difficulty:?} {name}: every seed pays exactly {needed} activation(s): {paid:?}"
+            );
+        }
+    }
+}
+
+/// The Unsubstantiate board at its saturated decision: the Island paid {U}
+/// and one Ogre activation paid {R}, so passing pays {1}{U}.
+fn saturated_unsubstantiate() -> (GameState, GameAction) {
+    let mut state = announced(UNSUBSTANTIATE_BOARD);
+    let (sources, _, bears) = board_ids(&state, UNSUBSTANTIATE_BOARD);
+    apply_as_current_for_simulation(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bears)),
+        },
+    )
+    .expect("the Bears are a legal target");
+    let island = state
+        .objects
+        .values()
+        .find(|object| object.name == "Island")
+        .map(|object| object.id)
+        .expect("the board has an Island");
+    let tap_island = activatable_mana_actions_for_player(&state, P0)
+        .into_iter()
+        .find(|action| matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == island))
+        .expect("the Island taps for {U}");
+    let ogre = GameAction::ActivateAbility {
+        source_id: sources[0],
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    for action in [tap_island, ogre.clone()] {
+        apply_as_current_for_simulation(&mut state, action).expect("payment step action");
+    }
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert_eq!(state.players[0].life, 17, "reach: one Ogre activation paid");
+    (state, ogre)
+}
+
+/// Always draws zero, the uniform draw's lower endpoint.
+struct ZeroRng;
+
+impl rand::RngCore for ZeroRng {
+    fn next_u32(&mut self) -> u32 {
+        0
+    }
+    fn next_u64(&mut self) -> u64 {
+        0
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        dest.fill(0);
+    }
+}
+
+/// P1: on the real score vector at the saturated decision, under search
+/// (Medium) and without (Easy), the surplus Ogre activation is never a finite
+/// row, the pass is, and the sampler's zero draw selects a finite row.
+#[test]
+fn surplus_activation_is_rejected_in_the_real_score_vector() {
+    let (state, ogre) = saturated_unsubstantiate();
+    assert_eq!(
+        surplus_mana_activation(&state, &ogre),
+        SurplusManaActivation::Surplus,
+        "reach: the engine certifies the Ogre activation as surplus"
+    );
+    for difficulty in [AiDifficulty::Medium, AiDifficulty::Easy] {
+        let config = create_config(difficulty, Platform::Native);
+        let scored = score_candidates(&state, P0, &config);
+        let score_of = |action: &GameAction| {
+            scored
+                .iter()
+                .find(|(scored, _)| scored == action)
+                .map(|(_, score)| *score)
+        };
         assert!(
-            activations.iter().all(|&count| (1..4).contains(&count)),
-            "{name}: every seed pays, and none stalls to four activations: {activations:?}"
+            score_of(&GameAction::PassPriority).is_some_and(f64::is_finite),
+            "{difficulty:?}: the pass is a finite row: {scored:?}"
         );
         assert!(
-            2 * one > activations.len(),
-            "{name}: most seeds pay with one activation: {activations:?}"
+            score_of(&ogre).is_none_or(|score| score == f64::NEG_INFINITY),
+            "{difficulty:?}: the surplus Ogre activation is rejected: {scored:?}"
+        );
+        let picked =
+            select_safe_action_index_from_scores(&state, &scored, config.temperature, &mut ZeroRng)
+                .expect("the sampler picks a row");
+        assert!(
+            scored[picked].1.is_finite(),
+            "{difficulty:?}: a zero draw selects a finite row, got {:?}",
+            scored[picked]
         );
     }
 }
 
-/// A Slaying Fire cast at Rumbling Baloth, paid so far with two floating
-/// colorless and one Ogre activation: {R}{C}{C} pays {2}{R}.
+/// A Slaying Fire cast at Rumbling Baloth, paid so far with two Wastes and one
+/// Ogre activation: {R}{C}{C} pays {2}{R}.
 fn slaying_fire_after_one_ogre() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
@@ -328,16 +453,13 @@ fn slaying_fire_after_one_ogre() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         .from_oracle_text_with_keywords(&["Dethrone"], TREASONOUS_OGRE)
         .with_mana_cost(cost(vec![ManaCostShard::Red], 3))
         .id();
+    let wastes: Vec<_> = (0..2)
+        .map(|_| sc.add_land_from_oracle(P0, "Wastes", WASTES).id())
+        .collect();
     let fire = sc
         .add_spell_to_hand_from_oracle(P0, "Slaying Fire", true, SLAYING_FIRE)
         .with_mana_cost(cost(vec![ManaCostShard::Red], 2))
         .id();
-    sc.with_mana_pool(
-        P0,
-        (0..2)
-            .map(|_| ManaUnit::new(ManaType::Colorless, ogre, false, Vec::new()))
-            .collect(),
-    );
     let mut runner = sc.build();
     let card_id = runner.state().objects[&fire].card_id;
     runner
@@ -353,6 +475,13 @@ fn slaying_fire_after_one_ogre() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
             target: Some(TargetRef::Object(baloth)),
         })
         .expect("Rumbling Baloth is a legal target");
+    for land in wastes {
+        let tap = activatable_mana_actions_for_player(runner.state(), P0)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == land))
+            .expect("each Wastes taps for {C} at the payment step");
+        runner.act(tap).expect("the Wastes pays {C}");
+    }
     let ogre_activation = GameAction::ActivateAbility {
         source_id: ogre,
         ability_index: 0,
@@ -431,6 +560,41 @@ fn adamant_continuation_stays_searchable_once_the_pass_pays() {
                 scored.iter().any(|(scored, _)| scored == action),
                 "{label}: {action:?} stays a scored payment continuation: {scored:?}"
             );
+        }
+        assert!(
+            scored
+                .iter()
+                .find(|(scored, _)| scored == &ogre_activation)
+                .is_some_and(|(_, score)| score.is_finite()),
+            "{label}: the payment-sensitive Ogre activation stays a finite row: {scored:?}"
+        );
+    }
+
+    // phase-rs/phase#10922: the surplus certificate keeps every activation
+    // the adamant line needs open. Capacity for red is 3 ({2}{R}); only once
+    // three red already float can a fourth change nothing.
+    let mut more = GameRunner::from_state(state.clone());
+    for pooled_red in 1..=3 {
+        let expected = if pooled_red < 3 {
+            SurplusManaActivation::NotCertified(SurplusNotCertified::Unsaturated)
+        } else {
+            SurplusManaActivation::Surplus
+        };
+        assert_eq!(
+            surplus_mana_activation(more.state(), &ogre_activation),
+            expected,
+            "with {pooled_red} red pooled"
+        );
+        if pooled_red < 3 {
+            assert!(
+                score_candidates(more.state(), P0, &config)
+                    .iter()
+                    .find(|(scored, _)| scored == &ogre_activation)
+                    .is_some_and(|(_, score)| score.is_finite()),
+                "with {pooled_red} red pooled the Ogre activation stays searchable"
+            );
+            more.act(ogre_activation.clone())
+                .expect("the Ogre activates again while paying");
         }
     }
 

@@ -15,6 +15,13 @@ pub mod blitz;
 mod blitz_tests;
 pub mod boosters;
 pub mod bracket_estimate;
+// The bracket corpus harness: labelled-deck fixtures, the scorer, and the
+// golden-expectation ratchet. Gated so it is excluded from the shipped lib /
+// WASM surface — it performs std::fs I/O and changes no game behavior.
+// Mirrors `analysis::corpus`'s `combo-verify` gate (analysis/mod.rs:43-46).
+#[cfg(any(test, feature = "bracket-corpus"))]
+pub mod bracket_corpus;
+pub mod bracket_explanation;
 pub mod card_subset;
 pub mod casting;
 pub(crate) mod casting_costs;
@@ -46,6 +53,7 @@ mod dash_tests;
 pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;
+pub mod decks;
 pub mod derived;
 pub mod derived_views;
 pub mod devotion;
@@ -112,7 +120,9 @@ mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
+pub mod boss;
 pub mod conspiracy;
+pub mod horde;
 // Tests for `conspiracy` live in a sibling file (declared here, not in
 // `conspiracy.rs`, so `conspiracy.rs` stays implementation-only).
 #[cfg(test)]
@@ -145,6 +155,7 @@ pub mod planechase;
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
+pub(crate) mod pre_entry_view;
 pub(crate) mod precast_copy_shortcut;
 pub use precast_copy_shortcut::normalize_untrusted_restore;
 pub use precast_copy_shortcut::rekey_after_trusted_restore;
@@ -228,9 +239,27 @@ pub(crate) mod zones;
 pub(crate) mod test_fixtures;
 
 pub use ante::face_uses_ante;
+#[cfg(any(test, feature = "bracket-corpus"))]
+pub use bracket_corpus::{
+    assert_floor_matches_population, assert_ratchet_history, expectation_row_from_reading,
+    held_out_split, load_corpus_dir, load_expectations, parse_corpus_fixture, parse_expectations,
+    reading_from_estimate, rows_digest, score_corpus, unresolved_names, AxisMiss, AxisScore,
+    BandMiss, CorpusDispute, CorpusFixture, CorpusFixtureError, CorpusFraction, CorpusLabel,
+    CorpusLoadError, CorpusMiss, CorpusReading, CorpusRuleStatus, CorpusScore, CorpusSource,
+    CorpusSplit, ExpectationFiredRow, ExpectationRow, ExpectationsError, ExpectationsFile,
+    FiredState, GateRegime, LabelBasis, RatchetEntry, ARMED_RULES, HELD_OUT_MODULUS,
+    HELD_OUT_RESIDUE, HELD_OUT_RULE_SENTENCE, MIN_AXIS_POPULATION_N, MIN_BAND_POPULATION_N,
+};
 pub use bracket_estimate::{
-    estimate_bracket, BracketAxis, BracketAxisCounts, BracketContributingCards, BracketEstimate,
-    BracketViolation, CommanderBracketTier,
+    combo_declaration_floor, estimate_bracket, estimate_bracket_for_request, AxisReading,
+    Barometer, BarometerAuthority, BracketAxis, BracketCheck, BracketCheckOutcome, BracketCoverage,
+    BracketEstimate, BracketEstimateRequest, ComboBarometer, ComboCheck, ComboDeclaration,
+    ComboFloorRule, ComboFloorTrigger, ComboWindow, CommanderBracketTier, DeclarationVerdict,
+    EstimateConfidence, FloorRule, FloorRuleSource, EARLY_ASSEMBLE_CEILING,
+};
+pub use bracket_explanation::{
+    BracketCard, BracketCardRole, BracketCut, BracketExplanation, BracketLadderStep, BracketReason,
+    BracketReasonSource, ExplainedCombo,
 };
 // Plumbing: read-only re-export of the X-affordability authority
 // (`max_x_value`) and the cost-leg extractors that feed it
@@ -240,6 +269,11 @@ pub use bracket_estimate::{
 // this exposes exactly those functions from it. The governing rule annotations
 // live on the function definitions in `casting_costs.rs`, not on this
 // visibility re-export.
+#[cfg(feature = "test-support")]
+pub use casting_costs::{
+    alternative_mana_payable_with_nothing_held, oracle_alternative_reservation_verdict,
+    ReservationVerdict, RESERVATION_PROBE_BUDGET,
+};
 pub use casting_costs::{extract_mana_leg, extract_x_mana_cost, max_x_value};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
@@ -257,7 +291,7 @@ pub use engine::{
     apply, apply_as_current, apply_with_rejection, new_game, preflight_debug_action,
     preflight_debug_action_with_rejection, require_explicit_debug_permission,
     resolve_all_ready_prefix_with_rejection, start_game, start_game_skip_mulligan,
-    start_game_with_starting_player, EngineError,
+    start_game_winner_plays_first, start_game_with_starting_player, EngineError,
 };
 pub use engine_debug::{
     create_debug_cards, create_debug_cards_with_rejection, debug_card_entry_source,

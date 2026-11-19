@@ -562,7 +562,12 @@ fn opponent_who_left_before_resolution_is_not_iterated() {
     let mut runner = scenario.build();
 
     cast_from_exile(&mut runner, meteor);
-    engine::game::elimination::eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     let prompts = resolve_with(&mut runner, |_, cards| vec![cards[0]], |_, _| {});
 
     assert_eq!(prompts.len(), 1, "only the live opponent: {prompts:?}");
@@ -1714,7 +1719,12 @@ fn hostile_legacy_pool_prompt_is_rejected_not_rebound() {
         "reach: the queue after P1 is empty"
     );
     make_frame_legacy(&mut runner);
-    engine::game::elimination::eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     assert_eq!(
         controller(&runner, stolen),
         P2,
@@ -2532,6 +2542,7 @@ fn simultaneous_departure_of_every_opponent_ends_the_game_with_no_prompt() {
     engine::game::elimination::eliminate_players_simultaneously(
         runner.state_mut(),
         &[P1, P2],
+        engine::types::events::LossReason::Conceded,
         &mut Vec::new(),
     );
     assert_eq!(
@@ -2663,4 +2674,95 @@ fn caster_leaving_under_a_repeated_choice_keeps_resolving() {
         "nothing left parked"
     );
     assert!(runner.state().stack.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The cast-from-exile gate survives a damage pause
+// ---------------------------------------------------------------------------
+
+/// Soul-Scar Mage without Prowess: its trigger on casting Meteor is irrelevant
+/// to the replacement under test and would sit above Meteor on the stack.
+const SOUL_SCAR_MAGE: &str = "If a source you control would deal noncombat damage to a \
+creature an opponent controls, put that many -1/-1 counters on that creature instead.";
+const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your \
+control, it creates twice that many of those tokens instead.\nIf an effect would put one or \
+more counters on a permanent you control, it puts twice that many of those counters on that \
+permanent instead.";
+const VIZIER_OF_REMEDIES: &str = "If one or more -1/-1 counters would be put on a creature you \
+control, that many -1/-1 counters minus one are put on it instead.";
+
+/// CR 608.2c + CR 601.2a + CR 616.1g: a foretold Meteor under Soul-Scar Mage,
+/// against P1's creatures with Doubling Season and Vizier of Remedies. Each of
+/// P1's creatures orders its counter replacements, so the damage instruction
+/// pauses with recipients still to damage. The instruction after it is gated
+/// on the spell having been cast from exile; it must still see that it was
+/// once the damage completes: P0 chooses P1's artifact and it is destroyed.
+#[test]
+fn cast_from_exile_gate_holds_after_a_counter_order_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_MAGE);
+    let first = scenario.add_creature(P1, "First Wall", 0, 20).id();
+    let second = scenario.add_creature(P1, "Second Wall", 0, 20).id();
+    let season = scenario
+        .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    scenario.add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER_OF_REMEDIES);
+    let relic = add_artifact(&mut scenario, P1, "P1 Relic");
+    let meteor = add_meteor(&mut scenario);
+    let mut runner = scenario.build();
+
+    cast_from_exile(&mut runner, meteor);
+    let mut counter_orders = 0usize;
+    let mut choices = 0usize;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert_eq!(player, P1, "the affected creature's controller orders");
+                assert_eq!(
+                    choices, 0,
+                    "the gated choice follows the whole damage instruction"
+                );
+                let index = candidates
+                    .iter()
+                    .position(|c| c.source_id == season)
+                    .expect("Doubling Season is a candidate");
+                counter_orders += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("order the counter replacements");
+            }
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                assert_eq!(player, P0, "the spell's controller chooses");
+                assert!(
+                    cards.contains(&relic),
+                    "P1's artifact is offered: {cards:?}"
+                );
+                choices += 1;
+                runner
+                    .act(GameAction::SelectCards { cards: vec![relic] })
+                    .expect("choose P1's artifact");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            _ => break,
+        }
+    }
+
+    assert!(
+        counter_orders >= 2,
+        "the damage paused with recipients remaining ({counter_orders} orders)"
+    );
+    assert_eq!(choices, 1, "the cast-from-exile choice is made once");
+    assert_eq!(zone_of(&runner, relic), Some(Zone::Graveyard));
+    for wall in [first, second] {
+        assert_eq!(
+            runner.state().objects[&wall].damage_marked,
+            0,
+            "replaced damage"
+        );
+    }
 }

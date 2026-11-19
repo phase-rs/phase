@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engine::ai_support::legal_actions_for_viewer;
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::deck_loading::{DeckList, PlayerDeckList};
 use engine::game::engine::apply;
 use engine::game::replay::reconstruct_initial_state;
@@ -224,7 +224,7 @@ fn produce_native_portability_corpus() {
             ..Default::default()
         }),
     };
-    let mut state = reconstruct_initial_state(&header, Some(&db)).unwrap();
+    let mut state = reconstruct_initial_state(&header, Some(&db), &ComboTable::default()).unwrap();
     for player in &state.players {
         assert!(
             !player.hand.is_empty(),

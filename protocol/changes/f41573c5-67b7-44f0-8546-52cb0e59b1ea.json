@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "DerivedViews gains attack_targets (each attacker's live attack target, CR 506.4c) and unblocked_attack_previews, the engine-owned per-attacker unblocked combat damage and life-loss projection (CR 510.1a, CR 702.4b, CR 120.3a/b) published during DeclareAttackers; the attack-target picker renders per-target totals and projected life only from these fields (and the hover preview's attack line from attack_targets), so an older server or peer that omits it silently loses the totals — full-game and P2P move in lockstep"
+}
