@@ -1854,6 +1854,10 @@
       "title": "Order the copies",
       "subtitle": "Choose the spell whose copy goes on the stack next"
     },
+    "departureOrder": {
+      "title": "Choose the next permanent",
+      "subtitle": "Choose which permanent’s replacement effects to consider next"
+    },
     "memberOrder": {
       "title": "Order the cards",
       "subtitle": "Choose which card is handled next"

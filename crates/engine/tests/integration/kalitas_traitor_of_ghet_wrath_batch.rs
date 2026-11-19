@@ -189,6 +189,165 @@ fn both_kalitas_choose_replacements_in_apnap_order_before_wrath_delivers() {
     }
 }
 
+/// CR 101.4c + CR 616.1: one player orders their simultaneous choices. Select
+/// the later battlefield Bear first, then give the two deaths different replacements.
+#[test]
+fn wrath_lets_the_affected_player_choose_which_bear_to_consult_first() {
+    use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+
+    for restore in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let later = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+        let kalitas = scenario
+            .add_creature_from_oracle(P1, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+            .id();
+        let rip = scenario
+            .add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE)
+            .id();
+        let wrath = scenario
+            .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+            .id();
+        let mut runner = scenario.build();
+        let mut events = runner.cast(wrath).commit().resolve().events().to_vec();
+        let WaitingFor::MemberOrderChoice {
+            player, choices, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "P0 must first choose which Bear to consult, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(choices.len(), 2);
+        assert!(choices.contains(&first) && choices.contains(&later));
+        if restore {
+            let saved =
+                serde_json::to_vec(&PersistedGameState::capture(runner.state().clone())).unwrap();
+            let state = serde_json::from_slice::<PersistedGameState>(&saved)
+                .unwrap()
+                .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                .unwrap()
+                .finalize_after_rehydration(|_| Ok(()))
+                .unwrap();
+            runner = GameRunner::from_state(state);
+        }
+        assert!(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![kalitas]
+                })
+                .is_err(),
+            "P0 cannot select the opponent's Kalitas"
+        );
+        events.extend(
+            runner
+                .act(GameAction::SelectCards { cards: vec![later] })
+                .unwrap()
+                .events,
+        );
+        for (bear, answer) in [(later, kalitas), (first, rip)] {
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "expected the replacement decision for {bear:?}, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == kalitas));
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == rip));
+            assert_eq!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .and_then(|choice| choice.proposed.affected_object_id()),
+                Some(bear)
+            );
+            assert!([first, later, kalitas]
+                .iter()
+                .all(|id| runner.state().objects[id].zone == Zone::Battlefield));
+            events.extend(choose_replacement_from(&mut runner, answer));
+        }
+        runner.advance_until_stack_empty();
+        for id in [first, later, kalitas] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
+            assert_eq!(zone_changes_of(&events, id), 1);
+        }
+        assert_eq!(runner.state().objects[&wrath].zone, Zone::Exile);
+        assert_eq!(zombies(&events), 1);
+        let tokens = zombies_on_battlefield(runner.state());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(runner.state().objects[&tokens[0]].controller, P1);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// CR 800.4a + CR 616.1: a concession can remove either the player ordering
+/// the deaths or the competing replacements that made the ordering necessary.
+#[test]
+fn conceding_during_wraths_member_order_reconsults_the_surviving_board() {
+    use engine::types::player::PlayerId;
+
+    let p2 = PlayerId(2);
+    for conceder in [P1, p2] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+        let kalitas = scenario
+            .add_creature_from_oracle(p2, "Kalitas, Traitor of Ghet", 3, 4, KALITAS)
+            .id();
+        scenario.add_enchantment_from_oracle(p2, "Rest in Peace", REST_IN_PEACE);
+        let wrath = scenario
+            .add_spell_to_hand_from_oracle(P0, "Wrath of God", false, WRATH_OF_GOD)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(wrath).commit().resolve();
+        assert!(matches!(&runner.state().waiting_for,
+            WaitingFor::MemberOrderChoice { player: P1, choices, .. }
+                if choices.len() == 2 && choices.contains(&first) && choices.contains(&second)));
+
+        let result = runner
+            .act(GameAction::Concede {
+                player_id: conceder,
+            })
+            .unwrap();
+        let losses = result.events.iter().filter(
+            |event| matches!(event, GameEvent::PlayerLost { player_id, .. } if *player_id == conceder),
+        );
+        assert_eq!(losses.count(), 1);
+        let state = runner.state();
+        assert!(state.active_simultaneous_departure().is_none());
+        assert!(state.stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        if conceder == P1 {
+            assert_eq!(state.objects[&kalitas].zone, Zone::Exile);
+            assert_eq!(zone_changes_of(&result.events, kalitas), 1);
+            assert_eq!(state.objects[&wrath].zone, Zone::Exile);
+        } else {
+            for bear in [first, second] {
+                assert_eq!(state.objects[&bear].zone, Zone::Graveyard);
+                assert_eq!(zone_changes_of(&result.events, bear), 1);
+            }
+            assert_eq!(state.objects[&wrath].zone, Zone::Graveyard);
+        }
+    }
+}
+
 /// CR 616.1 + CR 701.8a: Rest in Peace and Kalitas both apply to the opposing
 /// creature's death, so its controller chooses one. Answering that choice does
 /// not abandon the rest of Wrath of God: the batch resumes, so Kalitas is
@@ -627,6 +786,27 @@ fn jinnie_token_choice_mid_state_based_death_batch_resumes_the_batch() {
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
+fn select_first_bear(runner: &mut GameRunner, bears: &[ObjectId]) -> Vec<GameEvent> {
+    let WaitingFor::MemberOrderChoice {
+        player, choices, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a choice between the two Bears, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(choices.len(), bears.len());
+    assert!(bears.iter().all(|bear| choices.contains(bear)));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![bears[0]],
+        })
+        .unwrap()
+        .events
+}
+
 /// Answer every CR 616.1 ordering prompt with Kalitas's replacement, collecting
 /// the events, until the game is back at priority.
 fn answer_orderings_with(
@@ -674,13 +854,14 @@ fn fumigate_gains_life_for_every_creature_after_the_whole_paused_destruction() {
 
     let outcome = runner.cast(fumigate).commit().resolve();
     let mut events = outcome.events().to_vec();
+    events.extend(select_first_bear(&mut runner, &bears));
     assert!(
         matches!(
-            outcome.final_waiting_for(),
+            runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ),
         "the first opposing death asks for an ordering, got {:?}",
-        outcome.final_waiting_for()
+        runner.state().waiting_for
     );
     assert_eq!(
         runner.state().players[0].life,
@@ -759,7 +940,8 @@ fn state_based_death_batch_resumes_after_consult_time_ordering_choices() {
 
     let outcome = runner.cast(pyroclasm).commit().resolve();
     let mut events = outcome.events().to_vec();
-    match outcome.final_waiting_for() {
+    events.extend(select_first_bear(&mut runner, &bears));
+    match &runner.state().waiting_for {
         WaitingFor::ReplacementChoice { candidates, .. } => assert!(
             candidates.iter().any(|c| c.source_id == kalitas),
             "Kalitas is a candidate while the batch is consulted"

@@ -1816,6 +1816,10 @@
       "title": "Ordina le copie",
       "subtitle": "Scegli la magia la cui copia va successivamente in pila"
     },
+    "departureOrder": {
+      "title": "Scegli il prossimo permanente",
+      "subtitle": "Scegli per quale permanente valutare ora gli effetti di sostituzione"
+    },
     "memberOrder": {
       "title": "Ordina le carte",
       "subtitle": "Scegli quale carta viene gestita dopo"

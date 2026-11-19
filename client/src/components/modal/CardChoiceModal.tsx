@@ -1247,22 +1247,20 @@ function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
   );
 }
 
-// CR 608.2f + CR 405.3: the controller of an ordered member loop picks which
-// member is processed next — a spell copy, or a per-member instruction whose
-// iterations pause for a payment. Display-only: the engine supplies `choices`
-// and enforces legality; clicking a member dispatches a single-object
-// SelectCards.
+// The engine supplies the purpose, chooser and eligible objects. Selecting a
+// member uses the same action for spell copies, instructions and replacements.
 function MemberOrderChoiceModal({ data }: { data: MemberOrderChoice["data"] }) {
   const { t } = useTranslation("game");
-  const copyBatch = data.purpose === "SpellCopies";
+  const label = {
+    SpellCopies: "spellCopyOrder",
+    InstructionLoop: "memberOrder",
+    DepartureReplacements: "departureOrder",
+  } as const;
+  const prompt = label[data.purpose];
   return (
     <SingleObjectPickModal
-      title={t(
-        copyBatch ? "cardChoice.spellCopyOrder.title" : "cardChoice.memberOrder.title",
-      )}
-      subtitle={t(
-        copyBatch ? "cardChoice.spellCopyOrder.subtitle" : "cardChoice.memberOrder.subtitle",
-      )}
+      title={t(`cardChoice.${prompt}.title`)}
+      subtitle={t(`cardChoice.${prompt}.subtitle`)}
       choices={data.choices}
     />
   );

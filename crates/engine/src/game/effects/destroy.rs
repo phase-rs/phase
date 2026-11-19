@@ -13,12 +13,13 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 pub(crate) use crate::types::game_state::SimultaneousDeparture;
 use crate::types::game_state::{
-    DepartureCause, DepartureRiderCustody, GameState, PendingSimultaneousDeparture,
-    QueuedSimultaneousDeparture, ResidentDrainPolicy,
+    DepartureCause, DepartureRiderCustody, GameState, MemberOrderPurpose,
+    PendingSimultaneousDeparture, QueuedSimultaneousDeparture, ResidentDrainPolicy,
     SimultaneousDepartureConsultStep as ConsultStep, SimultaneousDepartureMember,
     SimultaneousDepartureOwner, SimultaneousDepartureStage, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIdentityBinding};
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::ResolutionFrame;
 use crate::types::zones::Zone;
@@ -587,7 +588,7 @@ pub(crate) fn depart_simultaneously(
         deferred_events: Vec::new(),
     };
     let batch_start = events.len();
-    advance_simultaneous_departure(state, pending, batch_start, events)
+    advance_simultaneous_departure(state, pending, batch_start, None, events)
 }
 
 /// CR 614.6 + CR 616.1 + CR 608.2c: resume a parked simultaneous departure
@@ -609,8 +610,14 @@ pub(crate) fn drain_pending_simultaneous_departure(
     else {
         return;
     };
+    let mut selected = None;
     match pending.stage.take() {
         None => {}
+        Some(SimultaneousDepartureStage::SelectedForConsult { binding }) => {
+            if binding.is_current(state) {
+                selected = Some(binding.reference.object_id);
+            }
+        }
         // CR 616.1: the consult's answer was carried out by the answer's own
         // owner rather than recorded here (the batch was not the active frame
         // when the answer arrived), so that member's departure already
@@ -633,7 +640,7 @@ pub(crate) fn drain_pending_simultaneous_departure(
     let mut restored = std::mem::take(&mut pending.deferred_events);
     restored.append(events);
     *events = restored;
-    let _ = advance_simultaneous_departure(state, pending, 0, events);
+    let _ = advance_simultaneous_departure(state, pending, 0, selected, events);
 }
 
 /// A replacement choice is about to be answered while a simultaneous
@@ -804,14 +811,25 @@ fn consult_graveyard_move(
     }
 }
 
+enum NextDeparture {
+    Consult(usize),
+    Choose {
+        player: PlayerId,
+        choices: Vec<ObjectId>,
+    },
+}
+
 /// CR 616.1 + CR 101.4 + CR 805.6: only a member actually awaiting a
 /// replacement choice competes for APNAP order. The pipeline names the chooser,
 /// including a choice owed by the replacement's source controller.
-fn next_departure_consult(state: &GameState, pending: &PendingSimultaneousDeparture) -> usize {
+fn next_departure_consult(
+    state: &GameState,
+    pending: &PendingSimultaneousDeparture,
+) -> NextDeparture {
     if pending.unconsulted.len() < 2 {
-        return 0;
+        return NextDeparture::Consult(0);
     }
-    let chooser_rank = |member: SimultaneousDepartureMember| {
+    let chooser = |member: SimultaneousDepartureMember| {
         let obj = state.objects.get(&member.object_id)?;
         if obj.zone != Zone::Battlefield || obj.is_phased_out() {
             return None;
@@ -821,26 +839,91 @@ fn next_departure_consult(state: &GameState, pending: &PendingSimultaneousDepart
         let (step, proposed) = departure_proposal(pending, member);
         let first = preview(proposed);
         match consult_graveyard_move(step, first, preview).1 {
-            ReplacementResult::NeedsChoice(chooser) => {
-                Some(crate::game::topology::apnap_team_rank(state, chooser))
-            }
+            ReplacementResult::NeedsChoice(chooser) => Some(chooser),
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => None,
         }
     };
-    let Some(mut earliest) = chooser_rank(pending.unconsulted[0]) else {
-        return 0;
+    let Some(mut player) = chooser(pending.unconsulted[0]) else {
+        return NextDeparture::Consult(0);
     };
+    let mut earliest = crate::game::topology::apnap_team_rank(state, player);
     let mut next = 0;
+    let mut choices = Vec::new();
     for (index, &member) in pending.unconsulted.iter().enumerate().skip(1) {
-        if earliest == 0 {
-            break;
+        let Some(other) = chooser(member) else {
+            continue;
+        };
+        if other == player {
+            if choices.is_empty() {
+                choices.push(pending.unconsulted[next].object_id);
+            }
+            choices.push(member.object_id);
+            continue;
         }
-        if let Some(rank) = chooser_rank(member).filter(|rank| *rank < earliest) {
-            earliest = rank;
+        // Shared-turn teammates have the same rank, but one cannot make the
+        // other's choices. Keep the first chooser within that team.
+        let rank = crate::game::topology::apnap_team_rank(state, other);
+        if rank < earliest {
+            (earliest, player) = (rank, other);
             next = index;
+            choices.clear();
         }
     }
-    next
+    if choices.is_empty() {
+        NextDeparture::Consult(next)
+    } else {
+        NextDeparture::Choose { player, choices }
+    }
+}
+
+/// CR 800.4: a departure can change the choices even when their chooser stays.
+/// Release only this batch's order prompt; the elimination boundary resumes
+/// the still-parked batch with its own event buffer.
+pub(crate) fn retire_departure_order_after_player_leave(state: &mut GameState) -> bool {
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::MemberOrderChoice {
+            purpose: MemberOrderPurpose::DepartureReplacements,
+            ..
+        }
+    ) || !state
+        .active_simultaneous_departure()
+        .is_some_and(|pending| pending.stage.is_none())
+    {
+        return false;
+    }
+    let Some(player) = crate::game::players::apnap_order(state).first().copied() else {
+        return false;
+    };
+    state.waiting_for = WaitingFor::Priority { player };
+    true
+}
+
+/// Accept only a member that still belongs to this player's live order choice.
+pub(crate) fn select_departure_member(
+    state: &mut GameState,
+    chooser: PlayerId,
+    member: ObjectId,
+) -> bool {
+    let Some(pending) = state.active_simultaneous_departure() else {
+        return false;
+    };
+    if pending.stage.is_some()
+        || !matches!(
+            next_departure_consult(state, pending),
+            NextDeparture::Choose { player, choices } if player == chooser && choices.contains(&member)
+        )
+    {
+        return false;
+    }
+    let binding = ObjectIdentityBinding::from_object(&state.objects[&member]);
+    let mut pending = state
+        .take_active_simultaneous_departure()
+        .expect("the departure owns the active frame")
+        .expect("the active departure was just validated");
+    pending.stage = Some(SimultaneousDepartureStage::SelectedForConsult { binding });
+    state.resolution_stack.push_simultaneous_departure(pending);
+    true
 }
 
 /// Consult the remaining members, then deliver every queued one, parking the
@@ -850,11 +933,33 @@ fn advance_simultaneous_departure(
     state: &mut GameState,
     mut pending: PendingSimultaneousDeparture,
     stamp_from: usize,
+    mut selected: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> SimultaneousDepartureOutcome {
     let resumed_with_queued_members = !pending.queued.is_empty() && pending.delivered.is_empty();
     while !pending.unconsulted.is_empty() {
-        let next = next_departure_consult(state, &pending);
+        let next = match selected.take().and_then(|id| {
+            pending
+                .unconsulted
+                .iter()
+                .position(|member| member.object_id == id)
+        }) {
+            Some(index) => index,
+            None => match next_departure_consult(state, &pending) {
+                NextDeparture::Consult(index) => index,
+                NextDeparture::Choose { player, choices } => {
+                    state.waiting_for = WaitingFor::MemberOrderChoice {
+                        player,
+                        source_id: pending.source,
+                        choices,
+                        purpose: MemberOrderPurpose::DepartureReplacements,
+                    };
+                    let boundary = state.resolution_stack.capture_child_boundary();
+                    park_simultaneous_departure(state, pending, boundary, stamp_from, events);
+                    return SimultaneousDepartureOutcome::Paused;
+                }
+            },
+        };
         let member = pending.unconsulted.remove(next);
         // CR 400.7: an earlier member's replacing instructions may have moved
         // this one already; it is no longer on the battlefield to depart.

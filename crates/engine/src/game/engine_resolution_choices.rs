@@ -4610,20 +4610,32 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::MemberOrderChoice {
-                player, choices, ..
+                player,
+                choices,
+                purpose,
+                ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 608.2f + CR 405.3: the chosen member supplies the loop's next
-            // iteration — the next copy for a spell-copy batch, or the next
-            // per-member instruction.
+            // The chosen member supplies the next loop iteration or the next
+            // simultaneous replacement decision owed by this player.
             let [member] = chosen.as_slice() else {
                 return Err(EngineError::InvalidAction(format!(
                     "Choose exactly one member to process next, got {}",
                     chosen.len()
                 )));
             };
-            if !choices.contains(member) || !effects::order_next_member(state, *member) {
+            use crate::types::game_state::MemberOrderPurpose;
+            let accepted = choices.contains(member)
+                && match purpose {
+                    MemberOrderPurpose::DepartureReplacements => {
+                        effects::destroy::select_departure_member(state, player, *member)
+                    }
+                    MemberOrderPurpose::SpellCopies | MemberOrderPurpose::InstructionLoop => {
+                        effects::order_next_member(state, *member)
+                    }
+                };
+            if !accepted {
                 return Err(EngineError::InvalidAction(
                     "That member has no iteration left to run".to_string(),
                 ));

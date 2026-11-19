@@ -1816,6 +1816,10 @@
       "title": "Ordonner les copies",
       "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
     },
+    "departureOrder": {
+      "title": "Choisissez le prochain permanent",
+      "subtitle": "Choisissez pour quel permanent les effets de remplacement seront examinés en premier"
+    },
     "memberOrder": {
       "title": "Ordonnez les cartes",
       "subtitle": "Choisissez la carte traitée ensuite"

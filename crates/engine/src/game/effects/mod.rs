@@ -3549,35 +3549,24 @@ fn open_member_order_choice(
     if choices.len() < 2 {
         return false;
     }
-    let purpose = member_order_purpose(ability);
-    let player = match purpose {
-        MemberOrderPurpose::SpellCopies => {
-            let mut bound = ability.clone();
-            rebind_member_driven_parent_target(&mut bound, choices[0]);
-            copy_spell::resolve_copy_controller(state, &bound)
-        }
-        // CR 608.2f: the controller of the spell or ability performing the
-        // repeated instruction chooses the order those instructions run in.
-        MemberOrderPurpose::InstructionLoop => ability.controller,
+    let (purpose, player) = if matches!(ability.effect, Effect::CopySpell { .. }) {
+        let mut bound = ability.clone();
+        rebind_member_driven_parent_target(&mut bound, choices[0]);
+        (
+            MemberOrderPurpose::SpellCopies,
+            copy_spell::resolve_copy_controller(state, &bound),
+        )
+    } else {
+        // CR 608.2f: the controller orders the per-member instructions.
+        (MemberOrderPurpose::InstructionLoop, ability.controller)
     };
     state.waiting_for = WaitingFor::MemberOrderChoice {
         player,
-        source_id: ability.source_id,
+        source_id: Some(ability.source_id),
         choices,
         purpose,
     };
     true
-}
-
-/// CR 608.2f: the process a member-driven loop repeats is read from its head
-/// effect. A batch loop repeats `CopySpell` once per member; any other head is
-/// an instruction loop whose iterations pause for player input.
-fn member_order_purpose(ability: &ResolvedAbility) -> MemberOrderPurpose {
-    if matches!(ability.effect, Effect::CopySpell { .. }) {
-        MemberOrderPurpose::SpellCopies
-    } else {
-        MemberOrderPurpose::InstructionLoop
-    }
 }
 
 /// CR 608.2f + CR 405.3: the answer to `WaitingFor::MemberOrderChoice` — move

@@ -930,6 +930,10 @@
       "subtitle": "选择其复制品将下一个进入堆叠的咒语",
       "title": "排列复制品顺序"
     },
+    "departureOrder": {
+      "title": "选择下一个永久物",
+      "subtitle": "选择接下来为哪个永久物考虑替代性效应"
+    },
     "memberOrder": {
       "title": "排列牌张顺序",
       "subtitle": "选择下一张要处理的牌"

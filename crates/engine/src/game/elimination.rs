@@ -341,7 +341,8 @@ pub enum DepartureResume {
     /// Nothing of a resolution is left for the caller to finish.
     Settled,
     /// The departure canceled the current replacement-choice pause of a parked
-    /// zone-change owner. Its surviving tail is still owed: the caller resumes
+    /// zone-change owner or invalidated its choice of which departure to
+    /// consult. Its surviving tail is still owed: the caller resumes
     /// it and settles the action before any player receives priority, and the
     /// departure left its queued triggers for that settlement to place.
     ParkedZoneChangeTail,
@@ -925,6 +926,15 @@ pub(crate) fn eliminate_players(
                 .resolution_stack
                 .active_zone_change_owner_pause()
                 .is_none()
+        {
+            resume = DepartureResume::ParkedZoneChangeTail;
+        }
+        // CR 800.4a + CR 616.1: after ownership and control settle, the
+        // announced members, their replacement effects, or their choosers may
+        // have left. Reconsult the batch from the caller's fresh event buffer:
+        // re-parking it must never capture the concession's own events.
+        if !leaving_set.is_empty()
+            && super::effects::destroy::retire_departure_order_after_player_leave(state)
         {
             resume = DepartureResume::ParkedZoneChangeTail;
         }

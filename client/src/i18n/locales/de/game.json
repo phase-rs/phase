@@ -1816,6 +1816,10 @@
       "title": "Kopien ordnen",
       "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
     },
+    "departureOrder": {
+      "title": "Wähle die nächste bleibende Karte",
+      "subtitle": "Wähle, für welche bleibende Karte als Nächstes Ersatzeffekte berücksichtigt werden"
+    },
     "memberOrder": {
       "title": "Karten sortieren",
       "subtitle": "Wähle, welche Karte als Nächstes behandelt wird"

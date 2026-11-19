@@ -6602,6 +6602,9 @@ pub struct QueuedSimultaneousDeparture {
 /// Where a parked simultaneous departure stopped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SimultaneousDepartureStage {
+    /// CR 101.4c: the player selected this member for the next consult. The
+    /// resumer consumes the selection once, before opening its replacement choice.
+    SelectedForConsult { binding: ObjectIdentityBinding },
     /// CR 616.1: a member's consult surfaced a replacement choice; the parked
     /// `PendingReplacement` is that member's. Its answer is recorded into the
     /// queue (never delivered on its own), so every member is still consulted
@@ -20096,10 +20099,8 @@ impl CastOpponentChoicePurpose {
 }
 
 /// CR 608.2f: what a [`WaitingFor::MemberOrderChoice`] prompt orders. A
-/// member-driven loop pauses for player input either because it puts a copy of
-/// each member spell on the stack, or because each member's instruction itself
-/// pauses (an unless payment). The prompt names the process so the choice can
-/// word itself without the client inferring it from the effect.
+/// member-driven process can be a copy loop, a repeated instruction, or a batch
+/// of simultaneous replacement decisions. The prompt names the process for display.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemberOrderPurpose {
     /// CR 405.3 + CR 707.10: a batch of spell copies; the chosen spell supplies
@@ -20112,6 +20113,9 @@ pub enum MemberOrderPurpose {
     /// iterations pause for player input; the chosen member's instruction runs
     /// next.
     InstructionLoop,
+    /// CR 101.4c + CR 616.1: the player chooses which simultaneous departure's
+    /// replacement decision to make next.
+    DepartureReplacements,
 }
 
 // clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
@@ -21044,11 +21048,14 @@ pub enum WaitingFor {
     /// (`SpellCopies`); an instruction loop that pauses per member (Sword-Point
     /// Diplomacy's "for each of those cards, put that card into your hand unless
     /// any opponent pays 3 life", CR 608.2f + CR 118.12a) picks which member is
-    /// handled next (`InstructionLoop`). Raised only while two or more members
-    /// remain; the answer is a single-object `SelectCards`.
+    /// handled next (`InstructionLoop`). Under CR 101.4c the same prompt lets a
+    /// player order simultaneous replacement decisions they owe. Raised only
+    /// while two or more members are eligible; the answer is a single-object `SelectCards`.
     MemberOrderChoice {
         player: PlayerId,
-        source_id: ObjectId,
+        /// The instruction's source, when it has one. State-based deaths have no source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
         choices: Vec<ObjectId>,
         /// What the ordered members are, for the prompt's wording.
         #[serde(default)]
