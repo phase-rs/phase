@@ -21,16 +21,18 @@
 
 use std::ops::Range;
 
+use crate::game::costs::{
+    single_choice_payment, single_choice_payment_branches, SingleChoicePayment,
+};
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    AbilityCost, CardSelectionMode, DiscardSelfScope, EffectError, EffectKind, QuantityExpr,
-    RepeatForTiming, ResolvedAbility, SacrificeCost, SacrificeRequirement, SubAbilityLink,
-    TargetFilter, TargetRef,
+    AbilityCost, EffectError, EffectKind, RepeatForTiming, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DiscardCause, GameState, PendingPlayerScopeSacrificeCompletion, PendingSimultaneousUnless,
-    SimultaneousUnlessAnswer, SimultaneousUnlessSeatAnswer, WaitingFor,
+    SimultaneousUnlessAnswer, SimultaneousUnlessCollection, SimultaneousUnlessDelivery,
+    SimultaneousUnlessPhase, SimultaneousUnlessSeatAnswer, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -51,7 +53,7 @@ pub(super) fn admits(ability: &ResolvedAbility) -> bool {
         && ability.player_scope.is_some()
         && ability.unless_pay.as_ref().is_some_and(|unless| {
             unless.payer == TargetFilter::ScopedPlayer
-                && deferrable_branches(&unless.cost).is_some()
+                && single_choice_payment_branches(&unless.cost).is_some()
         })
         && !crate::game::resolution_prompt::effect_offers_choice(&ability.effect)
         && !super::awaits_resolution_object_choice(ability)
@@ -65,81 +67,6 @@ pub(super) fn admits(ability: &ResolvedAbility) -> bool {
         && ability.distribute.is_none()
         && ability.repeat_until.is_none()
         && per_instance_template(ability).is_some()
-}
-
-/// CR 118.12a: one branch of an unless cost whose answer can be recorded now
-/// and acted on later, with the pool its payer chooses from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeferrableBranch<'a> {
-    /// CR 701.21a: sacrifice one permanent matching `target`.
-    Sacrifice { target: &'a TargetFilter },
-    /// CR 701.9a: discard one chosen card from hand.
-    Discard,
-}
-
-/// The closed classifier of deferrable unless-cost branches. Every other cost
-/// kind is listed explicitly, so a new one fails closed at compile time.
-fn deferrable_branch(cost: &AbilityCost) -> Option<DeferrableBranch<'_>> {
-    match cost {
-        AbilityCost::Sacrifice(SacrificeCost {
-            target,
-            requirement: SacrificeRequirement::Count { count: 1 },
-        }) => Some(DeferrableBranch::Sacrifice { target }),
-        AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value: 1 },
-            filter: None,
-            selection: CardSelectionMode::Chosen,
-            self_scope: DiscardSelfScope::FromHand,
-        } => Some(DeferrableBranch::Discard),
-        AbilityCost::Sacrifice(_)
-        | AbilityCost::Discard { .. }
-        | AbilityCost::OneOf { .. }
-        | AbilityCost::Mana { .. }
-        | AbilityCost::Composite { .. }
-        | AbilityCost::Waterbend { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        | AbilityCost::PerCounter { .. }
-        | AbilityCost::SayPhrase { .. }
-        | AbilityCost::ManaDynamic { .. }
-        | AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::PayEnergy { .. }
-        | AbilityCost::PaySpeed { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::EffectCost { .. }
-        | AbilityCost::KeywordCostOfCastSpell { .. }
-        | AbilityCost::GetPlayerCounters { .. }
-        | AbilityCost::Unimplemented { .. } => None,
-    }
-}
-
-/// CR 118.12a: every branch of an unless cost with its classification, or
-/// `None` when any branch can't be deferred. A disjunctive cost ("sacrifices a
-/// nonland permanent of their choice or discards a card") is deferrable only
-/// when each of its branches is.
-fn deferrable_branches(cost: &AbilityCost) -> Option<Vec<(&AbilityCost, DeferrableBranch<'_>)>> {
-    match cost {
-        AbilityCost::OneOf { costs } if !costs.is_empty() => costs
-            .iter()
-            .map(|branch| deferrable_branch(branch).map(|kind| (branch, kind)))
-            .collect(),
-        single => deferrable_branch(single).map(|kind| vec![(single, kind)]),
-    }
 }
 
 /// CR 101.4 + CR 608.2c: the one-seat instruction every node of the poll is
@@ -171,11 +98,14 @@ pub(crate) enum WalkOutcome {
 /// What a delivery left owed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeliveryOutcome {
-    /// The chosen actions happened. `span` is the delivery's own events in the
-    /// buffer it was given.
+    /// The chosen actions happened. `span` covers, in the buffer the outcome is
+    /// returned into, every event of the delivery, including held events spliced
+    /// back from earlier actions.
     Delivered { span: Range<usize> },
-    /// CR 616.1: the sacrifice batch paused on a replacement choice; the rest of
-    /// the delivery is parked on the continuation and runs after it.
+    /// CR 616.1: a step paused on a replacement choice and the carrier (in
+    /// `Delivering`) holds the delivery's completed events, or the sacrifice
+    /// batch paused and `pending_player_scope_sacrifice_choice.completion
+    /// .deferred_events` holds them.
     Paused,
 }
 
@@ -216,11 +146,13 @@ pub(super) fn start(
         ability: Box::new(template),
         unless_pay,
         instances,
-        current_player: first,
-        next_instance: 0,
-        remaining_players: seats.collect(),
-        answers: Vec::new(),
-        hidden_discards: Vec::new(),
+        phase: SimultaneousUnlessPhase::Collecting(SimultaneousUnlessCollection {
+            current_player: first,
+            next_instance: 0,
+            remaining_players: seats.collect(),
+            answers: Vec::new(),
+            hidden_discards: Vec::new(),
+        }),
         trigger_event: state.current_trigger_event.clone(),
         // CR 608.2c: bind the carrier to the resolution that wrote it.
         resolving_entry: state.resolving_stack_entry.as_ref().map(|entry| entry.id),
@@ -251,14 +183,17 @@ pub(crate) fn holds_resolution(state: &GameState) -> bool {
 }
 
 /// CR 608.2c: whether an answer by `player` to a prompt of `source_id` is an
-/// answer to the open poll: the poll's current seat, its source, and the
-/// resolution that wrote it. A foreign prompt never binds.
+/// answer to the open poll: the poll's current seat while it is collecting, its
+/// source, and the resolution that wrote it. A foreign prompt never binds, and a
+/// poll that is delivering has no collecting seat.
 pub(crate) fn binds(state: &GameState, player: PlayerId, source_id: ObjectId) -> bool {
     state
         .pending_simultaneous_unless
         .as_deref()
         .is_some_and(|carrier| {
-            carrier.current_player == player
+            carrier
+                .collection()
+                .is_some_and(|collection| collection.current_player == player)
                 && carrier.ability.source_id == source_id
                 && carrier.resolving_entry
                     == state.resolving_stack_entry.as_ref().map(|entry| entry.id)
@@ -274,30 +209,30 @@ pub(crate) fn answer_branch(
     pay: bool,
     cost: &AbilityCost,
 ) -> Result<WalkOutcome, EffectError> {
-    let carrier = open_carrier(state)?;
+    let (carrier, collection) = open_carrier(state)?;
     if !pay {
         return Ok(record_and_walk(state, SimultaneousUnlessAnswer::Declined));
     }
-    let branch = deferrable_branch(cost).ok_or_else(|| {
+    let branch = single_choice_payment(cost).ok_or_else(|| {
         EffectError::InvalidParam(
             "CR 118.12a: the chosen unless cost is not a branch of this poll".to_string(),
         )
     })?;
-    let seat = carrier.current_player;
-    let pool = live_pool(state, carrier, seat, branch);
+    let seat = collection.current_player;
+    let pool = live_pool(state, carrier, collection, seat, branch);
     if pool.is_empty() {
         return Ok(record_and_walk(state, SimultaneousUnlessAnswer::Declined));
     }
     let pending_effect = Box::new(seat_instruction(carrier, seat));
     state.waiting_for = match branch {
-        DeferrableBranch::Sacrifice { .. } => WaitingFor::WardSacrificeChoice {
+        SingleChoicePayment::SacrificeOne { .. } => WaitingFor::WardSacrificeChoice {
             player: seat,
             permanents: pool,
             pending_effect,
             remaining: 1,
             min_total_power: None,
         },
-        DeferrableBranch::Discard => WaitingFor::WardDiscardChoice {
+        SingleChoicePayment::DiscardOneChosen => WaitingFor::WardDiscardChoice {
             player: seat,
             cards: pool,
             pending_effect,
@@ -318,8 +253,8 @@ pub(crate) fn answer_pick(
     prompt: &WaitingFor,
     chosen: &[ObjectId],
 ) -> Result<WalkOutcome, EffectError> {
-    let carrier = open_carrier(state)?;
-    let seat = carrier.current_player;
+    let (carrier, collection) = open_carrier(state)?;
+    let seat = collection.current_player;
     let (offered, kind) = match prompt {
         WaitingFor::WardSacrificeChoice { permanents, .. } => (permanents, PickKind::Sacrifice),
         WaitingFor::WardDiscardChoice { cards, .. } => (cards, PickKind::Discard),
@@ -334,11 +269,11 @@ pub(crate) fn answer_pick(
             "Must select exactly one card to pay this instance".to_string(),
         ));
     };
-    let live = deferrable_branches(&carrier.unless_pay.cost)
+    let live = single_choice_payment_branches(&carrier.unless_pay.cost)
         .into_iter()
         .flatten()
         .filter(|(_, branch)| kind.matches(*branch))
-        .any(|(_, branch)| live_pool(state, carrier, seat, branch).contains(pick));
+        .any(|(_, branch)| live_pool(state, carrier, collection, seat, branch).contains(pick));
     if !offered.contains(pick) || !live {
         return Err(EffectError::InvalidParam(
             "CR 101.4: that object is not an available choice for this instance".to_string(),
@@ -353,8 +288,12 @@ pub(crate) fn answer_pick(
         PickKind::Sacrifice => SimultaneousUnlessAnswer::Sacrifice { permanent: pin },
         PickKind::Discard => {
             // CR 101.4a: the card stays in hand, unrevealed, until delivery.
-            if let Some(carrier) = state.pending_simultaneous_unless.as_deref_mut() {
-                carrier.hidden_discards.push((seat, pin));
+            if let Some(collection) = state
+                .pending_simultaneous_unless
+                .as_deref_mut()
+                .and_then(PendingSimultaneousUnless::collection_mut)
+            {
+                collection.hidden_discards.push((seat, pin));
             }
             SimultaneousUnlessAnswer::Discard
         }
@@ -370,31 +309,43 @@ enum PickKind {
 }
 
 impl PickKind {
-    fn matches(self, branch: DeferrableBranch<'_>) -> bool {
+    fn matches(self, branch: SingleChoicePayment<'_>) -> bool {
         match (self, branch) {
-            (Self::Sacrifice, DeferrableBranch::Sacrifice { .. })
-            | (Self::Discard, DeferrableBranch::Discard) => true,
-            (Self::Sacrifice, DeferrableBranch::Discard)
-            | (Self::Discard, DeferrableBranch::Sacrifice { .. }) => false,
+            (Self::Sacrifice, SingleChoicePayment::SacrificeOne { .. })
+            | (Self::Discard, SingleChoicePayment::DiscardOneChosen) => true,
+            (Self::Sacrifice, SingleChoicePayment::DiscardOneChosen)
+            | (Self::Discard, SingleChoicePayment::SacrificeOne { .. }) => false,
         }
     }
 }
 
-fn open_carrier(state: &GameState) -> Result<&PendingSimultaneousUnless, EffectError> {
-    state.pending_simultaneous_unless.as_deref().ok_or_else(|| {
-        EffectError::InvalidParam("CR 101.4: no unless poll is collecting answers".to_string())
-    })
+/// The open poll and its collection; `Err` when no poll is collecting answers
+/// (none is open, or it is already delivering).
+fn open_carrier(
+    state: &GameState,
+) -> Result<(&PendingSimultaneousUnless, &SimultaneousUnlessCollection), EffectError> {
+    state
+        .pending_simultaneous_unless
+        .as_deref()
+        .and_then(|carrier| carrier.collection().map(|collection| (carrier, collection)))
+        .ok_or_else(|| {
+            EffectError::InvalidParam("CR 101.4: no unless poll is collecting answers".to_string())
+        })
 }
 
 /// Record the current seat's answer for its current instance and continue the
 /// walk.
 fn record_and_walk(state: &mut GameState, answer: SimultaneousUnlessAnswer) -> WalkOutcome {
-    if let Some(carrier) = state.pending_simultaneous_unless.as_deref_mut() {
-        carrier.answers.push(SimultaneousUnlessSeatAnswer {
-            player: carrier.current_player,
+    if let Some(collection) = state
+        .pending_simultaneous_unless
+        .as_deref_mut()
+        .and_then(PendingSimultaneousUnless::collection_mut)
+    {
+        collection.answers.push(SimultaneousUnlessSeatAnswer {
+            player: collection.current_player,
             answer,
         });
-        carrier.next_instance += 1;
+        collection.next_instance += 1;
     }
     walk(state)
 }
@@ -422,12 +373,16 @@ fn walk_seats(state: &mut GameState) -> WalkOutcome {
         let Some(carrier) = state.pending_simultaneous_unless.as_deref_mut() else {
             return WalkOutcome::Complete;
         };
-        if carrier.next_instance >= carrier.instances {
-            if carrier.remaining_players.is_empty() {
+        let instances = carrier.instances;
+        let Some(collection) = carrier.collection_mut() else {
+            return WalkOutcome::Complete;
+        };
+        if collection.next_instance >= instances {
+            if collection.remaining_players.is_empty() {
                 return WalkOutcome::Complete;
             }
-            carrier.current_player = carrier.remaining_players.remove(0);
-            carrier.next_instance = 0;
+            collection.current_player = collection.remaining_players.remove(0);
+            collection.next_instance = 0;
             continue;
         }
         let prompt = {
@@ -435,7 +390,8 @@ fn walk_seats(state: &mut GameState) -> WalkOutcome {
                 .pending_simultaneous_unless
                 .as_deref()
                 .expect("checked above");
-            seat_prompt(state, carrier)
+            let collection = carrier.collection().expect("checked above");
+            seat_prompt(state, carrier, collection)
         };
         match prompt {
             Some(prompt) => {
@@ -445,15 +401,16 @@ fn walk_seats(state: &mut GameState) -> WalkOutcome {
             // CR 608.2d + CR 118.3: no branch can be paid, so the only
             // option is not to pay: the instance is unpaid without a prompt.
             None => {
-                let carrier = state
+                let collection = state
                     .pending_simultaneous_unless
                     .as_deref_mut()
+                    .and_then(PendingSimultaneousUnless::collection_mut)
                     .expect("checked above");
-                carrier.answers.push(SimultaneousUnlessSeatAnswer {
-                    player: carrier.current_player,
+                collection.answers.push(SimultaneousUnlessSeatAnswer {
+                    player: collection.current_player,
                     answer: SimultaneousUnlessAnswer::Declined,
                 });
-                carrier.next_instance += 1;
+                collection.next_instance += 1;
             }
         }
     }
@@ -463,10 +420,14 @@ fn walk_seats(state: &mut GameState) -> WalkOutcome {
 /// pay, or `None` when it can pay none. A branch is available when its live
 /// pool is non-empty and the generic dispatch's CR 614.17b and spoken-phrase
 /// filters admit it. Declining is always offered.
-fn seat_prompt(state: &GameState, carrier: &PendingSimultaneousUnless) -> Option<WaitingFor> {
-    let seat = carrier.current_player;
+fn seat_prompt(
+    state: &GameState,
+    carrier: &PendingSimultaneousUnless,
+    collection: &SimultaneousUnlessCollection,
+) -> Option<WaitingFor> {
+    let seat = collection.current_player;
     let bound = seat_instruction(carrier, seat);
-    let mut available = available_branches(state, carrier, &bound);
+    let mut available = available_branches(state, carrier, collection, &bound);
     let cost = match available.len() {
         0 => return None,
         1 => available.remove(0),
@@ -489,14 +450,15 @@ fn seat_prompt(state: &GameState, carrier: &PendingSimultaneousUnless) -> Option
 fn available_branches(
     state: &GameState,
     carrier: &PendingSimultaneousUnless,
+    collection: &SimultaneousUnlessCollection,
     bound: &ResolvedAbility,
 ) -> Vec<AbilityCost> {
-    let seat = carrier.current_player;
-    deferrable_branches(&carrier.unless_pay.cost)
+    let seat = collection.current_player;
+    single_choice_payment_branches(&carrier.unless_pay.cost)
         .into_iter()
         .flatten()
         .filter(|(cost, branch)| {
-            !live_pool(state, carrier, seat, *branch).is_empty()
+            !live_pool(state, carrier, collection, seat, *branch).is_empty()
                 && !crate::game::costs::resolution_cost_includes_impossible_event(
                     state, seat, cost, bound,
                 )
@@ -518,13 +480,14 @@ fn seat_instruction(carrier: &PendingSimultaneousUnless, seat: PlayerId) -> Reso
 fn live_pool(
     state: &GameState,
     carrier: &PendingSimultaneousUnless,
+    collection: &SimultaneousUnlessCollection,
     seat: PlayerId,
-    branch: DeferrableBranch<'_>,
+    branch: SingleChoicePayment<'_>,
 ) -> Vec<ObjectId> {
     let source = carrier.ability.source_id;
     match branch {
-        DeferrableBranch::Sacrifice { target } => {
-            let pinned: Vec<&ObjectIncarnationRef> = carrier
+        SingleChoicePayment::SacrificeOne { target } => {
+            let pinned: Vec<&ObjectIncarnationRef> = collection
                 .answers
                 .iter()
                 .filter(|answer| answer.player == seat)
@@ -540,21 +503,23 @@ fn live_pool(
             .filter(|id| !pinned.iter().any(|pin| pins(state, pin, *id)))
             .collect()
         }
-        DeferrableBranch::Discard => crate::game::casting::find_eligible_discard_targets(
-            state,
-            seat,
-            source,
-            carrier.ability.context.granting_object,
-            None,
-        )
-        .into_iter()
-        .filter(|id| {
-            !carrier
-                .hidden_discards
-                .iter()
-                .any(|(chooser, pin)| *chooser == seat && pins(state, pin, *id))
-        })
-        .collect(),
+        SingleChoicePayment::DiscardOneChosen => {
+            crate::game::casting::find_eligible_discard_targets(
+                state,
+                seat,
+                source,
+                carrier.ability.context.granting_object,
+                None,
+            )
+            .into_iter()
+            .filter(|id| {
+                !collection
+                    .hidden_discards
+                    .iter()
+                    .any(|(chooser, pin)| *chooser == seat && pins(state, pin, *id))
+            })
+            .collect()
+        }
     }
 }
 
@@ -583,10 +548,13 @@ fn discard_pin_is_live(state: &GameState, seat: PlayerId, pin: &ObjectIncarnatio
             .is_some_and(|object| object.zone == Zone::Hand && object.owner == seat)
 }
 
-/// CR 101.4 + CR 608.2f: perform every chosen action of a completed poll
-/// together. The carrier has already been taken. Sacrifices happen first, then
-/// one discard of every chosen card, then one unpaid instance per decline, in
-/// APNAP seat order.
+/// CR 101.4 + CR 614.1 + CR 608.2f: perform every chosen action of a completed
+/// poll together. The carrier has already been taken. Discards happen first,
+/// then one unpaid instance per decline, and the sacrifice batch last, each step
+/// flat at constant depth (CR 614.1: replacement effects such as Rest in Peace or
+/// Platinum Emperion apply to every action of the simultaneous event, including
+/// those of permanents sacrificed in it). The events of completed steps are held
+/// until the whole delivery is done (CR 603.10).
 ///
 /// CR 118.12 + CR 118.12a: "unless" reads the choice, not the event. A pick
 /// voided since it was chosen (it left the battlefield or the hand and is a new
@@ -594,123 +562,282 @@ fn discard_pin_is_live(state: &GameState, seat: PlayerId, pin: &ObjectIncarnatio
 /// the choice met CR 118.3 when it was made.
 pub(crate) fn deliver(
     state: &mut GameState,
-    carrier: PendingSimultaneousUnless,
+    mut carrier: PendingSimultaneousUnless,
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<DeliveryOutcome, EffectError> {
-    let prior = std::mem::replace(
-        &mut state.current_trigger_event,
-        carrier.trigger_event.clone(),
-    );
-    let outcome = deliver_choices(state, carrier, events, depth);
-    state.current_trigger_event = prior;
-    outcome
+    let SimultaneousUnlessPhase::Collecting(collection) = &carrier.phase else {
+        return Err(EffectError::InvalidParam(
+            "CR 101.4: a delivery was asked to deliver twice".to_string(),
+        ));
+    };
+    let delivery = begin_delivery(collection);
+    carrier.phase = SimultaneousUnlessPhase::Delivering(delivery);
+    // Nothing of the delivery is in the buffer yet.
+    let span_start = events.len();
+    drive_delivery(state, carrier, events, depth, span_start)
 }
 
-fn deliver_choices(
-    state: &mut GameState,
-    carrier: PendingSimultaneousUnless,
-    events: &mut Vec<GameEvent>,
-    depth: u32,
-) -> Result<DeliveryOutcome, EffectError> {
-    let start = events.len();
-    let template = *carrier.ability;
-    let controller = template.controller;
-
-    let mut sacrifices: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
-    let mut unpaid: Vec<PlayerId> = Vec::new();
-    for SimultaneousUnlessSeatAnswer { player, answer } in carrier.answers {
+/// CR 101.4 + CR 614.1: the delivery cursor of a completed collection: every
+/// answer in answer order, which is APNAP order.
+fn begin_delivery(collection: &SimultaneousUnlessCollection) -> SimultaneousUnlessDelivery {
+    let mut unpaid = Vec::new();
+    let mut sacrifices = Vec::new();
+    for SimultaneousUnlessSeatAnswer { player, answer } in &collection.answers {
         match answer {
-            SimultaneousUnlessAnswer::Declined => unpaid.push(player),
+            SimultaneousUnlessAnswer::Declined => unpaid.push(*player),
+            // Liveness is checked when the batch is performed.
             SimultaneousUnlessAnswer::Sacrifice { permanent } => {
-                if !sacrifice_pin_is_live(state, player, &permanent) {
-                    continue;
-                }
-                match sacrifices.last_mut() {
-                    Some((seat, chosen)) if *seat == player => chosen.push(permanent.object_id),
-                    _ => sacrifices.push((player, vec![permanent.object_id])),
-                }
+                sacrifices.push((*player, *permanent));
             }
             // The card itself is in `hidden_discards`.
             SimultaneousUnlessAnswer::Discard => {}
         }
     }
-    let discards: Vec<TargetRef> = carrier
-        .hidden_discards
-        .iter()
-        .filter(|(seat, pin)| discard_pin_is_live(state, *seat, pin))
-        .map(|(_, pin)| TargetRef::Object(pin.object_id))
-        .collect();
-
-    // CR 118.12: the discard node is a cost payment, so its discards are not
-    // an effect's (no Library-of-Leng-class replacement; the forced-discard
-    // muzzle belongs to the choice, #11091); each unpaid instance is the
-    // template bound to its own seat.
-    let nodes = (!discards.is_empty())
-        .then(|| {
-            super::scoped_discard::scoped_discard_delivery_node(
-                &template,
-                discards,
-                DiscardCause::Cost,
-            )
-        })
-        .into_iter()
-        .chain(
-            unpaid
-                .into_iter()
-                .map(|seat| super::bind_scoped_seat(&template, controller, seat)),
-        );
-    let tail = chain_in_order(nodes);
-
-    if !sacrifices.is_empty() {
-        // CR 701.21a: each player sacrifices the permanents it chose, as one
-        // simultaneous batch.
-        let completion = PendingPlayerScopeSacrificeCompletion {
-            effect_kind: Some(EffectKind::Sacrifice),
-            ..PendingPlayerScopeSacrificeCompletion::default()
-        };
-        match super::perform_player_scope_sacrifices(
-            state,
-            &template,
-            sacrifices,
-            Some(completion),
-            events,
-        )? {
-            // CR 616.1: the rest of the delivery runs once the sacrifice batch
-            // resumes; its resume drains the continuation.
-            super::PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
-                if let Some(tail) = tail {
-                    super::prepend_to_pending_continuation(state, tail);
-                }
-                return Ok(DeliveryOutcome::Paused);
-            }
-            super::PlayerScopeSacrificePerformOutcome::Completed { .. } => {}
-        }
+    SimultaneousUnlessDelivery {
+        discards: collection.hidden_discards.clone(),
+        unpaid,
+        sacrifices,
+        held_events: Vec::new(),
     }
-    if let Some(tail) = tail {
-        super::resolve_unpaid_unless_ability_chain(state, &tail, events, depth)?;
-    }
-    Ok(DeliveryOutcome::Delivered {
-        span: start..events.len(),
-    })
 }
 
-/// CR 608.2c: `nodes` as one chain, each node the next printed instruction of
-/// the one before it.
-fn chain_in_order(
-    nodes: impl DoubleEndedIterator<Item = ResolvedAbility>,
-) -> Option<ResolvedAbility> {
-    nodes.rev().fold(None, |next, mut node| {
-        if let Some(mut next) = next {
-            next.sub_link = SubAbilityLink::SequentialSibling;
-            node.sub_ability = Some(Box::new(next));
+/// The single entry that runs a delivery's remaining steps: the start, an
+/// answer's settle, a departure's settle or resume, and the resume hook. It owns
+/// the installation and restoration of the poll's trigger event. `span_start` is
+/// the first index of `events` that belongs to this delivery.
+pub(crate) fn drive_delivery(
+    state: &mut GameState,
+    carrier: PendingSimultaneousUnless,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    span_start: usize,
+) -> Result<DeliveryOutcome, EffectError> {
+    let prior = std::mem::replace(
+        &mut state.current_trigger_event,
+        carrier.trigger_event.clone(),
+    );
+    let outcome = drive_delivery_steps(state, carrier, events, depth, span_start);
+    state.current_trigger_event = prior;
+    outcome
+}
+
+fn drive_delivery_steps(
+    state: &mut GameState,
+    mut carrier: PendingSimultaneousUnless,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    span_start: usize,
+) -> Result<DeliveryOutcome, EffectError> {
+    let SimultaneousUnlessPhase::Delivering(delivery) = &mut carrier.phase else {
+        return Err(EffectError::InvalidParam(
+            "CR 101.4: only a delivering poll has steps to drive".to_string(),
+        ));
+    };
+    let mut delivery = std::mem::take(delivery);
+    // Mid-resolution convention: skips the depth-0 top-level reset.
+    let step_depth = depth.max(1);
+    let template = (*carrier.ability).clone();
+    let controller = template.controller;
+
+    // CR 701.9a + CR 118.12a + CR 400.7: discards, one card per step. The
+    // discard node is a cost payment, so its discards are not an effect's (no
+    // Library-of-Leng-class replacement; the forced-discard muzzle belongs to
+    // the choice, #11091). A pick voided since it was chosen is skipped and its
+    // instance is still paid.
+    while !delivery.discards.is_empty() {
+        let (seat, pin) = delivery.discards.remove(0);
+        if !crate::game::players::is_alive(state, seat) || !discard_pin_is_live(state, seat, &pin) {
+            continue;
         }
-        Some(node)
-    })
+        let node = super::scoped_discard::scoped_discard_delivery_node(
+            &template,
+            vec![TargetRef::Object(pin.object_id)],
+            DiscardCause::Cost,
+        );
+        let continuations_before = ability_continuation_frames(state);
+        super::resolve_unpaid_unless_ability_chain(state, &node, events, step_depth)?;
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(park(
+                state,
+                carrier,
+                delivery,
+                events,
+                span_start,
+                continuations_before,
+            ));
+        }
+    }
+    // CR 118.12a: unpaid instances, each its own life-loss event.
+    while !delivery.unpaid.is_empty() {
+        let seat = delivery.unpaid.remove(0);
+        // CR 800.4a: a departed seat loses nothing.
+        if !crate::game::players::is_alive(state, seat) {
+            continue;
+        }
+        let node = super::bind_scoped_seat(&template, controller, seat);
+        let continuations_before = ability_continuation_frames(state);
+        super::resolve_unpaid_unless_ability_chain(state, &node, events, step_depth)?;
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Ok(park(
+                state,
+                carrier,
+                delivery,
+                events,
+                span_start,
+                continuations_before,
+            ));
+        }
+    }
+
+    // CR 701.21a + CR 101.4: the sacrifice batch, last. Its sacrifices remove
+    // the only permanents the earlier steps could have depended on. The held
+    // events seed the batch's own deferred span, so they are released with it.
+    let mut held = std::mem::take(&mut delivery.held_events);
+    held.extend(events.drain(span_start..));
+    let sacrifices = group_live_sacrifices(state, &delivery.sacrifices);
+    if sacrifices.is_empty() {
+        events.splice(span_start..span_start, held);
+        return Ok(DeliveryOutcome::Delivered {
+            span: span_start..events.len(),
+        });
+    }
+    let completion = PendingPlayerScopeSacrificeCompletion {
+        effect_kind: Some(EffectKind::Sacrifice),
+        deferred_events: held,
+        ..PendingPlayerScopeSacrificeCompletion::default()
+    };
+    match super::perform_player_scope_sacrifices(
+        state,
+        &template,
+        sacrifices,
+        Some(completion),
+        events,
+    )? {
+        super::PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
+            Ok(DeliveryOutcome::Paused)
+        }
+        super::PlayerScopeSacrificePerformOutcome::Completed { .. } => {
+            Ok(DeliveryOutcome::Delivered {
+                span: span_start..events.len(),
+            })
+        }
+    }
+}
+
+/// CR 400.7 + CR 701.21a + CR 118.12a: the chosen permanents that are still the
+/// objects chosen, on the battlefield, under the player who chose them, grouped
+/// by consecutive seat. A skipped pick's instance still counts as paid, and a
+/// departed seat sacrifices nothing (CR 800.4a).
+fn group_live_sacrifices(
+    state: &GameState,
+    sacrifices: &[(PlayerId, ObjectIncarnationRef)],
+) -> Vec<(PlayerId, Vec<ObjectId>)> {
+    let mut grouped: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
+    for (seat, pin) in sacrifices {
+        if !crate::game::players::is_alive(state, *seat)
+            || !sacrifice_pin_is_live(state, *seat, pin)
+        {
+            continue;
+        }
+        match grouped.last_mut() {
+            Some((last, chosen)) if last == seat => chosen.push(pin.object_id),
+            _ => grouped.push((*seat, vec![pin.object_id])),
+        }
+    }
+    grouped
+}
+
+/// How many child ability continuations are parked.
+fn ability_continuation_frames(state: &GameState) -> usize {
+    state
+        .resolution_stack
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::AbilityContinuation(_)
+            )
+        })
+        .count()
+}
+
+/// CR 616.1: a step paused on a replacement choice. The carrier, with the
+/// remaining steps, goes back into the state, and the delivery's completed
+/// events are held with it.
+fn park(
+    state: &mut GameState,
+    mut carrier: PendingSimultaneousUnless,
+    mut delivery: SimultaneousUnlessDelivery,
+    events: &mut Vec<GameEvent>,
+    span_start: usize,
+    continuations_before: usize,
+) -> DeliveryOutcome {
+    // CR 603.10 + CR 101.4: completed steps are part of the one simultaneous
+    // action; hold them so no pause-time collector sees them before the
+    // delivery's sacrifices have happened.
+    delivery.held_events.extend(events.drain(span_start..));
+    carrier.phase = SimultaneousUnlessPhase::Delivering(delivery);
+    state.pending_simultaneous_unless = Some(Box::new(carrier));
+    // Invariants the resume hook's early return relies on (`delivery_may_resume`).
+    debug_assert!(
+        !matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "a parked delivery's wait is its step's prompt"
+    );
+    debug_assert_eq!(
+        ability_continuation_frames(state),
+        continuations_before,
+        "a delivery step left a child ability continuation"
+    );
+    debug_assert!(
+        state.resolution_stack.active_discard().is_none(),
+        "a delivery step left a discard frame"
+    );
+    DeliveryOutcome::Paused
+}
+
+/// Whether a delivery is parked on a step's prompt.
+pub(crate) fn delivery_is_parked(state: &GameState) -> bool {
+    state
+        .pending_simultaneous_unless
+        .as_deref()
+        .is_some_and(|carrier| carrier.delivery().is_some())
+}
+
+/// CR 101.4 + CR 608.2c: whether the parked step has fully settled, so the
+/// delivery's remaining steps may run: the wait is priority and nothing the step
+/// started is still in flight.
+pub(crate) fn delivery_may_resume(state: &GameState) -> bool {
+    delivery_is_parked(state)
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_replacement.is_none()
+        && state.pending_discard_batch.is_none()
+        && state.pending_player_scope_sacrifice_choice.is_none()
+        && state.active_change_zone_frame().is_none()
+        && state.active_post_replacement_drains().is_none()
+        && state.resolution_stack.active_discard().is_none()
+}
+
+/// CR 101.4 + CR 614.1: run the remaining steps of a parked delivery. The
+/// carrier is consumed, so a failed step can never re-run (the departure
+/// settle's convention).
+pub(crate) fn resume_parked_delivery(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(carrier) = state.pending_simultaneous_unless.take() else {
+        return;
+    };
+    // The resume runs in the action that answered the paused step's prompt, whose
+    // buffer begins with that step's own work.
+    if let Err(error) = drive_delivery(state, *carrier, events, 1, 0) {
+        tracing::error!(%error, "a parked simultaneous unless delivery failed to resume");
+        debug_assert!(
+            false,
+            "a parked simultaneous unless delivery failed to resume: {error}"
+        );
+    }
 }
 
 /// What a departure did to an open poll (`reconcile_after_departure`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SimultaneousUnlessReconciliation {
     /// No carrier, or the open prompt still stands for a living seat (the
     /// carrier may have been pruned).
@@ -724,20 +851,34 @@ pub(crate) enum SimultaneousUnlessReconciliation {
     Prompted(PlayerId),
     /// Collection is complete and the caller delivers it.
     Settle,
+    /// CR 800.4f: departed seats' remaining delivery entries were dropped; the
+    /// paused step's prompt still stands for a chooser in the game.
+    DeliveryParked,
+    /// CR 800.4a + CR 701.9a: the paused step's chooser left the game, so that
+    /// step will not happen (its card left the game with its owner and was never
+    /// discarded). The cursor is still in `state`; the caller resumes it.
+    DeliveryStepAbandoned,
+    /// CR 800.4a: the delivery's controller left; the resolving ability ceased to
+    /// exist, so its remaining steps don't happen. The held events (which did
+    /// happen) were appended to `events` from `released_from`.
+    DeliveryRetired { released_from: usize },
 }
 
 /// CR 800.4a + CR 800.4f + CR 101.4: reconcile an open poll with the players
 /// still in the game. A departed seat pays nothing and chooses nothing: its
 /// remaining turn, its answers and its hidden picks are dropped. A departed
 /// controller's resolving ability ceases to exist.
-pub(crate) fn reconcile_after_departure(state: &mut GameState) -> SimultaneousUnlessReconciliation {
-    let Some(controller) = state
-        .pending_simultaneous_unless
-        .as_deref()
-        .map(|carrier| carrier.ability.controller)
-    else {
+pub(crate) fn reconcile_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> SimultaneousUnlessReconciliation {
+    let Some(carrier) = state.pending_simultaneous_unless.as_deref() else {
         return SimultaneousUnlessReconciliation::Unchanged;
     };
+    let controller = carrier.ability.controller;
+    if carrier.delivery().is_some() {
+        return reconcile_delivery_after_departure(state, events);
+    }
     if !crate::game::players::is_alive(state, controller) {
         retire_after_controller_left(state);
         return SimultaneousUnlessReconciliation::Retired;
@@ -746,23 +887,93 @@ pub(crate) fn reconcile_after_departure(state: &mut GameState) -> SimultaneousUn
         .pending_simultaneous_unless
         .take()
         .expect("checked above");
+    let instances = carrier.instances;
     let alive = |player: PlayerId| crate::game::players::is_alive(state, player);
-    carrier.remaining_players.retain(|player| alive(*player));
-    carrier.answers.retain(|answer| alive(answer.player));
-    carrier
-        .hidden_discards
-        .retain(|(chooser, _)| alive(*chooser));
-    let chooser = carrier.current_player;
-    let chooser_alive = alive(chooser);
-    if !chooser_alive {
-        // CR 800.4f: the departed chooser answers no further instance.
-        carrier.next_instance = carrier.instances;
-    }
+    let (chooser, chooser_alive) = {
+        let collection = carrier
+            .collection_mut()
+            .expect("a poll that is not delivering is collecting");
+        collection.remaining_players.retain(|player| alive(*player));
+        collection.answers.retain(|answer| alive(answer.player));
+        collection
+            .hidden_discards
+            .retain(|(chooser, _)| alive(*chooser));
+        let chooser = collection.current_player;
+        let chooser_alive = alive(chooser);
+        if !chooser_alive {
+            // CR 800.4f: the departed chooser answers no further instance.
+            collection.next_instance = instances;
+        }
+        (chooser, chooser_alive)
+    };
     state.pending_simultaneous_unless = Some(carrier);
     if chooser_alive {
         return refresh_live_prompt(state).unwrap_or(SimultaneousUnlessReconciliation::Unchanged);
     }
     walk_after_departure(state, chooser)
+}
+
+/// CR 800.4a + CR 800.4f + CR 101.4: reconcile a delivery parked on a step's
+/// prompt with the players still in the game.
+fn reconcile_delivery_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> SimultaneousUnlessReconciliation {
+    let mut carrier = state
+        .pending_simultaneous_unless
+        .take()
+        .expect("a parked delivery");
+    let controller = carrier.ability.controller;
+    let source_id = carrier.ability.source_id;
+    let mut step_abandoned = false;
+    // The teardown clears `pending_replacement` only when the leaver is the
+    // latched chooser of the live CR 616.1 choice; a paused step whose
+    // replacement choice was abandoned this way has lost its step.
+    if state.pending_replacement.is_none() {
+        // CR 800.4a + CR 701.9a: the paused card left the game with its owner;
+        // it was not discarded. The batch's chooser is gone and the teardown
+        // cleared its choice. Without this the batch would never be taken again.
+        let stale_batch = state.pending_discard_batch.as_ref().is_some_and(|batch| {
+            batch.source_id == source_id
+                && batch.cause == DiscardCause::Cost
+                && batch.fan_out.is_none()
+                && !crate::game::players::is_alive(state, batch.player)
+        });
+        if stale_batch {
+            state.pending_discard_batch = None;
+            step_abandoned = true;
+        }
+        // A paused life-loss step has no batch: its wait still names the
+        // departed chooser.
+        if let WaitingFor::ReplacementChoice { player, .. } = &state.waiting_for {
+            if !crate::game::players::is_alive(state, *player) {
+                step_abandoned = true;
+            }
+        }
+    }
+    if !crate::game::players::is_alive(state, controller) {
+        // CR 800.4a: the resolving ability ceased to exist, so the remaining
+        // steps don't happen; the events that did happen are released.
+        let released_from = events.len();
+        if let Some(delivery) = carrier.delivery_mut() {
+            events.append(&mut delivery.held_events);
+        }
+        state.pending_simultaneous_unless = Some(carrier);
+        retire_after_controller_left(state);
+        return SimultaneousUnlessReconciliation::DeliveryRetired { released_from };
+    }
+    let alive = |player: PlayerId| crate::game::players::is_alive(state, player);
+    if let Some(delivery) = carrier.delivery_mut() {
+        delivery.discards.retain(|(seat, _)| alive(*seat));
+        delivery.unpaid.retain(|seat| alive(*seat));
+        delivery.sacrifices.retain(|(seat, _)| alive(*seat));
+    }
+    state.pending_simultaneous_unless = Some(carrier);
+    if step_abandoned {
+        SimultaneousUnlessReconciliation::DeliveryStepAbandoned
+    } else {
+        SimultaneousUnlessReconciliation::DeliveryParked
+    }
 }
 
 /// Continue the walk after a departure changed the poll and report where it
@@ -776,7 +987,8 @@ fn walk_after_departure(
             state
                 .pending_simultaneous_unless
                 .as_deref()
-                .map_or(fallback, |carrier| carrier.current_player),
+                .and_then(PendingSimultaneousUnless::collection)
+                .map_or(fallback, |collection| collection.current_player),
         ),
         WalkOutcome::Complete => SimultaneousUnlessReconciliation::Settle,
     }
@@ -791,26 +1003,27 @@ fn walk_after_departure(
 /// `None` when the prompt still matches the live board (or is not the poll's).
 fn refresh_live_prompt(state: &mut GameState) -> Option<SimultaneousUnlessReconciliation> {
     let carrier = state.pending_simultaneous_unless.as_deref()?;
+    let collection = carrier.collection()?;
     if !carrier_prompt_is_live(state, carrier) {
         return None;
     }
-    let chooser = carrier.current_player;
+    let chooser = collection.current_player;
     let bound = seat_instruction(carrier, chooser);
     let stale = match &state.waiting_for {
         WaitingFor::WardSacrificeChoice { permanents, .. } => {
-            let live = pick_pool(state, carrier, PickKind::Sacrifice);
+            let live = pick_pool(state, carrier, collection, PickKind::Sacrifice);
             (!same_members(permanents, &live)).then_some(StalePrompt::Pick(live))
         }
         WaitingFor::WardDiscardChoice { cards, .. } => {
-            let live = pick_pool(state, carrier, PickKind::Discard);
+            let live = pick_pool(state, carrier, collection, PickKind::Discard);
             (!same_members(cards, &live)).then_some(StalePrompt::Pick(live))
         }
         WaitingFor::UnlessPayment { cost, .. } => {
-            let available = available_branches(state, carrier, &bound);
+            let available = available_branches(state, carrier, collection, &bound);
             (!same_members(std::slice::from_ref(cost), &available)).then_some(StalePrompt::Branches)
         }
         WaitingFor::UnlessPaymentChooseCost { costs, .. } => {
-            let available = available_branches(state, carrier, &bound);
+            let available = available_branches(state, carrier, collection, &bound);
             (!same_members(costs, &available)).then_some(StalePrompt::Branches)
         }
         _ => None,
@@ -851,16 +1064,17 @@ enum StalePrompt {
 fn pick_pool(
     state: &GameState,
     carrier: &PendingSimultaneousUnless,
+    collection: &SimultaneousUnlessCollection,
     kind: PickKind,
 ) -> Vec<ObjectId> {
-    let seat = carrier.current_player;
+    let seat = collection.current_player;
     let mut pool: Vec<ObjectId> = Vec::new();
-    for (_, branch) in deferrable_branches(&carrier.unless_pay.cost)
+    for (_, branch) in single_choice_payment_branches(&carrier.unless_pay.cost)
         .into_iter()
         .flatten()
         .filter(|(_, branch)| kind.matches(*branch))
     {
-        for id in live_pool(state, carrier, seat, branch) {
+        for id in live_pool(state, carrier, collection, seat, branch) {
             if !pool.contains(&id) {
                 pool.push(id);
             }
@@ -903,8 +1117,12 @@ fn retire_after_controller_left(state: &mut GameState) {
     }
 }
 
-/// Whether the live wait is the poll's own prompt.
+/// Whether the live wait is the collecting poll's own prompt. A delivering poll
+/// owns no prompt of its own: its wait is a replacement choice.
 fn carrier_prompt_is_live(state: &GameState, carrier: &PendingSimultaneousUnless) -> bool {
+    let Some(collection) = carrier.collection() else {
+        return false;
+    };
     match &state.waiting_for {
         WaitingFor::UnlessPayment {
             player,
@@ -926,7 +1144,7 @@ fn carrier_prompt_is_live(state: &GameState, carrier: &PendingSimultaneousUnless
             pending_effect,
             ..
         } => {
-            *player == carrier.current_player
+            *player == collection.current_player
                 && pending_effect.source_id == carrier.ability.source_id
         }
         _ => false,

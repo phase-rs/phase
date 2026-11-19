@@ -44953,8 +44953,9 @@ fn for_each_of_those_permanents_population_repeat_is_simultaneous_instances() {
     assert_repeat_timing_invariant(execute);
 }
 
-/// CR 608.2e: "investigate twice" and "Investigate three times." are counted
-/// repetitions of a whole instruction, not a for-each instance set, so the
+/// CR 608.2c + CR 701.16a: "investigate twice" creates one Clue, then another.
+/// They are counted repetitions of a whole instruction, not a for-each instance
+/// set, so the
 /// suffix producer stays `Sequential` (a stamp at the merge would yield
 /// `SimultaneousInstances`).
 #[test]

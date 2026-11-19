@@ -7075,7 +7075,7 @@ pub struct PendingPlayerScopeChoice {
 /// instance before the next player starts; nothing chosen moves and no life is
 /// lost until every answer is in, and then every action happens together
 /// (CR 608.2f). Owned by `effects::simultaneous_unless`.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PendingSimultaneousUnless {
     /// Per-instance template: built by `split_player_scope_chain`, so
     /// `player_scope = None`; `repeat_for = None`; `unless_pay = None`. Every
@@ -7088,6 +7088,32 @@ pub struct PendingSimultaneousUnless {
     pub unless_pay: crate::types::ability::UnlessPayModifier,
     /// CR 608.2h: the number of instances, fixed once when the poll began.
     pub instances: u32,
+    /// Whether the poll is still collecting answers or is performing them.
+    pub phase: SimultaneousUnlessPhase,
+    /// The resolving trigger's event, installed again for every prompt and for
+    /// the delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+    /// CR 608.2c: binds the carrier to the resolution that wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_entry: Option<ObjectId>,
+}
+
+/// Where a choose-all-then-act unless poll is: the single authority for the
+/// collection fields and the delivery cursor (the same shape as
+/// [`PendingScopedLibrarySearch::phase`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SimultaneousUnlessPhase {
+    /// CR 101.4: players are still choosing in APNAP order.
+    Collecting(SimultaneousUnlessCollection),
+    /// CR 101.4 + CR 614.1: every choice is made; the actions are being performed.
+    Delivering(SimultaneousUnlessDelivery),
+}
+
+/// CR 101.4: the answers recorded so far by a collecting poll.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimultaneousUnlessCollection {
     /// The seat answering now.
     pub current_player: PlayerId,
     /// The instance `current_player` answers next (0-based).
@@ -7100,13 +7126,135 @@ pub struct PendingSimultaneousUnless {
     /// to the incarnation they had when chosen (CR 400.7). They stay in hand,
     /// unrevealed, until the poll is delivered; a viewer sees only its own.
     pub hidden_discards: Vec<(PlayerId, ObjectIncarnationRef)>,
-    /// The resolving trigger's event, installed again for every prompt and for
-    /// the delivery.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger_event: Option<GameEvent>,
-    /// CR 608.2c: binds the carrier to the resolution that wrote it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolving_entry: Option<ObjectId>,
+}
+
+/// CR 101.4 + CR 614.1: the cursor of a poll whose answers are being performed.
+/// Discards come first, then unpaid life losses, then the sacrifice batch last,
+/// so every earlier action sees the battlefield as it was when the players chose.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimultaneousUnlessDelivery {
+    /// CR 101.4a + CR 400.7: discard picks not yet delivered, APNAP order, pinned
+    /// to the incarnation chosen. Projected only to the chooser.
+    pub discards: Vec<(PlayerId, ObjectIncarnationRef)>,
+    /// CR 118.12a: one entry per unpaid instance not yet delivered, APNAP order.
+    pub unpaid: Vec<PlayerId>,
+    /// CR 701.21a + CR 400.7: the chosen permanents, APNAP order, pinned. Public.
+    pub sacrifices: Vec<(PlayerId, ObjectIncarnationRef)>,
+    /// CR 603.10 + CR 101.4: events of completed steps, held across a pause until
+    /// the whole delivery completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_events: Vec<GameEvent>,
+}
+
+#[derive(serde::Deserialize)]
+struct PendingSimultaneousUnlessWire {
+    ability: Box<ResolvedAbility>,
+    unless_pay: crate::types::ability::UnlessPayModifier,
+    instances: u32,
+    phase: SimultaneousUnlessPhase,
+    #[serde(default)]
+    trigger_event: Option<GameEvent>,
+    #[serde(default)]
+    resolving_entry: Option<ObjectId>,
+}
+
+impl<'de> serde::Deserialize<'de> for PendingSimultaneousUnless {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PendingSimultaneousUnlessWire::deserialize(deserializer)?;
+        let valid = match &wire.phase {
+            SimultaneousUnlessPhase::Collecting(collection) => {
+                let mut seen_remaining = HashSet::new();
+                let remaining_valid = collection.remaining_players.iter().all(|player| {
+                    *player != collection.current_player && seen_remaining.insert(*player)
+                });
+                let mut answers_by_player: HashMap<PlayerId, u32> = HashMap::new();
+                let mut discards_by_player: HashMap<PlayerId, u32> = HashMap::new();
+                for answer in &collection.answers {
+                    *answers_by_player.entry(answer.player).or_default() += 1;
+                    if matches!(answer.answer, SimultaneousUnlessAnswer::Discard) {
+                        *discards_by_player.entry(answer.player).or_default() += 1;
+                    }
+                }
+                // A viewer projection keeps only the viewer's own hidden picks, so
+                // a chooser may hold fewer picks than `Discard` answers, never more.
+                let mut hidden_by_player: HashMap<PlayerId, u32> = HashMap::new();
+                for (player, _) in &collection.hidden_discards {
+                    *hidden_by_player.entry(*player).or_default() += 1;
+                }
+                remaining_valid
+                    && collection.next_instance <= wire.instances
+                    && answers_by_player
+                        .values()
+                        .all(|count| *count <= wire.instances)
+                    && hidden_by_player.iter().all(|(player, count)| {
+                        discards_by_player
+                            .get(player)
+                            .is_some_and(|answered| count <= answered)
+                    })
+            }
+            SimultaneousUnlessPhase::Delivering(delivery) => {
+                let mut discard_ids = HashSet::new();
+                let mut sacrifice_ids = HashSet::new();
+                delivery
+                    .discards
+                    .iter()
+                    .all(|(_, pin)| discard_ids.insert(pin.object_id))
+                    && delivery
+                        .sacrifices
+                        .iter()
+                        .all(|(_, pin)| sacrifice_ids.insert(pin.object_id))
+                    && discard_ids.is_disjoint(&sacrifice_ids)
+            }
+        };
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "invalid simultaneous unless phase invariants",
+            ));
+        }
+        Ok(Self {
+            ability: wire.ability,
+            unless_pay: wire.unless_pay,
+            instances: wire.instances,
+            phase: wire.phase,
+            trigger_event: wire.trigger_event,
+            resolving_entry: wire.resolving_entry,
+        })
+    }
+}
+
+impl PendingSimultaneousUnless {
+    /// The collection fields, while the poll is still collecting.
+    pub fn collection(&self) -> Option<&SimultaneousUnlessCollection> {
+        match &self.phase {
+            SimultaneousUnlessPhase::Collecting(collection) => Some(collection),
+            SimultaneousUnlessPhase::Delivering(_) => None,
+        }
+    }
+
+    pub fn collection_mut(&mut self) -> Option<&mut SimultaneousUnlessCollection> {
+        match &mut self.phase {
+            SimultaneousUnlessPhase::Collecting(collection) => Some(collection),
+            SimultaneousUnlessPhase::Delivering(_) => None,
+        }
+    }
+
+    /// The delivery cursor, once every answer is in.
+    pub fn delivery(&self) -> Option<&SimultaneousUnlessDelivery> {
+        match &self.phase {
+            SimultaneousUnlessPhase::Delivering(delivery) => Some(delivery),
+            SimultaneousUnlessPhase::Collecting(_) => None,
+        }
+    }
+
+    pub fn delivery_mut(&mut self) -> Option<&mut SimultaneousUnlessDelivery> {
+        match &mut self.phase {
+            SimultaneousUnlessPhase::Delivering(delivery) => Some(delivery),
+            SimultaneousUnlessPhase::Collecting(_) => None,
+        }
+    }
 }
 
 /// One recorded answer of a [`PendingSimultaneousUnless`] poll.
@@ -70741,11 +70889,13 @@ mod restored_exact_attack_authority_tests {
                             payer: crate::types::ability::TargetFilter::ScopedPlayer,
                         },
                         instances: 1,
-                        current_player: P0,
-                        next_instance: 0,
-                        remaining_players: vec![],
-                        answers: vec![],
-                        hidden_discards: vec![],
+                        phase: SimultaneousUnlessPhase::Collecting(SimultaneousUnlessCollection {
+                            current_player: P0,
+                            next_instance: 0,
+                            remaining_players: vec![],
+                            answers: vec![],
+                            hidden_discards: vec![],
+                        }),
                         trigger_event: trigger_event.clone(),
                         resolving_entry: None,
                     }));

@@ -27,9 +27,9 @@ fn torment_repeat_x_applies_lose_life_each_iteration() {
         "Torment must carry repeat_for X, got {:?}",
         def.repeat_for
     );
-    // CR 608.2e: "Repeat the following process X times" is a series of separate
-    // steps (the ruling: each repetition is done separately), never the
-    // for-each instance set, and the parser-to-resolver transfer keeps it so.
+    // CR 608.2c: Torment of Hailfire's ruling: "Each repetition through this
+    // process is done separately." The count is never the for-each instance
+    // set, and the parser-to-resolver transfer keeps it so.
     assert_eq!(def.repeat_timing, RepeatForTiming::Sequential);
     assert_eq!(
         build_resolved_from_def(&def, ObjectId(900), P0).repeat_timing,
@@ -104,11 +104,10 @@ fn torment_repeat_x_declined_unless_choices_resume_each_iteration() {
     );
 }
 
-/// CR 608.2e (D3.14): Torment of Hailfire's "Repeat the following process X
-/// times" stays round by round, cast through the production pipeline: "Each
-/// repetition through this process is done separately", so the card P1 chose
-/// to discard on the first repetition is in the graveyard before the second
-/// repetition's prompt.
+/// CR 608.2c: Torment of Hailfire's ruling: "Each repetition through this
+/// process is done separately." Cast through the production pipeline, the card
+/// P1 chose to discard on the first repetition is in the graveyard before the
+/// second repetition's prompt.
 #[test]
 fn torment_cast_discards_each_round_before_the_next_prompt() {
     let mut scenario = GameScenario::new();

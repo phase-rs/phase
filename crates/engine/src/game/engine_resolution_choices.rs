@@ -447,9 +447,55 @@ pub(crate) fn settle_simultaneous_unless_after_departure(
     use super::elimination::DepartureResume;
     use effects::simultaneous_unless::{DeliveryOutcome, SimultaneousUnlessReconciliation};
 
-    match effects::simultaneous_unless::reconcile_after_departure(state) {
+    match effects::simultaneous_unless::reconcile_after_departure(state, events) {
         SimultaneousUnlessReconciliation::Unchanged | SimultaneousUnlessReconciliation::Retired => {
             Ok(DepartureResume::Settled)
+        }
+        // CR 800.4f: the paused step's prompt names a living chooser; its answer
+        // resumes the delivery through the continuation drain.
+        SimultaneousUnlessReconciliation::DeliveryParked => Ok(DepartureResume::Settled),
+        // CR 800.4a + CR 603.2 + CR 603.2c: the delivery's held events happened;
+        // they are collected once, since they were never in a buffer while held.
+        // A paused step whose chooser is still in the game keeps its prompt
+        // (CR 616.1 + CR 614.1: the event is already under way).
+        SimultaneousUnlessReconciliation::DeliveryRetired { released_from } => {
+            super::triggers::collect_departure_triggers_into_deferred(
+                state,
+                events,
+                released_from,
+                None,
+            );
+            Ok(DepartureResume::Settled)
+        }
+        SimultaneousUnlessReconciliation::DeliveryStepAbandoned => {
+            let carrier = state
+                .pending_simultaneous_unless
+                .take()
+                .expect("an abandoned step keeps its parked delivery");
+            // CR 117.2e + CR 117.3b + CR 800.4j: provisional, exactly as the
+            // `Settle` arm below; the abandoned step's prompt named a departed
+            // player.
+            set_priority(state, super::engine::living_priority_seat(state));
+            // The concession's own events precede the resume point and stay in
+            // its result; the delivery's span starts here.
+            let resume_at = events.len();
+            let outcome =
+                effects::simultaneous_unless::drive_delivery(state, *carrier, events, 0, resume_at)
+                    .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+            match outcome {
+                DeliveryOutcome::Delivered { span } => {
+                    super::triggers::collect_departure_triggers_into_deferred(
+                        state, events, span.start, None,
+                    );
+                    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        Ok(DepartureResume::ResolutionTail)
+                    } else {
+                        Ok(DepartureResume::Settled)
+                    }
+                }
+                // A later step's prompt names a living chooser.
+                DeliveryOutcome::Paused => Ok(DepartureResume::Settled),
+            }
         }
         SimultaneousUnlessReconciliation::Prompted(chooser) => {
             // CR 117.2e: the republished prompt is the wait; it names a living

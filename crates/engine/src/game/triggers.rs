@@ -50840,11 +50840,15 @@ pub mod tests {
             ability: template,
             unless_pay,
             instances: 2,
-            current_player: PlayerId(1),
-            next_instance: 0,
-            remaining_players: Vec::new(),
-            answers: Vec::new(),
-            hidden_discards: Vec::new(),
+            phase: crate::types::game_state::SimultaneousUnlessPhase::Collecting(
+                crate::types::game_state::SimultaneousUnlessCollection {
+                    current_player: PlayerId(1),
+                    next_instance: 0,
+                    remaining_players: Vec::new(),
+                    answers: Vec::new(),
+                    hidden_discards: Vec::new(),
+                },
+            ),
             trigger_event: None,
             resolving_entry: Some(entry.id),
         }

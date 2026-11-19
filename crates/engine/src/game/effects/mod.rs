@@ -1575,6 +1575,20 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             state, events,
         );
     }
+    // CR 101.4 + CR 614.1 + CR 608.2c: a choose-all-then-act delivery parked on
+    // a step's prompt resumes its remaining steps once that step has fully
+    // settled, and before any later instruction of its resolution runs.
+    if simultaneous_unless::delivery_is_parked(state) {
+        if simultaneous_unless::delivery_may_resume(state) {
+            simultaneous_unless::resume_parked_delivery(state, events);
+        }
+        // CR 608.2c: while the delivery is parked, no later instruction runs.
+        if simultaneous_unless::delivery_is_parked(state)
+            || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            return;
+        }
+    }
     // The continuation — the completed ChangeZone's chained downstream, or any
     // other parked chain — runs only once the inner iteration finished without
     // re-pausing on a further per-target replacement choice.

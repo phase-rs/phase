@@ -38902,8 +38902,7 @@ fn lower_copy_each_tracked_spell(
             inner: Box::new(members),
         }
     };
-    // CR 608.2e: the copy count is a number of separate copies, not a for-each
-    // instance set.
+    // CR 707.10: each copy is its own copy put onto the stack, so the copy count is a number of separate copies, not a for-each instance set.
     (clause, Some(RepeatCount::sequential(count)))
 }
 
@@ -50667,7 +50666,7 @@ fn parse_effect_chain_ir_body(
                 RepeatProcessOutcome::FixedCount(qty) => {
                     if let Some(first) = builder.clauses_mut().first_mut() {
                         first.repeat_for = Some(qty);
-                        // CR 608.2e: "repeat this process" is a series of separate steps.
+                        // CR 608.2c: the instructions are followed in the order written, so each repetition of the process completes before the next begins.
                         first.repeat_timing = RepeatForTiming::Sequential;
                     }
                 }
@@ -50680,7 +50679,7 @@ fn parse_effect_chain_ir_body(
                 RepeatProcessOutcome::CappedRepeat(qty) => {
                     if let [only] = builder.clauses_mut() {
                         only.repeat_for = Some(qty);
-                        // CR 608.2e: a capped repeat is a series of separate steps.
+                        // CR 608.2c: the instructions are followed in the order written, so each repetition of a capped repeat completes before the next begins.
                         only.repeat_timing = RepeatForTiming::Sequential;
                     } else {
                         builder
@@ -52174,9 +52173,7 @@ fn parse_effect_chain_ir_body(
         } else {
             (None, text)
         };
-        // CR 608.2e: every count merged here ("twice" / "N times", difference,
-        // pending) is a series of separate steps; only the for-each prefix peel
-        // above carries `SimultaneousInstances`.
+        // CR 608.2c: every count merged here ("twice" / "N times", difference, pending) repeats the instruction in the order written, one repetition after another; only the for-each prefix peel above carries `SimultaneousInstances`.
         let repeat_for = repeat_for
             .or(repeat_count.map(RepeatCount::sequential))
             // CR 608.2c: difference-repeat count detected after the leading

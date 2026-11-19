@@ -8981,6 +8981,13 @@ fn resume_pending_continuation_pass(
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
             effects::counters::resume_copy_target_entry_completions(state, events)?;
+            // CR 101.4 + CR 608.2c: a frame that retired in
+            // `resume_resolution_frames` (a post-replacement drain) may have
+            // been the last gate on a parked delivery; re-enter the drain so
+            // the delivery and then the later instructions resume.
+            if effects::simultaneous_unless::delivery_may_resume(state) {
+                effects::drain_pending_continuation(state, events);
+            }
         }
         resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;

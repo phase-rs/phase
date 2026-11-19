@@ -1453,9 +1453,7 @@ impl RepeatCount {
         }
     }
 
-    /// CR 608.2e: every other counted repeat ("repeat the following process",
-    /// "twice" / "N times", difference, lifted and copy counts) is a series of
-    /// separate steps.
+    /// CR 608.2c: each repetition is followed in the order written, completing before the next.
     pub(crate) fn sequential(count: QuantityExpr) -> Self {
         Self {
             count,

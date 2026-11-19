@@ -38395,7 +38395,7 @@ impl InstructionJoin {
 /// `SimultaneousInstances` with no count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum RepeatForTiming {
-    /// CR 608.2e: each iteration is a separate step, completed before the next
+    /// CR 608.2c: each iteration is followed in order, completing before the next
     /// begins. Every producer other than the for-each prefix peel stamps this:
     /// "repeat the following process", "twice" / "N times", difference counts,
     /// and lifted and copy counts.
@@ -49928,7 +49928,7 @@ mod tests {
         assert_eq!(ability, deserialized);
     }
 
-    /// CR 608.2c + CR 608.2e: the repeat timing is omitted at its default,
+    /// The repeat timing is omitted at its default,
     /// round-trips when `SimultaneousInstances`, and legacy JSON without the
     /// key reads `Sequential`.
     #[test]

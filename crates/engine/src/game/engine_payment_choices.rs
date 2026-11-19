@@ -1117,16 +1117,17 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
     let Some(modifier) = ability.unless_pay.as_ref() else {
         return false;
     };
-    let AbilityCost::Sacrifice(cost) = &modifier.cost else {
+    let Some(costs::SingleChoicePayment::SacrificeOne { .. }) =
+        costs::single_choice_payment(&modifier.cost)
+    else {
         return false;
     };
     // The scoped resolver owns the actual payer. Oracle lowering can preserve
     // an anaphoric "they" as `Player` before the outer player scope is applied.
     if !matches!(
-        (&modifier.payer, &cost.requirement, &ability.effect),
+        (&modifier.payer, &ability.effect),
         (
             TargetFilter::ScopedPlayer | TargetFilter::Player,
-            SacrificeRequirement::Count { count: 1 },
             Effect::Token {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 ..
@@ -1263,11 +1264,10 @@ fn handle_player_scope_token_unless_payment(
     if !pay {
         return finish_player_scope_token_unless_payment(state, player, false, events);
     }
-    let AbilityCost::Sacrifice(cost) = cost else {
-        unreachable!("aggregate parser gate admits only sacrifice costs")
-    };
-    let SacrificeRequirement::Count { count: 1 } = cost.requirement else {
-        unreachable!("aggregate parser gate admits exactly one sacrifice")
+    let Some(costs::SingleChoicePayment::SacrificeOne { target }) =
+        costs::single_choice_payment(&cost)
+    else {
+        unreachable!("admitted by begin_player_scope_token_unless_sacrifice")
     };
     let pending_effect = state
         .pending_player_scope_unless_payment
@@ -1276,7 +1276,7 @@ fn handle_player_scope_token_unless_payment(
         .pending_effect
         .clone();
     let eligible =
-        eligible_unless_sacrifice_permanents(state, player, pending_effect.source_id, &cost.target);
+        eligible_unless_sacrifice_permanents(state, player, pending_effect.source_id, target);
     if eligible.is_empty() {
         return finish_player_scope_token_unless_payment(state, player, false, events);
     }
@@ -3271,6 +3271,15 @@ pub(crate) fn eligible_unless_sacrifice_permanents(
                     obj.controller == player
                         && !obj.is_emblem
                         && crate::game::filter::matches_target_filter(state, **id, filter, &ctx)
+                        // CR 101.2: "can't" beats "can". A permanent that can't be
+                        // sacrificed can't pay a sacrifice cost (Alexios, Deimos of
+                        // Kosmos: "You also can't sacrifice it to pay a cost that
+                        // requires you to sacrifice a creature.").
+                        && !crate::game::static_abilities::object_has_static_other(
+                            state,
+                            **id,
+                            "CantBeSacrificed",
+                        )
                 })
                 .unwrap_or(false)
         })
@@ -3990,12 +3999,13 @@ fn settle_simultaneous_unless(
         // CR 603.2 + CR 603.3 + CR 616.1: a delivery paused on a replacement
         // choice after earlier chosen actions completed (a sacrifice before a
         // discard) leaves no priority wait, so the reducer epilogue runs no
-        // pipeline. This pipeline collects the triggers of the completed
-        // actions that no collector has claimed (a completed sacrifice batch's);
-        // a discard the paused discard node completed was collected and claimed
-        // by that node's park, so it is not collected again (CR 603.2c). The
-        // collected triggers wait in the deferred queue until a player would
-        // receive priority.
+        // pipeline. A delivery paused on a step's or the batch's CR 616.1
+        // choice holds its completed events
+        // (`SimultaneousUnlessDelivery.held_events` / the batch's
+        // `deferred_events`), so no pipeline collects them before the delivery
+        // completes (CR 603.10). This pipeline collects the triggers of the
+        // events that remain in the buffer. The collected triggers wait in the
+        // deferred queue until a player would receive priority.
         SettlePipeline::ReducerEpilogue { event_start } => {
             (!matches!(state.waiting_for, WaitingFor::Priority { .. })).then_some(event_start)
         }

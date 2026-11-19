@@ -3841,6 +3841,85 @@ pub(crate) fn cost_asks_for_mana(cost: &AbilityCost) -> bool {
     }
 }
 
+/// CR 118.12a: an unless cost paid by choosing exactly one object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SingleChoicePayment<'a> {
+    /// CR 701.21a: sacrifice one permanent matching `target`.
+    SacrificeOne { target: &'a TargetFilter },
+    /// CR 701.9a: discard one chosen card from hand, unfiltered.
+    DiscardOneChosen,
+}
+
+/// The closed classifier of single-choice unless costs. Every other cost kind
+/// is listed explicitly, so a new one fails closed at compile time.
+pub(crate) fn single_choice_payment(cost: &AbilityCost) -> Option<SingleChoicePayment<'_>> {
+    use crate::types::ability::{
+        CardSelectionMode, DiscardSelfScope, SacrificeCost, SacrificeRequirement,
+    };
+    match cost {
+        AbilityCost::Sacrifice(SacrificeCost {
+            target,
+            requirement: SacrificeRequirement::Count { count: 1 },
+        }) => Some(SingleChoicePayment::SacrificeOne { target }),
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        } => Some(SingleChoicePayment::DiscardOneChosen),
+        AbilityCost::Sacrifice(_)
+        | AbilityCost::Discard { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => None,
+    }
+}
+
+/// CR 118.12a: every branch of an unless cost with its classification, or
+/// `None` when any branch is not a single-choice payment. A disjunctive cost
+/// ("sacrifices a nonland permanent of their choice or discards a card") is
+/// single-choice only when each of its branches is.
+pub(crate) fn single_choice_payment_branches(
+    cost: &AbilityCost,
+) -> Option<Vec<(&AbilityCost, SingleChoicePayment<'_>)>> {
+    match cost {
+        AbilityCost::OneOf { costs } if !costs.is_empty() => costs
+            .iter()
+            .map(|branch| single_choice_payment(branch).map(|kind| (branch, kind)))
+            .collect(),
+        single => single_choice_payment(single).map(|kind| vec![(single, kind)]),
+    }
+}
+
 /// Adds each context-ref draw leaf under `cost` (nested `Composite`s
 /// flattened) to its drawer's running total.
 fn accumulate_draw_leg_totals(
@@ -4633,6 +4712,43 @@ mod tests {
         AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: amount },
         }
+    }
+
+    /// CR 118.12a: the single-choice classifier admits exactly the one-object
+    /// sacrifice and the one unfiltered chosen discard.
+    #[test]
+    fn single_choice_payment_classifies_one_object_costs() {
+        assert_eq!(
+            single_choice_payment(&sacrifice_one()),
+            Some(SingleChoicePayment::SacrificeOne {
+                target: &TargetFilter::Any
+            })
+        );
+        assert_eq!(
+            single_choice_payment(&discard_one()),
+            Some(SingleChoicePayment::DiscardOneChosen)
+        );
+        let sacrifice_two = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 2));
+        assert_eq!(single_choice_payment(&sacrifice_two), None);
+        let filtered_discard = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: Some(TargetFilter::Any),
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        assert_eq!(single_choice_payment(&filtered_discard), None);
+        assert_eq!(single_choice_payment(&pay_life(2)), None);
+        let one_of = AbilityCost::OneOf {
+            costs: vec![sacrifice_one(), discard_one()],
+        };
+        assert_eq!(
+            single_choice_payment_branches(&one_of).map(|branches| branches.len()),
+            Some(2)
+        );
+        let mixed = AbilityCost::OneOf {
+            costs: vec![sacrifice_one(), pay_life(2)],
+        };
+        assert!(single_choice_payment_branches(&mixed).is_none());
     }
 
     fn pay_cost_effect(cost: AbilityCost) -> AbilityCost {
