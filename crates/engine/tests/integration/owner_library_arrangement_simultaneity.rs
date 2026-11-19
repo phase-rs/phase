@@ -532,41 +532,55 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
         assert!(!runner.state().battlefield.contains(&rider));
     };
     assert_merged(&runner);
-    // A forged successor cannot be authorized by repeating it on the
-    // member and its approval: the logical announcement names the real pile.
-    let mut saved =
-        serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
-    let frames = saved["state"]["resolution_frames"]["frames"]
-        .as_array_mut()
-        .unwrap();
-    let member = frames
-        .iter_mut()
-        .find_map(|frame| {
-            frame
-                .get_mut("data")?
-                .get_mut("staged")?
-                .get_mut("members")?
-                .as_array_mut()?
-                .iter_mut()
-                .find(|member| member["identity"]["object_id"] == serde_json::json!(rider))
-        })
-        .expect("saved physical arrival");
+    // Checked import must reject both a forged survivor and an omitted
+    // authority, even when the member and its proposal agree with each other.
     let wrong = serde_json::json!({
         "object_id": host,
         "incarnation": runner.state().objects[&host].incarnation + 1,
     });
-    member["merged_departure"] = wrong.clone();
-    member["approved_event"]["ZoneChange"]["merged_departure"] = wrong;
-    let error = serde_json::from_value::<PersistedGameState>(saved)
-        .unwrap()
-        .into_game_state()
-        .expect_err("forged merge departure must not reopen");
-    assert!(
-        error
-            .to_string()
-            .contains("no matching announced merge departure"),
-        "{error}"
-    );
+    for (authority, expected) in [
+        (Some(wrong), "no matching announced merge departure"),
+        (None, "missing its merge departure"),
+    ] {
+        let mut saved =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        let frames = saved["state"]["resolution_frames"]["frames"]
+            .as_array_mut()
+            .unwrap();
+        let member = frames
+            .iter_mut()
+            .find_map(|frame| {
+                frame
+                    .get_mut("data")?
+                    .get_mut("staged")?
+                    .get_mut("members")?
+                    .as_array_mut()?
+                    .iter_mut()
+                    .find(|member| member["identity"]["object_id"] == serde_json::json!(rider))
+            })
+            .expect("saved physical arrival");
+        let approval = member["approved_event"]["ZoneChange"]
+            .as_object_mut()
+            .unwrap();
+        if let Some(authority) = authority {
+            approval.insert("merged_departure".into(), authority.clone());
+            member["merged_departure"] = authority;
+        } else {
+            approval
+                .remove("merged_departure")
+                .expect("approval has authority");
+            member
+                .as_object_mut()
+                .unwrap()
+                .remove("merged_departure")
+                .expect("physical member has authority");
+        }
+        let error = serde_json::from_value::<PersistedGameState>(saved)
+            .unwrap()
+            .into_game_state()
+            .expect_err("invalid merge departure must not reopen");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
     round_trip_arrangement(&mut runner);
     assert_merged(&runner);
     let mut alternate = GameRunner::from_state(runner.state().clone());

@@ -3299,6 +3299,23 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
         // A selection names a decision by its subject, so subjects are unique.
         let mut subjects = HashSet::new();
         for member in &staged.members {
+            if member.request.cause == PendingBatchZoneChangeCause::MergedComponentRouting
+                && member.merged_departure.is_none()
+                && state
+                    .objects
+                    .get(&member.identity.object_id)
+                    .is_some_and(|card| {
+                        ObjectIncarnationRef::from_object(card) == member.identity
+                            && card.zone == Zone::Battlefield
+                            && (!card.merged_components.is_empty()
+                                || (!state.battlefield.contains(&card.id)
+                                    && card.split_from_merge_survivor.is_none()))
+                    })
+            {
+                // Older batches already detached their piles and stamped the
+                // absorbed cards. A still-merged card needs the exact plan.
+                return Err("a staged physical move is missing its merge departure".into());
+            }
             if let Some(departure) = member.merged_departure {
                 let names_survivor = owner.component_delivery_parent.as_ref().map_or_else(
                     || {
@@ -4088,20 +4105,32 @@ fn lead_with_merge_survivor(requests: &mut [ZoneMoveRequest], survivor: ObjectId
 /// consultations, not moves. The original group still owns the permanent
 /// departures; absorbed cards acquire no battlefield slot.
 fn admit_staged_library_components(state: &GameState, owner: &mut PendingBatchDeliveries) -> bool {
-    if !arranges_physical_library_arrivals(owner) {
+    let admits_components = arranges_physical_library_arrivals(owner)
+        || matches!(
+            &owner.completion,
+            Some(BatchCompletion::PutOnTopComplete { .. })
+        ) && owner
+            .staged
+            .as_ref()
+            .is_some_and(|staged| staged.members.len() > 1);
+    if !admits_components {
         return false;
     }
     let staged = owner
         .staged
         .as_mut()
         .expect("approval stage has staged members");
+    // Submitted ranks take their existing linked component route.
+    if !staged.arrangements.is_empty() {
+        return false;
+    }
 
     let mut components = Vec::new();
     staged.members.retain_mut(|member| {
         let Some(ProposedEvent::ZoneChange {
             from: Zone::Battlefield,
             to: Zone::Library,
-            library_placement,
+            library_placement: Some(library_placement),
             library_shuffle: LibraryShuffleMode::PerObject,
             applied,
             performed_by,
@@ -4112,6 +4141,7 @@ fn admit_staged_library_components(state: &GameState, owner: &mut PendingBatchDe
         };
         if member.state != StagedBatchMemberState::Approved
             || member.merged_departure.is_some()
+            || !library_placement.is_owner_arrangeable()
             || !staged_member_is_live(state, member)
         {
             return true;
@@ -4120,7 +4150,7 @@ fn admit_staged_library_components(state: &GameState, owner: &mut PendingBatchDe
             state,
             member.identity.object_id,
             Zone::Library,
-            library_placement.as_deref(),
+            Some(library_placement),
             LibraryShuffleMode::PerObject,
             applied,
             *performed_by,
@@ -10694,9 +10724,10 @@ mod w3_library_placement_tests {
             .resolution_stack
             .batch_delivery_owner_mut(relation.parent_group_id)
             .expect("child exposes its identified original parent");
-        assert!(parent.paused_current.as_ref().is_some_and(|paused| paused
-            .captures(relation.member, &relation.expected_event)
-            && paused.terminal_completion.is_none()));
+        assert!(parent.paused_current.as_ref().is_some_and(|paused| {
+            paused.captures(relation.member, &relation.expected_event)
+                && paused.terminal_completion.is_none()
+        }));
         let wire = serde_json::to_value(&*state).expect("component pause serializes");
         let mut restored: GameState =
             serde_json::from_value(wire).expect("component pause restores");

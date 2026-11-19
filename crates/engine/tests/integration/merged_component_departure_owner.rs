@@ -65,12 +65,12 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode, TargetFilter,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    ActionResult, GameState, PersistedGameState, StackEntryKind, WaitingFor,
+    ActionResult, CastingVariant, GameState, PersistedGameState, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -1896,6 +1896,78 @@ fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
              Extractor Demon P2 had stolen looked back to a source P2 controlled for the merged \
              permanent's retained departure, which the owner collected before P2 left"
         );
+    }
+}
+
+/// CR 101.4 + CR 616.1 + CR 903.9c: an announced target set cannot ask
+/// Karn's owner before the earlier seat's absorbed commander.
+#[test]
+fn rebuking_ceremony_schedules_merged_and_ordinary_commander_choices_apnap() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    for karn_first in [false, true] {
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let mender = scenario.add_real_card(P0, "Circuit Mender", Zone::Battlefield, db);
+        let brokkos = scenario.add_real_card(P0, "Brokkos, Apex of Forever", Zone::Command, db);
+        let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+        let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+        scenario.with_mana_pool(
+            P0,
+            mana(ManaType::Green, 9)
+                .into_iter()
+                .chain(mana(ManaType::Blue, 1))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        for id in [brokkos, karn] {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .is_commander = true;
+        }
+        let mutate = runner
+            .cast(brokkos)
+            .alternative_cast(AlternativeCastDecision::Alternative)
+            .casting_variant(CastingVariant::Mutate)
+            .target_object(mender)
+            .resolve();
+        assert!(matches!(
+            mutate.final_waiting_for(),
+            WaitingFor::MutateMergeChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::ChooseMutateMergeSide {
+                side: MergeSide::Bottom,
+            })
+            .unwrap();
+        assert_eq!(
+            runner.state().objects[&mender].merged_components,
+            [mender, brokkos]
+        );
+
+        let targets = if karn_first {
+            [karn, mender]
+        } else {
+            [mender, karn]
+        };
+        cast_until_resolved_or_asked(&mut runner, ceremony, &targets);
+        assert_commander_prompt(runner.state(), P0, brokkos);
+        save_and_restore(&mut runner);
+        answer(&mut runner, 0);
+        assert_commander_prompt(runner.state(), P1, karn);
+        let events = answer(&mut runner, 0);
+        assert_eq!(runner.state().objects[&brokkos].zone, Zone::Command);
+        assert_eq!(runner.state().objects[&karn].zone, Zone::Command);
+        assert_eq!(runner.state().objects[&mender].zone, Zone::Library);
+        assert_eq!(
+            events.iter().filter(|event| {
+                matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), .. }
+                    if [mender, brokkos].contains(object_id))
+            }).count(), 1,
+        );
+        resolution_finished(runner.state());
     }
 }
 
