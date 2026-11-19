@@ -6800,11 +6800,20 @@ pub(super) fn handle_resolution_choice(
                         // population (a filtered pool's complement omits
                         // un-offered members) AND clobber the pick
                         // inheritance its exclusion reads. Skip the forward;
-                        // the sub keeps the inherited pick targets.
+                        // the sub keeps the inherited pick targets. A sub whose
+                        // own target IS the bare set ("exile the other" — Karn,
+                        // Scion of Urza) computes nothing: the complement is
+                        // exactly its referent, so it still takes the forward.
+                        let sub_computes_own_population =
+                            effects::ability_node_references_tracked_set(next_sub)
+                                && !matches!(
+                                    next_sub.effect.target_filter(),
+                                    Some(crate::types::ability::TargetFilter::TrackedSet { .. })
+                                );
                         if !matches!(
                             next_sub.effect,
                             crate::types::ability::Effect::CastCopyOfCard { .. }
-                        ) && !effects::ability_node_references_tracked_set(next_sub)
+                        ) && !sub_computes_own_population
                         {
                             next_sub.set_unpinned_targets(
                                 unchosen.iter().map(|&id| TargetRef::Object(id)).collect(),
