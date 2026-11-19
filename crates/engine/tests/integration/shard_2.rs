@@ -225,6 +225,7 @@ mod chosen_number_opponent_restriction;
 mod chosen_target_groups_phase2;
 mod cinder_strike_additional_cost_instead;
 mod city_of_traitors_land_played_deferred;
+mod cityscape_leveler_powerstone;
 mod civilized_scholar_discard_transform;
 mod claim_jumper_repeat;
 mod cleanup_control_reversion_triggers;

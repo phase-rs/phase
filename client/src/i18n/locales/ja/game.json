@@ -2490,6 +2490,9 @@
     "optionalTriggers": "任意の誘発型能力（{{count, number}}）",
     "replacementChoices": "置換効果の選択（{{count, number}}）"
   },
+  "choiceModal": {
+    "holdForFullCard": "長押しでカード全体を表示"
+  },
   "optionalEffect": {
     "sourceFallback": "効果",
     "title": "{{name}} — 任意の効果",

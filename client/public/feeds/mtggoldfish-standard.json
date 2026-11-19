@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-11-18T00:00:00Z",
+  "updated": "2026-11-19T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -1282,129 +1282,117 @@
       ]
     },
     {
-      "name": "Azorius Momo",
+      "name": "Boros Dwarves",
       "author": "MTGGoldfish",
       "colors": [
-        "W",
-        "U"
+        "R",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Guiding Hydra"
-        },
-        {
           "count": 4,
-          "name": "Momo, Friendly Flier"
-        },
-        {
-          "count": 1,
-          "name": "Erode"
-        },
-        {
-          "count": 4,
-          "name": "Floodfarm Verge"
-        },
-        {
-          "count": 4,
-          "name": "Hallowed Fountain"
+          "name": "Inspiring Vantage"
         },
         {
           "count": 2,
-          "name": "Seam Rip"
+          "name": "Basilisk Collar"
         },
         {
           "count": 4,
-          "name": "Practiced Offense"
-        },
-        {
-          "count": 4,
-          "name": "Springleaf Drum"
+          "name": "Dwarven Mauler"
         },
         {
           "count": 1,
-          "name": "Island"
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Lavaspur Boots"
+        },
+        {
+          "count": 4,
+          "name": "Thorin, Mountain-king"
         },
         {
           "count": 2,
-          "name": "Multiversal Passage"
+          "name": "Skateboard"
         },
         {
           "count": 4,
-          "name": "Daydream"
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 4,
+          "name": "Dain's Company"
+        },
+        {
+          "count": 4,
+          "name": "The Lonely Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 3,
+          "name": "Dwalin, Weaponmaster"
+        },
+        {
+          "count": 4,
+          "name": "Kili the Resourceful"
+        },
+        {
+          "count": 4,
+          "name": "Dragonfire Blade"
+        },
+        {
+          "count": 4,
+          "name": "Leyline Axe"
         },
         {
           "count": 2,
-          "name": "The Wondrous Wasp"
-        },
-        {
-          "count": 4,
-          "name": "Gleaming Bastion"
-        },
-        {
-          "count": 4,
-          "name": "Sage of the Skies"
-        },
-        {
-          "count": 6,
           "name": "Plains"
         },
         {
-          "count": 4,
-          "name": "Starfield Shepherd"
-        },
-        {
-          "count": 1,
-          "name": "Nurturing Pixie"
+          "count": 2,
+          "name": "Chainsaw"
         },
         {
           "count": 4,
-          "name": "Steamcore Scholar"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
+          "name": "Sunbillow Verge"
         }
       ],
       "sideboard": [
         {
           "count": 2,
+          "name": "Bofur, Reliable Guardian"
+        },
+        {
+          "count": 2,
+          "name": "Sheltered by Ghosts"
+        },
+        {
+          "count": 1,
+          "name": "Anzrag's Rampage"
+        },
+        {
+          "count": 2,
           "name": "Seam Rip"
         },
         {
-          "count": 1,
-          "name": "Pyrrhic Strike"
-        },
-        {
-          "count": 3,
-          "name": "The Theorist, Jace Beleren"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "The Wondrous Wasp"
+          "count": 4,
+          "name": "Shattered Acolyte"
         },
         {
           "count": 2,
-          "name": "No More Lies"
+          "name": "Chainsaw"
         },
         {
           "count": 2,
-          "name": "Spider-Sense"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 2,
-          "name": "Clarion Conqueror"
+          "name": "Rest in Peace"
         }
       ]
     }

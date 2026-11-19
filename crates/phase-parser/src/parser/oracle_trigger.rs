@@ -12677,13 +12677,13 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // handlers via the per-half re-parse loop.
     // Renamed from `is_event_verb_start`: it now answers "does an event HEAD start
     // here", covering the active-voice verbs AND the state-change/passive voices.
-    // 4 of the 11 event-head lexicon CONSULTATION SITES are WIDE: this one; the LEADING-half gate in
+    // 4 of the 12 event-head lexicon CONSULTATION SITES are WIDE: this one; the LEADING-half gate in
     // split_cross_subject_event_compound; extract_subject_text (a fn-value handoff to
     // scan_split_at_phrase); and the pass-2 scan in is_new_sentence_not_type_continuation (issue #7451).
-    // 7 stay narrow: split_cross_subject_event_compound's TRAILING-half gate — that function owns one
-    // gate of EACH width — the three trailing-leg gates in split_serial_event_compound, and the three in
-    // continues_serial_event_condition. Counting unit + regeneration command: see
-    // parse_event_head_start's doc.
+    // 8 stay narrow: split_cross_subject_event_compound's TRAILING-half gate — that function owns one
+    // gate of EACH width — the three trailing-leg gates in split_serial_event_compound, the three in
+    // continues_serial_event_condition, and the StateGate arm of parse_bare_leg_verb. Counting unit +
+    // regeneration command: see parse_event_head_start's doc.
     fn is_event_head_start(text: &str) -> bool {
         parse_event_head_start(text).is_ok()
     }
@@ -13099,15 +13099,16 @@ fn parse_non_event_complement(input: &str) -> OracleResult<'_, ()> {
 /// ```
 /// One line per site; the WIDE ones are exactly the lines naming `parse_event_head_start`.
 ///
-/// Composed at exactly **FOUR of the ELEVEN** consultation sites: the **LEADING**-half gate in
+/// Composed at exactly **FOUR of the TWELVE** consultation sites: the **LEADING**-half gate in
 /// `split_cross_subject_event_compound` (deliberately wide — see its own comment there), the 2-way
 /// or-split gate (`is_event_head_start`, defined inside `split_or_event_compound` and consulted by
 /// that function's `" or "` scan loop), the subject-span terminator (`extract_subject_text`), and the
 /// widened-window pass-2 scan in `is_new_sentence_not_type_continuation` (issue #7451). The other
-/// **SEVEN** stay NARROW — `split_cross_subject_event_compound`'s **TRAILING**-half gate (that function
+/// **EIGHT** stay NARROW — `split_cross_subject_event_compound`'s **TRAILING**-half gate (that function
 /// owns one gate of EACH width; do not read it as a narrow-only consumer), the three serial TRAILING-leg
-/// gates in `split_serial_event_compound`, and the three in `continues_serial_event_condition` — each
-/// with a named counterexample or a measured zero-demand justification at its own site.
+/// gates in `split_serial_event_compound`, the three in `continues_serial_event_condition`, and the
+/// `StateGate` arm of `parse_bare_leg_verb` — each with a named counterexample or a measured
+/// zero-demand justification at its own site.
 ///
 /// The #7451 site is the only composition whose consumer can move a condition/effect boundary, and it is
 /// safe there for a structural reason rather than a measured one: it is consulted **only** inside a
@@ -13214,6 +13215,11 @@ enum SharedComplement {
     /// of both combat events (Sol, Advocate Eternal: "Whenever you attack or
     /// block with both ~ and its partner").
     CombatAdjunct,
+    /// CR 603.2: a "while <state>" gate printed once after the second leg gates
+    /// both events (Syr Vondam, Sunstar Exemplar: "When ~ dies or is put into
+    /// exile while its power is 4 or greater"); `strip_while_state_clause` then
+    /// reads it the same way on each leg.
+    StateGate,
 }
 
 fn parse_bare_leg_verb(input: &str) -> OracleResult<'_, SharedComplement> {
@@ -13223,8 +13229,19 @@ fn parse_bare_leg_verb(input: &str) -> OracleResult<'_, SharedComplement> {
             SharedComplement::CombatAdjunct,
             parse_combat_declaration_verb,
         ),
+        // NARROW consultation site: the only bare first leg printed before a
+        // shared "while" gate is a "dies" verb (Syr Vondam); no state-change head is.
+        value(SharedComplement::StateGate, parse_event_verb_start),
     ))
     .parse(input)
+}
+
+/// "while <state>" ending the second leg, in original case.
+fn extract_state_gate<'a>(pair: TextPair<'a>) -> Option<&'a str> {
+    let (gate_lower, _) = take_until::<_, _, OracleError<'_>>(" while ")
+        .parse(pair.lower)
+        .ok()?;
+    pair.original_remainder(gate_lower).map(str::trim)
 }
 
 /// "with X" after the second leg's combat verb, in original case.
@@ -13251,6 +13268,9 @@ fn append_shared_complement_if_bare_event(
         .and_then(|(_, kind, _)| match kind {
             SharedComplement::Object => extract_shared_object(after_lower, second_event),
             SharedComplement::CombatAdjunct => extract_combat_adjunct(after_lower, second_event),
+            SharedComplement::StateGate => {
+                extract_state_gate(TextPair::new(second_event, after_lower))
+            }
         });
     match shared {
         Some(complement) => format!("{first} {complement}"),
