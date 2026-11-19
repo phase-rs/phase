@@ -4785,6 +4785,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     rewrite_that_type_mana_instead(&mut result);
 
     fold_token_it_has_grants_into_token_statics(&mut result);
+    // CR 608.2c + CR 111.3: an else branch that creates "one of those tokens"
+    // received the same trailing grant; the creating effect defines the token's
+    // characteristics, including its ability text, so fold it into that token too.
+    if let Some(else_def) = result.else_ability.as_deref_mut() {
+        fold_token_it_has_grants_into_token_statics(else_def);
+    }
     fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a

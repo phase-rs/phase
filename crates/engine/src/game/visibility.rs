@@ -8607,6 +8607,7 @@ mod tests {
         caster: PlayerId,
     ) -> Box<PendingCast> {
         Box::new(PendingCast {
+            alternative_cost_keyword: None,
             object_id,
             card_id,
             ability: Box::new(ResolvedAbility::new(
@@ -13296,6 +13297,7 @@ mod tests {
                         trigger_events: Vec::new(),
                         trigger_match_count: None,
                         return_result_occurrence: None,
+                        replacement_action: None,
                     }),
                     selected: vec![ObjectIncarnationRef::from_object(&state.objects[&hidden])],
                 },

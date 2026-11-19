@@ -16,8 +16,9 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
-    PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement, ZoneOpponentChooserPurpose,
+    PendingContinuation, PendingCounterPostAction, PendingMassLibraryOrderBatches,
+    PendingMassLibraryOrderChoice, PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1184,6 +1185,73 @@ fn member_library_placement(
     }
 }
 
+/// CR 400.1 + CR 110.1: whether a change's population is battlefield-scoped —
+/// the filter carries no explicitly written zone constraint (`TargetFilter::population_zones()`
+/// is empty; "permanent" defaults to the battlefield), or names the battlefield
+/// alone. A population this move does not read from the battlefield cannot join
+/// a battlefield-coordinated joint group.
+fn battlefield_scoped_population(target: &TargetFilter) -> bool {
+    matches!(
+        target.population_zones().as_slice(),
+        [] | [Zone::Battlefield]
+    )
+}
+
+/// CR 603.2c + CR 608.2c: Detect the coordinated same-name mass-exile conjunct —
+/// a `ChangeZone` to Exile whose chained sub_ability is the same sentence's
+/// "and all other permanents with the same name as that permanent" mass exile
+/// (a `ChangeZoneAll` to Exile over `FilterProp::SameNameAsParentTarget`): the
+/// targeted move and the conjunct announce and settle as one logical event.
+///
+/// CR 608.2c: only compatible COORDINATED moves coalesce. Both moves must be
+/// battlefield-scoped ([`battlefield_scoped_population`], and no explicit
+/// non-battlefield origin) — the conjunct reads "all other permanents", a
+/// CR 110.1 battlefield population. A same-name instruction that scans other
+/// zones (Eradicate's "search its controller's graveyard, hand, and library for
+/// all cards with the same name … and exile them") is an independent later
+/// instruction, not the conjunct: it stays on the ordinary `ChangeZoneAll`
+/// path, where every member is read through its own origin zone, so its
+/// zone-exit triggers and its own trailing instruction (Eradicate's shuffle)
+/// keep the written order.
+pub(crate) fn same_name_mass_exile_sub(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let sub = ability.sub_ability.as_deref()?;
+    let (parent_origin, parent_target) = match &ability.effect {
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin,
+            target,
+            ..
+        } => (*origin, target),
+        _ => return None,
+    };
+    if !battlefield_scoped_population(parent_target)
+        || parent_origin.is_some_and(|zone| zone != Zone::Battlefield)
+    {
+        return None;
+    }
+    let (sub_origin, sub_target) = match &sub.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin,
+            target,
+            ..
+        } => (*origin, target),
+        _ => return None,
+    };
+    if !matches!(
+        sub_target,
+        TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+    ) {
+        return None;
+    }
+    if !battlefield_scoped_population(sub_target)
+        || sub_origin.is_some_and(|zone| zone != Zone::Battlefield)
+    {
+        return None;
+    }
+    Some(sub)
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -1898,20 +1966,77 @@ pub fn resolve(
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
+    // CR 603.2c + CR 608.2c: Detention Sphere pattern — "exile target [X] and all
+    // other permanents with the same name as that permanent". The targeted exile
+    // and the same-name mass exile form a single logical event.
+    // If this ChangeZone to Exile has a sub_ability that is a ChangeZoneAll to
+    // Exile with SameNameAsParentTarget, announce and deliver the target together
+    // with its same-name matches as one population through this logical zone-change
+    // group path.
+    let mut move_objects = targeted_objects.clone();
+    if let Some(sub) = same_name_mass_exile_sub(ability) {
+        if let Effect::ChangeZoneAll {
+            origin: sub_origin,
+            target: sub_target,
+            ..
+        } = &sub.effect
+        {
+            let origin_zones = change_zone_all_origin_zones(state, *sub_origin, sub_target);
+            let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
+            let mut matches: Vec<ObjectId> = state
+                .objects
+                .iter()
+                .filter(|(&id, obj)| {
+                    origin_zones.contains(&obj.zone)
+                        && obj.is_card_population_member()
+                        && !targeted_objects.contains(&id)
+                        && crate::game::filter::matches_target_filter_for_zone(
+                            state,
+                            id,
+                            obj.zone,
+                            sub_target,
+                            &filter_ctx,
+                        )
+                })
+                .map(|(&id, _)| id)
+                .collect();
+            matches.sort();
+            move_objects.extend(matches);
+            // CR 608.2c: the absorbed conjunct never runs as a chain step, but its
+            // own printed continuation ("Then that player reveals their hand and
+            // exiles all cards with that name …" — Legion's End; "That player
+            // investigates …" — Declaration in Stone) is a later instruction of this
+            // same resolution. Schedule it through the shared continuation authority:
+            // the head's targets and chain context bind the conjunct's own anaphora
+            // ("that player", "that name"). `drain_pending_continuation` resumes a
+            // pending change-zone iteration (CR 608.2c) BEFORE any parked
+            // continuation, so parking here keeps the written order on both the
+            // synchronous path and a mid-move paused group completion.
+            if let Some(trailing) = sub.sub_ability.as_deref() {
+                let mut tail = trailing.clone();
+                if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
+                    tail.mirror_targets_from(ability);
+                }
+                crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
+                state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+            }
+        }
+    }
+
     // CR 614.12a + CR 614.13a: same pre-loop snapshot as the mass path, for a
     // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
     // Captured before any member enters so every co-arriver (and the devourers
     // themselves) is excluded regardless of iteration order.
     crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
         state,
-        targeted_objects.iter().copied(),
+        move_objects.iter().copied(),
         dest_zone,
     );
 
     // CR 603.6a + CR 614.12: one event — every member's gates read the board
     // before any member moves.
     let members =
-        resolve_change_zone_member_entries(state, Some(ability), &entry_spec, &targeted_objects);
+        resolve_change_zone_member_entries(state, Some(ability), &entry_spec, &move_objects);
 
     // CR 608.2c: "that many" in a later instruction refers back to the number
     // of objects this targeted move actually relocated (e.g. Vengeful Regrowth:
@@ -1921,7 +2046,10 @@ pub fn resolve(
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
         state,
-        &ZoneChangeAnnouncement::all(&targeted_objects, dest_zone),
+        // CR 603.2c + CR 608.2c: the announcement covers the JOINT population —
+        // the chosen target and the absorbed same-name conjunct — so all of
+        // their moves announce together before any member moves.
+        &ZoneChangeAnnouncement::all(&move_objects, dest_zone),
     );
     let mut entrants =
         crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
@@ -2114,11 +2242,11 @@ pub fn resolve(
             .expect("completed ChangeZone owns the active frame");
     }
 
-    // CR 608.2c: record how many objects this targeted move relocated so a
-    // downstream sub-ability's `QuantityRef::EventContextAmount` ("that many")
-    // resolves to the actual count — mirrors the mass `resolve_all` tail and the
-    // single-object branches above. (The paused path defers this stamp to the
-    // drain, which owns the trailing `EffectResolved`.)
+    // CR 608.2c: record how many objects this move relocated so a downstream
+    // sub-ability's `QuantityRef::EventContextAmount` ("that many") resolves to
+    // the actual count — mirrors the mass `resolve_all` tail and the single-object
+    // branches above. (The paused path defers this stamp to the drain, which owns
+    // the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
 
     // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may

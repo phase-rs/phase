@@ -452,6 +452,7 @@ mod xu_ifit_with_entry_ability_removal;
 mod yare_extra_blockers;
 mod yavimaya_enchantress_dynamic_pump;
 mod yenna_aura_token_copy;
+mod you_attack_head_tails;
 mod you_have_been_caught_stealing_any_damage;
 mod yuna_grand_summoner;
 mod yunas_whistle;

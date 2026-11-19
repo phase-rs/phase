@@ -1315,11 +1315,68 @@ fn parse_attacked_player_phrase(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// What follows "you attack" in a player attack-trigger head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum YouAttackTail {
+    /// CR 508.3d: no attacked object; fires once per declaration.
+    Bare,
+    /// CR 508.3e: "a player" / "the monarch".
+    AttackedPlayer(AttackTargetFilter),
+    /// CR 303.4b: "enchanted player", owned by subject+event decomposition.
+    EnchantedPlayer,
+    /// CR 603.2: any other tail narrows the event (Merry, Esquire of Rohan's
+    /// "with ~ and another legendary creature"); dropping it would fire on
+    /// every attack, so the head fails closed as `Unknown`.
+    Unrecognized,
+}
+
+/// Optional comma and whitespace, then end of input: nothing else may follow a
+/// recognized tail (the effect is split off upstream).
+fn parse_you_attack_tail_end(input: &str) -> OracleResult<'_, ()> {
+    value((), (multispace0, opt(tag(",")), multispace0, eof)).parse(input)
+}
+
+/// Classify the text after "you attack". Every recognized tail is
+/// all-consuming; anything else is [`YouAttackTail::Unrecognized`].
+fn parse_you_attack_tail(rest: &str) -> YouAttackTail {
+    alt((
+        value(YouAttackTail::Bare, parse_you_attack_tail_end),
+        map(
+            terminated(parse_you_attack_player_object, parse_you_attack_tail_end),
+            YouAttackTail::AttackedPlayer,
+        ),
+        value(
+            YouAttackTail::EnchantedPlayer,
+            (tag(" enchanted player"), parse_you_attack_tail_end),
+        ),
+    ))
+    .parse(rest)
+    .map_or(YouAttackTail::Unrecognized, |(_, tail)| tail)
+}
+
+/// CR 508.1 + CR 603.2: "[whenever|when] you attack<tail>" with its tail
+/// classified; the keyword is optional for the delayed form emitted by
+/// `try_parse_whenever_this_turn` (CR 603.7b). The word-boundary guard sits
+/// OUTSIDE the classification, so "you attacked this turn" is `None`, never
+/// `Unrecognized`.
+fn parse_you_attack_head(lower: &str) -> Option<YouAttackTail> {
+    let (rest, _) = preceded(
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("whenever "),
+            tag("when "),
+        ))),
+        terminated(tag("you attack"), peek(alt((eof, recognize(one_of(" ,")))))),
+    )
+    .parse(lower)
+    .ok()?;
+    Some(parse_you_attack_tail(rest))
+}
+
 /// CR 508.3e: the attacked-player OBJECT of a bare "you attack …" trigger
 /// condition, i.e. the `[another player]` slot in "Whenever [a player] attacks
 /// [another player], . . .".
 ///
-/// Returning `Some` does two independent jobs, both owned by
+/// Recognizing the object does two independent jobs, both owned by
 /// `attack_target_filter`:
 ///
 /// 1. **Restriction.** CR 508.3e: "It won't trigger if a creature is put onto
@@ -1334,13 +1391,12 @@ fn parse_attacked_player_phrase(input: &str) -> OracleResult<'_, ()> {
 ///    which has no "that player" anaphor at all, proving the cardinality is a
 ///    property of the trigger CONDITION, not of the ability's body.
 ///
-/// `None` (a bare "you attack") keeps CR 508.3d: fires once per declaration,
-/// any defender. A trailing qualifier ("a player WITH one or more equipped
-/// creatures", Akiri) also declines: that clause narrows the trigger further
-/// and is not modelled on this arm, so claiming the CR 508.3e restriction
-/// while dropping the qualifier would be worse than leaving the shape alone.
-fn parse_you_attack_player_object(rest: &str) -> Option<AttackTargetFilter> {
-    let (remainder, filter) = alt((
+/// The bare "you attack" tail keeps CR 508.3d: fires once per declaration,
+/// any defender. This combinator only recognizes the object; the caller
+/// requires the head to end right after it, so a trailing qualifier ("a player
+/// WITH one or more equipped creatures", Akiri) is an unrecognized tail.
+fn parse_you_attack_player_object(rest: &str) -> OracleResult<'_, AttackTargetFilter> {
+    alt((
         value(
             AttackTargetFilter::Player,
             tag::<_, _, OracleError<'_>>(" a player"),
@@ -1352,12 +1408,6 @@ fn parse_you_attack_player_object(rest: &str) -> Option<AttackTargetFilter> {
         value(AttackTargetFilter::Monarch, tag(" the monarch")),
     ))
     .parse(rest)
-    .ok()?;
-    remainder
-        .trim_start_matches(',')
-        .trim()
-        .is_empty()
-        .then_some(filter)
 }
 
 fn condition_introduces_defending_player(cond_lower: &str) -> bool {
@@ -12742,7 +12792,7 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             // live fix — but it makes the invariant hold BY CONSTRUCTION here instead
             // of depending on an upstream caller. (Pre-existing: the base commit passed
             // the untrimmed lower half alongside the trimmed original.)
-            let first = append_shared_object_if_bare_event(
+            let first = append_shared_complement_if_bare_event(
                 first_half.original.trim(),
                 first_half.lower.trim(),
                 second_half.lower.trim(),
@@ -12789,10 +12839,7 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("deal"),
         parse_event_word("enters"),
         parse_event_word("enter"),
-        parse_event_word("attacks"),
-        parse_event_word("attack"),
-        parse_event_word("blocks"),
-        parse_event_word("block"),
+        parse_combat_declaration_verb,
         parse_event_word("leaves"),
         // Left as a bare `tag` deliberately: "into" is always followed by a zone
         // name, so this phrase can never sit at a comma/period/EOF boundary and
@@ -13075,7 +13122,10 @@ fn parse_non_event_complement(input: &str) -> OracleResult<'_, ()> {
 /// `parse_event_verb_start`, `parse_bare_shared_event_verb`,
 /// `parse_shared_object_verb_head`, `parse_cross_subject_phrase_start` — plus ONE
 /// open shape detector, `parse_state_change_event_start`, which enumerates no
-/// complements at all. Each is scoped to one question and reached from a named
+/// complements at all. `parse_combat_declaration_verb` is not a fifth: it is
+/// `parse_event_verb_start`'s own combat subset, factored out so the
+/// shared-complement gate (`parse_bare_leg_verb`) reads the same arms. Each is
+/// scoped to one question and reached from a named
 /// consumer set. Consolidation into a single parameterized combinator becomes OWED
 /// when either (a) a FIFTH hand-maintained event-head lexicon is proposed in this
 /// file, or (b) any one of the four acquires a second consumer gate. At that point
@@ -13141,13 +13191,6 @@ fn parse_shared_object_verb_head(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-fn ends_with_bare_event_verb(text: &str) -> bool {
-    scan_preceded(text, |i| {
-        all_consuming(parse_bare_shared_event_verb).parse(i)
-    })
-    .is_some()
-}
-
 /// Extract the shared object from a verb+object phrase.
 /// E.g., `"sacrifice a token"` → `Some("a token")` (using original case).
 fn extract_shared_object<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
@@ -13161,22 +13204,70 @@ fn extract_shared_object<'a>(lower: &str, original: &'a str) -> Option<&'a str> 
     }
 }
 
-fn append_shared_object_if_bare_event(
+/// What a first leg ending at a bare verb borrows from the second leg of an
+/// "X or Y <complement>" compound. Any other complement stays leg-local.
+#[derive(Debug, Clone, Copy)]
+enum SharedComplement {
+    /// CR 701.7 + CR 701.21: the direct object ("you create or sacrifice a token").
+    Object,
+    /// CR 508.1m / CR 509.1i: the "with X" adjunct naming the declared creatures
+    /// of both combat events (Sol, Advocate Eternal: "Whenever you attack or
+    /// block with both ~ and its partner").
+    CombatAdjunct,
+}
+
+fn parse_bare_leg_verb(input: &str) -> OracleResult<'_, SharedComplement> {
+    alt((
+        value(SharedComplement::Object, parse_bare_shared_event_verb),
+        value(
+            SharedComplement::CombatAdjunct,
+            parse_combat_declaration_verb,
+        ),
+    ))
+    .parse(input)
+}
+
+/// "with X" after the second leg's combat verb, in original case.
+fn extract_combat_adjunct<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
+    let (rest_lower, _) = preceded(
+        parse_combat_declaration_verb,
+        peek(tag::<_, _, OracleError<'_>>(" with ")),
+    )
+    .parse(lower)
+    .ok()?;
+    Some(original[original.len() - rest_lower.len()..].trim())
+}
+
+/// The single shared-complement authority for or-split event compounds: a
+/// first leg that ends at a bare verb takes the complement its kind shares
+/// from the second leg.
+fn append_shared_complement_if_bare_event(
     first: &str,
     first_lower: &str,
     after_lower: &str,
     second_event: &str,
 ) -> String {
-    // CR 701.7 + CR 701.21: Shared-object compound verbs — "you create
-    // or sacrifice a token" shares the object between both verbs. If the
-    // first half ends with a bare verb (no object), propagate the object
-    // from the second verb.
-    if ends_with_bare_event_verb(first_lower) {
-        if let Some(obj) = extract_shared_object(after_lower, second_event) {
-            return format!("{first} {obj}");
-        }
+    let shared = scan_preceded(first_lower, |i| all_consuming(parse_bare_leg_verb).parse(i))
+        .and_then(|(_, kind, _)| match kind {
+            SharedComplement::Object => extract_shared_object(after_lower, second_event),
+            SharedComplement::CombatAdjunct => extract_combat_adjunct(after_lower, second_event),
+        });
+    match shared {
+        Some(complement) => format!("{first} {complement}"),
+        None => first.to_string(),
     }
-    first.to_string()
+}
+
+/// "attack[s]" / "block[s]" at a word boundary (CR 508.1 / CR 509.1): the
+/// combat subset of `parse_event_verb_start`, shared with `parse_bare_leg_verb`.
+fn parse_combat_declaration_verb(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_event_word("attacks"),
+        parse_event_word("attack"),
+        parse_event_word("blocks"),
+        parse_event_word("block"),
+    ))
+    .parse(input)
 }
 
 /// Extract the trigger keyword + subject from a condition prefix, preserving the
@@ -14168,6 +14259,11 @@ pub fn parse_trigger_condition(
     }
 
     // --- Player triggers: "you gain life", "you cast a spell", "you draw a card" ---
+    // CR 603.2: an unrecognized "you attack" tail fails closed here, before the
+    // lowercase-only player dispatch, so the `Unknown` keeps the card's casing.
+    if parse_you_attack_head(&lower) == Some(YouAttackTail::Unrecognized) {
+        return unknown_trigger_definition(condition);
+    }
     if let Some(result) = try_parse_player_trigger(&lower) {
         return result;
     }
@@ -20128,6 +20224,9 @@ fn apply_attachment_prop(filter: TargetFilter, prop: Option<FilterProp>) -> Targ
 
 /// CR 903.3 + CR 508.1: "whenever you attack with [your] commander" — fires when
 /// the scoped player declares a commander as an attacker (Jocasta, Automaton Avenger).
+/// A leading self-reference ("with this creature and/or your commander", Ainok
+/// Strike Leader) widens the subject to `Or[SelfRef, commander]`: the trigger
+/// fires once when either or both are declared as attackers.
 fn try_parse_you_attack_with_commander(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let (after_prefix, ()) = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
@@ -20139,11 +20238,23 @@ fn try_parse_you_attack_with_commander(lower: &str) -> Option<(TriggerMode, Trig
     let (after_actor, ()) = value((), tag::<_, _, OracleError<'_>>("you attack with "))
         .parse(after_prefix)
         .ok()?;
+    let (after_self, self_leg) = opt(terminated(
+        parse_self_reference_subject,
+        tag::<_, _, OracleError<'_>>(" and/or "),
+    ))
+    .parse(after_actor)
+    .ok()?;
 
-    let (filter, rest) = parse_commander_subject_filter_prefix(after_actor)?;
+    let (filter, rest) = parse_commander_subject_filter_prefix(after_self)?;
     if !rest.trim().is_empty() {
         return None;
     }
+    let filter = match self_leg {
+        Some(()) => TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, filter],
+        },
+        None => filter,
+    };
 
     let mut def = make_base();
     def.mode = TriggerMode::YouAttack;
@@ -22337,50 +22448,37 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // "whenever you attack" — player-centric attack trigger.
     //
     // CR 508.1 + CR 603.2: matches when the active player declares attackers.
-    // Anchored (NOT a substring scan): an optional "whenever "/"when " prefix
-    // followed by "you attack". The bare "you attack" form is the prefix-stripped
-    // delayed-trigger condition emitted by `try_parse_whenever_this_turn`
-    // (CR 603.7b) for cards like Dalkovan Encampment.
-    //
-    // The trailing `peek` is a word-boundary guard: "you attack" must be followed
-    // by end-of-input, a space, or a comma so that "you attacked this turn" (a
-    // condition, not a trigger) does not match. The more-specific arms
-    // ("whenever you attack with N or more creatures", "N or more creatures
-    // attack a player") are dispatched earlier via `try_parse_special_trigger_pattern`
-    // and `try_parse_n_or_more_attacks`, so this arm cannot shadow them.
-    if let Ok((rest, _)) = preceded(
-        opt(alt((
-            tag::<_, _, OracleError<'_>>("whenever "),
-            tag("when "),
-        ))),
-        terminated(tag("you attack"), peek(alt((eof, recognize(one_of(" ,")))))),
-    )
-    .parse(lower)
-    {
+    // The head grammar and its tail classification live in
+    // `parse_you_attack_head`. The more-specific arms ("whenever you attack with
+    // N or more creatures", "N or more creatures attack a player") are
+    // dispatched earlier via `try_parse_special_trigger_pattern` and
+    // `try_parse_n_or_more_attacks`, so this arm cannot shadow them.
+    let you_attack = |attack_target_filter| {
+        let mut def = make_base();
+        def.mode = TriggerMode::YouAttack;
+        def.attack_target_filter = attack_target_filter;
+        (TriggerMode::YouAttack, def)
+    };
+    match parse_you_attack_head(lower) {
+        // CR 508.3d vs CR 508.3e: a bare "you attack" names no attacked object
+        // and fires once per declaration (CR 508.3d); "you attack a player" /
+        // "you attack the monarch" names [another player], which both RESTRICTS
+        // the trigger to player-directed attacks (CR 508.3e: "It won't trigger
+        // ... if a creature attacks a planeswalker or a battle") and makes the
+        // attacked player a per-firing binding. Both halves live on
+        // `attack_target_filter`; `None` keeps the CR 508.3d any-defender
+        // semantics.
+        Some(YouAttackTail::Bare) => return Some(you_attack(None)),
+        Some(YouAttackTail::AttackedPlayer(filter)) => return Some(you_attack(Some(filter))),
+        // CR 603.2: fail closed. `parse_trigger_condition` claims this case first
+        // with the original-case text; this return covers the lowercase-only
+        // callers.
+        Some(YouAttackTail::Unrecognized) => return Some(unknown_trigger_definition(lower)),
         // CR 303.4b + CR 508.1a: "you attack enchanted player" is a DEFENDER-scoped
-        // attack trigger (the Aura's attached player must be the one attacked), not
-        // a bare "you attack" (any-defender) trigger. Decline here so subject+event
-        // decomposition (`try_parse_event`) produces the Attacks-mode trigger with
-        // valid_source=Controller ("you"), valid_target=AttachedTo (the enchanted
-        // player), and attack_target_filter=Player — the same shape as the Curse
-        // cycle. A bare "you attack" (any defender) still maps to YouAttack.
-        if tag::<_, _, OracleError<'_>>(" enchanted player")
-            .parse(rest)
-            .is_err()
-        {
-            let mut def = make_base();
-            def.mode = TriggerMode::YouAttack;
-            // CR 508.3d vs CR 508.3e: a bare "you attack" names no attacked
-            // object and fires once per declaration (CR 508.3d); "you attack a
-            // player" / "you attack the monarch" names [another player], which
-            // both RESTRICTS the trigger to player-directed attacks (CR 508.3e:
-            // "It won't trigger ... if a creature attacks a planeswalker or a
-            // battle") and makes the attacked player a per-firing binding. Both
-            // halves live on `attack_target_filter`; `None` keeps the CR 508.3d
-            // any-defender semantics exactly as before.
-            def.attack_target_filter = parse_you_attack_player_object(rest);
-            return Some((TriggerMode::YouAttack, def));
-        }
+        // attack trigger (the Aura's attached player must be the one attacked).
+        // Decline so subject+event decomposition (`try_parse_event`) produces the
+        // Curse cycle's Attacks-mode shape.
+        Some(YouAttackTail::EnchantedPlayer) | None => {}
     }
 
     // CR 707.10: "whenever you copy a spell" — fires when the player creates a copy of a spell.

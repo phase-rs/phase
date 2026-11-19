@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CastingVariantChoiceOption and PendingCast carry the elected alternative-cost keyword instance (CR 113.2c)"
+}

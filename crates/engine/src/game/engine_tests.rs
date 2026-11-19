@@ -17,6 +17,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::format::FormatConfig;
+use crate::types::game_state::PostReplacementDrainStack;
 use crate::types::game_state::{
     ActionResult, CastPaymentMode, CastingVariant, PendingCast, ProductionOverride,
     TargetSelectionProgress, WaitingFor,
@@ -9325,6 +9326,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     // `derived` requires the two storage sites to agree. Reproduce that
     // precondition here so the synthetic state matches engine reality.
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
+        alternative_cost_keyword: None,
         object_id: ObjectId(0),
         card_id: CardId(0),
         ability: Box::new(crate::types::ability::ResolvedAbility::new(
@@ -9778,6 +9780,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
     // Mirror the production precondition: ManaPayment is only entered with
     // `pending_cast` populated (see the drift invariant in `derived`).
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
+        alternative_cost_keyword: None,
         object_id: ObjectId(0),
         card_id: CardId(0),
         ability: Box::new(crate::types::ability::ResolvedAbility::new(
