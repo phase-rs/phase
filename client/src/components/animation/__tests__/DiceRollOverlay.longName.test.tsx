@@ -116,15 +116,16 @@ describe("DiceRollOverlay with a long player name", () => {
   });
 
   it("fits a coin flip's outcome to its row, in a row that grows when it wraps", async () => {
-    // 450px at the 24px size class fits the 387px it may fill at 24 × 387 / 450,
-    // above the 18px floor.
+    // 450px at the 24px size class fits the 386px it may fill at 24 × 386 / 450,
+    // above the 18px floor. happy-dom has no Tailwind stylesheet, so the pill's
+    // `px-5 border` measure as nothing here; the hook's own test covers them.
     widths.oneLine = 450;
     render(<DiceRollOverlay />);
     await showRoll({ kind: "coin", playerId: 1, won: false, context: "ability" });
 
     const outcome = await screen.findByText(`${LONG_NAME} lost the flip`);
     expect(outcome).toHaveClass("text-center", "text-balance");
-    expect(parseFloat(outcome.style.fontSize)).toBeCloseTo((24 * 387) / 450);
+    expect(parseFloat(outcome.style.fontSize)).toBeCloseTo((24 * 386) / 450);
 
     const row = outcome.parentElement!;
     expect(row).toHaveClass("w-full", "min-h-14");

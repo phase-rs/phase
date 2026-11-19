@@ -116,8 +116,8 @@ describe("TurnBanner", () => {
 
     const title = screen.getByText(LONG_TITLE);
     expect(title).toHaveClass("text-center", "text-balance");
-    // 600px at 48px fits the 387px the title may fill at 48 × 387 / 600.
-    expect(parseFloat(title.style.fontSize)).toBeCloseTo((48 * 387) / 600);
+    // 600px at 48px fits the 386px the title may fill at 48 × 386 / 600.
+    expect(parseFloat(title.style.fontSize)).toBeCloseTo((48 * 386) / 600);
     expect(title.parentElement).toHaveClass("w-full", SIDE_GUTTERS);
   });
 });

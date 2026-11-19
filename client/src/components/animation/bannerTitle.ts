@@ -17,9 +17,13 @@ import { useLayoutEffect, useState } from "react";
 export const BANNER_TITLE_GUTTERS =
   "px-[calc(max(env(safe-area-inset-left),env(safe-area-inset-right))+var(--game-edge-right,0.75rem))]";
 
+/** Room left on a title's line for how browsers round the widths it is measured by. */
+const FIT_SLACK_PX = 2;
+
 /**
  * Fits a banner title to its line, the content box of its parent, which needs a
- * definite width. Returns the ref to put on the title.
+ * definite width. Returns the ref to put on the title, which must lay out as a
+ * block (a block or a flex item), so that `width` applies to it.
  *
  * - A title that fits on one line keeps its size class, with no inline size.
  * - One that doesn't shrinks until it fits on one line, down to `minimumRem`.
@@ -59,10 +63,12 @@ export function useBannerTitleFit(text: string, minimumRem: number) {
       title.style.position = "";
       title.style.width = "";
 
-      // A title not laid out (zero width) has nothing to fit. `offsetWidth` is in
-      // whole pixels, so a pixel of slack keeps a title whose width rounded down
-      // from wrapping after all.
-      if (!lineWidth || oneLineWidth < lineWidth) {
+      // A title not laid out (zero width) has nothing to fit. Chrome and Safari
+      // snap each `offsetWidth` to whole pixels from its own left edge, so a
+      // reading can be off by up to just under a pixel either way. Two pixels of
+      // slack, in this check and in the room the text may fill, keep a title the
+      // readings call a fit from wrapping after all.
+      if (!lineWidth || oneLineWidth <= lineWidth - FIT_SLACK_PX) {
         return;
       }
 
@@ -75,7 +81,7 @@ export function useBannerTitleFit(text: string, minimumRem: number) {
         (parseFloat(titleStyle.paddingRight) || 0) +
         (parseFloat(titleStyle.borderLeftWidth) || 0) +
         (parseFloat(titleStyle.borderRightWidth) || 0);
-      const textRoom = lineWidth - 1 - chromeWidth;
+      const textRoom = lineWidth - FIT_SLACK_PX - chromeWidth;
       const sizeToFit = (width: number) => (sizeClassPx * textRoom) / (width - chromeWidth);
 
       const minimumPx = minimumRem * parseFloat(getComputedStyle(document.documentElement).fontSize);
