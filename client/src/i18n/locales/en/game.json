@@ -1477,6 +1477,9 @@
       "poisonCounters": "Poison Counters",
       "players": "Players",
       "whoGoesFirst": "Who Goes First",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "You",
+      "archenemyOpponent": "Opponent {{number}}",
       "firstPlayer": {
         "random": "Random",
         "play": "Play",

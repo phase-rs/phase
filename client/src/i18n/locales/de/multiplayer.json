@@ -255,6 +255,7 @@
     "commanderDamage": "Kommandeurschaden",
     "poisonCounters": "Giftmarken",
     "playerSeats": "Spielerplätze",
+    "archenemySeat": "Archenemy",
     "seat": "Platz {{number}}",
     "youHost": "Du (Host)",
     "ai": "KI",

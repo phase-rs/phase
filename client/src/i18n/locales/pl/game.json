@@ -1439,6 +1439,9 @@
       "poisonCounters": "Znaczniki trucizny",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Ty",
+      "archenemyOpponent": "Przeciwnik {{number}}",
       "firstPlayer": {
         "random": "Losowo",
         "play": "Zagrywanie",

@@ -5129,12 +5129,16 @@ impl FormatConfig {
     /// zone (CR 903.6), commander tax (CR 903.8), 21 commander damage per
     /// player (CR 903.10a — a hero reaching 21 loses and the team loses
     /// with them per CR 810.8a-via-904.13b). The archenemy plays first
-    /// with no first-turn draw skip (CR 904.6 + CR 103.8c).
+    /// with no first-turn draw skip (CR 904.6 + CR 103.8c). Minimum three
+    /// seats: Archenemy uses the Team vs. Team multiplayer variant (CR
+    /// 904.2), a multiplayer game begins with more than two players (CR
+    /// 800.1), and the heroes team holds any number of players (CR 904.2b)
+    /// — so 1v1 is degenerate and 1v2 is the smallest legal table.
     pub fn archenemy_commander() -> Self {
         FormatConfig {
             format: GameFormat::ArchenemyCommander,
             starting_life: 60,
-            min_players: 2,
+            min_players: 3,
             max_players: 6,
             deck_size: DeckSizeRule::Exactly(100),
             singleton: true,
@@ -7346,8 +7350,9 @@ mod tests {
         assert_eq!(entry.legality_key, Some("commander"));
         let config = FormatConfig::archenemy_commander();
         assert_eq!(entry.default_config, config);
-        // CR 904.13a: one archenemy plus 1-5 heroes.
-        assert_eq!(config.min_players, 2);
+        // CR 904.2a + CR 904.2b + CR 800.1: exactly one archenemy plus 2-5
+        // heroes — multiplayer begins above two players, so 1v1 is degenerate.
+        assert_eq!(config.min_players, 3);
         assert_eq!(config.max_players, 6);
         // CR 904.13b: 60 for the archenemy, shared 60 for the heroes.
         assert_eq!(config.starting_life, 60);
@@ -7385,7 +7390,7 @@ mod tests {
             }
         );
         // CR 904.13b: the archenemy starts at 60 at every seat count.
-        for count in 2..=6usize {
+        for count in 3..=6usize {
             assert_eq!(config.starting_life_for_player(PlayerId(0), count), 60);
             assert_eq!(
                 config.starting_life_total_for_player(PlayerId(0), count),
@@ -7393,8 +7398,8 @@ mod tests {
             );
         }
         // CR 904.13b: heroes split the shared 60 evenly — exact at every
-        // legal hero count (1-5), summing back to 60.
-        for (count, per_seat) in [(2usize, 60), (3, 30), (4, 20), (5, 15), (6, 12)] {
+        // legal hero count (2-5), summing back to 60.
+        for (count, per_seat) in [(3usize, 30), (4, 20), (5, 15), (6, 12)] {
             for hero in 1..count {
                 assert_eq!(
                     config.starting_life_for_player(PlayerId(hero as u8), count),
@@ -7412,7 +7417,8 @@ mod tests {
                 .sum();
             assert_eq!(seats, 60, "{count} seats: hero seats sum to 60");
         }
-        assert!(config.validate_for_player_count(2).is_ok());
+        assert!(config.validate_for_player_count(2).is_err());
+        assert!(config.validate_for_player_count(3).is_ok());
         assert!(config.validate_for_player_count(6).is_ok());
         assert!(config.validate_for_player_count(1).is_err());
         assert!(config.validate_for_player_count(7).is_err());

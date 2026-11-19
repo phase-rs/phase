@@ -1439,6 +1439,9 @@
       "poisonCounters": "Segnalini veleno",
       "players": "Giocatori",
       "whoGoesFirst": "Chi inizia",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Tu",
+      "archenemyOpponent": "Avversario {{number}}",
       "firstPlayer": {
         "random": "Casuale",
         "play": "Gioca",

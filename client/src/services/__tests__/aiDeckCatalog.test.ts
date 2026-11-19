@@ -411,6 +411,41 @@ describe("buildLegalAiDeckCatalog", () => {
     );
   });
 
+  it("keeps Commander-tagged decks in the AI pool for Archenemy Commander", async () => {
+    // Discord report (Vesperbat): Archenemy Commander solo games "don't
+    // fire". The knownFormat pre-filter compared exact format strings, so
+    // every Commander precon and Commander-tagged saved deck was dropped
+    // before the engine compatibility check — collapsing the AI pool and
+    // aborting setup with noLegalAiDecks even though Commander decks are
+    // legal Archenemy Commander hero decks (empty scheme slot).
+    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+      secrets: {
+        code: "SOS",
+        name: "Secrets of Strixhaven",
+        type: "Commander Deck",
+        coveragePct: 100,
+        mainBoard: deck("Precon Legal Card").main,
+        commander: [{ count: 1, name: "Zimone, Mystery Unraveler" }],
+      },
+    });
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Tagged Commander",
+      JSON.stringify({
+        ...deck("Sol Ring", "Atraxa, Praetors' Voice"),
+        format: "Commander",
+      }),
+    );
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "ArchenemyCommander",
+      selectedMatchType: "Bo1",
+    });
+    const ids = catalog.candidates.map((candidate) => candidate.id);
+
+    expect(ids).toContain("precon:secrets");
+    expect(ids).toContain("saved:Tagged Commander");
+  });
+
   it("filters out precons that contain banned/illegal cards", async () => {
     // Simulate a precon whose main board includes a card the engine flags
     // as banned in the selected format. This is exactly the user-reported
