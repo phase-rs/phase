@@ -571,6 +571,159 @@ fn avacyn_returning_to_the_same_bear_controller_invalidates_wraths_replacement_c
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
+/// Both Bears' replacements were consulted before the first Bear moved.
+/// Read the second Bear's outcome and count the Zombies after Jinnie's prompt.
+fn planar_cleansing_during_delivery(masked_monument: bool, concede: bool) -> (Zone, usize) {
+    use engine::game::effects::attach::attach_to;
+    use engine::game::layers::evaluate_layers;
+    use engine::types::card_type::CoreType;
+    use engine::types::keywords::Keyword;
+    use engine::types::player::PlayerId;
+
+    let db = shared_card_db().expect("integration card fixture must load");
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..6)
+            .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let masked = masked_monument.then(|| {
+        let monument = scenario.add_real_card(P0, "Eldrazi Monument", Zone::Battlefield, db);
+        let song = scenario.add_real_card(P0, "Song of the Dryads", Zone::Battlefield, db);
+        (monument, song)
+    });
+    let first = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let second = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let avacyn = add_avacyn(&mut scenario);
+    let control = add_control_magic(&mut scenario);
+    let kalitas = scenario.add_real_card(p2, "Kalitas, Traitor of Ghet", Zone::Battlefield, db);
+    let jinnie = scenario.add_real_card(p2, "Jinnie Fay, Jetmir's Second", Zone::Battlefield, db);
+    scenario.with_counter(jinnie, CounterType::Shield, 1);
+    let spell = scenario.add_real_card(P0, "Planar Cleansing", Zone::Hand, db);
+    let mut runner = scenario.build();
+    if let Some((monument, song)) = masked {
+        attach_to(runner.state_mut(), song, monument);
+    }
+    attach_to(runner.state_mut(), control, avacyn);
+    evaluate_layers(runner.state_mut());
+    let state = runner.state();
+    assert_eq!(state.objects[&avacyn].controller, P1);
+    if let Some((monument, _)) = masked {
+        assert!(state.objects[&monument]
+            .card_types
+            .core_types
+            .contains(&CoreType::Land));
+        assert!(has_subtype(state, monument, "Forest"));
+    }
+    for bear in [first, second] {
+        assert!(!state.objects[&bear].has_keyword(&Keyword::Indestructible));
+    }
+    let second_incarnation = state.objects[&second].incarnation;
+    let mut events = runner.cast(spell).commit().resolve().events().to_vec();
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::ReplacementChoice { player, candidates, .. }
+        if *player == p2 && candidates.iter().any(|candidate| candidate.source_id == jinnie)),
+        "Jinnie decides whether to replace the first Bear's Zombie, got {:?}",
+        runner.state().waiting_for
+    );
+    if let Some((_, song)) = masked {
+        assert_eq!(runner.state().objects[&song].zone, Zone::Graveyard);
+    }
+    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+    // Inspect the continuous effects on the partial physical battlefield
+    // without changing the engine's interrupted resolution.
+    let mut partial = runner.state().clone();
+    evaluate_layers(&mut partial);
+    assert_eq!(partial.objects[&avacyn].controller, P1);
+    if let Some((monument, _)) = masked {
+        assert!(partial.objects[&monument]
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact));
+    }
+    assert_eq!(
+        partial.objects[&second].has_keyword(&Keyword::Indestructible),
+        masked_monument
+    );
+
+    if concede {
+        events.extend(
+            runner
+                .act(GameAction::Concede { player_id: P1 })
+                .unwrap()
+                .events,
+        );
+        assert_eq!(runner.state().objects[&avacyn].controller, P0);
+    }
+    let mut offers = 0;
+    while let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    {
+        assert_eq!(*player, p2);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == jinnie));
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.description == "Decline")
+            .expect("Jinnie's replacement is optional");
+        offers += 1;
+        assert!(offers <= 2);
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index })
+                .unwrap()
+                .events,
+        );
+    }
+    let state = runner.state();
+    let second_zone = state.objects[&second].zone;
+    if second_zone == Zone::Battlefield {
+        assert_eq!(state.objects[&second].incarnation, second_incarnation);
+        assert!(state.objects[&second].has_keyword(&Keyword::Indestructible));
+    }
+    assert_eq!(
+        zone_changes_of(&events, second),
+        usize::from(second_zone == Zone::Exile)
+    );
+    assert_eq!(zone_changes_of(&events, first), 1);
+    assert_eq!(offers, zombies(&events));
+    assert_eq!(offers, zombies_on_battlefield(state).len());
+    assert_eq!(state.objects[&kalitas].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&jinnie].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    (second_zone, offers)
+}
+
+#[test]
+fn planar_cleansing_masked_monument_keeps_both_approved_moves_during_delivery() {
+    for concede in [false, true] {
+        assert_eq!(
+            planar_cleansing_during_delivery(true, concede),
+            (Zone::Exile, 2),
+            "Song leaves before Jinnie's first offer; concession = {concede}"
+        );
+    }
+}
+
+#[test]
+fn planar_cleansing_avacyn_alone_keeps_both_approved_moves_during_delivery() {
+    for concede in [false, true] {
+        assert_eq!(
+            planar_cleansing_during_delivery(false, concede),
+            (Zone::Exile, 2),
+            "no other permanent protects the queued Bear; concession = {concede}"
+        );
+    }
+}
+
 fn run_borrowed_bear_departures(
     protected_by_avacyn: bool,
     cases: &[(engine::types::player::PlayerId, BearAtDeparture, bool)],

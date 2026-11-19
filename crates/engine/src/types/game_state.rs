@@ -6676,6 +6676,22 @@ pub struct PendingSimultaneousDeparture {
     pub deferred_events: Vec<GameEvent>,
 }
 
+impl PendingSimultaneousDeparture {
+    /// CR 101.4 + CR 608.2f: a parked batch is still consulting until
+    /// materialization begins. A consult-time substitute can pause without
+    /// an in-flight member; every delivery-time pause records its member.
+    pub(crate) fn is_consulting(&self) -> bool {
+        match self.stage {
+            None
+            | Some(
+                SimultaneousDepartureStage::SelectedForConsult { .. }
+                | SimultaneousDepartureStage::Consulting { .. },
+            ) => true,
+            Some(SimultaneousDepartureStage::Delivering { .. }) => false,
+        }
+    }
+}
+
 /// CR 616.1: Which pausing primitive of an `EachPlayerCopyChosen` per-player
 /// step is currently mid-flight, so the drain resumes at the right point
 /// (neither re-reading a stale token nor double-placing counters).

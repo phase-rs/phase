@@ -792,10 +792,9 @@ pub(crate) fn departure_choice_in_flight(state: &GameState) -> bool {
         })
 }
 
-/// CR 101.4 + CR 800.4a: a leave can newly prohibit a queued destruction.
-/// Compare both sides of the leave: a keyword already visible because an
-/// earlier member physically moved in the same simultaneous batch does not
-/// retroactively invalidate an approved destruction.
+/// CR 101.4 + CR 800.4a: while an event is still being consulted, a leave
+/// can newly prohibit a queued destruction. A batch already delivering its
+/// approved outcomes only checks each remaining object's incarnation.
 pub(crate) fn reconcile_queued_destructions_after_player_leave(
     state: &mut GameState,
     before: &ObjectMap,
@@ -803,7 +802,7 @@ pub(crate) fn reconcile_queued_destructions_after_player_leave(
     if !state
         .resolution_stack
         .iter()
-        .any(|frame| matches!(frame, ResolutionFrame::SimultaneousDeparture(_)))
+        .any(|frame| matches!(frame, ResolutionFrame::SimultaneousDeparture(pending) if pending.is_consulting()))
     {
         return;
     }
@@ -812,7 +811,7 @@ pub(crate) fn reconcile_queued_destructions_after_player_leave(
     let after = &state.objects;
     state
         .resolution_stack
-        .retain_queued_destructions(|id| !destruction_became_impossible(before, after, id));
+        .retain_uncommitted_destructions(|id| !destruction_became_impossible(before, after, id));
 }
 
 fn destruction_became_impossible(before: &ObjectMap, after: &ObjectMap, id: ObjectId) -> bool {
@@ -1131,6 +1130,9 @@ fn advance_simultaneous_departure(
             .queued
             .sort_by_key(|member| order.get(&member.object_id).copied().unwrap_or(usize::MAX));
     }
+    // CR 101.4 + CR 608.2f: the consulted outcomes now commit as one
+    // simultaneous event. Delivering records that boundary across any
+    // child prompt; the loop's order does not establish new consult points.
     while !pending.queued.is_empty() {
         let queued = pending.queued.remove(0);
         // CR 400.7: the consulted object already left (sacrificed by another
@@ -1442,10 +1444,8 @@ mod tests {
         id
     }
 
-    /// Synthetic member-level control: a partial batch has already exposed a
-    /// protection on the physical board before an unrelated player concedes
-    /// (for example, Planar Cleansing taking Song of the Dryads off Avacyn).
-    /// Only protection gained across the concession retires a queued move.
+    /// Synthetic member-level control for an uncommitted batch: only
+    /// protection gained across this leave retires a queued destruction.
     #[test]
     fn queued_destruction_compares_eligibility_on_both_sides_of_a_leave() {
         let mut state = GameState::new_two_player(42);
