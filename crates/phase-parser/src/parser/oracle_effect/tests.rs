@@ -22317,6 +22317,12 @@ fn compound_tap_and_put_counter_binds_parent_target_under_typed_trigger_subject(
     }
 }
 
+/// Synthetic boundary probe: no printed card has this targeted compound under
+/// a typed trigger subject. The nearest printed card is Defiant Vanguard:
+/// "When this creature blocks, at end of combat, destroy it and all creatures
+/// it blocked this turn." This probe checks preservation of the existing
+/// fail-closed boundary.
+///
 /// CR 509.1g + CR 608.2i: the typed-referent continuation pin never reaches a
 /// block-history clause. "it" in "all creatures it blocked this turn" names this
 /// same instruction's target, not an earlier instruction's, so the clause
