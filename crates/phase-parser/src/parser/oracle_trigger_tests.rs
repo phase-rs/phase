@@ -44726,7 +44726,9 @@ fn you_attack_unrecognized_tail_fails_closed() {
 }
 
 /// CR 603.2 + CR 508.1m / CR 509.1i: in "attack or block with X" the bare
-/// attack leg keeps the shared "with X". Leg-local complements are not carried.
+/// attack leg keeps the shared "with X", and a bare first leg keeps a shared
+/// "while <state>" gate. Leg-local complements are not carried, and a first leg
+/// with its own complement takes nothing.
 #[test]
 fn or_split_carries_shared_adjunct_to_bare_leg() {
     let sol = parse_trigger_lines(
@@ -44747,6 +44749,16 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
             "God-Eternal Kefnet",
             "When God-Eternal Kefnet dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.",
             "When ~ dies, you may put it into its owner's library third from the top.",
+        ),
+        (
+            "Syr Vondam, Sunstar Exemplar",
+            "When Syr Vondam dies or is put into exile while its power is 4 or greater, destroy up to one target nonland permanent.",
+            "When ~ dies while its power is 4 or greater, destroy up to one target nonland permanent.",
+        ),
+        (
+            "Astral Drift",
+            "Whenever you cycle this card or cycle another card while this enchantment is on the battlefield, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.",
+            "Whenever you cycle this card, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.",
         ),
     ] {
         let legs = parse_trigger_lines(line, name);
