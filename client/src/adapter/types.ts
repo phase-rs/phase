@@ -4667,9 +4667,10 @@ export interface DerivedViews {
   /**
    * CR 805.5a: living seats entitled to answer the live priority window that
    * have not passed it yet — the parked representative plus unpassed
-   * teammates on a shared-team window, otherwise the single holder. Absent
-   * on non-priority windows and on wire paths without derived views, where
-   * consumers fall back to `priority_player`. Mirrors
+   * teammates on a shared-team window. Absent on non-priority windows, when
+   * it would name only the holder (always so for individual seats), and on
+   * wire paths without derived views; consumers then fall back to
+   * `priority_player`. Mirrors
    * `engine::game::derived_views::DerivedViews::priority_decision_owners`.
    */
   priority_decision_owners?: PlayerId[];

@@ -721,8 +721,10 @@ pub struct DerivedViews {
     pub unique_authorized_submitter: Option<PlayerId>,
     /// CR 805.5a: the living seats entitled to answer the live priority
     /// window that have not passed it yet — the parked representative plus
-    /// every unpassed teammate on a shared-team window, otherwise the single
-    /// holder. Omitted on any non-priority window. The browser AI scheduler
+    /// every unpassed teammate on a shared-team window. Omitted on any
+    /// non-priority window and whenever it would name only the holder
+    /// (always so for individual seats), where consumers fall back to
+    /// `WaitingFor::Priority`'s player. The browser AI scheduler
     /// drives the AI seats in this list so a teammate stays eligible while
     /// the window sits on its representative; it mirrors the headless
     /// driver's owner filter minus the AI membership check, which only the
@@ -2732,14 +2734,23 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
 /// decision until someone acts (which clears passes), so passed owners are
 /// excluded — the same filter the headless AI driver applies before
 /// choosing a seat.
+///
+/// A list naming only the holder adds nothing to `WaitingFor::Priority`, and
+/// every consumer already falls back to the holder, so it is left empty
+/// (and omitted from the wire). The list is published only when a teammate
+/// can act on the window, which keeps individual-seat updates unchanged.
 fn priority_decision_owners(state: &GameState) -> Vec<PlayerId> {
-    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+    let WaitingFor::Priority { player: holder } = state.waiting_for else {
         return Vec::new();
-    }
-    crate::game::turn_control::decision_owners(state)
+    };
+    let owners: Vec<PlayerId> = crate::game::turn_control::decision_owners(state)
         .into_iter()
         .filter(|owner| !state.priority_passes.contains(owner))
-        .collect()
+        .collect();
+    if owners == [holder] {
+        return Vec::new();
+    }
+    owners
 }
 
 /// CR 103.1: the starting player of the game this state describes, once it has
@@ -10942,20 +10953,28 @@ mod tests {
             vec![PlayerId(1)]
         );
 
+        // Only the holder left unpassed: the list would repeat the window's
+        // player, so it is omitted and consumers fall back to the holder.
+        state.priority_passes.clear();
+        state.priority_passes.insert(PlayerId(1));
+        assert!(derive_views(&state, None)
+            .priority_decision_owners
+            .is_empty());
+
         // Non-priority windows carry no owner list.
         state.waiting_for = WaitingFor::GameOver { winner: None };
         assert!(derive_views(&state, None)
             .priority_decision_owners
             .is_empty());
 
-        // Individual formats collapse to the single holder.
+        // Individual formats never publish a list: the holder is the only
+        // owner, which `WaitingFor::Priority` already names.
         let mut solo = GameState::new(FormatConfig::standard(), 2, 42);
         solo.waiting_for = WaitingFor::Priority {
             player: PlayerId(1),
         };
-        assert_eq!(
-            derive_views(&solo, None).priority_decision_owners,
-            vec![PlayerId(1)]
-        );
+        assert!(derive_views(&solo, None)
+            .priority_decision_owners
+            .is_empty());
     }
 }

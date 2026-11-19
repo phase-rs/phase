@@ -458,7 +458,8 @@ export function createAIController(config: AIControllerConfig): AIController {
     // is not the only seat that may act. Drive the first non-local seat
     // among the engine-authored unpassed decision owners so an AI teammate
     // stays eligible while the window sits on its representative. Falls
-    // back to the holder when derived views are absent (legacy wire paths).
+    // back to the holder when the list is absent: it names only the holder,
+    // or derived views are missing (legacy wire paths).
     if (waitingFor.type === "Priority") {
       const owners = state.derived?.priority_decision_owners;
       if (owners?.length) {

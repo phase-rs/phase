@@ -14929,8 +14929,9 @@ mod teammate_browser_ai_tests {
             "P1's pass must not pass for P0"
         );
 
-        // The window never left the representative, and the scheduler list
-        // now names only the still-unpassed P0.
+        // The window never left the representative. Only the still-unpassed
+        // P0 remains, so the scheduler list is omitted and the browser falls
+        // back to the parked holder.
         assert!(
             matches!(
                 installed().waiting_for,
@@ -14939,6 +14940,6 @@ mod teammate_browser_ai_tests {
             "priority must stay parked on P0, got {:?}",
             installed().waiting_for
         );
-        assert_eq!(owners_of(&installed()), vec![P0]);
+        assert!(owners_of(&installed()).is_empty());
     }
 }
