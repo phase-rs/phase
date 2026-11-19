@@ -434,8 +434,8 @@ fn assert_arrangement_finished(runner: &GameRunner) {
     assert!(runner.state().resolution_stack.is_empty());
 }
 
-/// CR 401.4 + CR 730.3a: the physical cards interleave in the one submitted
-/// order, rather than obtaining an independent component order later.
+/// CR 401.4 + CR 730.3 + CR 730.3a: for merged A+B and ordinary C,
+/// the owner can privately choose A, C, B. A+B still departs as one permanent.
 #[test]
 fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
     let mut scenario = GameScenario::new();
@@ -492,12 +492,12 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
     events.extend(
         runner
             .act(GameAction::SelectCards {
-                cards: vec![rider, ordinary, host],
+                cards: vec![host, ordinary, rider],
             })
             .unwrap()
             .events,
     );
-    assert_eq!(library(&runner, P0), vec![sentinel, rider, ordinary, host]);
+    assert_eq!(library(&runner, P0), vec![sentinel, host, ordinary, rider]);
     for (id, origin) in [
         (rider, None),
         (ordinary, Some(Zone::Battlefield)),
@@ -714,8 +714,9 @@ fn hallowed_burial_lone_commander_host_declines_command_after_round_trip() {
     check_hallowed_burial_commander_host_round_trip(false, false);
 }
 
-/// CR 903.9b + CR 903.9c + CR 401.4: Otrimi represents the permanent and
-/// Gemrazer is underneath; redirecting the host preserves the other cards' order.
+/// CR 903.9b + CR 903.9c + CR 401.4: Otrimi represents the permanent, but
+/// redirecting it to command leaves only Gemrazer and the ordinary card in the
+/// library order. The vanished rank does not displace either of them.
 #[test]
 fn hallowed_burial_interleaved_commander_host_accepts_command_after_round_trip() {
     check_hallowed_burial_commander_host_round_trip(true, true);
@@ -1004,8 +1005,8 @@ fn hallowed_burial_commander_first_pause_round_trips_unconsulted_component_seed(
     assert_arrangement_finished(&runner);
 }
 
-/// CR 730.3a: without an outer submitted order a lone merged permanent still
-/// obtains the ordinary component order prompt.
+/// CR 730.3 + CR 730.3a: a lone merged permanent supplies two library cards
+/// but only one departure. Its owner still arranges those cards privately.
 #[test]
 fn hallowed_burial_lone_merged_permanent_keeps_component_order_prompt() {
     let mut scenario = GameScenario::new();

@@ -8281,14 +8281,25 @@ pub struct PendingBatchDeliveries {
 impl PendingBatchDeliveries {
     /// CR 800.4a: detached components retain only their own submitted entries.
     pub(crate) fn detach_component_parent(&mut self) {
-        let Some(link) = self.component_delivery_parent.take() else {
+        self.retire_component_arrangement_seed();
+        self.component_delivery_parent = None;
+    }
+
+    /// CR 800.4a: when the parent no longer holds the inherited order, keep
+    /// only child-local placements. The separate departure handback stays live.
+    pub(crate) fn retire_component_arrangement_seed(&mut self) {
+        let Some(link) = self.component_delivery_parent.as_mut() else {
             return;
         };
+        let arrangements = std::mem::take(&mut link.inherited_arrangements);
+        if arrangements.is_empty() {
+            return;
+        }
         let Some(staged) = self.staged.as_mut() else {
             return;
         };
         for arrangement in &mut staged.arrangements {
-            if link.inherited_arrangements.contains(arrangement) {
+            if arrangements.contains(arrangement) {
                 arrangement.batch.members.retain(|entry| {
                     staged
                         .members

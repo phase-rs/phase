@@ -3117,12 +3117,9 @@ pub(crate) fn open_owner_library_arrangement(
     track_exiled_by_source: bool,
     duration: Option<Duration>,
 ) {
-    // Numbered arrangements rank physical cards. Legacy Top/Bottom prompts
-    // retain the supplied logical permanent population and per-member timing.
-    let owner_batches = if matches!(
-        library_position,
-        LibraryPosition::NthFromTop { .. } | LibraryPosition::BeneathTop { .. }
-    ) {
+    // CR 401.4 + CR 730.3a: owners arrange physical cards, not the
+    // permanents that represented them on the battlefield.
+    let owner_batches = if library_position.is_owner_arrangeable() {
         let physical: Vec<ObjectId> = owner_batches
             .into_iter()
             .flat_map(|(_, ids)| ids)

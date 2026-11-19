@@ -2470,15 +2470,35 @@ impl ResolutionStack {
         }
     }
 
-    /// CR 730.3 + CR 800.4a: the objects the active batch delivery still holds —
-    /// its paused member and its undelivered tail. For a merged permanent's
-    /// component batch, linked to an announcing owner or not, the absorbed
-    /// components among them are in no zone list until delivered, yet they are
-    /// objects their owner owns.
+    /// CR 730.3 + CR 800.4a: the active batch holds undelivered objects,
+    /// including absorbed components that are in no zone list until delivered.
     pub(crate) fn active_batch_held_objects(&self) -> Vec<ObjectId> {
-        let Some(ResolutionFrame::BatchDelivery(batch)) = self.last() else {
+        let Some(batch) = self.active_batch_delivery().or_else(|| {
+            self.bounded_staged_owner_slot()
+                .and_then(|slot| match self.frames.get(slot) {
+                    Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch.as_ref()),
+                    _ => None,
+                })
+        }) else {
             return Vec::new();
         };
+        if let Some(staged) = &batch.staged {
+            // The legacy requests/remaining projection contains only the
+            // unconsulted suffix. Held decisions and approved members are
+            // still owned by the batch until physical delivery.
+            return staged
+                .members
+                .iter()
+                .filter(|member| {
+                    !matches!(
+                        member.state,
+                        crate::types::game_state::StagedBatchMemberState::Terminal
+                            | crate::types::game_state::StagedBatchMemberState::Abandoned
+                    )
+                })
+                .map(|member| member.identity.object_id)
+                .collect();
+        }
         batch
             .paused_current
             .iter()
@@ -2788,11 +2808,10 @@ impl ResolutionStack {
         Ok(())
     }
 
-    /// CR 800.4a: visit the active logical zone-change owners a departing
-    /// player's member may belong to — the active `BatchDelivery` or paused
-    /// `ChangeZone` iteration, or, under an active component child, that child
-    /// and the announcing owner immediately beneath it (either kind). The
-    /// visitor never searches for a buried owner.
+    /// CR 800.4a: visit each live logical zone-change owner once. A linked
+    /// component child exposes its announcing owner immediately below; a
+    /// replacement child can instead cover a staged owner in that slot.
+    /// Neither case searches deeper in the stack.
     pub(crate) fn visit_active_zone_change_owners_mut(
         &mut self,
         mut visit: impl FnMut(ZoneChangeOwnerMut<'_>),
@@ -2800,29 +2819,30 @@ impl ResolutionStack {
         let Some(top) = self.frames.top() else {
             return;
         };
-        let link = match self.frames.get(top) {
-            Some(ResolutionFrame::BatchDelivery(child)) => child.component_delivery_parent.clone(),
+        let parent_group = match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(child)) => child
+                .component_delivery_parent
+                .as_ref()
+                .map(|link| link.parent_group_id),
             _ => None,
         };
-        if let Some(link) = link {
-            if let Some(below) = self.frames.below(top) {
-                match self.frames.get_mut(below) {
-                    Some(ResolutionFrame::BatchDelivery(parent))
-                        if parent.logical_zone_change_group.logical_group_id
-                            == link.parent_group_id =>
-                    {
-                        visit(ZoneChangeOwnerMut::Batch(parent.as_mut()));
-                    }
-                    Some(ResolutionFrame::ChangeZone(frame)) => {
-                        if let Some(parent) = frame.pending.as_mut().filter(|pending| {
-                            pending.logical_zone_change_group.logical_group_id
-                                == link.parent_group_id
-                        }) {
-                            visit(ZoneChangeOwnerMut::ChangeZone(parent));
-                        }
-                    }
-                    _ => {}
+        let staged_slot = self.bounded_staged_owner_slot();
+        if let Some(below) = self.frames.below(top) {
+            match self.frames.get_mut(below) {
+                Some(ResolutionFrame::BatchDelivery(parent))
+                    if parent_group == Some(parent.logical_zone_change_group.logical_group_id)
+                        || staged_slot == Some(below) =>
+                {
+                    visit(ZoneChangeOwnerMut::Batch(parent.as_mut()));
                 }
+                Some(ResolutionFrame::ChangeZone(frame)) => {
+                    if let Some(parent) = frame.pending.as_mut().filter(|pending| {
+                        parent_group == Some(pending.logical_zone_change_group.logical_group_id)
+                    }) {
+                        visit(ZoneChangeOwnerMut::ChangeZone(parent));
+                    }
+                }
+                _ => {}
             }
         }
         match self.frames.get_mut(top) {
@@ -2861,7 +2881,7 @@ impl ResolutionStack {
                 .and_then(|below| owners.get(below).copied().flatten())
                 == Some(link.parent_group_id);
             if !owner_present {
-                child.component_delivery_parent = None;
+                child.detach_component_parent();
             }
         }
     }
@@ -2896,65 +2916,44 @@ impl ResolutionStack {
             })
     }
 
-    /// R4b elimination seam: mutably visit exactly the identified staged
-    /// BatchDelivery owner, and detach the component handoffs of any member that
-    /// visit abandoned. Returns whether a frame was visited.
+    /// Locate the already identified staged owner in the same bounded window.
+    fn staged_batch_owner_slot(&self, identity: &StagedOwnerIdentity) -> Option<FrameSlot> {
+        let slot = self.bounded_staged_owner_slot()?;
+        match self.frames.get(slot) {
+            Some(ResolutionFrame::BatchDelivery(batch))
+                if batch.logical_zone_change_group.logical_group_id == identity.group
+                    && batch.component_delivery_parent == identity.component =>
+            {
+                Some(slot)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn staged_batch_owner(
+        &self,
+        identity: &StagedOwnerIdentity,
+    ) -> Option<&PendingBatchDeliveries> {
+        match self.frames.get(self.staged_batch_owner_slot(identity)?) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            _ => None,
+        }
+    }
+
     pub(crate) fn visit_staged_batch_owner_mut(
         &mut self,
         identity: &StagedOwnerIdentity,
-        mut visit: impl FnMut(&mut PendingBatchDeliveries),
+        visit: impl FnOnce(&mut PendingBatchDeliveries),
     ) -> bool {
-        let Some(slot) = self.bounded_staged_owner_slot() else {
+        let Some(slot) = self.staged_batch_owner_slot(identity) else {
             return false;
         };
-        let selected = matches!(
-            self.frames.get(slot),
-            Some(ResolutionFrame::BatchDelivery(batch))
-                if batch.staged.is_some()
-                    && batch.logical_zone_change_group.logical_group_id == identity.group
-                    && batch.component_delivery_parent == identity.component
-        );
-        if !selected {
-            return false;
+        if let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get_mut(slot) {
+            visit(batch);
+            true
+        } else {
+            false
         }
-        let mut abandoned = Vec::new();
-        if let Some(ResolutionFrame::BatchDelivery(frame)) = self.frames.get_mut(slot) {
-            visit(frame);
-            if let Some(staged) = &frame.staged {
-                abandoned = staged
-                    .members
-                    .iter()
-                    .filter(|member| {
-                        matches!(
-                            member.state,
-                            crate::types::game_state::StagedBatchMemberState::Abandoned
-                        )
-                    })
-                    .map(|member| member.identity)
-                    .collect();
-            }
-        }
-        // CR 800.4a: a component child's validated parent boundary is gone once
-        // the parent member is pruned. Detach exactly those links so the
-        // post-elimination save validates without inventing a parent pause.
-        if !abandoned.is_empty() {
-            for frame in self.frames.iter_mut() {
-                if let ResolutionFrame::BatchDelivery(child) = frame {
-                    if let Some(link) = child
-                        .component_delivery_parent
-                        .as_ref()
-                        .filter(|link| link.parent_group_id == identity.group)
-                    {
-                        if abandoned.contains(&link.member) {
-                            child.detach_component_parent();
-                        } else {
-                            child.prune_inherited_entries(&abandoned);
-                        }
-                    }
-                }
-            }
-        }
-        true
     }
 
     /// Mutably accesses a BatchDelivery owner while its exact active

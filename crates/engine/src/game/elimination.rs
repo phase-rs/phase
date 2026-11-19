@@ -1618,11 +1618,7 @@ fn abandon_pending_zone_change_member_for_player_left(
     identity: ObjectIncarnationRef,
     leaving_player: PlayerId,
 ) {
-    // Capture the exact staged owner (its group and, for a linked
-    // component batch, the parent boundary it captured) before the retirement
-    // transaction mutates anything, so the second visit below names the same
-    // frame rather than re-deriving an owner from the nearest staged frame.
-    let mut staged_owner = state.resolution_stack.staged_owner_identity();
+    let mut abandoned_parent_group = None;
     let mut canceled_pauses = Vec::new();
     // CR 730.3: under a merged permanent's component child this visits the
     // child and the batch or ChangeZone owner that announced the departure.
@@ -1632,13 +1628,6 @@ fn abandon_pending_zone_change_member_for_player_left(
         .resolution_stack
         .visit_active_zone_change_owners_mut(|owner| match owner {
             ZoneChangeOwnerMut::Batch(pending) => {
-                if staged_owner.as_ref().is_some_and(|owner| {
-                    owner.group == pending.logical_zone_change_group.logical_group_id
-                        && owner.component == pending.component_delivery_parent
-                }) {
-                    // The owner visitor already reaches this exact staged frame.
-                    staged_owner = None;
-                }
                 pending.remaining.retain(|id| *id != identity.object_id);
                 pending
                     .requests
@@ -1658,7 +1647,20 @@ fn abandon_pending_zone_change_member_for_player_left(
                             .expected_event,
                     );
                 }
-                pending.prune_inherited_entries(&[identity]);
+                if pending.component_delivery_parent.as_ref().is_some_and(|link| {
+                    abandoned_parent_group == Some(link.parent_group_id)
+                        && link.member == identity
+                }) {
+                    pending.retire_component_arrangement_seed();
+                } else {
+                    pending.prune_inherited_entries(&[identity]);
+                }
+                if matches!(
+                    pending.logical_zone_change_group.member_outcome(identity),
+                    Some(crate::types::game_state::LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft)
+                ) {
+                    abandoned_parent_group = Some(pending.logical_zone_change_group.logical_group_id);
+                }
                 crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
             }
             ZoneChangeOwnerMut::ChangeZone(pending) => {
@@ -1682,37 +1684,6 @@ fn abandon_pending_zone_change_member_for_player_left(
                 }
             }
         });
-    if let Some(staged_owner) = staged_owner {
-        // An approved member's delivery pause can bury its staged owner below
-        // a PostReplacement child. Visit it only if the owner visitor missed it.
-        state
-            .resolution_stack
-            .visit_staged_batch_owner_mut(&staged_owner, |pending| {
-                pending
-                    .logical_zone_change_group
-                    .record_abandoned_by_player_left(identity)
-                    .expect("buried staged batch owns a coherent logical group");
-                pending.remaining.retain(|id| *id != identity.object_id);
-                pending
-                    .requests
-                    .retain(|request| request.object_id != identity.object_id);
-                // CR 800.4a + CR 616.1: cancel the exact live child boundary
-                // before abandoning the member, then prune the abandoned slot.
-                if pending.paused_current.as_ref().is_some_and(|paused| {
-                    paused.member == identity && paused.terminal_completion.is_none()
-                }) {
-                    canceled_pauses.push(
-                        pending
-                            .paused_current
-                            .take()
-                            .expect("checked paused delivery is present")
-                            .expected_event,
-                    );
-                }
-                pending.prune_inherited_entries(&[identity]);
-                crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
-            });
-    }
 
     for expected_event in canceled_pauses {
         if state
@@ -2361,12 +2332,6 @@ fn retire_pending_zone_change_contexts_owned_by(
     owned_after: &crate::types::game_state::DepartingOwnerAfterAuthority,
 ) {
     let held_by_child = occurrences_held_by_component_child(state);
-    // CR 800.4a: a staged owner can be hidden below the top `PostReplacement`
-    // delivery child, where the owner visitor cannot reach it. Identify the
-    // bounded owner first, retire the visited owners, then retire that exact
-    // owner; retirement is idempotent, so an owner reached by both paths is
-    // not harmed.
-    let staged_owner = state.resolution_stack.staged_owner_identity();
     state
         .resolution_stack
         .visit_active_zone_change_owners_mut(|owner| match owner {
@@ -2377,17 +2342,6 @@ fn retire_pending_zone_change_contexts_owned_by(
                 .logical_zone_change_group
                 .retire_contexts_owned_by(player, &held_by_child, owned_after),
         });
-    if let Some(identity) = staged_owner {
-        state
-            .resolution_stack
-            .visit_staged_batch_owner_mut(&identity, |pending| {
-                pending.logical_zone_change_group.retire_contexts_owned_by(
-                    player,
-                    &held_by_child,
-                    owned_after,
-                );
-            });
-    }
 }
 
 /// CR 730.3: a linked component child holds occurrences its announcing owner

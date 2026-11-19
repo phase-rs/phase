@@ -66,6 +66,7 @@ use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode, TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
@@ -318,14 +319,18 @@ fn resolution_finished(state: &GameState) {
     );
 }
 
-/// CR 730.3 + CR 603.2c: Totally Lost puts the merged permanent on top of its
-/// owner's library through one batch. Circuit Mender's ability triggers once
-/// for the one permanent that left — whether the split runs straight through
-/// (Brokkos is not a commander) or Brokkos's CR 903.9b prompt parks it and is
-/// answered either way.
+/// CR 730.3 + CR 603.2c: Totally Lost moves one permanent, so Circuit Mender
+/// triggers once. CR 730.3a: the owner privately orders the cards that enter
+/// the library. CR 903.9b: a commander sent to the command zone is not among them.
 #[test]
 fn totally_lost_collects_the_merged_departure_once_for_each_commander_answer() {
-    for answer_index in [None, Some(0), Some(1)] {
+    for (answer_index, reverse) in [
+        (None, false),
+        (None, true),
+        (Some(0), false),
+        (Some(1), false),
+        (Some(1), true),
+    ] {
         let db = shared_card_db().expect("integration card fixture must load");
         let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
         scenario.at_phase(Phase::PreCombatMain);
@@ -356,7 +361,24 @@ fn totally_lost_collects_the_merged_departure_once_for_each_commander_answer() {
             }
         };
 
-        let label = format!("answer {answer_index:?}");
+        let label = format!("answer {answer_index:?}, reverse={reverse}");
+        if brokkos_zone == Zone::Library {
+            let order = if reverse {
+                [pile.brokkos, pile.mender]
+            } else {
+                [pile.mender, pile.brokkos]
+            };
+            order_merged_components_on_top(&mut runner, P0, order);
+            assert!(
+                runner.state().players[0]
+                    .library
+                    .iter()
+                    .take(2)
+                    .copied()
+                    .eq(order),
+                "{label}: both components follow the submitted top order"
+            );
+        }
         resolution_finished(runner.state());
         assert_eq!(
             mender_departure_triggers(runner.state()),
@@ -368,10 +390,34 @@ fn totally_lost_collects_the_merged_departure_once_for_each_commander_answer() {
     }
 }
 
-/// The Circuit Mender departure triggers `spell` produces on the same pile when
-/// Brokkos is not a commander, so nothing parks the split: the synchronous
-/// control the parked runs must match.
-fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId> {
+fn order_merged_components_on_top(runner: &mut GameRunner, owner: PlayerId, order: [ObjectId; 2]) {
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { player, library_owner, cards, top_count: 2, .. }
+                if *player == owner && *library_owner == owner
+                    && cards.len() == 2 && order.iter().all(|card| cards.contains(card))
+        ),
+        "expected the owner's component arrangement: {:?}",
+        runner.state().waiting_for
+    );
+    let result = runner
+        .act(GameAction::SelectCards {
+            cards: order.to_vec(),
+        })
+        .expect("the owner orders both components");
+    assert!(
+        result
+            .events
+            .iter()
+            .all(|event| !matches!(event, GameEvent::CardsRevealed { .. })),
+        "the order of the components is not revealed"
+    );
+}
+
+/// The Circuit Mender departure triggers `spell` produces without a commander
+/// replacement. A positional move still needs the owner's private order.
+fn unparked_control_triggers(spell_name: &str, pile_shape: Pile, arrange: bool) -> Vec<PlayerId> {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
     scenario.at_phase(Phase::PreCombatMain);
@@ -385,6 +431,9 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId
     let mut runner = scenario.build();
     let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, false);
     cast_until_resolved_or_asked(&mut runner, spell, &[pile.survivor]);
+    if arrange {
+        order_merged_components_on_top(&mut runner, P1, [mender, brokkos]);
+    }
     resolution_finished(runner.state());
     assert_eq!(
         patrol_triggers(runner.state()),
@@ -417,7 +466,7 @@ fn assert_control(spell_name: &str, pile_shape: Pile, control: &[PlayerId]) {
 #[test]
 fn chaos_warp_hands_a_parked_component_back_to_the_owner_iteration() {
     for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
-        let control = unparked_control_triggers("Chaos Warp", pile_shape);
+        let control = unparked_control_triggers("Chaos Warp", pile_shape, false);
         assert_control("Chaos Warp", pile_shape, &control);
         for answer_index in [0, 1] {
             let db = shared_card_db().expect("integration card fixture must load");
@@ -916,19 +965,22 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     steal_for(&mut runner, P1, turn_against, stolen_demon);
 
     cast_until_resolved_or_asked(&mut runner, ceremony, &[pile.survivor, angel]);
-    // CR 401.4: both cards go on top of P1's library, so P1 arranges them.
+    // CR 401.4 + CR 730.3a: P1 arranges both physical components and the Angel.
     let WaitingFor::EffectZoneChoice {
         player: P1, cards, ..
     } = &runner.state().waiting_for
     else {
         panic!("{:?}", runner.state().waiting_for);
     };
-    assert_eq!(cards.len(), 2);
+    assert_eq!(cards.len(), 3);
+    assert!(
+        cards.contains(&pile.mender) && cards.contains(&pile.brokkos) && cards.contains(&angel)
+    );
     runner
         .act(GameAction::SelectCards {
-            cards: vec![pile.survivor, angel],
+            cards: vec![pile.mender, pile.brokkos, angel],
         })
-        .expect("P1 arranges the two cards");
+        .expect("P1 arranges the three cards");
 
     assert!(
         runner.state().players[1].is_eliminated,
@@ -1094,7 +1146,7 @@ fn unsummon_concession_during_the_prompt_exiles_the_held_component() {
 /// answer nothing is left parked.
 #[test]
 fn spell_controller_concession_during_the_owners_prompt_leaves_nothing_parked() {
-    for spell_name in ["Chaos Warp", "Rebuking Ceremony"] {
+    for (spell_name, shuffle_tail) in [("Chaos Warp", true), ("Rebuking Ceremony", false)] {
         for answer_index in [0, 1] {
             let db = shared_card_db().expect("integration card fixture must load");
             let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
@@ -1109,7 +1161,7 @@ fn spell_controller_concession_during_the_owners_prompt_leaves_nothing_parked() 
             let mut runner = scenario.build();
             let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
             let label = format!("{spell_name}, answer {answer_index}");
-            let targets: Vec<ObjectId> = if spell_name == "Chaos Warp" {
+            let targets: Vec<ObjectId> = if shuffle_tail {
                 vec![pile.survivor]
             } else {
                 vec![karn, pile.survivor]
@@ -1128,9 +1180,12 @@ fn spell_controller_concession_during_the_owners_prompt_leaves_nothing_parked() 
             );
             assert_commander_prompt(runner.state(), P1, pile.brokkos);
             let events = answer(&mut runner, answer_index);
+            if !shuffle_tail && answer_index == 1 {
+                order_merged_components_on_top(&mut runner, P1, [mender, brokkos]);
+            }
             // CR 608.2m: a resolution under way continues to resolve fully, so
             // Chaos Warp's tail shuffles and reveals once for the owner.
-            let expected_tail = usize::from(spell_name == "Chaos Warp");
+            let expected_tail = usize::from(shuffle_tail);
             assert_eq!(
                 events
                     .iter()
@@ -1234,8 +1289,8 @@ fn chaos_warp_owner_concession_during_the_prompt_finishes_before_priority() {
 /// CR 800.4a + CR 730.3: another seat concedes while the commander's owner is
 /// choosing. P2's surviving artifact leaves the game with P2 and drops out of
 /// the ceremony; the parked component and its owner are untouched, the prompt
-/// stays with P1, and either answer finishes the ceremony with the merged
-/// departure collected once.
+/// stays with P1, and either answer finishes the ceremony. Under CR 603.10a
+/// the returned Extractor Demon observes the later merged departure for P0.
 #[test]
 fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
     for answer_index in [0, 1] {
@@ -1257,17 +1312,36 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
 
         cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(runner.state().objects[&mender].zone, Zone::Battlefield);
         concede(&mut runner, P2);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(runner.state().objects[&stolen_demon].controller, P0);
         assert_eq!(
             runner.state().objects[&surviving].zone,
             Zone::Exile,
             "{label}"
         );
 
-        // The owner's record of what it collected before P2 left survives a save.
+        // The parked replacement and its surviving owner survive a save.
         save_and_restore(&mut runner);
         answer(&mut runner, answer_index);
+        if answer_index == 1 {
+            order_merged_components_on_top(&mut runner, P1, [mender, brokkos]);
+        }
+        assert!(matches!(
+            &runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection {
+                player: P0,
+                trigger_controller: Some(P0),
+                source_id: Some(source),
+                ..
+            } if *source == stolen_demon
+        ));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Player(P0)),
+            })
+            .expect("P0 announces the Demon's trigger");
         resolution_finished(runner.state());
         assert_eq!(
             runner.state().objects[&ceremony].zone,
@@ -1286,10 +1360,8 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
         );
         assert_eq!(
             demon_triggers(runner.state()),
-            0,
-            "{label}: CR 603.10a + CR 800.4d: P2 conceded while P1's prompt was parked, so the \
-             Extractor Demon P2 had stolen looked back to a source P2 controlled for the merged \
-             permanent's retained departure, which the owner collected before P2 left"
+            1,
+            "{label}: the Demon observes the one merged departure after its control reverts"
         );
     }
 }
@@ -1377,11 +1449,10 @@ fn kor_skyfisher_selection_hands_a_parked_component_back_to_its_loop() {
 
 /// CR 603.2 + CR 603.10a + CR 603.3a: the observer leaves with the leaver, but its
 /// trigger is a survivor's. P0 takes control of P2's Extractor Demon with Turn
-/// Against; P0's Totally Lost moves P1's merged commander pile and Brokkos's
-/// CR 903.9b prompt parks the split. P2 concedes while P1's prompt is open, and
-/// the Demon leaves the game with its owner. The Demon's ability had already
-/// triggered for the merged permanent's departure under P0, so after P1 answers
-/// P0 is putting it on the stack, exactly once.
+/// Against; P0's Chaos Warp moves P1's merged commander pile. Circuit Mender
+/// has left the battlefield when Brokkos's CR 903.9b prompt parks the split.
+/// P2 concedes at that prompt, taking the Demon with them; the Demon's ability
+/// for the completed departure is still put on the stack for P0 exactly once.
 #[test]
 fn a_survivors_trigger_survives_its_source_leaving_with_another_seat() {
     for answer_index in [0, 1] {
@@ -1391,18 +1462,17 @@ fn a_survivors_trigger_survives_its_source_leaving_with_another_seat() {
         let (mender, brokkos) = add_pile(&mut scenario, P1);
         let demon = scenario.add_real_card(P2, "Extractor Demon", Zone::Battlefield, db);
         let turn_against = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
-        let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+        let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
         scenario.with_library_top(P1, &["Library Card A"]);
-        let mut pool = mana(ManaType::Blue, 5);
-        pool.extend(mana(ManaType::Red, 5));
-        scenario.with_mana_pool(P0, pool);
+        scenario.with_mana_pool(P0, mana(ManaType::Red, 8));
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
         let label = format!("answer {answer_index}");
         steal_for(&mut runner, P0, turn_against, demon);
 
-        cast_until_resolved_or_asked(&mut runner, lost, &[pile.survivor]);
+        cast_until_resolved_or_asked(&mut runner, warp, &[pile.survivor]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(runner.state().objects[&mender].zone, Zone::Library);
         concede(&mut runner, P2);
         assert_eq!(runner.state().objects[&demon].zone, Zone::Exile, "{label}");
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
@@ -1443,7 +1513,9 @@ fn a_survivors_trigger_survives_its_source_leaving_with_another_seat() {
 
 /// CR 603.2c + CR 603.3a: the batched sibling of the row above. P0 controls
 /// P2's Nefarious Imp and P1's merged commander pile (two Turn Against); P0's
-/// Totally Lost moves the pile and Brokkos's CR 903.9b prompt parks the split.
+/// Evacuation returns the pile and Brokkos's CR 903.9b prompt parks the split.
+/// One with the Stars keeps the Imp out of the creature return without removing
+/// its ability (CR 205.1a).
 /// P2 concedes and the Imp leaves with its owner. After P1 answers, P0 has two
 /// Imp triggers: one for the merged permanent P0 controlled, latched on the
 /// owner before P2 left, and one for the Imp itself leaving the battlefield.
@@ -1457,9 +1529,9 @@ fn a_survivors_batched_trigger_survives_its_source_leaving_with_another_seat() {
         let imp = scenario.add_real_card(P2, "Nefarious Imp", Zone::Battlefield, db);
         let take_imp = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
         let take_pile = scenario.add_real_card(P0, "Turn Against", Zone::Hand, db);
-        let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
-        scenario.with_library_top(P1, &["Library Card A"]);
-        let mut pool = mana(ManaType::Blue, 5);
+        let evacuation = scenario.add_real_card(P0, "Evacuation", Zone::Hand, db);
+        let aura = scenario.add_real_card(P0, "One with the Stars", Zone::Hand, db);
+        let mut pool = mana(ManaType::Blue, 9);
         pool.extend(mana(ManaType::Red, 10));
         scenario.with_mana_pool(P0, pool);
         let mut runner = scenario.build();
@@ -1467,9 +1539,17 @@ fn a_survivors_batched_trigger_survives_its_source_leaving_with_another_seat() {
         let label = format!("answer {answer_index}");
         steal_for(&mut runner, P0, take_imp, imp);
         steal_for(&mut runner, P0, take_pile, pile.survivor);
+        let enchanted = runner.cast(aura).target_object(imp).resolve();
+        enchanted.assert_zone(&[aura], Zone::Battlefield);
+        assert_eq!(
+            enchanted.state().objects[&imp].card_types.core_types,
+            vec![CoreType::Enchantment]
+        );
 
-        cast_until_resolved_or_asked(&mut runner, lost, &[pile.survivor]);
+        cast_until_resolved_or_asked(&mut runner, evacuation, &[]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(runner.state().objects[&mender].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&imp].zone, Zone::Battlefield);
         concede(&mut runner, P2);
         assert_eq!(runner.state().objects[&imp].zone, Zone::Exile, "{label}");
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
@@ -1531,13 +1611,14 @@ fn a_forged_record_of_departures_collected_before_a_player_left_is_rejected_on_l
     let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
     scenario.at_phase(Phase::PreCombatMain);
     let (mender, brokkos) = add_pile(&mut scenario, P1);
-    let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+    let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
     scenario.with_library_top(P1, &["Library Card A"]);
-    scenario.with_mana_pool(P0, mana(ManaType::Blue, 5));
+    scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
     let mut runner = scenario.build();
     let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
-    cast_until_resolved_or_asked(&mut runner, lost, &[pile.survivor]);
+    cast_until_resolved_or_asked(&mut runner, warp, &[pile.survivor]);
     assert_commander_prompt(runner.state(), P1, pile.brokkos);
+    assert_eq!(runner.state().objects[&mender].zone, Zone::Library);
     concede(&mut runner, P2);
 
     let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
@@ -1693,9 +1774,9 @@ fn a_departed_batched_observer_does_not_trigger_for_a_later_departure() {
 
 /// CR 603.10a + CR 603.3a + CR 800.4d: a second player leaves the same turn.
 /// In a four-player game P3 concedes first, so an earlier departure is already
-/// recorded this turn. P2 then steals P0's Extractor Demon, P0's Rebuking
-/// Ceremony starts moving P1's merged commander pile, and Brokkos's CR 903.9b
-/// prompt parks the owner. P2 concedes while P1's prompt is open, the Demon goes
+/// recorded this turn. P2 then steals P0's Extractor Demon, P0's Chaos Warp
+/// moves Circuit Mender, and Brokkos's CR 903.9b prompt parks the owner.
+/// P2 concedes while P1's prompt is open, the Demon goes
 /// back to P0, and P1 answers: the merged permanent's retained departure was
 /// collected under the controllers before P2 left, so the Demon triggers nothing.
 /// The boundary is the departure during this owner's operation, not the first
@@ -1709,10 +1790,9 @@ fn a_second_leaver_in_the_turn_still_retires_its_stolen_observers_retained_trigg
         let (mender, brokkos) = add_pile(&mut scenario, P1);
         let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
         let turn_against = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
-        let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
-        let surviving = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
         scenario.with_library_top(P1, &["Library Card A"]);
-        scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+        scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
         scenario.with_mana_pool(P2, mana(ManaType::Red, 5));
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
@@ -1721,8 +1801,9 @@ fn a_second_leaver_in_the_turn_still_retires_its_stolen_observers_retained_trigg
         concede(&mut runner, PlayerId(3));
         assert!(runner.state().players[3].is_eliminated, "{label}");
         steal_for(&mut runner, P2, turn_against, stolen_demon);
-        cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
+        cast_until_resolved_or_asked(&mut runner, warp, &[pile.survivor]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(runner.state().objects[&mender].zone, Zone::Library);
         concede(&mut runner, P2);
         assert!(runner.state().players[2].is_eliminated, "{label}");
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
@@ -1855,6 +1936,9 @@ fn resumed_batch_owner_hands_a_later_merged_member_to_its_component_batch() {
             assert_commander_prompt(runner.state(), P2, pile.brokkos);
             save_and_restore(&mut runner);
             answer(&mut runner, brokkos_answer);
+            if brokkos_answer == 1 {
+                order_merged_components_on_top(&mut runner, P2, [mender, brokkos]);
+            }
 
             resolution_finished(runner.state());
             assert!(
@@ -1922,6 +2006,7 @@ fn concession_resume_reaching_a_merged_member_parks_on_its_component() {
         );
         assert_commander_prompt(runner.state(), P2, pile.brokkos);
         answer(&mut runner, 1);
+        order_merged_components_on_top(&mut runner, P2, [mender, brokkos]);
         resolution_finished(runner.state());
         assert_eq!(
             runner.state().objects[&ceremony].zone,
@@ -1998,7 +2083,7 @@ fn concession_during_a_merged_permanents_owner_pass_goes_on_with_the_next_pass()
 /// the departure exactly as the unparked control does.
 #[test]
 fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
-    for spell_name in ["Totally Lost", "Chaos Warp"] {
+    for (spell_name, arrange) in [("Totally Lost", true), ("Chaos Warp", false)] {
         for (pile_shape, component_answer) in [
             (Pile::BrokkosUnderMender, None),
             (Pile::BrokkosUnderMender, Some(0)),
@@ -2006,7 +2091,7 @@ fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
             (Pile::MenderOverBrokkos, Some(0)),
             (Pile::MenderOverBrokkos, Some(1)),
         ] {
-            let control = unparked_control_triggers(spell_name, pile_shape);
+            let control = unparked_control_triggers(spell_name, pile_shape, arrange);
             assert_control(spell_name, pile_shape, &control);
             let db = shared_card_db().expect("integration card fixture must load");
             let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
@@ -2052,6 +2137,9 @@ fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
                 assert_commander_prompt(runner.state(), P1, pile.brokkos);
                 save_and_restore(&mut runner);
                 answer(&mut runner, index);
+            }
+            if arrange && component_answer != Some(0) {
+                order_merged_components_on_top(&mut runner, P1, [mender, brokkos]);
             }
 
             resolution_finished(runner.state());

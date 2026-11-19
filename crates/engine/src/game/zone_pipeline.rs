@@ -1664,8 +1664,8 @@ fn move_arranged_batch_then(
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let group_id = logical_zone_change_group.logical_group_id;
-    // Component populations keep per-member delivery unless numbered placement
-    // or a complete submitted physical order supplies arrangement authority.
+    // CR 730.3a: positional component moves need approval before their owner
+    // can arrange the cards that will enter the library.
     // Ordinary staged populations retain their existing admission policy.
     let delegated = component_delivery_parent.is_some();
     let component_family = reqs
@@ -2140,7 +2140,7 @@ fn component_arrangement_admission(
     if !positioned {
         return false;
     }
-    // Mirror numbered grouping's stable-base restriction, not just its position.
+    // CR 401.7: only numbered positions require a stable insertion base.
     let numbered = reqs.iter().all(|req| {
         matches!(
             req.placement,
@@ -2150,7 +2150,14 @@ fn component_arrangement_admission(
                 || req.placement == other.placement
         })
     });
-    if numbered {
+    if numbered
+        || reqs.iter().all(|req| {
+            matches!(
+                req.placement,
+                Some(LibraryPosition::Top | LibraryPosition::Bottom)
+            )
+        })
+    {
         return true;
     }
     reqs.iter().all(|req| {
@@ -4084,19 +4091,16 @@ fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliverie
             .iter()
             .map(|&index| &staged.members[index])
             .collect();
-        // Only numbered component placement or replacement-origin placement
-        // needs a fresh prompt; a submitted physical seed was handled above.
-        let numbered_components = matches!(
-            position,
-            LibraryPosition::NthFromTop { .. } | LibraryPosition::BeneathTop { .. }
-        ) && announced.iter().any(|member| {
+        // CR 730.3a: without inherited ranks, the owner orders the physical
+        // cards that remain after their replacement consultations.
+        let component_group = announced.iter().any(|member| {
             matches!(
                 member.request.cause,
                 crate::types::game_state::PendingBatchZoneChangeCause::MergedComponentRouting
             )
         });
         let needs_prompt = announced.len() >= 2
-            && (numbered_components
+            && (component_group
                 || announced
                     .iter()
                     .any(|member| staged_member_placement_is_replacement(member)));
@@ -5382,15 +5386,24 @@ pub(crate) fn reconcile_staged_batch_after_departure(
         return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
     }
 
-    // The staged owner may be buried below a top PostReplacement delivery child.
-    let mut buried = None;
-    if !state
-        .resolution_stack
-        .visit_staged_batch_owner_mut(&identity, |pending| buried = Some(pending.clone()))
-    {
+    // CR 730.3 + CR 616.1: a component child still owes the parent's exact
+    // delivery outcome. Even if departure canceled the child's current
+    // choice, the child must drain and hand back before the parent advances.
+    if state.active_batch_delivery().is_some_and(|child| {
+        child
+            .component_delivery_parent
+            .as_ref()
+            .is_some_and(|link| link.parent_group_id == identity.group)
+    }) {
         return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
     }
-    let Some(mut owner) = buried else {
+
+    // Read the buried owner without modifying its live child or handback.
+    let Some(mut owner) = state
+        .resolution_stack
+        .staged_batch_owner(&identity)
+        .cloned()
+    else {
         return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
     };
     let run_start = events.len();
@@ -5406,7 +5419,7 @@ pub(crate) fn reconcile_staged_batch_after_departure(
     }
     state
         .resolution_stack
-        .visit_staged_batch_owner_mut(&identity, |pending| *pending = owner.clone());
+        .visit_staged_batch_owner_mut(&identity, |pending| *pending = owner);
     // A buried owner is not settled here: the child frame owns the stack, so
     // its own resume performs the settlement and the owed final part is still
     // outstanding for the ordinary convergence.
@@ -10971,21 +10984,30 @@ mod w3_library_placement_tests {
         let start = runner.state().zone_changes_this_turn.len();
         let outcome = runner.cast(lost).target_object(bears).resolve();
         let mut events = outcome.events().to_vec();
-        let mut order = Vec::new();
-        if let WaitingFor::DigRestSplitChoice { cards, .. } = &runner.state().waiting_for {
-            order = cards.clone();
-            order.reverse();
-            let result = runner
-                .act(crate::types::actions::GameAction::SelectCards {
-                    cards: order.clone(),
-                })
-                .expect("the owner submits a nonidentity component order");
-            events.extend(result.events);
-        }
-        assert!(
-            !order.is_empty(),
-            "merged components must offer the owner arrangement"
-        );
+        // CR 730.3 + CR 730.3a: the one departing permanent gives its owner
+        // two cards to arrange privately as they enter the library.
+        let WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            cards,
+            top_count: 2,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected private component order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!((*player, *library_owner), (PlayerId(0), PlayerId(0)));
+        let mut order = cards.clone();
+        order.reverse();
+        let result = runner
+            .act(GameAction::SelectCards {
+                cards: order.clone(),
+            })
+            .expect("the owner submits a nonidentity component order");
+        events.extend(result.events);
         let state = runner.state();
         let library: Vec<_> = state.players[0].library.iter().copied().collect();
         assert_eq!(
