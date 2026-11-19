@@ -27,7 +27,7 @@ fn torment_repeat_x_applies_lose_life_each_iteration() {
         "Torment must carry repeat_for X, got {:?}",
         def.repeat_for
     );
-    // CR 608.2c: Torment of Hailfire's ruling: "Each repetition through this
+    // Torment of Hailfire's ruling (2017-07-14): "Each repetition through this
     // process is done separately." The count is never the for-each instance
     // set, and the parser-to-resolver transfer keeps it so.
     assert_eq!(def.repeat_timing, RepeatForTiming::Sequential);
@@ -104,7 +104,7 @@ fn torment_repeat_x_declined_unless_choices_resume_each_iteration() {
     );
 }
 
-/// CR 608.2c: Torment of Hailfire's ruling: "Each repetition through this
+/// Torment of Hailfire's ruling (2017-07-14): "Each repetition through this
 /// process is done separately." Cast through the production pipeline, the card
 /// P1 chose to discard on the first repetition is in the graveyard before the
 /// second repetition's prompt.

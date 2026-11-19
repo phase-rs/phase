@@ -38395,8 +38395,9 @@ impl InstructionJoin {
 /// `SimultaneousInstances` with no count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum RepeatForTiming {
-    /// CR 608.2c: each iteration is followed in order, completing before the next
-    /// begins. Every producer other than the for-each prefix peel stamps this:
+    /// Each iteration completes before the next begins, as Torment of Hailfire's
+    /// ruling (2017-07-14) says: "Each repetition through this process is done
+    /// separately." Every producer other than the for-each prefix peel stamps this:
     /// "repeat the following process", "twice" / "N times", difference counts,
     /// and lifted and copy counts.
     #[default]

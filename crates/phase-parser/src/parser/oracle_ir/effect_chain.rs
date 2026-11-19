@@ -1453,7 +1453,9 @@ impl RepeatCount {
         }
     }
 
-    /// CR 608.2c: each repetition is followed in the order written, completing before the next.
+    /// A counted repeat whose repetitions are each done separately (Torment of
+    /// Hailfire's ruling, 2017-07-14: "Each repetition through this process is
+    /// done separately.").
     pub(crate) fn sequential(count: QuantityExpr) -> Self {
         Self {
             count,
