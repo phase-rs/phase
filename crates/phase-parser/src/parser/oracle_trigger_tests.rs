@@ -31,6 +31,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
+use crate::types::player::PlayerCounterKind;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::zones::Zone;
@@ -8791,6 +8792,51 @@ fn wick_etb_post_effect_if_stays_on_execute_with_otherwise() {
         "else branch must PutCounter, got {:?}",
         else_branch.effect
     );
+}
+
+#[test]
+fn radgull_lowers_a_resolution_time_player_counter_branch() {
+    let abilities = parse_oracle_text(
+        "Flying\nWhenever this creature deals combat damage to a player, that player gets two rad counters if they don't have any rad counters. Otherwise, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+        "Vexing Radgull",
+        &["Flying".to_owned()],
+        &["Creature".to_owned()],
+        &[],
+    );
+    let [trigger] = abilities.triggers.as_slice() else {
+        panic!("expected exactly one combat damage trigger");
+    };
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+    assert!(trigger.condition.is_none());
+    let execute = trigger.execute.as_deref().expect("counter instruction");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::GivePlayerCounter {
+            counter_kind: PlayerCounterKind::Rad,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::TriggeringPlayer,
+        }
+    );
+    assert_eq!(
+        execute.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Rad,
+                    scope: CountScope::ScopedPlayer,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+    assert!(execute.player_scope.is_none());
+    assert!(execute.sub_ability.is_none());
+    let otherwise = execute.else_ability.as_deref().expect("paired Otherwise");
+    assert_eq!(*otherwise.effect, Effect::Proliferate);
+    assert_no_unimplemented(execute);
 }
 
 /// CR 603.4: A post-effect `if` ("draw a card if Y") is NOT an

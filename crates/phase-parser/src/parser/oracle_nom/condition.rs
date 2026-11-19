@@ -43,6 +43,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
+use crate::types::player::PlayerCounterKind;
 use crate::types::zones::Zone;
 
 // =========================================================================
@@ -4546,6 +4547,25 @@ fn parse_you_have_typed_cards_in_your_graveyard(input: &str) -> OracleResult<'_,
         )));
     }
     Ok((rest, type_filters))
+}
+
+/// CR 122.1: Recognize a named player-counter absence predicate. The caller
+/// must establish the antecedent before binding this resolution-time read.
+pub(crate) fn parse_anaphoric_player_counter_absence(
+    input: &str,
+) -> OracleResult<'_, (&str, PlayerCounterKind)> {
+    let (rest, subject) = alt((
+        terminated(tag("they"), (tag(" "), parse_dont)),
+        terminated(tag("that player"), (tag(" "), parse_doesnt)),
+    ))
+    .parse(input)?;
+    let (rest, kind) = delimited(
+        tag(" have any "),
+        nom_quantity::parse_player_counter_kind,
+        tag(" counters"),
+    )
+    .parse(rest)?;
+    Ok((rest, (subject, kind)))
 }
 
 /// Parse "they have exactly N [or exactly M ...] cards in hand" and

@@ -4893,6 +4893,45 @@ pub(super) fn strip_routed_suffix_conditional(
     if crate::parser::oracle_cost::is_self_cost_reduction_prefix(effect_prefix_lower) {
         return (None, text.to_string());
     }
+    // CR 608.2c + CR 608.2h + CR 122.1: This postfix guard reads the
+    // event player's live counters. The condition pass precedes clause
+    // subject staging. Require a proven trigger root and the same event
+    // player in both subjects; do not reinterpret a nearer player or let
+    // ScopedPlayer fall back to the controller.
+    if position == GatedInstructionPosition::ChainRoot
+        && ctx.in_trigger
+        && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer)
+    {
+        if let Ok((_, (anaphor, kind))) =
+            all_consuming(nom_condition::parse_anaphoric_player_counter_absence)
+                .parse(condition_text)
+        {
+            let mut probe = ctx.clone_throwaway();
+            let names_event_player = |application: super::SubjectApplication| {
+                application.affected == TargetFilter::TriggeringPlayer
+            };
+            if subject::parse_subject_application(anaphor, &mut probe)
+                .is_some_and(names_event_player)
+                && subject::parse_leading_subject_application(effect_prefix, &mut probe)
+                    .is_some_and(names_event_player)
+            {
+                return (
+                    general(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerCounter {
+                                kind,
+                                scope: CountScope::ScopedPlayer,
+                            },
+                        },
+                        comparator: Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    }),
+                    effect_prefix.to_string(),
+                );
+            }
+            return (None, text.to_string());
+        }
+    }
     let effect_text = if let Some(tail) = copy_retarget_tail {
         format!("{effect_prefix}, and {tail}")
     } else {
@@ -10290,6 +10329,51 @@ mod tests {
         SharedQuality, SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn player_counter_absence_requires_a_proven_event_antecedent() {
+        let printed = "that player gets two rad counters if they don't have any rad counters";
+        let mut event = ParseContext {
+            in_trigger: true,
+            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            ..Default::default()
+        };
+        let (guard, instruction) = strip_suffix_conditional(printed, &mut event);
+        assert!(guard.is_some());
+        assert_eq!(instruction, "that player gets two rad counters");
+
+        for mut ctx in [
+            ParseContext::default(),
+            ParseContext {
+                in_trigger: true,
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                strip_suffix_conditional(printed, &mut ctx),
+                (None, printed.to_owned())
+            );
+        }
+        assert_eq!(
+            strip_routed_suffix_conditional(
+                printed,
+                &mut event,
+                GatedInstructionPosition::AfterInstruction,
+            ),
+            (None, printed.to_owned())
+        );
+    }
+
+    #[test]
+    fn player_counter_absence_parses_the_kind_not_a_fixed_rad_keyword() {
+        assert_eq!(
+            all_consuming(nom_condition::parse_anaphoric_player_counter_absence)
+                .parse("that player doesn’t have any poison counters"),
+            Ok(("", ("that player", PlayerCounterKind::Poison)))
+        );
+    }
 
     /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
     /// returns `None` for it — a dropped `None` would lower the effect to
