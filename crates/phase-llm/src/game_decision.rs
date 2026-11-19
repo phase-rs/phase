@@ -2,9 +2,12 @@
 //!
 //! The model never authors an action. It is shown the engine-issued candidate
 //! domain — the same `AiDecisionContract` the heuristic AI selects from — and
-//! returns an INDEX into it. Everything the engine already enforces about AI
-//! actions (contract issuance, authority binding, re-validation on submit) is
-//! untouched, so an LLM seat cannot reach an action a heuristic seat could not.
+//! returns an INDEX into it. A combat declaration a chat model composes
+//! instead: it is shown each attack or block the engine's prompt lists and
+//! returns the indices of those it declares (`combat_declaration`).
+//! Everything the engine already enforces about AI actions (contract issuance,
+//! authority binding, re-validation on submit) is untouched, so an LLM seat
+//! cannot reach an action a heuristic seat could not.
 
 use engine::ai_support::AiDecisionContract;
 use engine::database::CardDatabase;
@@ -17,14 +20,16 @@ use engine::types::match_config::MatchPhase;
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 
+use crate::combat_declaration::ComposedDeclaration;
 use crate::error::{LlmError, LlmResult};
 use crate::fingerprint::fingerprint_of;
 use crate::format_guidance::game_format_brief;
 use crate::prompt::{
     decode_choice, difficulty_brief, history_budget, numbered_options, option_domain_statement,
-    option_value, untrusted_block, DecisionFrame, LlmPrompt, RESPONSE_CONTRACT,
+    option_value, untrusted_block, DecisionFrame, LlmPrompt, GAME_RESPONSE_CONTRACT,
     UNTRUSTED_DATA_DECLARATION,
 };
+use crate::provider::WireProtocol;
 use crate::render::action::{describe_action, describe_waiting_for, primary_object_name};
 use crate::render::game::{render_board, GameRenderOptions};
 use crate::render::history::{
@@ -40,6 +45,10 @@ pub struct GameDecisionRequest {
     /// to [`select_action`] so a decision that moved on is refused instead of
     /// misapplied.
     pub fingerprint: String,
+    /// How many options the chat prompt numbers. For a combat declaration
+    /// these are the empty declaration, when the engine accepts it, followed
+    /// by its pairs; a System One question is asked over the frame's options,
+    /// the engine's candidates.
     pub option_count: usize,
     /// The parts of this decision a message-thread continue is rendered from.
     update: ThreadUpdateParts,
@@ -56,6 +65,9 @@ struct ThreadUpdateParts {
     live_position: String,
     /// The numbered option list, exactly as the full prompt carries it.
     options: String,
+    /// How the model answers those options, as the full prompt states it
+    /// outside the data block.
+    instruction: &'static str,
     /// The seat the position is rendered for, so the history a continue
     /// carries names each player as the position does.
     viewer: PlayerId,
@@ -143,19 +155,26 @@ impl GameDecisionRequest {
         data.push_str(&self.update.live_position);
         data.push_str("\n\n");
         data.push_str(&self.update.options);
-        Some(decision_message(&data, self.option_count))
+        Some(decision_message(
+            &data,
+            self.option_count,
+            self.update.instruction,
+        ))
     }
 }
 
 /// The user message for one decision: the fenced data block, then the
 /// engine-authored option domain and instruction outside it.
-fn decision_message(data: &str, option_count: usize) -> String {
+fn decision_message(data: &str, option_count: usize, instruction: &str) -> String {
     format!(
-        "{}\n\n--- DECISION ---\n{}\nChoose exactly one option by its number.\n",
+        "{}\n\n--- DECISION ---\n{}\n{instruction}\n",
         untrusted_block(data),
         option_domain_statement(option_count),
     )
 }
+
+/// The instruction of a decision answered with one option.
+const ONE_OPTION_INSTRUCTION: &str = "Choose exactly one option by its number.";
 
 /// Difficulties below this see the board without Oracle text. They are meant to
 /// misplay in the way a new player misplays — off the board, not off exact card
@@ -189,8 +208,95 @@ const MANA_GUIDANCE: &str = "MANA: every untapped mana source you control counts
      you make a stronger play, holding back only the sources you need for something else \
      this turn.";
 
-/// Render the option domain exactly once, so the prompt the model reads and the
-/// fingerprint that guards it are derived from the same strings.
+/// A decision's options, rendered once, so the prompt the model reads, the
+/// fingerprint that guards it and the binding of its reply all read the same
+/// strings.
+#[derive(Debug)]
+struct DecisionOptions {
+    /// One line per engine-issued candidate, in contract order. A System One
+    /// question is put over these for every decision.
+    candidates: Vec<String>,
+    /// The combat declaration a chat model composes, pair by pair, instead of
+    /// choosing one of the candidates, when the decision is one.
+    declaration: Option<ComposedDeclaration>,
+}
+
+impl DecisionOptions {
+    /// The options of `contract`'s decision in `state`, named from `visible`,
+    /// the state filtered for the contract's semantic owner.
+    fn new(state: &GameState, visible: &GameState, contract: &AiDecisionContract) -> Self {
+        let viewer = contract.semantic_owner;
+        Self {
+            candidates: candidate_lines(visible, viewer, contract),
+            declaration: ComposedDeclaration::pending(state, visible, viewer),
+        }
+    }
+
+    /// The options a chat prompt numbers.
+    fn chat_lines(&self) -> &[String] {
+        self.declaration
+            .as_ref()
+            .map_or(self.candidates.as_slice(), ComposedDeclaration::lines)
+    }
+
+    /// Whether the decision leaves one answer, so it is not put to a model.
+    fn is_forced(&self, state: &GameState, contract: &AiDecisionContract) -> bool {
+        match &self.declaration {
+            Some(declaration) => declaration.is_forced(state, &contract.candidates),
+            None => self.candidates.len() < 2,
+        }
+    }
+
+    /// How a chat model answers [`Self::chat_lines`], stated outside the data
+    /// block.
+    fn chat_instruction(&self) -> &'static str {
+        self.declaration
+            .as_ref()
+            .map_or(ONE_OPTION_INSTRUCTION, ComposedDeclaration::instruction)
+    }
+
+    /// The fingerprint of every option line this decision can be answered
+    /// over: the candidates a System One reply names, and a declaration's
+    /// pairs a chat reply names. Without a declaration it is taken over the
+    /// candidates alone.
+    fn fingerprint(&self, contract: &AiDecisionContract) -> String {
+        let revision = contract.state_revision.to_string();
+        let owner = contract.semantic_owner.0.to_string();
+        let actor = contract.authorized_actor.0.to_string();
+        // The marker keeps the boundary between the two lists in the hash.
+        let declaration = self.declaration.iter().flat_map(|declaration| {
+            std::iter::once("declaration").chain(declaration.lines().iter().map(String::as_str))
+        });
+        fingerprint_of(
+            [revision.as_str(), owner.as_str(), actor.as_str()]
+                .into_iter()
+                .chain(self.candidates.iter().map(String::as_str))
+                .chain(declaration),
+        )
+    }
+
+    /// Bind a chat completion to the action it selects: one candidate, or the
+    /// declaration composed from every pair it names.
+    fn choose_chat(
+        &self,
+        state: &GameState,
+        contract: &AiDecisionContract,
+        completion_text: &str,
+    ) -> LlmResult<LlmActionSelection> {
+        let Some(declaration) = &self.declaration else {
+            return choose_candidate(contract, completion_text);
+        };
+        let option_count = declaration.lines().len();
+        // A declaration is answered with every option it declares.
+        let choice = decode_choice(completion_text, option_count, option_count)?;
+        Ok(LlmActionSelection {
+            action: declaration.bind(state, &choice.indices)?,
+            reasoning: choice.reasoning,
+        })
+    }
+}
+
+/// One line per engine-issued candidate.
 ///
 /// Labels carry card names and payload strings, so they are sanitized HERE
 /// rather than at the format site: doing it here is what keeps the fingerprint
@@ -203,7 +309,7 @@ const MANA_GUIDANCE: &str = "MANA: every untapped mana source you control counts
 /// makes the decision (CR 723.5), but the board, and so the options, are still
 /// the controlled seat's: what that seat may see is visible to its controller
 /// too (CR 723.4), and its objects keep their normal controllers (CR 723.3).
-fn option_lines(
+fn candidate_lines(
     visible: &GameState,
     viewer: PlayerId,
     contract: &AiDecisionContract,
@@ -224,22 +330,8 @@ fn option_lines(
 
 /// The fingerprint of a contract's option domain.
 pub fn decision_fingerprint(state: &GameState, contract: &AiDecisionContract) -> String {
-    let viewer = contract.semantic_owner;
-    let visible = filter_state_for_viewer(state, viewer);
-    options_fingerprint(contract, &option_lines(&visible, viewer, contract))
-}
-
-/// The fingerprint of a contract's option domain, over the option lines
-/// already rendered for it.
-fn options_fingerprint(contract: &AiDecisionContract, lines: &[String]) -> String {
-    let revision = contract.state_revision.to_string();
-    let owner = contract.semantic_owner.0.to_string();
-    let actor = contract.authorized_actor.0.to_string();
-    fingerprint_of(
-        [revision.as_str(), owner.as_str(), actor.as_str()]
-            .into_iter()
-            .chain(lines.iter().map(String::as_str)),
-    )
+    let visible = filter_state_for_viewer(state, contract.semantic_owner);
+    DecisionOptions::new(state, &visible, contract).fingerprint(contract)
 }
 
 /// The fingerprint of the viewer-visible information state at the time of a decision.
@@ -345,9 +437,16 @@ pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract)
         }
     }
 
-    let options = option_lines(&visible, viewer, contract);
-    for opt in &options {
+    let options = DecisionOptions::new(state, &visible, contract);
+    for opt in &options.candidates {
         parts.push(format!("opt:{opt}"));
+    }
+    for pair in options
+        .declaration
+        .iter()
+        .flat_map(ComposedDeclaration::lines)
+    {
+        parts.push(format!("declare:{pair}"));
     }
 
     fingerprint_of(parts.iter().map(String::as_str))
@@ -436,8 +535,8 @@ pub fn build_game_decision_prompt(
     // the board and the options are both rendered from this one state, as
     // this one seat, so an option names its target in the board's words.
     let visible = filter_state_for_viewer(state, viewer);
-    let options = option_lines(&visible, viewer, contract);
-    if options.is_empty() {
+    let options = DecisionOptions::new(state, &visible, contract);
+    if options.candidates.is_empty() {
         return Err(LlmError::UndecodableChoice {
             detail: "the engine issued no candidate actions".to_string(),
         });
@@ -446,7 +545,14 @@ pub fn build_game_decision_prompt(
     // legal option spends a round trip and a prompt's worth of tokens to learn
     // nothing; the caller takes it through the heuristic path instead, which
     // `UnsupportedDecision` already means and does not count as a failure.
-    if options.len() == 1 {
+    //
+    // A combat declaration is judged by its composed options, not by the
+    // engine's candidates alone, which sample the legal declarations and can
+    // leave one unsampled (a block beside one a requirement forces); see
+    // `ComposedDeclaration::is_forced`. A System One provider, asked over the
+    // candidates, refuses a question with fewer than two itself
+    // (`wire::system_one_request`).
+    if options.is_forced(state, contract) {
         return Err(LlmError::UnsupportedDecision {
             detail: "only one legal option; there is nothing to decide".to_string(),
         });
@@ -493,8 +599,9 @@ pub fn build_game_decision_prompt(
          available to you right now, each with a description. Outside the block, the \
          message states how many options exist and which numbers are valid; that \
          statement is authoritative and complete. Every valid number is a legal \
-         option, and no other number is. Choose exactly one by its number.\n\n{}",
-        UNTRUSTED_DATA_DECLARATION, RESPONSE_CONTRACT,
+         option, and no other number is. Choose exactly one by its number, unless \
+         the message tells you to choose a list of options.\n\n{}",
+        UNTRUSTED_DATA_DECLARATION, GAME_RESPONSE_CONTRACT,
     );
 
     // Every rendered value is DATA — the position, the pending prompt, and each
@@ -508,21 +615,24 @@ pub fn build_game_decision_prompt(
         describe_waiting_for(&visible.waiting_for),
     );
     let position = format!("{board}\n{waiting_for}");
-    let options_section = numbered_options("YOUR LEGAL OPTIONS", &options);
+    let chat_options = options.chat_lines();
+    let options_section = numbered_options("YOUR LEGAL OPTIONS", chat_options);
     let data = format!("{position}\n\n{options_section}");
 
-    let user = decision_message(&data, options.len());
+    let user = decision_message(&data, chat_options.len(), options.chat_instruction());
 
+    // A typed Choice names one criterion, so a System One provider is always
+    // asked over the engine's candidates, a combat declaration included.
     let frame = DecisionFrame {
         brief,
         position,
         instruction: "Choose the one legal option that is best for you right now.".to_string(),
-        options: options.clone(),
+        options: options.candidates.clone(),
     };
 
     Ok(GameDecisionRequest {
-        fingerprint: options_fingerprint(contract, &options),
-        option_count: options.len(),
+        fingerprint: options.fingerprint(contract),
+        option_count: chat_options.len(),
         prompt: LlmPrompt {
             system,
             user,
@@ -531,6 +641,7 @@ pub fn build_game_decision_prompt(
         update: ThreadUpdateParts {
             live_position: format!("{live_board}\n{waiting_for}"),
             options: options_section,
+            instruction: options.chat_instruction(),
             viewer,
             history: render.history,
             // CR 723.5: a decision another player makes for this seat, while
@@ -546,23 +657,46 @@ pub fn build_game_decision_prompt(
 ///
 /// The one response-consuming authority for a game decision. The decision is
 /// re-checked against the fingerprint first, then the reply is read against the
-/// option lines this decision issues, so a System One answer can only name
-/// criteria the engine actually offered, and only then is the selected index
-/// bound to a candidate, as [`select_action`] binds one. The fingerprint and
-/// the reply are both read against the one set of option lines rendered here.
+/// option lines its provider was asked over, so a System One answer can only
+/// name criteria the engine actually offered, and only then is it bound to an
+/// action: a System One answer to one candidate, a chat reply as
+/// [`select_action`] binds one. The fingerprint and the reply are both read
+/// against the one set of option lines rendered here.
 pub fn select_action_from_response(
     state: &GameState,
     contract: &AiDecisionContract,
     expected_fingerprint: &str,
     reply: LlmReply<'_>,
 ) -> LlmResult<LlmActionSelection> {
-    let viewer = contract.semantic_owner;
-    let options = option_lines(&filter_state_for_viewer(state, viewer), viewer, contract);
-    if options_fingerprint(contract, &options) != expected_fingerprint {
+    let visible = filter_state_for_viewer(state, contract.semantic_owner);
+    let options = DecisionOptions::new(state, &visible, contract);
+    if options.fingerprint(contract) != expected_fingerprint {
         return Err(LlmError::StaleDecision);
     }
-    let completion = completion_from_response(reply.provider, reply.status, reply.body, &options)?;
-    choose_candidate(contract, &completion)
+    match reply.provider.wire() {
+        // A System One question is put over the candidates, and its answer
+        // ranks them; the head is the one it chose.
+        WireProtocol::SystemOneRelay => {
+            let completion = completion_from_response(
+                reply.provider,
+                reply.status,
+                reply.body,
+                &options.candidates,
+            )?;
+            choose_candidate(contract, &completion)
+        }
+        WireProtocol::OpenAiChat
+        | WireProtocol::AnthropicMessages
+        | WireProtocol::GeminiGenerateContent => {
+            let completion = completion_from_response(
+                reply.provider,
+                reply.status,
+                reply.body,
+                options.chat_lines(),
+            )?;
+            options.choose_chat(state, contract, &completion)
+        }
+    }
 }
 
 /// The action an LLM reply selects, plus the model's stated reason.
@@ -572,21 +706,27 @@ pub struct LlmActionSelection {
     pub reasoning: Option<String>,
 }
 
-/// Bind a completion back to an engine action.
+/// Bind a chat completion back to an engine action.
+///
+/// A chat completion only: a System One answer names one of the engine's
+/// candidates, and only [`select_action_from_response`] reads one.
 ///
 /// Refuses on any mismatch rather than approximating: a moved-on decision, an
-/// out-of-range index, or an undecodable reply all surface as errors so the
-/// caller falls back to the heuristic AI.
+/// out-of-range index, an undecodable reply, or a combat declaration the
+/// engine does not accept as chosen all surface as errors so the caller falls
+/// back to the heuristic AI.
 pub fn select_action(
     state: &GameState,
     contract: &AiDecisionContract,
     expected_fingerprint: &str,
     completion_text: &str,
 ) -> LlmResult<LlmActionSelection> {
-    if decision_fingerprint(state, contract) != expected_fingerprint {
+    let visible = filter_state_for_viewer(state, contract.semantic_owner);
+    let options = DecisionOptions::new(state, &visible, contract);
+    if options.fingerprint(contract) != expected_fingerprint {
         return Err(LlmError::StaleDecision);
     }
-    choose_candidate(contract, completion_text)
+    options.choose_chat(state, contract, completion_text)
 }
 
 /// The candidate a completion names, once its decision is known to be current.
@@ -1602,7 +1742,7 @@ mod tests {
         actions.push(GameAction::PassPriority);
         let contract = contract(actions);
         let viewer = contract.semantic_owner;
-        let lines = option_lines(&filter_state_for_viewer(state, viewer), viewer, &contract);
+        let lines = candidate_lines(&filter_state_for_viewer(state, viewer), viewer, &contract);
         assert!(
             lines
                 .iter()
@@ -2050,6 +2190,1506 @@ mod tests {
             reply_through_the_response_path(&state, &contract, &request, 1),
             GameAction::SubmitVoteCandidate { candidate_index: 1 }
         );
+    }
+
+    /// Brightling, verbatim Oracle text: four activated abilities, the last a
+    /// choice of two made as it resolves.
+    const BRIGHTLING: &str = "{W}: This creature gains vigilance until end of turn.\n\
+         {W}: This creature gains lifelink until end of turn.\n\
+         {W}: Return this creature to its owner's hand.\n\
+         {1}: This creature gets +1/-1 or -1/+1 until end of turn.";
+
+    /// Brightling on Player 0's battlefield with a Plains to pay for any one
+    /// of its abilities, at Player 0's priority, and the index of its last
+    /// ability, found by its effect rather than by its place.
+    fn brightling() -> (engine::game::scenario::GameRunner, ObjectId, usize) {
+        use engine::game::scenario::GameScenario;
+        use engine::types::ability::Effect;
+        use engine::types::mana::ManaColor;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::White);
+        let brightling = scenario
+            .add_creature_from_oracle(PlayerId(0), "Brightling", 3, 3, BRIGHTLING)
+            .id();
+        let runner = scenario.build();
+        let disjunction = runner.state().objects[&brightling]
+            .abilities
+            .iter()
+            .position(|ability| matches!(&*ability.effect, Effect::ChooseOneOf { .. }))
+            .expect("reach guard: Brightling's last ability is a choice of two");
+        (runner, brightling, disjunction)
+    }
+
+    /// Issue #10996: an activated ability was offered by its index on its
+    /// source (`Activate Ability (Ability Index: 1, ...)`), and the model
+    /// guessed which ability an index was. Each of Brightling's four
+    /// abilities, as the engine offers them, now quotes the ability it
+    /// activates, with Brightling's name where its text names itself.
+    #[test]
+    fn activated_ability_options_quote_the_ability_they_activate() {
+        let (runner, brightling, disjunction) = brightling();
+        let state = runner.state();
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let activations: Vec<(usize, usize)> = contract
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(position, candidate)| {
+                let GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                    ..
+                } = candidate.action
+                else {
+                    return None;
+                };
+                (source_id == brightling).then_some((position, ability_index))
+            })
+            .collect();
+        // Reach guard: the engine offers all four, the Plains paying for any.
+        assert_eq!(activations.len(), 4, "{:?}", contract.candidates);
+
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let options = &request.prompt.frame.options;
+        let activation_options: Vec<&String> = activations
+            .iter()
+            .map(|(position, _)| &options[*position])
+            .collect();
+        for printed in [
+            "{W}: Brightling gains vigilance until end of turn.",
+            "{W}: Brightling gains lifelink until end of turn.",
+            "{W}: Return Brightling to its owner's hand.",
+            "{1}: Brightling gets +1/-1 or -1/+1 until end of turn.",
+        ] {
+            let quoting = activation_options
+                .iter()
+                .filter(|option| option.contains(&format!("(Ability Index: \"{printed}\", ")))
+                .count();
+            assert_eq!(quoting, 1, "{printed} in {activation_options:?}");
+        }
+
+        // Each option quotes the ability at its own index: the choice of two,
+        // found by its effect, is the one its option names.
+        let (position, _) = activations
+            .iter()
+            .find(|(_, ability_index)| *ability_index == disjunction)
+            .expect("the engine offers the choice of two");
+        assert_eq!(
+            options[*position],
+            "Brightling — Activate Ability (Ability Index: \"{1}: Brightling gets +1/-1 or \
+             -1/+1 until end of turn.\", Source ID: Brightling (controlled by You))"
+        );
+    }
+
+    /// CR 608.2d: Brightling's "{1}: This creature gets +1/-1 or -1/+1 until
+    /// end of turn." asks as it resolves which of the two it gets, and the
+    /// engine offers the two by index (`Choose Branch (Index: 0)`). Each option
+    /// now quotes the engine's description of its branch.
+    #[test]
+    fn branch_options_quote_the_branch_they_choose() {
+        let (mut runner, brightling, disjunction) = brightling();
+        let activation = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::ActivateAbility { source_id, ability_index, .. }
+                        if *source_id == brightling && *ability_index == disjunction
+                )
+            })
+            .expect("the engine offers the choice of two");
+        runner
+            .act(activation)
+            .expect("activating Brightling's choice of two");
+        // Both players pass, and the ability resolves to its choice.
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        let state = runner.state();
+        let WaitingFor::ChooseOneOfBranch {
+            branch_descriptions,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: the ability asks which of the two, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(branch_descriptions.len(), 2, "{branch_descriptions:?}");
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        assert_eq!(
+            contract
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                GameAction::ChooseBranch { index: 0 },
+                GameAction::ChooseBranch { index: 1 },
+            ]
+        );
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let options = &request.prompt.frame.options;
+        for (index, option) in options.iter().enumerate() {
+            let described = branch_descriptions[index].replace('~', "Brightling");
+            assert_eq!(option, &format!("Choose Branch (Index: \"{described}\")"));
+        }
+        // The two read apart by the modification each one makes.
+        let [first, second] = options.as_slice() else {
+            panic!("two branches: {options:?}");
+        };
+        assert!(
+            first.contains("+1/-1") != second.contains("+1/-1")
+                && first.contains("-1/+1") != second.contains("-1/+1"),
+            "{options:?}"
+        );
+    }
+
+    /// Abzan Charm, verbatim Oracle text.
+    const ABZAN_CHARM: &str = "Choose one —\n\
+         • Exile target creature with power 3 or greater.\n\
+         • You draw two cards and you lose 2 life.\n\
+         • Distribute two +1/+1 counters among one or two target creatures.";
+
+    /// Issue #10996: a modal spell's modes were offered by index
+    /// (`Select Modes (Indices: 0)`). Casting Abzan Charm, each mode option the
+    /// engine offers now quotes the mode it chooses.
+    #[test]
+    fn mode_options_quote_the_mode_they_choose() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for color in [ManaColor::White, ManaColor::Black, ManaColor::Green] {
+            scenario.add_basic_land(PlayerId(0), color);
+        }
+        // A creature with power 3 or greater, so every mode has a target.
+        scenario.add_creature(PlayerId(1), "Serra Angel", 4, 4);
+        let charm = {
+            let mut builder = scenario.add_spell_to_hand_from_oracle(
+                PlayerId(0),
+                "Abzan Charm",
+                true,
+                ABZAN_CHARM,
+            );
+            builder.with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::White,
+                    ManaCostShard::Black,
+                    ManaCostShard::Green,
+                ],
+                generic: 0,
+            });
+            builder.id()
+        };
+        let mut runner = scenario.build();
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == charm)
+            })
+            .expect("three lands pay for Abzan Charm");
+        runner.act(cast).expect("casting Abzan Charm");
+        let state = runner.state();
+        // Reach guard: CR 601.2b, the mode is chosen as the spell is cast.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ModeChoice { .. }),
+            "{:?}",
+            state.waiting_for
+        );
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let printed = [
+            "Exile target creature with power 3 or greater.",
+            "You draw two cards and you lose 2 life.",
+            "Distribute two +1/+1 counters among one or two target creatures.",
+        ];
+        let mut modes = Vec::new();
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::SelectModes { indices } = &candidate.action else {
+                continue;
+            };
+            let [index] = indices.as_slice() else {
+                panic!("Abzan Charm chooses one mode: {indices:?}");
+            };
+            assert_eq!(
+                option,
+                &format!("Select Modes (Indices: \"{}\")", printed[*index])
+            );
+            modes.push(*index);
+        }
+        // Reach guard: every mode has a legal target, so all three are offered.
+        modes.sort_unstable();
+        assert_eq!(modes, [0, 1, 2], "{:?}", request.prompt.frame.options);
+    }
+
+    /// Steppe Lynx and Grazing Gladehart, verbatim Oracle text.
+    const STEPPE_LYNX: &str =
+        "Landfall — Whenever a land you control enters, this creature gets +2/+2 until end of turn.";
+    const GRAZING_GLADEHART: &str =
+        "Landfall — Whenever a land you control enters, you may gain 2 life.";
+
+    /// Issue #10996: the order of two triggers was offered as indices
+    /// (`Order Triggers (Order: 0, 1)`), and nothing said which trigger an
+    /// index was or which way round the order ran. Playing a land with Steppe
+    /// Lynx and Grazing Gladehart out, each option the engine offers now names
+    /// both triggers by source and text, from the one that resolves first:
+    /// the one the order places last (CR 405.2 + CR 405.5).
+    #[test]
+    fn trigger_order_options_name_the_triggers_in_the_order_they_resolve() {
+        use engine::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let lynx = scenario
+            .add_creature_from_oracle(PlayerId(0), "Steppe Lynx", 0, 1, STEPPE_LYNX)
+            .id();
+        scenario.add_creature_from_oracle(
+            PlayerId(0),
+            "Grazing Gladehart",
+            2,
+            2,
+            GRAZING_GLADEHART,
+        );
+        let forest = scenario.add_land_to_hand(PlayerId(0), "Forest").id();
+        let mut runner = scenario.build();
+        let play = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == forest)
+            })
+            .expect("the Forest can be played");
+        runner.act(play).expect("playing the Forest");
+        let state = runner.state();
+        let WaitingFor::OrderTriggers { triggers, .. } = &state.waiting_for else {
+            panic!(
+                "reach guard: both landfall triggers wait to be ordered, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(triggers.len(), 2, "{triggers:?}");
+        // Each trigger as the option should name it, read from the engine's
+        // summary, Steppe Lynx's own name for its self-reference.
+        let named = |index: usize| {
+            let trigger = &triggers[index];
+            let text = trigger.description.replace('~', &trigger.source_name);
+            format!("{} (\"{text}\")", trigger.source_name)
+        };
+        let lynx_index = triggers
+            .iter()
+            .position(|trigger| trigger.source_id == lynx)
+            .expect("Steppe Lynx's trigger is one of the two");
+        assert!(
+            named(lynx_index).contains("Steppe Lynx gets +2/+2 until end of turn"),
+            "{}",
+            named(lynx_index)
+        );
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let mut orders = Vec::new();
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::OrderTriggers { order } = &candidate.action else {
+                continue;
+            };
+            let [placed_first, placed_last] = order.as_slice() else {
+                panic!("two triggers: {order:?}");
+            };
+            assert_eq!(
+                option,
+                &format!(
+                    "Order Triggers (Order: {} resolves first, then {})",
+                    named(*placed_last),
+                    named(*placed_first)
+                )
+            );
+            orders.push(order.clone());
+        }
+        // Reach guard: both orders are offered.
+        orders.sort();
+        assert_eq!(orders, [vec![0, 1], vec![1, 0]]);
+    }
+
+    /// Cankerbloom, verbatim Oracle text, its reminder text included.
+    const CANKERBLOOM: &str = "{1}, Sacrifice this creature: Choose one —\n\
+         • Destroy target artifact.\n\
+         • Destroy target enchantment.\n\
+         • Proliferate. (Choose any number of permanents and/or players, then give each \
+         another counter of each kind already there.)";
+
+    /// Issue #10996: a modal activated ability's modes are chosen as it is
+    /// activated (CR 700.2a), in a prompt of their own, and were offered by
+    /// index (`Select Modes (Indices: 0)`). Activating Cankerbloom ("{1},
+    /// Sacrifice this creature: Choose one — • Destroy target artifact. •
+    /// Destroy target enchantment. • Proliferate. (...)"), each mode option the
+    /// engine offers now quotes the mode it chooses.
+    #[test]
+    fn modal_ability_options_quote_the_mode_they_choose() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::ManaColor;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // The Forest pays the {1}.
+        scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+        // An artifact and an enchantment, so every mode has a legal target and
+        // none is withheld (CR 700.2a).
+        scenario.add_artifact_from_oracle(PlayerId(1), "Sol Ring", "{T}: Add {C}{C}.");
+        scenario.add_enchantment_from_oracle(
+            PlayerId(1),
+            "Glorious Anthem",
+            "Creatures you control get +1/+1.",
+        );
+        let cankerbloom = scenario
+            .add_creature_from_oracle(PlayerId(0), "Cankerbloom", 3, 2, CANKERBLOOM)
+            .id();
+        let mut runner = scenario.build();
+        let activation = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::ActivateAbility { source_id, .. } if *source_id == cankerbloom
+                )
+            })
+            .expect("the Forest pays for Cankerbloom's ability");
+        runner.act(activation).expect("activating Cankerbloom");
+        let state = runner.state();
+        // The modes as printed. Reminder text (CR 207.2a) is italicized text
+        // with no game function (CR 207.2), and the parser strips it from each
+        // mode line, so Proliferate's mode is the keyword action alone.
+        let printed = [
+            "Destroy target artifact.",
+            "Destroy target enchantment.",
+            "Proliferate.",
+        ];
+        // Reach guard: CR 602.2b + CR 700.2a, the mode is chosen before the
+        // cost is paid, in the activated ability's own prompt, which records
+        // each mode's printed text.
+        let WaitingFor::AbilityModeChoice {
+            modal,
+            source_id,
+            is_activated,
+            unavailable_modes,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: the activation asks for its mode, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*source_id, cankerbloom);
+        assert!(*is_activated);
+        assert!(unavailable_modes.is_empty(), "{unavailable_modes:?}");
+        assert_eq!(modal.mode_descriptions, printed);
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let mut modes = Vec::new();
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::SelectModes { indices } = &candidate.action else {
+                continue;
+            };
+            let [index] = indices.as_slice() else {
+                panic!("Cankerbloom chooses one mode: {indices:?}");
+            };
+            assert_eq!(
+                option,
+                &format!("Select Modes (Indices: \"{}\")", printed[*index])
+            );
+            modes.push(*index);
+        }
+        // Reach guard: every mode has a legal target, so all three are offered.
+        modes.sort_unstable();
+        assert_eq!(modes, [0, 1, 2], "{:?}", request.prompt.frame.options);
+    }
+
+    /// Brightmare, verbatim Oracle text.
+    const BRIGHTMARE: &str = "When this creature enters, tap up to one target creature. \
+         You gain life equal to that creature's power.";
+
+    /// Issue #10996: Brightmare's "When this creature enters, tap up to one
+    /// target creature. You gain life equal to that creature's power." may go
+    /// on the stack with no target (CR 603.3d + CR 115.6), and the option that
+    /// declines read only `Choose Target`. Cast with a Grizzly Bears across the
+    /// table, the decline the engine offers now reads `Choose Target (Target:
+    /// none)`, beside the options that name each creature.
+    #[test]
+    fn declining_an_optional_target_says_it_chooses_none() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::ability::TargetRef;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Three Plains pay {2}{W}.
+        for _ in 0..3 {
+            scenario.add_basic_land(PlayerId(0), ManaColor::White);
+        }
+        // Grizzly Bears prints no rules text, so its name is the whole card.
+        let bears = scenario
+            .add_creature(PlayerId(1), "Grizzly Bears", 2, 2)
+            .id();
+        let brightmare = scenario
+            .add_creature_to_hand_from_oracle(PlayerId(0), "Brightmare", 2, 3, BRIGHTMARE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 2,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::CastSpell { object_id, .. } if *object_id == brightmare
+                )
+            })
+            .expect("three Plains pay for Brightmare");
+        runner.act(cast).expect("casting Brightmare");
+        // Both players pass, Brightmare resolves and enters, and its trigger
+        // asks for its target as it goes on the stack.
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        let state = runner.state();
+        let WaitingFor::TriggerTargetSelection {
+            player,
+            target_slots,
+            selection,
+            source_id,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: Brightmare's trigger asks for its target, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*player, PlayerId(0));
+        assert_eq!(*source_id, Some(brightmare));
+        // "Up to one": a single target slot, which may be left empty.
+        let [slot] = target_slots.as_slice() else {
+            panic!("one target slot: {target_slots:?}");
+        };
+        assert!(slot.optional, "{slot:?}");
+        assert_eq!(selection.current_slot, 0);
+        // Either creature may be tapped, Brightmare itself among them.
+        let legal = &selection.current_legal_targets;
+        assert_eq!(legal.len(), 2, "{legal:?}");
+        for creature in [brightmare, bears] {
+            assert!(legal.contains(&TargetRef::Object(creature)), "{legal:?}");
+        }
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let options = &request.prompt.frame.options;
+        // Reach guard: one option per creature, and the decline.
+        assert_eq!(options.len(), 3, "{options:?}");
+        // The option the engine issued for each answer, found by its action:
+        // the contract sorts its candidates in the engine's own order.
+        let option_for = |target: Option<TargetRef>| {
+            let action = GameAction::ChooseTarget { target };
+            let position = contract
+                .candidates
+                .iter()
+                .position(|candidate| candidate.action == action)
+                .unwrap_or_else(|| panic!("the engine offers {action:?}"));
+            options[position].as_str()
+        };
+        assert_eq!(option_for(None), "Choose Target (Target: none)");
+        assert_eq!(
+            option_for(Some(TargetRef::Object(bears))),
+            "Choose Target (Target: Grizzly Bears (controlled by Player 1))"
+        );
+        assert_eq!(
+            option_for(Some(TargetRef::Object(brightmare))),
+            "Choose Target (Target: Brightmare (controlled by You))"
+        );
+    }
+
+    /// CR 616.1: Lightning Bolt ("Lightning Bolt deals 3 damage to any target.")
+    /// aimed at Player 1 meets Furnace of Rath ("If a source would deal damage
+    /// to a permanent or player, it deals double that damage to that permanent
+    /// or player instead.") and Benevolent Unicorn ("If a spell would deal
+    /// damage to a permanent or player, it deals that much damage minus 1 to
+    /// that permanent or player instead."), and Player 1, the affected player,
+    /// chooses which applies first. The engine offers the two by index
+    /// (`Choose Replacement (Index: 0)`); each option now names its effect by
+    /// its source and its text.
+    #[test]
+    fn replacement_options_name_the_effect_they_apply() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::ability::TargetRef;
+        use engine::types::game_state::{ReplacementCandidateSummary, ReplacementChoiceKind};
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        // Verbatim Oracle text.
+        const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+        const FURNACE_OF_RATH: &str = "If a source would deal damage to a permanent or player, it \
+             deals double that damage to that permanent or player instead.";
+        const BENEVOLENT_UNICORN: &str =
+            "If a spell would deal damage to a permanent or player, it \
+             deals that much damage minus 1 to that permanent or player instead.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Red);
+        let furnace = scenario
+            .add_enchantment_from_oracle(PlayerId(0), "Furnace of Rath", FURNACE_OF_RATH)
+            .id();
+        let unicorn = scenario
+            .add_creature_from_oracle(PlayerId(1), "Benevolent Unicorn", 1, 2, BENEVOLENT_UNICORN)
+            .id();
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Lightning Bolt", true, LIGHTNING_BOLT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == bolt)
+            })
+            .expect("a Mountain pays for Lightning Bolt");
+        runner.act(cast).expect("casting Lightning Bolt");
+        // Reach guard: CR 601.2c, the target is chosen as the spell is cast.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        let at_player_one = GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(PlayerId(1))),
+        };
+        let aim = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| *action == at_player_one)
+            .expect("Player 1 is a legal target");
+        runner.act(aim).expect("aiming at Player 1");
+        // Both players pass, and Lightning Bolt resolves into its damage.
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        let state = runner.state();
+        let WaitingFor::ReplacementChoice {
+            player,
+            candidate_count,
+            candidates,
+            kind,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: the damage waits on which effect applies first, got {:?}",
+                state.waiting_for
+            );
+        };
+        // The damaged player orders the two effects (the order changes the
+        // damage, so the engine asks rather than applying one).
+        assert_eq!(*player, PlayerId(1));
+        assert_eq!(*kind, ReplacementChoiceKind::Order);
+        assert_eq!(*candidate_count, 2, "{candidates:?}");
+        // What the label reads: each summary names its printed card and quotes
+        // its printed text. Found by source, since the order is the engine's.
+        let printed = [
+            (furnace, "Furnace of Rath", FURNACE_OF_RATH),
+            (unicorn, "Benevolent Unicorn", BENEVOLENT_UNICORN),
+        ];
+        for &(source_id, name, text) in &printed {
+            let summary = ReplacementCandidateSummary {
+                source_id,
+                source_name: name.to_string(),
+                description: text.to_string(),
+            };
+            assert!(candidates.contains(&summary), "{name} in {candidates:?}");
+        }
+
+        let contract = AiDecisionContract::issue(state, PlayerId(1));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let mut indices = Vec::new();
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::ChooseReplacement { index } = candidate.action else {
+                continue;
+            };
+            let (_, name, text) = printed
+                .iter()
+                .find(|(source_id, ..)| *source_id == candidates[index].source_id)
+                .expect("each option is one of the two effects");
+            assert_eq!(
+                option,
+                &format!("Choose Replacement (Index: {name} (\"{text}\"))")
+            );
+            indices.push(index);
+        }
+        // Reach guard: both effects are offered.
+        indices.sort_unstable();
+        assert_eq!(indices, [0, 1], "{:?}", request.prompt.frame.options);
+    }
+
+    /// Reverse the Sands, verbatim Oracle text.
+    const REVERSE_THE_SANDS: &str = "Redistribute any number of players' life totals. \
+         (Each of those players gets one life total back.)";
+
+    /// CR 119.7 + CR 119.8: Reverse the Sands ("Redistribute any number of
+    /// players' life totals. (Each of those players gets one life total
+    /// back.)") offered each assignment by index (`Submit Life Redistribution
+    /// (Option Index: 1)`). Cast at 7 life against 31, each option the engine
+    /// offers now names the life total it gives each seat.
+    #[test]
+    fn life_redistribution_options_name_the_totals_they_set() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        // Two different totals, so giving each the other's is an option.
+        let (mine, theirs) = (7, 31);
+        let mut scenario = GameScenario::new();
+        scenario
+            .at_phase(Phase::PreCombatMain)
+            .with_life(PlayerId(0), mine)
+            .with_life(PlayerId(1), theirs);
+        // Eight Plains pay {6}{W}{W}.
+        for _ in 0..8 {
+            scenario.add_basic_land(PlayerId(0), ManaColor::White);
+        }
+        let sands = scenario
+            .add_spell_to_hand_from_oracle(
+                PlayerId(0),
+                "Reverse the Sands",
+                false,
+                REVERSE_THE_SANDS,
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 6,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == sands)
+            })
+            .expect("eight Plains pay for Reverse the Sands");
+        runner.act(cast).expect("casting Reverse the Sands");
+        // Both players pass, and the spell resolves to its redistribution.
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        let state = runner.state();
+        // What each option gives You and Player 1, in the engine's order: the
+        // totals as they stand, then the two exchanged.
+        let totals = [(mine, theirs), (theirs, mine)];
+        // Reach guard: "any number of players" asks for no players first. The
+        // engine puts every seat's total in the pool and asks the caster which
+        // assignment to take, keeping the current totals among them.
+        let WaitingFor::RedistributeLifeTotals { player, options } = &state.waiting_for else {
+            panic!(
+                "reach guard: Reverse the Sands asks how to redistribute, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*player, PlayerId(0));
+        let assignments: Vec<Vec<(PlayerId, i32)>> = options
+            .iter()
+            .map(|option| option.assignment.clone())
+            .collect();
+        let expected: Vec<Vec<(PlayerId, i32)>> = totals
+            .iter()
+            .map(|&(yours, opponents)| vec![(PlayerId(0), yours), (PlayerId(1), opponents)])
+            .collect();
+        assert_eq!(assignments, expected);
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        assert_eq!(
+            contract
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                GameAction::SubmitLifeRedistribution { option_index: 0 },
+                GameAction::SubmitLifeRedistribution { option_index: 1 },
+            ]
+        );
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        // Each seat by the board's word for it, with the total the option
+        // gives it. The action has no source object, so no name leads.
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::SubmitLifeRedistribution { option_index } = candidate.action else {
+                panic!("only redistributions are offered: {:?}", candidate.action);
+            };
+            let (yours, opponents) = totals[option_index];
+            assert_eq!(
+                option,
+                &format!(
+                    "Submit Life Redistribution (Option Index: You at {yours} life, Player 1 at \
+                     {opponents} life)"
+                )
+            );
+        }
+    }
+
+    /// CR 700.3: Make an Example ("Each opponent separates the creatures they
+    /// control into two piles. For each opponent, you choose one of their
+    /// piles. Each opponent sacrifices the creatures in their chosen pile.
+    /// (Piles can be empty.)"). A pile was offered by its side alone
+    /// (`Choose Pile (Pile: Type A)`). Player 1 puts Serra Angel and Hill Giant
+    /// in pile A and leaves pile B empty (CR 700.3d). Each pile option the
+    /// engine offers Player 0 now names its creatures as Player 0's board
+    /// names them, or says the pile is empty.
+    #[test]
+    fn pile_options_name_the_objects_in_the_pile_they_choose() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::game_state::{PileResult, PileSide};
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        // Verbatim Oracle text. Hill Giant is a vanilla 3/3 and has none.
+        const MAKE_AN_EXAMPLE: &str = "Each opponent separates the creatures they control into \
+             two piles. For each opponent, you choose one of their piles. Each opponent \
+             sacrifices the creatures in their chosen pile. (Piles can be empty.)";
+        const SERRA_ANGEL: &str =
+            "Flying\nVigilance (Attacking doesn't cause this creature to tap.)";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Four Swamps pay {3}{B} with nothing to choose.
+        for _ in 0..4 {
+            scenario.add_basic_land(PlayerId(0), ManaColor::Black);
+        }
+        // Created in this order, so the battlefield, and with it the pile,
+        // lists Serra Angel first.
+        let angel = scenario
+            .add_creature(PlayerId(1), "Serra Angel", 4, 4)
+            .from_oracle_text_with_keywords(&["Flying", "Vigilance"], SERRA_ANGEL)
+            .id();
+        let giant = scenario.add_creature(PlayerId(1), "Hill Giant", 3, 3).id();
+        let example = {
+            let mut builder = scenario.add_spell_to_hand_from_oracle(
+                PlayerId(0),
+                "Make an Example",
+                false,
+                MAKE_AN_EXAMPLE,
+            );
+            builder.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 3,
+            });
+            builder.id()
+        };
+        let mut runner = scenario.build();
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == example)
+            })
+            .expect("four Swamps pay for Make an Example");
+        runner.act(cast).expect("casting Make an Example");
+        // Both players pass, and the spell resolves to Player 1's partition.
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        // Reach guard: Player 1, the only opponent, separates the creatures
+        // they control.
+        let WaitingFor::SeparatePilesPartition {
+            player, eligible, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "reach guard: Player 1 separates their creatures, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, PlayerId(1));
+        assert!(eligible.iter().eq(&[angel, giant]), "{eligible:?}");
+
+        // Player 1 takes the engine's own partition with both creatures in
+        // pile A, which leaves pile B empty.
+        let partition = AiDecisionContract::issue(runner.state(), PlayerId(1))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::SubmitPilePartition { pile_a } if *pile_a == [angel, giant]
+                )
+            })
+            .expect("the engine offers Player 1 both creatures in pile A");
+        runner
+            .act(partition)
+            .expect("Player 1 separating their creatures");
+        let state = runner.state();
+        // Reach guard: Player 0 chooses one of Player 1's piles, and the piles
+        // are what the options name.
+        let WaitingFor::SeparatePilesChoice {
+            player,
+            pending,
+            current,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: Player 0 chooses one of Player 1's piles, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*player, PlayerId(0));
+        assert!(pending.is_empty(), "{pending:?}");
+        assert_eq!(
+            *current,
+            PileResult {
+                subject: PlayerId(1),
+                pile_a: [angel, giant].into_iter().collect(),
+                pile_b: Default::default(),
+            }
+        );
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let mut sides = Vec::new();
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::ChoosePile { pile } = candidate.action else {
+                continue;
+            };
+            sides.push((pile, option.as_str()));
+        }
+        sides.sort_unstable();
+        // Both piles are offered. Each creature is named as Player 0's board
+        // names it, by its controller alone, as no permanent shares its name.
+        assert_eq!(
+            sides,
+            [
+                (
+                    PileSide::A,
+                    "Choose Pile (Pile: A: Serra Angel (controlled by Player 1), \
+                     Hill Giant (controlled by Player 1))",
+                ),
+                (PileSide::B, "Choose Pile (Pile: B: empty)"),
+            ]
+        );
+    }
+
+    /// CR 707.10c: Twincast ("Copy target instant or sorcery spell. You may
+    /// choose new targets for the copy.") lets its controller leave the copy's
+    /// target unchanged, and the engine offers that keep as `ChooseTarget`
+    /// with no target, which read as the bare `Choose Target`. Copying a
+    /// Lightning Bolt ("Lightning Bolt deals 3 damage to any target.") aimed
+    /// at the opponent's Grizzly Bears, the keep option now names the target
+    /// it keeps.
+    #[test]
+    fn keeping_a_copys_target_names_the_target_it_keeps() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::ability::TargetRef;
+        use engine::types::game_state::CopyChoiceMode;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        // Verbatim Oracle text. Declared in the test so other tests that name
+        // the same cards keep their own constants.
+        const TWINCAST: &str =
+            "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+        const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // A Mountain pays for the Bolt and two Islands pay for Twincast.
+        scenario.add_basic_land(PlayerId(0), ManaColor::Red);
+        for _ in 0..2 {
+            scenario.add_basic_land(PlayerId(0), ManaColor::Blue);
+        }
+        let bears = scenario
+            .add_creature(PlayerId(1), "Grizzly Bears", 2, 2)
+            .id();
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Lightning Bolt", true, LIGHTNING_BOLT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        let twincast = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Twincast", true, TWINCAST)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        // Player 0 bolts the Grizzly Bears, then, holding priority, copies
+        // the Bolt with Twincast.
+        runner.cast(bolt).target_object(bears).commit();
+        runner.cast(twincast).target_object(bolt).commit();
+        // Both players pass, and Twincast resolves to its copy's target walk.
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        let state = runner.state();
+        let WaitingFor::CopyRetarget {
+            player,
+            target_slots,
+            current_slot,
+            mode,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: Twincast asks about its copy's target, got {:?}",
+                state.waiting_for
+            );
+        };
+        // Reach guard: Player 0 chooses new targets for the copy (in an
+        // announcement a `None` would decline instead), and the slot being
+        // answered holds the Grizzly Bears, which it may keep or change.
+        assert_eq!(*player, PlayerId(0));
+        assert_eq!(*mode, Some(CopyChoiceMode::Retarget));
+        let slot = &target_slots[*current_slot];
+        assert_eq!(slot.current, Some(TargetRef::Object(bears)), "{slot:?}");
+        assert!(slot.can_keep && !slot.can_decline, "{slot:?}");
+        assert!(
+            slot.legal_alternatives
+                .contains(&TargetRef::Player(PlayerId(1))),
+            "{slot:?}"
+        );
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let options = &request.prompt.frame.options;
+        // The option line of each issued candidate that is `action`. Looked up
+        // by action, because the contract sorts its candidates.
+        let lines_for = |action: GameAction| {
+            contract
+                .candidates
+                .iter()
+                .zip(options)
+                .filter(|(candidate, _)| candidate.action == action)
+                .map(|(_, option)| option.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines_for(GameAction::ChooseTarget { target: None }),
+            [
+                "Choose Target (Target: keep the current target, Grizzly Bears (controlled by \
+                 Player 1))",
+            ],
+            "{options:?}"
+        );
+        // A new target is named the same way the kept one is.
+        let new_target = GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(PlayerId(1))),
+        };
+        assert_eq!(
+            lines_for(new_target),
+            ["Choose Target (Target: Player 1)"],
+            "{options:?}"
+        );
+    }
+
+    /// Both players pass, and the spell or ability on the stack resolves to the
+    /// choice it raises. The loop condition is the Brightling branch test's.
+    fn pass_until_the_stack_resolves(runner: &mut engine::game::scenario::GameRunner) {
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+    }
+
+    /// The outside-game choice the engine is waiting on, issued to Player 0 and
+    /// rendered as its options: each option beside the selections its candidate
+    /// makes, sorted, so a test compares the whole domain in any issue order.
+    fn outside_game_options(
+        state: &GameState,
+    ) -> Vec<(Vec<engine::types::actions::OutsideGameSelection>, String)> {
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let mut options: Vec<_> = contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+            .map(|(candidate, option)| {
+                let GameAction::ChooseOutsideGameCards { selections } = &candidate.action else {
+                    panic!("an outside-game choice offers only its cards: {candidate:?}");
+                };
+                (selections.clone(), option.clone())
+            })
+            .collect();
+        options.sort();
+        options
+    }
+
+    /// Karn, the Great Creator, verbatim Oracle text (`\u{2212}` is the U+2212
+    /// minus sign of its printed [−2]).
+    const KARN_THE_GREAT_CREATOR: &str =
+        "Activated abilities of artifacts your opponents control can't be activated.\n\
+         [+1]: Until your next turn, up to one target noncreature artifact becomes an artifact \
+         creature with power and toughness each equal to its mana value.\n\
+         [\u{2212}2]: You may reveal an artifact card you own from outside the game or choose \
+         a face-up artifact card you own in exile. Put that card into your hand.";
+
+    /// CR 400.11a + CR 406.3: Karn, the Great Creator's "[−2]: You may reveal an
+    /// artifact card you own from outside the game or choose a face-up artifact
+    /// card you own in exile. Put that card into your hand." offers a Pithing
+    /// Needle in Player 0's sideboard by its slot and a Sol Ring Player 0 owns
+    /// in exile by its object. Each option now names the card it brings in and
+    /// where it is (`Pithing Needle (sideboard)`, `Sol Ring (exile, owned by
+    /// You)`), where it showed the selection's raw fields.
+    #[test]
+    fn outside_game_options_name_the_sideboard_card_and_the_exiled_card() {
+        use engine::game::deck_loading::DeckEntry;
+        use engine::game::scenario::GameScenario;
+        use engine::types::ability::Effect;
+        use engine::types::actions::OutsideGameSelection;
+        use engine::types::card::CardFace;
+        use engine::types::card_type::{CardType, CoreType};
+        use engine::types::game_state::{OutsideGameChoiceSource, PlayerDeckPool};
+        use std::sync::Arc;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let karn = scenario
+            .add_planeswalker_from_oracle(
+                PlayerId(0),
+                "Karn, the Great Creator",
+                "Karn",
+                5,
+                KARN_THE_GREAT_CREATOR,
+            )
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        // CR 400.11a: an artifact card in Player 0's sideboard. The search
+        // matches its card type, and the option reads its name.
+        state.deck_pools = vec![PlayerDeckPool {
+            player: PlayerId(0),
+            current_sideboard: Arc::new(vec![DeckEntry {
+                card: CardFace {
+                    name: "Pithing Needle".to_string(),
+                    card_type: CardType {
+                        core_types: vec![CoreType::Artifact],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                count: 1,
+            }]),
+            ..Default::default()
+        }];
+        // CR 406.3: an artifact card Player 0 owns, face up in exile. Both type
+        // fields are set, so a layer pass that rebuilds the type from its base
+        // keeps it an artifact.
+        let sol_ring_card = CardId(state.next_object_id);
+        let sol_ring = create_object(
+            state,
+            sol_ring_card,
+            PlayerId(0),
+            "Sol Ring".to_string(),
+            Zone::Exile,
+        );
+        let exiled = state.objects.get_mut(&sol_ring).unwrap();
+        exiled.card_types.core_types.push(CoreType::Artifact);
+        exiled.base_card_types = exiled.card_types.clone();
+
+        // Reach guard: the parser reads the −2 as a search of the sideboard and
+        // of face-up exile, as card-data.json records it. Found by its effect,
+        // not its place.
+        let minus_two = runner.state().objects[&karn]
+            .abilities
+            .iter()
+            .position(|ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::SearchOutsideGame { source_pool, .. }
+                        if source_pool.includes_face_up_exile()
+                )
+            })
+            .expect("reach guard: Karn's -2 searches the sideboard and face-up exile");
+        let activation = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::ActivateAbility { source_id, ability_index, .. }
+                        if *source_id == karn && *ability_index == minus_two
+                )
+            })
+            .expect("the engine offers Karn's -2");
+        runner.act(activation).expect("activating Karn's -2");
+        pass_until_the_stack_resolves(&mut runner);
+
+        let state = runner.state();
+        let WaitingFor::OutsideGameChoice { choices, .. } = &state.waiting_for else {
+            panic!(
+                "reach guard: the -2 asks for an artifact card, got {:?}",
+                state.waiting_for
+            );
+        };
+        // Reach guard: the sideboard card is offered by its slot under its name,
+        // and the exiled card by its object, the two records the options read.
+        assert_eq!(choices.len(), 2, "{choices:?}");
+        assert!(
+            choices.iter().any(|entry| {
+                entry.name == "Pithing Needle"
+                    && matches!(
+                        &entry.source,
+                        OutsideGameChoiceSource::Sideboard {
+                            sideboard_index: 0,
+                            ..
+                        }
+                    )
+            }),
+            "{choices:?}"
+        );
+        assert!(
+            choices.iter().any(|entry| matches!(
+                &entry.source,
+                OutsideGameChoiceSource::FaceUpExile { object_id } if *object_id == sol_ring
+            )),
+            "{choices:?}"
+        );
+
+        let mut expected = vec![
+            // "You may": declining brings in nothing, and its option names nothing.
+            (Vec::new(), "Choose Outside Game Cards".to_string()),
+            (
+                vec![OutsideGameSelection::Sideboard { sideboard_index: 0 }],
+                "Choose Outside Game Cards (Selections: Pithing Needle (sideboard))".to_string(),
+            ),
+            (
+                vec![OutsideGameSelection::FaceUpExile {
+                    object_id: sol_ring,
+                }],
+                "Choose Outside Game Cards (Selections: Sol Ring (exile, owned by You))"
+                    .to_string(),
+            ),
+        ];
+        expected.sort();
+        assert_eq!(outside_game_options(state), expected);
+    }
+
+    /// Booster Tutor, verbatim Oracle text, reminder included.
+    const BOOSTER_TUTOR: &str =
+        "Open a sealed Magic booster pack, reveal the cards, and put one of them into your \
+         hand. (Remove that card from your deck before beginning a new game.)";
+
+    /// CR 400.11b: Booster Tutor's "Open a sealed Magic booster pack, reveal the
+    /// cards, and put one of them into your hand." offers each card of the
+    /// opened pack by its slot in the pack, which names no card. Each option now
+    /// names the card at its slot (`Fear of Missing Out (booster pack)`), where
+    /// it showed the slot number.
+    #[test]
+    fn booster_pack_options_name_the_card_they_take_from_the_pack() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::actions::OutsideGameSelection;
+        use engine::types::card::CardFace;
+        use engine::types::game_state::{BoosterProduct, BoosterShelf, OutsideGameChoiceSource};
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use std::sync::Arc;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Black);
+        let tutor = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Booster Tutor", true, BOOSTER_TUTOR)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        // One Duskmourn card at each rarity, so the opened pack is exactly these
+        // three, dealt rare first (`boosters::collate_pack`). A full set would
+        // deal its commons in seeded random order. Booster Tutor takes any card,
+        // and the option reads only its name.
+        let printed = |name: &str| CardFace {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let shelf = BoosterShelf::Products(vec![BoosterProduct {
+            set_code: "DSK".to_string(),
+            rares: vec![printed("Fear of Missing Out")],
+            uncommons: vec![printed("Baseball Bat")],
+            commons: vec![printed("Acrobatic Cheerleader")],
+            mythics: Vec::new(),
+        }]);
+        runner.state_mut().booster_shelf = Arc::new(shelf);
+
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == tutor)
+            })
+            .expect("a Swamp pays for Booster Tutor");
+        runner.act(cast).expect("casting Booster Tutor");
+        pass_until_the_stack_resolves(&mut runner);
+
+        let state = runner.state();
+        let WaitingFor::OutsideGameChoice { choices, .. } = &state.waiting_for else {
+            panic!(
+                "reach guard: Booster Tutor asks for a card of its pack, got {:?}",
+                state.waiting_for
+            );
+        };
+        // Reach guard: each card of the pack is offered by its slot, under the
+        // name its option reads.
+        let pack: Vec<(usize, &str)> = choices
+            .iter()
+            .map(|entry| match &entry.source {
+                OutsideGameChoiceSource::BoosterPack { pack_slot, .. } => {
+                    (*pack_slot, entry.name.as_str())
+                }
+                other => panic!("every card comes from the pack: {other:?}"),
+            })
+            .collect();
+        let dealt: [(usize, &str); 3] = [
+            (0, "Fear of Missing Out"),
+            (1, "Baseball Bat"),
+            (2, "Acrobatic Cheerleader"),
+        ];
+        assert_eq!(pack, dealt);
+
+        // "Put one of them": exactly one card, so no option declines.
+        let mut expected: Vec<(Vec<OutsideGameSelection>, String)> = dealt
+            .iter()
+            .map(|(pack_slot, name)| {
+                (
+                    vec![OutsideGameSelection::BoosterPack {
+                        pack_slot: *pack_slot,
+                    }],
+                    format!("Choose Outside Game Cards (Selections: {name} (booster pack))"),
+                )
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(outside_game_options(state), expected);
+    }
+
+    /// Living Wish, verbatim Oracle text.
+    const LIVING_WISH: &str = "You may reveal a creature or land card you own from outside the \
+         game and put it into your hand. Exile Living Wish.";
+
+    /// CR 702.139a + CR 400.11: Living Wish's "You may reveal a creature or
+    /// land card you own from outside the game and put it into your hand."
+    /// offers Player 0's revealed companion, Lurrus of the Dream-Den, by a
+    /// selection that names no card. The option now names it (`Lurrus of the
+    /// Dream-Den (companion)`), where it showed only the selection's kind.
+    #[test]
+    fn a_companion_option_names_the_companion_it_brings_in() {
+        use engine::game::deck_loading::DeckEntry;
+        use engine::game::scenario::GameScenario;
+        use engine::types::actions::OutsideGameSelection;
+        use engine::types::card::CardFace;
+        use engine::types::card_type::{CardType, CoreType};
+        use engine::types::display_only::DisplayOnly;
+        use engine::types::game_state::OutsideGameChoiceSource;
+        use engine::types::keywords::{CompanionCondition, Keyword};
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use engine::types::player::CompanionInfo;
+
+        // Living Wish rather than Mastermind's Acquisition: card-data.json
+        // parses the Acquisition's "Put a card you own from outside the game
+        // into your hand." as a `ChangeZone`, which never reaches the search
+        // that offers the companion.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+        scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+        let wish = scenario
+            .add_spell_to_hand_from_oracle(PlayerId(0), "Living Wish", false, LIVING_WISH)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            })
+            .id();
+        let mut runner = scenario.build();
+        // CR 702.139a: the companion is revealed before the game begins, which
+        // no scenario drives, so it is seeded as `companion_special_action.rs`
+        // seeds one. The search matches its card type, and the option reads its
+        // name.
+        runner.state_mut().players[0].companion = Some(CompanionInfo {
+            card: DeckEntry {
+                card: CardFace {
+                    name: "Lurrus of the Dream-Den".to_string(),
+                    card_type: CardType {
+                        core_types: vec![CoreType::Creature],
+                        subtypes: vec!["Cat".to_string(), "Nightmare".to_string()],
+                        ..Default::default()
+                    },
+                    keywords: vec![Keyword::Companion(
+                        CompanionCondition::MaxPermanentManaValue(2),
+                    )],
+                    ..Default::default()
+                },
+                count: 1,
+            },
+            used: false,
+            printing: DisplayOnly::default(),
+        });
+
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == wish)
+            })
+            .expect("two Forests pay for Living Wish");
+        runner.act(cast).expect("casting Living Wish");
+        pass_until_the_stack_resolves(&mut runner);
+
+        let state = runner.state();
+        let WaitingFor::OutsideGameChoice { choices, .. } = &state.waiting_for else {
+            panic!(
+                "reach guard: Living Wish asks for a card from outside the game, got {:?}",
+                state.waiting_for
+            );
+        };
+        // Reach guard: with no sideboard, the companion is the one card outside
+        // the game, offered under the name its option reads.
+        let [companion] = choices.as_slice() else {
+            panic!("only the companion is outside the game: {choices:?}");
+        };
+        assert!(
+            companion.name == "Lurrus of the Dream-Den"
+                && matches!(companion.source, OutsideGameChoiceSource::Companion { .. }),
+            "{companion:?}"
+        );
+
+        let mut expected = vec![
+            // "You may": declining brings in nothing, and its option names nothing.
+            (Vec::new(), "Choose Outside Game Cards".to_string()),
+            (
+                vec![OutsideGameSelection::Companion],
+                "Choose Outside Game Cards (Selections: Lurrus of the Dream-Den (companion))"
+                    .to_string(),
+            ),
+        ];
+        expected.sort();
+        assert_eq!(outside_game_options(state), expected);
     }
 
     /// CR 723.4 + CR 723.5: while Player 0 controls Player 1's turn

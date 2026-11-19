@@ -922,8 +922,16 @@ fn apply_debug_counter_gain(
     // the action boundary restores its snapshot. No wrap, no clamp.
     let parked = match gain {
         DebugCounterGain::Counter(kind) => {
+            // A debug-console grant is neither a resolving effect nor a
+            // replacement — stamp fail-closed `Other`.
             match try_add_player_counter_with_replacement(
-                state, actor, player_id, kind, count, events,
+                state,
+                actor,
+                player_id,
+                kind,
+                count,
+                crate::types::proposed_event::CounterCause::Other,
+                events,
             )? {
                 PlayerCounterAdditionOutcome::Applied | PlayerCounterAdditionOutcome::Prevented => {
                     false
@@ -932,9 +940,14 @@ fn apply_debug_counter_gain(
             }
         }
         // `true` = settled (applied or prevented), `false` = parked.
-        DebugCounterGain::Energy => {
-            !try_add_energy_with_replacement(state, actor, player_id, count, events)?
-        }
+        DebugCounterGain::Energy => !try_add_energy_with_replacement(
+            state,
+            actor,
+            player_id,
+            count,
+            crate::types::proposed_event::CounterCause::Other,
+            events,
+        )?,
     };
     // CR 616.1: a parked ordering choice owns the rest of the event; its
     // resume runs the event's triggers and state-based actions.

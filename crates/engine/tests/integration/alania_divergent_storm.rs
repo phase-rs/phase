@@ -7,7 +7,7 @@
 //! spell. You may choose new targets for the copy."
 //!
 //! The condition lowers to `Or` of composed
-//! `And(TriggeringSpellMatchesFilter(T), SpellsCastThisTurn{You,T} == 1)`
+//! `And(TriggeringSpellMatchesFilter(T), SpellsCast{You,T} == 1)`
 //! disjuncts. Each test drives the real pipeline (`apply()` via the scenario
 //! runner) and discriminates one behavioral claim; the revert-to-red note names
 //! the assertion that flips when the specific arm/recognizer/fix is reverted.
@@ -194,7 +194,7 @@ fn first_instant_fires_and_copies() {
     );
 }
 
-/// (2) A SECOND instant the same turn does NOT fire — `SpellsCastThisTurn{Instant}`
+/// (2) A SECOND instant the same turn does NOT fire — `SpellsCast{Instant}`
 /// is 2, so the ordinal check (`== 1`) fails.
 ///
 /// Revert-to-red: a dropped-count / `>= 1` implementation fires on the second cast
@@ -297,7 +297,7 @@ fn otter_self_exclusion_named_count() {
 
 /// (5) CR 603.4 resolution re-check (team-lead mandate). First instant fires and
 /// Alania's trigger goes on the stack; a SECOND instant is cast IN RESPONSE.
-/// When the trigger resolves, the live `SpellsCastThisTurn{Instant}` is 2, so the
+/// When the trigger resolves, the live `SpellsCast{Instant}` is 2, so the
 /// intervening-if is FALSE at resolution → the ability is removed and does
 /// nothing: the opponent does NOT draw and no copy is made.
 ///

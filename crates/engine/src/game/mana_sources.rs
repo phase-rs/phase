@@ -38,7 +38,7 @@ use crate::types::TriggerMode;
 use super::could_produce;
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::mana_abilities;
-use super::mana_abilities::ManaPayabilityMode;
+use super::mana_abilities::{ManaActivationPurpose, ManaPayabilityMode};
 use super::mana_payment;
 use super::restrictions;
 use super::triggers::trigger_source_context_for_latch;
@@ -191,7 +191,8 @@ pub(in crate::game) fn priority_mana_announcements(
 ) -> PriorityManaAnnouncements {
     let mut land_taps = Vec::new();
     let mut nonland_activations = Vec::new();
-    for selection in activatable_mana_source_selections(state, principal.semantic_holder()) {
+    let holder = principal.semantic_holder();
+    for selection in mana_source_selections(state, holder, ManaActivationPurpose::Explicit) {
         match priority_mana_route(state, &selection) {
             Some(PriorityManaRoute::LandTap) => {
                 land_taps.push(PriorityLandManaAnnouncement::new(selection));
@@ -406,8 +407,18 @@ pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
 /// Complete primitive actions for mana sources the player can currently activate.
 /// Shared by human interaction authority and AI enumeration so legality cannot drift.
 pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) -> Vec<GameAction> {
+    mana_actions_for_player(state, player, ManaActivationPurpose::Planning)
+}
+
+/// [`activatable_mana_actions_for_player`] for `purpose`: the player's own
+/// offers are `Explicit`, automatic and AI enumeration `Planning`.
+pub fn mana_actions_for_player(
+    state: &GameState,
+    player: PlayerId,
+    purpose: ManaActivationPurpose,
+) -> Vec<GameAction> {
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
+    let mana_activation_gates = mana_abilities::ManaActivationGates::compute_for(state, purpose);
     let mut actions = Vec::new();
     for &object_id in &state.battlefield {
         let Some(object) = state.objects.get(&object_id) else {
@@ -564,8 +575,17 @@ pub fn activatable_mana_source_selections(
     state: &GameState,
     player: PlayerId,
 ) -> Vec<ManaSourceSelection> {
+    mana_source_selections(state, player, ManaActivationPurpose::Planning)
+}
+
+/// [`activatable_mana_source_selections`] for `purpose`.
+pub(crate) fn mana_source_selections(
+    state: &GameState,
+    player: PlayerId,
+    purpose: ManaActivationPurpose,
+) -> Vec<ManaSourceSelection> {
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let gates = mana_abilities::ManaActivationGates::compute_for(state, purpose);
     let mut selections = Vec::new();
 
     for &object_id in &state.battlefield {
@@ -760,14 +780,15 @@ pub(crate) fn live_mana_source_option_for_selection(
     player: PlayerId,
     selection: &ManaSourceSelection,
 ) -> Result<ManaSourceOption, EngineError> {
-    if !activatable_mana_source_selections(state, player).contains(selection) {
+    if !mana_source_selections(state, player, ManaActivationPurpose::Explicit).contains(selection) {
         return Err(EngineError::ActionNotAllowed(
             "Mana source selection is stale or no longer legal".to_string(),
         ));
     }
 
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let gates =
+        mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit);
     let object_id = selection.source.object_id;
     let options = current_mana_source_options(state, player, object_id, &aura_sources, &gates);
     let mut matches = options
@@ -797,7 +818,8 @@ pub(crate) fn live_land_mana_option_for_selection(
 ) -> Result<ManaSourceOption, EngineError> {
     let object_id = selection.source.object_id;
     let aura_sources = taps_for_mana_trigger_sources(state);
-    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let gates =
+        mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit);
     let mut matches = activatable_land_mana_options_indexed_gated(
         state,
         object_id,
@@ -1190,7 +1212,7 @@ pub(crate) fn preflight_tap_land_action(
         waiting_player,
         selection.source.object_id,
         &taps_for_mana_trigger_sources(state),
-        &mana_abilities::ManaActivationGates::compute(state),
+        &mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit),
     )
     .into_iter()
     .filter(|candidate| candidate == action)

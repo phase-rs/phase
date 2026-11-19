@@ -1927,7 +1927,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .pending_trigger_event_batch
         .iter_mut()
         .chain(filtered.pending_attack_trigger_events.iter_mut())
-        .chain(filtered.deferred_entry_events.iter_mut())
+        .chain(
+            filtered
+                .deferred_entry_events
+                .iter_mut()
+                .map(|parked| &mut parked.event),
+        )
         .chain(filtered.unsettled_entry_batch_events.iter_mut())
         .chain(
             filtered
@@ -1959,6 +1964,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     for event in filtered
         .deferred_entry_events
         .iter_mut()
+        .map(|parked| &mut parked.event)
         .chain(filtered.unsettled_entry_batch_events.iter_mut())
     {
         redact_hidden_zone_change_event(event, &held_entry_hidden_ids);
@@ -1978,7 +1984,18 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         {
             redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
         }
+        // CR 400.2 + CR 708.5: a context's cause record names each causing entrant; a
+        // face-down entrant is hidden from this viewer as the object is.
+        for cause in context.causes.iter_mut() {
+            redact_hidden_zone_change_event(cause, &held_entry_hidden_ids);
+        }
     }
+    // CR 400.2 + CR 708.5: an observer's `AbilityTriggered` event nests the observed
+    // firing's cause records, wherever that event is carried. A face-down entrant among
+    // them (a manifested card) is hidden from this viewer as the object is.
+    filtered.for_each_trigger_event_carrier_mut(&mut |event| {
+        redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+    });
     match &mut filtered.waiting_for {
         WaitingFor::TriggerTargetSelection {
             trigger_event,
@@ -2126,6 +2143,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // entrant's projection carries its card_id/printed_ref, which other players may not see
     // (CR 708.5).
     filtered.battlefield_entry_observations.clear();
+    // CR 400.2 + CR 401.2 + CR 603.3: a held as-enters roll's trigger contexts are
+    // engine continuations that the settled release puts on the stack. They latch
+    // their sources' full contexts (cast payments, LKI names), so a card now hidden
+    // in a library or hand would be named through them. No client consumes them, so
+    // every audience's copy drops them. The parked entry stays, its event redacted
+    // above.
+    for parked in filtered.deferred_entry_events.iter_mut() {
+        parked.held_triggers.clear();
+    }
     redact_hidden_identity_side_tables(&mut filtered, &hidden_zone_change_ids);
 
     // Source-bound named choices carry complete source contexts in authoritative
@@ -3508,6 +3534,18 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // CR 400.2 + CR 708.5: the prompts that copy the resolving trigger's event, and the paused
+    // mana abilities a payment prompt carries, hold an observer's `AbilityTriggered` event too:
+    // one traversal redacts every nested cause record against the face-down-aware set. It runs
+    // after every `waiting_for` rebuild above (`PayCost` re-clones the authoritative resume,
+    // restoring unredacted causes) and before the hidden-identity pass, whose set omits
+    // face-down battlefield entrants.
+    filtered
+        .waiting_for
+        .for_each_prompt_trigger_event_mut(&mut |event| {
+            redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+        });
+
     redact_hidden_library_identity_carriers(&mut filtered, &hidden_library_ids);
 
     // CR 601.2h + CR 113.7a + CR 400.2: prompt-held and root-held paused abilities latch
@@ -3808,6 +3846,21 @@ pub fn filter_events_for_viewer(
                 redact_hidden_library_event(&mut event, &hidden_library);
                 event
             }
+            // `causes` are engine bookkeeping for the observer matcher; no viewer
+            // receives them (same treatment as `CardsRevealed.occurrences`).
+            GameEvent::AbilityTriggered {
+                stack_entry,
+                source_id,
+                controller,
+                origin,
+                ..
+            } => GameEvent::AbilityTriggered {
+                stack_entry: *stack_entry,
+                source_id: *source_id,
+                controller: *controller,
+                origin: *origin,
+                causes: Vec::new(),
+            },
             other => other.clone(),
         })
         .collect()
@@ -4326,7 +4379,26 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
         } => {
             redact_source_context_hidden_members(saga, hidden_ids);
         }
+        // CR 400.2 + CR 708.5: an observer's `AbilityTriggered` event nests the
+        // observed firing's cause events; each is hidden exactly as the same
+        // event is at top level.
+        GameEvent::AbilityTriggered { causes, .. } => {
+            for cause in causes {
+                redact_hidden_zone_change_event(cause, hidden_ids);
+            }
+        }
         _ => {}
+    }
+}
+
+/// CR 400.2 + CR 708.5: redacts the cause records an `AbilityTriggered` event nests,
+/// against `hidden_ids` (the viewer's hidden and face-down ids). No-op for every other
+/// event.
+fn redact_ability_triggered_causes(event: &mut GameEvent, hidden_ids: &HashSet<ObjectId>) {
+    if let GameEvent::AbilityTriggered { causes, .. } = event {
+        for cause in causes {
+            redact_hidden_zone_change_event(cause, hidden_ids);
+        }
     }
 }
 
@@ -4357,10 +4429,11 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `SagaChapterAbilityResolved` events held as a stack or resolving entry's
 /// `trigger_event`, in `stack_trigger_event_batches`, `current_trigger_event(s)`,
 /// `pending_trigger_event_batch`, `pending_attack_trigger_events`,
-/// `consumed_before_priority_trigger_events`, `deferred_entry_events`,
-/// `unsettled_entry_batch_events`, a paused
+/// `consumed_before_priority_trigger_events`, `deferred_entry_events` (event; its
+/// `held_triggers` are cleared for every audience), `unsettled_entry_batch_events`, a paused
 /// player-scope sacrifice's `deferred_events`, the pending trigger's `trigger_event`, a
-/// deferred or ordering trigger context's `trigger_event` and `trigger_events`, the
+/// deferred or ordering trigger context's `trigger_event` and `trigger_events` and a
+/// context's `causes`, the
 /// `trigger_event` of the `TriggerTargetSelection` (with its `trigger_events`),
 /// `UnlessPayment`, `UnlessPaymentChooseCost`, `ChooseObjectsSelection` and
 /// `EachPlayerCopyChosenSelection` prompts, and as a creation look-back event; and
@@ -5470,13 +5543,15 @@ fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::Pend
 /// CR 603.3b + CR 400.2: Wrapping-context variant of
 /// [`redact_pending_trigger_for_observer`] that also clears the
 /// `trigger_events` sidecar (the full simultaneous-event set for
-/// batched triggers, which can reference hidden-zone objects). Scheduling
+/// batched triggers, which can reference hidden-zone objects) and the
+/// `causes` record, a second copy of those events. Scheduling
 /// provenance is public metadata and is intentionally preserved.
 fn redact_pending_trigger_context_for_observer(
     ctx: &mut crate::game::triggers::PendingTriggerContext,
 ) {
     redact_pending_trigger_for_observer(&mut ctx.pending);
     ctx.trigger_events.clear();
+    ctx.causes.clear();
 }
 
 /// CR 400.2 + CR 401.2: an `EffectResolved` subject snapshot pairs a hidden
@@ -5718,6 +5793,47 @@ mod tests {
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
     use std::collections::BTreeSet;
+
+    /// Row V21c, building block (CR 400.2 + CR 708.5): a cause nested in an
+    /// observer's `AbilityTriggered` event is hidden exactly as the same
+    /// `ZoneChanged` is at top level.
+    #[test]
+    fn redact_hidden_zone_change_event_redacts_each_nested_cause() {
+        use crate::types::events::TriggeredAbilityOrigin;
+        let hidden = ObjectId(7);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            hidden,
+            Some(crate::types::zones::Zone::Library),
+            crate::types::zones::Zone::Battlefield,
+        );
+        record.name = "Secret Card".to_string();
+        record.core_types.push(CoreType::Creature);
+        let entry = GameEvent::ZoneChanged {
+            object_id: hidden,
+            from: Some(crate::types::zones::Zone::Library),
+            to: crate::types::zones::Zone::Battlefield,
+            record: Box::new(record),
+        };
+        let hidden_ids: HashSet<ObjectId> = [hidden].into_iter().collect();
+
+        let mut top_level = entry.clone();
+        redact_hidden_zone_change_event(&mut top_level, &hidden_ids);
+        // Reach guard: the redaction acts on the top-level copy.
+        assert_ne!(top_level, entry);
+
+        let mut observed = GameEvent::AbilityTriggered {
+            stack_entry: Some(ObjectId(50)),
+            source_id: ObjectId(8),
+            controller: PlayerId(1),
+            origin: TriggeredAbilityOrigin::SourceAbility,
+            causes: vec![entry],
+        };
+        redact_hidden_zone_change_event(&mut observed, &hidden_ids);
+        let GameEvent::AbilityTriggered { causes, .. } = observed else {
+            panic!("the event keeps its variant");
+        };
+        assert_eq!(causes, vec![top_level]);
+    }
 
     /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
     /// entrant's projection carries its card identity), so every viewer projection strips it.
@@ -6336,8 +6452,12 @@ mod tests {
         });
         state.pending_trigger_event_batch = all_events.clone();
         state.pending_attack_trigger_events = all_events.clone();
-        state.deferred_entry_events = vec![event.clone()];
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            event.clone(),
+            None,
+        )];
         state.unsettled_entry_batch_events = vec![event.clone()];
+
         state.consumed_before_priority_trigger_events =
             vec![crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
@@ -6601,7 +6721,6 @@ mod tests {
                     "pending_attack_trigger_events",
                     &state.pending_attack_trigger_events,
                 ),
-                ("deferred_entry_events", &state.deferred_entry_events),
                 (
                     "unsettled_entry_batch_events",
                     &state.unsettled_entry_batch_events,
@@ -6610,6 +6729,9 @@ mod tests {
                 for event in events {
                     push(label, &from_event(event));
                 }
+            }
+            for event in state.parked_entry_events() {
+                push("deferred_entry_events", &from_event(event));
             }
             for occurrence in &state.consumed_before_priority_trigger_events {
                 push(
@@ -7053,6 +7175,53 @@ mod tests {
                 assert_eq!(carried[1], payment[1], "{label}: pending_effect visible");
             }
         }
+
+        // U-H2. CR 400.2 + CR 401.2 + CR 603.3: a parked as-enters roll's held trigger
+        // contexts are engine continuations; every audience's projection drops them, the
+        // owner's included, and the parked entry stays. Seeded on a separate state so
+        // the assertions above are untouched.
+        let mut held_state = state.clone();
+        held_state.deferred_entry_events[0].held_triggers = vec![context()];
+        assert_eq!(
+            held_state.deferred_entry_events[0].held_triggers[0]
+                .pending
+                .ability
+                .trigger_source
+                .as_ref()
+                .map(|source| source.mana_spent_source_snapshots.clone()),
+            Some(payment.clone()),
+            "reach-guard: the held context names the hidden mana source"
+        );
+        for (audience, view) in [
+            (
+                "opponent",
+                filter_state_for_viewer(&held_state, opponent_id),
+            ),
+            ("spectator", filter_state_for_unseated_viewer(&held_state)),
+            ("owner", filter_state_for_viewer(&held_state, owner)),
+        ] {
+            assert_eq!(
+                view.deferred_entry_events.len(),
+                1,
+                "{audience}: the parked entry stays"
+            );
+            assert!(
+                view.deferred_entry_events[0].held_triggers.is_empty(),
+                "{audience}: the held contexts are dropped"
+            );
+            let wire = serde_json::to_value(&view).expect("the projection serializes");
+            assert!(
+                wire["deferred_entry_events"][0]
+                    .get("held_triggers")
+                    .is_none(),
+                "{audience}: no held_triggers key on the wire"
+            );
+        }
+        assert_eq!(
+            held_state.deferred_entry_events[0].held_triggers,
+            vec![context()],
+            "the authoritative state keeps its held contexts"
+        );
     }
 
     /// CR 406.3 + CR 406.3a: the three carriers whose copy-on-write pass first SELECTS what
@@ -8518,6 +8687,7 @@ mod tests {
         caster: PlayerId,
     ) -> Box<PendingCast> {
         Box::new(PendingCast {
+            alternative_cost_keyword: None,
             object_id,
             card_id,
             ability: Box::new(ResolvedAbility::new(
@@ -8567,6 +8737,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -13206,6 +13377,7 @@ mod tests {
                         trigger_events: Vec::new(),
                         trigger_match_count: None,
                         return_result_occurrence: None,
+                        replacement_action: None,
                     }),
                     selected: vec![ObjectIncarnationRef::from_object(&state.objects[&hidden])],
                 },
@@ -16054,6 +16226,52 @@ mod tests {
                 ..
             }
         ));
+
+        // U-H3. CR 400.2 + CR 401.2 + CR 603.3: a held as-enters roll context whose
+        // ability names the library card is dropped from every viewer's parked entry.
+        let roll = GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: Some(4),
+            pre_entry_source: Some(permanent),
+        };
+        let mut parked = crate::types::game_state::ParkedEntry::occurred(roll);
+        parked.held_triggers = vec![crate::game::triggers::PendingTriggerContext::single(
+            crate::game::triggers::PendingTrigger::ordinary(
+                ObjectId(900),
+                PlayerId(0),
+                None,
+                Box::new(with_context(library_card, &state)),
+                0,
+            ),
+        )];
+        state.deferred_entry_events.push(parked);
+        let authoritative = state.deferred_entry_events.clone();
+        assert_eq!(
+            authoritative[0].held_triggers[0]
+                .pending
+                .ability
+                .effect_context_object
+                .as_ref()
+                .map(|snapshot| snapshot.object_id),
+            Some(library_card),
+            "reach guard: the held context names the library card"
+        );
+        for (viewer, projected) in [
+            ("P0", filter_state_for_viewer(&state, PlayerId(0))),
+            ("P1", filter_state_for_viewer(&state, PlayerId(1))),
+            ("unseated", filter_state_for_unseated_viewer(&state)),
+        ] {
+            assert_eq!(projected.deferred_entry_events.len(), 1, "{viewer}");
+            assert!(
+                projected.deferred_entry_events[0].held_triggers.is_empty(),
+                "{viewer}: the held context is dropped"
+            );
+        }
+        assert_eq!(
+            state.deferred_entry_events, authoritative,
+            "the rules state keeps the held context"
+        );
     }
 
     fn exile_with_alt_cost_permission(

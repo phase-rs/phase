@@ -8,6 +8,7 @@ import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.t
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { useTargetingPromptStore } from "../../stores/targetingPromptStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
   boardChoiceSelectedPower,
@@ -352,6 +353,41 @@ export function TargetingOverlay() {
     ? t("targeting.collapseDescription")
     : t("targeting.expandDescription");
 
+  // The stack panel docks on a layer below this overlay, so this block drawn
+  // over it hides the panel's header, which holds the only control that moves
+  // the panel to the other side of the board (#11004). The block publishes
+  // its top and bottom edges, and the panel keeps its header clear of them.
+  // Two kinds of change move the edges, so they are measured on both: every
+  // commit (the effect has no dependency list), which sees the page's
+  // `--game-targeting-prompt-top` and this block's own content, such as a new
+  // instruction or the description expanding; and every resize of the block,
+  // which sees what changes without a commit, such as the viewport width
+  // re-wrapping the instruction.
+  const setPromptEdges = useTargetingPromptStore((s) => s.setEdges);
+  const promptBlockRef = useRef<HTMLDivElement | null>(null);
+  const measurePromptEdges = useCallback(() => {
+    const block = promptBlockRef.current;
+    if (!block) return;
+    const { top, bottom } = block.getBoundingClientRect();
+    setPromptEdges({ topPx: top, bottomPx: bottom });
+  }, [setPromptEdges]);
+  useLayoutEffect(() => measurePromptEdges());
+  // A ref callback rather than an effect: the block exists only past the early
+  // returns below, and the callback's cleanup runs exactly when the block
+  // leaves the DOM, which is when the published edges must drop back to 0.
+  const attachPromptBlock = useCallback((block: HTMLDivElement) => {
+    promptBlockRef.current = block;
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(measurePromptEdges);
+    observer?.observe(block);
+    return () => {
+      observer?.disconnect();
+      promptBlockRef.current = null;
+      setPromptEdges({ topPx: 0, bottomPx: 0 });
+    };
+  }, [measurePromptEdges, setPromptEdges]);
+
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
   }, [dispatch]);
@@ -571,6 +607,8 @@ export function TargetingOverlay() {
             instruction to ONE line is what keeps it clear where it clears, not
             a number. */}
         <div
+          ref={attachPromptBlock}
+          data-targeting-prompt
           className="absolute left-0 right-0 flex flex-col items-center gap-1 px-2"
           style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
         >

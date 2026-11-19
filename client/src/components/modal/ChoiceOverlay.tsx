@@ -7,21 +7,42 @@ import { useHorizontalScroll } from "../../hooks/useHorizontalScroll.ts";
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
 import { PeekButton } from "./DialogShell.tsx";
 
+type ChoiceOverlayProps = {
+  title: string;
+  children: React.ReactNode;
+  widthClassName?: string;
+  maxWidthClassName?: string;
+} & (
+  | {
+      subtitle: string;
+      footer?: React.ReactNode;
+      headerActions?: never;
+    }
+  | {
+      /**
+       * Opt-in single-line header, for a short screen where every line of
+       * chrome takes height from the cards. The title is the header's only
+       * text and these actions sit at the end of its line, so the prompt
+       * passes its instruction as the title, after any context its usual
+       * title adds, and its confirm (a ChoiceHeaderConfirm) here. The
+       * eyebrow, subtitle and footer are left out: the title already says
+       * what to do, and the confirm has moved up beside it.
+       */
+      headerActions: React.ReactElement;
+      subtitle?: never;
+      footer?: never;
+    }
+);
+
 export function ChoiceOverlay({
   title,
   subtitle,
+  headerActions,
   children,
   footer,
   widthClassName = "w-full",
   maxWidthClassName = "max-w-6xl",
-}: {
-  title: string;
-  subtitle: string;
-  children: React.ReactNode;
-  footer?: React.ReactNode;
-  widthClassName?: string;
-  maxWidthClassName?: string;
-}) {
+}: ChoiceOverlayProps) {
   const { t } = useTranslation("game");
   const contentRef = useRef<HTMLDivElement>(null);
   const peek = useOptionalDialogPeek();
@@ -65,17 +86,33 @@ export function ChoiceOverlay({
           transition={{ duration: 0.24, ease: "easeOut" }}
         >
           <div className="modal-header-compact relative shrink-0 border-b border-white/10">
-            <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500 lg:absolute lg:right-4 lg:top-3">
-              {t("choiceOverlay.eyebrow")}
-            </div>
-            <div className="lg:flex lg:items-baseline lg:gap-3">
-              <h2 className="shrink-0 font-semibold text-white">
-                {title}
-              </h2>
-              <p className="modal-subtitle text-slate-400 lg:mt-0">
-                {subtitle}
-              </p>
-            </div>
+            {headerActions !== undefined ? (
+              // The actions sit in the screen's top corner, which a landscape
+              // phone's rounded corner cuts into under `viewport-fit=cover`, so
+              // the line keeps clear of the safe-area insets (0 elsewhere).
+              <div className="flex items-center gap-3 pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
+                <h2 className="min-w-0 flex-1 font-semibold text-white">
+                  {title}
+                </h2>
+                <div className="flex shrink-0 items-center gap-2">
+                  {headerActions}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500 lg:absolute lg:right-4 lg:top-3">
+                  {t("choiceOverlay.eyebrow")}
+                </div>
+                <div className="lg:flex lg:items-baseline lg:gap-3">
+                  <h2 className="shrink-0 font-semibold text-white">
+                    {title}
+                  </h2>
+                  <p className="modal-subtitle text-slate-400 lg:mt-0">
+                    {subtitle}
+                  </p>
+                </div>
+              </>
+            )}
           </div>
           {/* When the peek tab is mounted it overlaps the card's right edge (~24px),
               so reserve right clearance to keep edge-aligned interactive content
@@ -118,17 +155,22 @@ export function ChoiceOverlay({
   );
 }
 
-/** Scrollable card strip wrapper with edge arrow buttons, mousewheel, and drag support. */
+/**
+ * Scrollable card strip wrapper with edge arrow buttons, mousewheel, and drag support.
+ *
+ * Below lg the frame sizes the cards from the room it has (`.card-strip-frame`
+ * in index.css): it grows to fill its parent, so place the strip in a flex
+ * column with a definite height, such as an overlay body. There the frame is a
+ * size container and so has no width of its own: the parent must stretch it
+ * across its width, as a flex column does by default. From lg up the cards
+ * keep the board size.
+ */
 export function ScrollableCardStrip({
   children,
-  className = "",
   stripClassName = "card-choice-strip",
-  innerClassName = "mx-auto flex min-h-0 flex-1 items-center gap-2 px-1 pt-2 pb-2 lg:gap-3",
 }: {
   children: React.ReactNode;
-  className?: string;
   stripClassName?: string;
-  innerClassName?: string;
 }) {
   const { t } = useTranslation("game");
   const stripRef = useHorizontalScroll<HTMLDivElement>();
@@ -167,10 +209,10 @@ export function ScrollableCardStrip({
   );
 
   return (
-    <div className={`relative ${className}`}>
+    <div className="card-strip-frame relative">
       <div
         ref={stripRef}
-        className={`${stripClassName} ${innerClassName}`}
+        className={`${stripClassName} flex min-h-0 flex-1 items-center gap-2 px-1 pt-2 pb-2 lg:gap-3`}
       >
         {children}
       </div>
@@ -257,6 +299,35 @@ export function ConfirmButton({
         </button>
       </motion.div>
     </AnimatePresence>
+  );
+}
+
+/**
+ * The confirm for ChoiceOverlay's single-line header (`headerActions`). Where
+ * ConfirmButton fills the footer's width, this one sits at the end of the
+ * title's line, so it stays compact while keeping a 44px touch height. Every
+ * prompt that opts into the header shares it, so the header confirm looks the
+ * same in each of them.
+ */
+export function ChoiceHeaderConfirm({
+  onClick,
+  disabled = false,
+  label,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  label?: string;
+}) {
+  const { t } = useTranslation("game");
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={menuButtonClass({ tone: "cyan", size: "sm", disabled })}
+    >
+      {label ?? t("choiceOverlay.confirm")}
+    </button>
   );
 }
 

@@ -1280,6 +1280,7 @@ export function HostSetup({
                 id="host-setup-cmd-dmg"
                 value={formatConfig.commander_damage_threshold ?? 21}
                 min={1}
+                max={255}
                 onCommit={(threshold) =>
                   setLocalFormatConfig((prev) => ({
                     ...prev,
