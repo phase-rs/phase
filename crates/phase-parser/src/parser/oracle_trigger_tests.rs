@@ -44953,12 +44953,11 @@ fn for_each_of_those_permanents_population_repeat_is_simultaneous_instances() {
     assert_repeat_timing_invariant(execute);
 }
 
-/// CR 701.16a: "investigate" means "create a Clue token", so "investigate twice"
-/// creates one Clue, then another.
-/// They are counted repetitions of a whole instruction, not a for-each instance
-/// set, so the
-/// suffix producer stays `Sequential` (a stamp at the merge would yield
-/// `SimultaneousInstances`).
+/// CR 701.16a: "investigate" means "create a Clue token". "Investigate twice"
+/// is a counted repetition of that whole instruction, not a for-each instance
+/// set, so the parser models it as `Sequential`, like the counted repeats in
+/// Torment of Hailfire's ruling (2017-07-14). The suffix producer stays
+/// `Sequential` (a stamp at the merge would yield `SimultaneousInstances`).
 #[test]
 fn counted_investigate_suffix_repeats_are_sequential() {
     let armed = parse_oracle_text(
