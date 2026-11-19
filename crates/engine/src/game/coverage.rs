@@ -1618,6 +1618,22 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
     }
 }
 
+/// CR 122.1f: display phrase for a "<player> is poisoned" condition.
+fn fmt_player_is_poisoned(player: &PlayerScope) -> String {
+    match player {
+        PlayerScope::Controller => "is poisoned".into(),
+        // `Opponent { Max }` is the parser's encoding of the existential "an opponent".
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        } => "an opponent is poisoned".into(),
+        // RecipientController reaches this condition only by rebinding a printed "that player".
+        PlayerScope::ScopedPlayer | PlayerScope::RecipientController => {
+            "that player is poisoned".into()
+        }
+        other => format!("{} is poisoned", fmt_player_scope(other)),
+    }
+}
+
 /// CR 123.6d + CR 123.6e: "unique vowels on that sticker", "letter 'o' in name
 /// stickers on self".
 fn fmt_name_sticker_letter_count(stickers: &NameStickerSet, letters: &LetterQuery) -> String {
@@ -5231,12 +5247,7 @@ fn fmt_trigger_condition(
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         TC::IsMonarch { .. } => "that player is monarch".into(),
-        // CR 122.1f + CR 508.5: keep the defending-player wording distinct so a
-        // gap string names the player the trigger actually tests.
-        TC::IsPoisoned {
-            player: PlayerScope::DefendingPlayer,
-        } => "defending player is poisoned".into(),
-        TC::IsPoisoned { .. } => "that player is poisoned".into(),
+        TC::IsPoisoned { player } => fmt_player_is_poisoned(player),
         TC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -5503,11 +5514,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
-        // CR 122.1f: keep the subject wording parallel to `TC::IsPoisoned`.
-        SC::PlayerIsPoisoned {
-            player: PlayerScope::Controller,
-        } => "is poisoned".into(),
-        SC::PlayerIsPoisoned { .. } => "that player is poisoned".into(),
+        SC::PlayerIsPoisoned { player } => fmt_player_is_poisoned(player),
         SC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -19044,6 +19051,80 @@ mod tests {
             fmt_trigger_condition(&tq, &crate::types::triggers::TriggerMode::Phase)
                 .contains("is odd")
         );
+    }
+
+    #[test]
+    fn player_is_poisoned_condition_text_names_its_subject() {
+        let details = |face: &CardFace| -> Vec<(String, String)> {
+            build_parse_details_for_face(face)
+                .into_iter()
+                .flat_map(|item| item.details)
+                .collect()
+        };
+        let detail = |key: &str, value: &str| (key.to_string(), value.to_string());
+
+        let betrayers = max_speed_matrix_face(
+            "Viridian Betrayers",
+            "This creature has infect as long as an opponent is poisoned. (It deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)",
+            &[],
+            &["Creature"],
+            &["Phyrexian", "Elf", "Warrior"],
+        );
+        let betrayers_details = details(&betrayers);
+        assert!(
+            betrayers_details.contains(&detail("conditional", "an opponent is poisoned")),
+            "{betrayers_details:?}"
+        );
+
+        let rats = max_speed_matrix_face(
+            "Septic Rats",
+            "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)\nWhenever this creature attacks, if defending player is poisoned, it gets +1/+1 until end of turn.",
+            &["Infect"],
+            &["Creature"],
+            &["Phyrexian", "Rat"],
+        );
+        let rats_details = details(&rats);
+        assert!(
+            rats_details.contains(&detail("condition", "defending player is poisoned")),
+            "{rats_details:?}"
+        );
+
+        for (player, expected) in [
+            (PlayerScope::Controller, "is poisoned"),
+            (
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+                "an opponent is poisoned",
+            ),
+            (PlayerScope::ScopedPlayer, "that player is poisoned"),
+            (PlayerScope::RecipientController, "that player is poisoned"),
+            (
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+                "min of opponents is poisoned",
+            ),
+            (PlayerScope::Target, "target player is poisoned"),
+        ] {
+            assert_eq!(
+                fmt_static_condition(&StaticCondition::PlayerIsPoisoned {
+                    player: player.clone()
+                }),
+                expected,
+                "static {player:?}"
+            );
+            assert_eq!(
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::IsPoisoned {
+                        player: player.clone()
+                    },
+                    &TriggerMode::Attacks,
+                ),
+                expected,
+                "trigger {player:?}"
+            );
+        }
     }
 
     #[test]
