@@ -8372,13 +8372,6 @@ impl PendingBatchDeliveries {
         if staged.population_devour_snapshot.is_some() && !self.is_change_zone_population() {
             return Err("only a ChangeZone population owns a Devour snapshot".to_string());
         }
-        if staged.arrange_library_arrivals
-            && (self.destination != Zone::Library || !self.is_change_zone_population())
-        {
-            return Err(
-                "only a library-bound ChangeZone population arranges physical arrivals".into(),
-            );
-        }
         let members = &staged.members;
         if members.is_empty() {
             return Err("staged batch delivery has no members".to_string());
@@ -8426,6 +8419,11 @@ impl PendingBatchDeliveries {
         {
             if tail.group_id != self.logical_zone_change_group.logical_group_id {
                 return Err("ChangeZone tail names another logical group".to_string());
+            }
+            if tail.arrangement == ChangeZoneArrangementPlan::ArrangePhysicalLibraryArrivals
+                && self.destination != Zone::Library
+            {
+                return Err("physical library arrangement requires a library destination".into());
             }
         }
 
@@ -8653,8 +8651,23 @@ impl PendingBatchDeliveries {
     }
 
     fn validate_staged_member(member: &StagedBatchMember) -> Result<(), String> {
+        if member.merged_departure.is_some()
+            && (member.request.cause != PendingBatchZoneChangeCause::MergedComponentRouting
+                || member.request.destination != Zone::Library)
+        {
+            return Err("a staged merge departure requires a physical library request".into());
+        }
         let approved_object = |event: &ProposedEvent| match event {
-            ProposedEvent::ZoneChange { object_id, .. } => *object_id == member.identity.object_id,
+            ProposedEvent::ZoneChange {
+                object_id,
+                from,
+                merged_departure,
+                ..
+            } => {
+                *object_id == member.identity.object_id
+                    && *merged_departure == member.merged_departure
+                    && (merged_departure.is_none() || *from == Zone::Battlefield)
+            }
             ProposedEvent::Destroy { object_id, .. } => *object_id == member.identity.object_id,
             _ => false,
         };
@@ -9303,10 +9316,6 @@ pub struct StagedBatchDelivery {
         serialize_with = "crate::types::deterministic_serde::option_hash_set"
     )]
     pub population_devour_snapshot: Option<HashSet<ObjectId>>,
-    /// CR 401.4 + CR 730.3a: one owner-arranged mass placement whose
-    /// logical population includes merged permanents.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub arrange_library_arrivals: bool,
 }
 
 /// The three distinct stages of one admitted batch. Consultation and
@@ -9363,6 +9372,9 @@ pub struct StagedBatchMember {
     /// `None` (legacy saves) keeps the frozen delivery-time identity check only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_origin: Option<Zone>,
+    /// CR 730.3: the still-merged permanent this physical move belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_departure: Option<ObjectIncarnationRef>,
     /// CR 400.3 owner recorded at approval; validated live before delivery.
     pub owner: PlayerId,
     pub state: StagedBatchMemberState,
@@ -10368,6 +10380,11 @@ pub struct ChangeZoneBatchTail {
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub destination: Zone,
+    #[serde(
+        default,
+        skip_serializing_if = "ChangeZoneArrangementPlan::is_ordinary"
+    )]
+    pub arrangement: ChangeZoneArrangementPlan,
     pub count: ChangeZoneCountPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_return_result_producer: Option<(ReturnResultOccurrenceId, ReturnResultId)>,
@@ -10387,6 +10404,20 @@ pub struct ChangeZoneBatchTail {
         skip_serializing_if = "crate::game::triggers::EntryOccurrenceCollector::is_owner"
     )]
     pub(crate) entry_collector: crate::game::triggers::EntryOccurrenceCollector,
+}
+
+/// CR 401.4 + CR 730.3a: how this ChangeZone population arranges arrivals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChangeZoneArrangementPlan {
+    #[default]
+    OrdinaryDelivery,
+    ArrangePhysicalLibraryArrivals,
+}
+
+impl ChangeZoneArrangementPlan {
+    fn is_ordinary(&self) -> bool {
+        *self == Self::OrdinaryDelivery
+    }
 }
 
 /// CR 608.2c: whether this population consumes its source's existing exile links.
@@ -63503,6 +63534,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             approved_post_replacement: None,
             held_decision: None,
             blocked: false,
+            merged_departure: None,
         };
         PendingBatchDeliveries::validate_staged_member(&member)
             .expect("concession-pruned destroy member with its outer approval is legal");
@@ -63559,6 +63591,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             approved_post_replacement: None,
             held_decision: None,
             blocked: false,
+            merged_departure: None,
         }
     }
 
@@ -63754,7 +63787,6 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 arrangement_cursor: 0,
                 population_devour_snapshot: None,
                 asking: None,
-                arrange_library_arrivals: false,
             }),
             pre_entry_battlefield: None,
         }

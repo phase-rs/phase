@@ -8080,6 +8080,8 @@ pub(super) fn handle_resolution_choice(
                             source_id,
                             controller: player,
                             destination: dest_zone,
+                            arrangement:
+                                crate::types::game_state::ChangeZoneArrangementPlan::OrdinaryDelivery,
                             count:
                                 crate::types::game_state::ChangeZoneCountPolicy::ChoiceSelected {
                                     chosen: chosen_ids.clone(),
@@ -8097,7 +8099,6 @@ pub(super) fn handle_resolution_choice(
                             logical_zone_change_group,
                             tail,
                             ctx.origin,
-                            false,
                             events,
                         ) {
                             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => {

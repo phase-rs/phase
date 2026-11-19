@@ -663,6 +663,10 @@ pub enum ProposedEvent {
             skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
         )]
         library_shuffle: crate::types::ability::LibraryShuffleMode,
+        /// CR 730.3 + CR 903.9c: a physical move approved separately from
+        /// this permanent's logical departure, which has not yet happened.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_departure: Option<ObjectIncarnationRef>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -1253,6 +1257,7 @@ impl ProposedEvent {
             co_entrants: None,
             ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
             library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+            merged_departure: None,
             applied: HashSet::new(),
         }
     }

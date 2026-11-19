@@ -18,16 +18,17 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, BatchDeliveryStage, EnteringAuraAuthority, ExileLinkKind, GameState,
-    HeldDecisionPrompt, HeldReplacementDecision, LibraryPlacementContinuation, LiminalEntryKind,
-    LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome, MassLibraryOrderBatch,
-    MassLibraryOrderMember, MergedCardComponentRoute, PendingBatchDeliveries,
-    PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingComponentDeliveryParent,
-    PendingCounterPostAction, PendingLiminalEntryResume, PendingReplacement,
-    PendingZoneChangeDelivery, PostReplacementDrainOwner, StagedArrangementStatus,
-    StagedBatchDelivery, StagedBatchMember, StagedBatchMemberState, StagedDestroyOperation,
-    StagedDestroyOuterApproval, StagedLibraryArrangement, StagedMemberOperation,
-    StagedMemberOutcome, WaitingFor, ZoneDeliveryExileTracking, ZoneMoveCompletion,
+    BatchCompletion, BatchDeliveryStage, ChangeZoneArrangementPlan, EnteringAuraAuthority,
+    ExileLinkKind, GameState, HeldDecisionPrompt, HeldReplacementDecision,
+    LibraryPlacementContinuation, LiminalEntryKind, LogicalZoneChangeGroup,
+    LogicalZoneChangeTerminalOutcome, MassLibraryOrderBatch, MassLibraryOrderMember,
+    MergedCardComponentRoute, PendingBatchDeliveries, PendingBatchZoneChangeCause,
+    PendingBatchZoneMoveRequest, PendingComponentDeliveryParent, PendingCounterPostAction,
+    PendingLiminalEntryResume, PendingReplacement, PendingZoneChangeDelivery,
+    PostReplacementDrainOwner, StagedArrangementStatus, StagedBatchDelivery, StagedBatchMember,
+    StagedBatchMemberState, StagedDestroyOperation, StagedDestroyOuterApproval,
+    StagedLibraryArrangement, StagedMemberOperation, StagedMemberOutcome, WaitingFor,
+    ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -1575,7 +1576,16 @@ pub(crate) fn move_objects_simultaneously_then(
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
-    move_arranged_batch_then(state, reqs, Vec::new(), completion, None, None, events)
+    move_arranged_batch_then(
+        state,
+        reqs,
+        Vec::new(),
+        completion,
+        None,
+        None,
+        None,
+        events,
+    )
 }
 
 /// CR 701.20d + CR 603.10a + CR 616.1: As [`move_objects_simultaneously_then`],
@@ -1606,6 +1616,7 @@ pub(crate) fn move_objects_simultaneously_settling_then(
         completion,
         component_delivery_parent,
         library_reorder,
+        None,
         events,
     )
 }
@@ -1627,6 +1638,7 @@ pub(crate) fn move_owner_arranged_batch_then(
         completion,
         None,
         library_reorder,
+        None,
         events,
     )
 }
@@ -1634,7 +1646,7 @@ pub(crate) fn move_owner_arranged_batch_then(
 pub(crate) fn move_component_batch_then(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
-    completion: Option<BatchCompletion>,
+    departure: ObjectIncarnationRef,
     component_delivery_parent: Option<PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -1642,13 +1654,15 @@ pub(crate) fn move_component_batch_then(
         state,
         reqs,
         Vec::new(),
-        completion,
+        None,
         component_delivery_parent,
         None,
+        Some(departure),
         events,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn move_arranged_batch_then(
     state: &mut GameState,
     mut reqs: Vec<ZoneMoveRequest>,
@@ -1656,6 +1670,7 @@ fn move_arranged_batch_then(
     completion: Option<BatchCompletion>,
     mut component_delivery_parent: Option<PendingComponentDeliveryParent>,
     library_reorder: Option<crate::types::game_state::LibraryReorderOperation>,
+    merged_departure: Option<ObjectIncarnationRef>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let event_start = events.len();
@@ -1697,8 +1712,20 @@ fn move_arranged_batch_then(
         let arrangements = component_delivery_parent
             .as_ref()
             .map_or(arrangements, |link| link.inherited_arrangements.clone());
-        Some(new_staged_batch(state, &reqs, arrangements))
+        if let Some(departure) = merged_departure {
+            lead_with_merge_survivor(&mut reqs, departure.object_id);
+        }
+        let mut staged = new_staged_batch(state, &reqs, arrangements);
+        if let Some(departure) = merged_departure {
+            for member in &mut staged.members {
+                member.merged_departure = Some(departure);
+            }
+        }
+        Some(staged)
     } else {
+        if let Some(departure) = merged_departure {
+            crate::game::merge::detach_merge_for_serial_delivery(state, departure.object_id);
+        }
         None
     };
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
@@ -2219,7 +2246,6 @@ fn new_staged_batch(
         arrangements,
         arrangement_cursor: 0,
         population_devour_snapshot: None,
-        arrange_library_arrivals: false,
     }
 }
 
@@ -2239,6 +2265,7 @@ fn new_staged_member(state: &GameState, index: usize, req: &ZoneMoveRequest) -> 
         approved_post_replacement: None,
         held_decision: None,
         blocked: false,
+        merged_departure: None,
     }
 }
 
@@ -2444,10 +2471,6 @@ fn run_staged_batch(
                         return StagedStop::Paused;
                     }
                     StagedConsult::AllConsulted => {
-                        if prepare_staged_library_components(state, owner) {
-                            run.blocking_settled = false;
-                            continue;
-                        }
                         begin_staged_arrangement(state, owner);
                         continue;
                     }
@@ -2588,6 +2611,13 @@ fn drive_staged_approval(
             run.blocking_settled = false;
         }
         return settle_staged_consult(state, owner, cursor, result, point);
+    }
+    // CR 101.4 + CR 903.9c: component choices exposed by an approved
+    // merged departure belong to the same window as the choices already
+    // held on ordinary permanents.
+    if admit_staged_library_components(state, owner) {
+        run.blocking_settled = false;
+        return StagedConsult::Continue;
     }
     let scheduled = schedule_staged_decisions(state, owner, events, &mut run.reconsulted);
     if scheduled == StagedConsult::Continue {
@@ -3269,6 +3299,59 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
         // A selection names a decision by its subject, so subjects are unique.
         let mut subjects = HashSet::new();
         for member in &staged.members {
+            if let Some(departure) = member.merged_departure {
+                let names_survivor = owner.component_delivery_parent.as_ref().map_or_else(
+                    || {
+                        owner
+                            .logical_zone_change_group
+                            .announced_members()
+                            .contains(&departure)
+                    },
+                    |parent| parent.member == departure,
+                );
+                if !names_survivor {
+                    return Err("a physical move has no matching announced merge departure".into());
+                }
+                if staged.stage != BatchDeliveryStage::Delivering
+                    && member.state != StagedBatchMemberState::Abandoned
+                    && staged_member_is_live(state, member)
+                    && !state
+                        .objects
+                        .get(&departure.object_id)
+                        .is_some_and(|permanent| {
+                            ObjectIncarnationRef::from_object(permanent) == departure
+                                && permanent.zone == Zone::Battlefield
+                                && permanent
+                                    .merged_components
+                                    .contains(&member.identity.object_id)
+                        })
+                {
+                    return Err(
+                        "a physical move does not belong to the live merged permanent".into(),
+                    );
+                }
+                let matches = |event: &ProposedEvent| {
+                    matches!(
+                        event,
+                        ProposedEvent::ZoneChange { object_id, merged_departure: Some(survivor), .. }
+                            if *object_id == member.identity.object_id && *survivor == departure
+                    )
+                };
+                if owner.paused_current.as_ref().is_some_and(|paused| {
+                    paused.member == member.identity
+                        && (!matches(&paused.expected_event)
+                            || state.pending_replacement.as_ref().is_some_and(|pending| {
+                                pending.parks_delivery(&paused.expected_event)
+                                    && !matches(&pending.proposed)
+                            }))
+                }) || member
+                    .held_decision
+                    .as_ref()
+                    .is_some_and(|held| held.boundary.is_some() && !matches(&held.pending.proposed))
+                {
+                    return Err("a parked component choice names another merge departure".into());
+                }
+            }
             let Some(decision) = &member.held_decision else {
                 continue;
             };
@@ -3583,7 +3666,7 @@ fn consult_staged_member(
         return StagedConsult::Continue;
     }
     // CR 614.4 + CR 614.12: the entrant is consulted against the whole entry event's members.
-    let Some(prepared) = prepared_batch_member_event(
+    let Some(mut prepared) = prepared_batch_member_event(
         state,
         &request,
         owner.logical_zone_change_group.announced_members(),
@@ -3597,6 +3680,12 @@ fn consult_staged_member(
         );
         return StagedConsult::Continue;
     };
+    if let ProposedEvent::ZoneChange {
+        merged_departure, ..
+    } = &mut prepared.proposed
+    {
+        *merged_departure = member.merged_departure;
+    }
     let cursor = member.announcement_index as usize;
     set_staged_member_state(owner, cursor, StagedBatchMemberState::InnerConsulting);
     let drain_point = state.resolution_stack.consult_drain_point();
@@ -3978,20 +4067,34 @@ fn note_change_zone_member_terminal(
     }
 }
 
-/// CR 730.3d + CR 903.9c: once the logical moves are approved, consult the
-/// physical moves in the same batch. Its original group still owns the
-/// permanent departures; absorbed cards acquire no battlefield slot.
-fn prepare_staged_library_components(
-    state: &mut GameState,
-    owner: &mut PendingBatchDeliveries,
-) -> bool {
+fn arranges_physical_library_arrivals(owner: &PendingBatchDeliveries) -> bool {
+    matches!(
+        &owner.completion,
+        Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. })
+            if tail.arrangement == ChangeZoneArrangementPlan::ArrangePhysicalLibraryArrivals
+    )
+}
+
+// Take the permanent's departure snapshot before delivering any absorbed card.
+fn lead_with_merge_survivor(requests: &mut [ZoneMoveRequest], survivor: ObjectId) {
+    let index = requests
+        .iter()
+        .position(|request| request.object_id == survivor)
+        .expect("physical move plan includes the merged survivor");
+    requests[..=index].rotate_right(1);
+}
+
+/// CR 730.3d + CR 903.9c: approved logical departures expose physical
+/// consultations, not moves. The original group still owns the permanent
+/// departures; absorbed cards acquire no battlefield slot.
+fn admit_staged_library_components(state: &GameState, owner: &mut PendingBatchDeliveries) -> bool {
+    if !arranges_physical_library_arrivals(owner) {
+        return false;
+    }
     let staged = owner
         .staged
         .as_mut()
         .expect("approval stage has staged members");
-    if !staged.arrange_library_arrivals {
-        return false;
-    }
 
     let mut components = Vec::new();
     staged.members.retain_mut(|member| {
@@ -4007,11 +4110,13 @@ fn prepare_staged_library_components(
         else {
             return true;
         };
-        if member.state != StagedBatchMemberState::Approved || !staged_member_is_live(state, member)
+        if member.state != StagedBatchMemberState::Approved
+            || member.merged_departure.is_some()
+            || !staged_member_is_live(state, member)
         {
             return true;
         }
-        let requests = crate::game::merge::prepare_merged_component_moves(
+        let mut requests = crate::game::merge::plan_merged_component_moves(
             state,
             member.identity.object_id,
             Zone::Library,
@@ -4023,9 +4128,11 @@ fn prepare_staged_library_components(
         if requests.is_empty() {
             return true;
         }
+        lead_with_merge_survivor(&mut requests, member.identity.object_id);
         components.extend(requests.iter().map(|request| {
             let mut component = new_staged_member(state, 0, request);
             component.expected_origin = Some(Zone::Battlefield);
+            component.merged_departure = Some(member.identity);
             if component.identity == member.identity {
                 component.approved_post_replacement = member.approved_post_replacement.take();
             }
@@ -4037,8 +4144,9 @@ fn prepare_staged_library_components(
         return false;
     }
 
-    // The logical approvals form a completed prefix, followed by physical
-    // consultations. Neither this order nor delivery uses the private ranks.
+    // The cursor was at the end of the sweep. Keep its consulted prefix,
+    // including held ordinary decisions, and sweep the new requests before
+    // the scheduler publishes any of them.
     staged.cursor = staged.members.len();
     staged.members.append(&mut components);
     owner.attempted.clear();
@@ -4127,6 +4235,7 @@ pub(crate) fn staged_arrangement_groups(
 /// approvals. Top/Bottom and domain-gated numbered positions are grouped;
 /// request-origin groups replay the legacy insertion order without a prompt.
 fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliveries) {
+    let arrange_physical_arrivals = arranges_physical_library_arrivals(owner);
     let Some(staged) = owner.staged.as_mut() else {
         return;
     };
@@ -4190,7 +4299,7 @@ fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliverie
         });
         let needs_prompt = announced.len() >= 2
             && (component_group
-                || staged.arrange_library_arrivals
+                || arrange_physical_arrivals
                 || announced
                     .iter()
                     .any(|member| staged_member_placement_is_replacement(member)));
@@ -4781,14 +4890,12 @@ pub(crate) fn deliver_staged_change_zone_batch(
     logical_zone_change_group: LogicalZoneChangeGroup,
     tail: crate::types::game_state::ChangeZoneBatchTail,
     expected_origin: Option<Zone>,
-    arrange_library_arrivals: bool,
     events: &mut Vec<GameEvent>,
 ) -> StagedChangeZoneOutcome {
     let event_start = events.len();
     let tail_collector = tail.entry_collector;
     let group_id = logical_zone_change_group.logical_group_id;
     let mut staged = new_staged_batch(state, &reqs, Vec::new());
-    staged.arrange_library_arrivals = arrange_library_arrivals;
     // CR 400.7: carry the producer's origin snapshot so a member
     // that moved during a preceding pause is refused before any replacement is
     // offered for it, matching the ordinary per-member guard.
@@ -8963,7 +9070,7 @@ fn deliver_replaced_batch_member(
     // proposed event for it.
     let merged_permanent_leave = matches!(
         &event,
-        ProposedEvent::ZoneChange { object_id, from, .. }
+        ProposedEvent::ZoneChange { object_id, from, merged_departure: None, .. }
             if *from == Zone::Battlefield
                 && state
                     .objects
@@ -9004,6 +9111,7 @@ fn deliver_replaced_batch_member(
         applied,
         with_entry_effect,
         co_entrants,
+        merged_departure,
         ..
     } = event
     {
@@ -9078,7 +9186,13 @@ fn deliver_replaced_batch_member(
             (from == Zone::Battlefield
                 && object.zone == Zone::Battlefield
                 && !state.battlefield.contains(&object_id))
-            .then_some(object.split_from_merge_survivor)
+            .then(|| {
+                merged_departure
+                    .map(|departure| {
+                        ObjectIncarnationRef::of(departure.object_id, departure.incarnation + 1)
+                    })
+                    .or(object.split_from_merge_survivor)
+            })
             .flatten()
         });
 
@@ -9153,8 +9267,11 @@ fn deliver_replaced_batch_member(
         // default zone. A no-op (no route stashed) for non-token survivors
         // (clause 1, already handled — every component followed the survivor's
         // redirected `to`) and when no card-scoped redirect diverges.
-        state.merged_card_component_route =
-            compute_merged_card_component_route(state, object_id, to, events);
+        state.merged_card_component_route = if merged_departure.is_none() {
+            compute_merged_card_component_route(state, object_id, to, events)
+        } else {
+            None
+        };
 
         // CR 701.24a: deliver to a specific library index when the event's
         // destination is the library and a position was requested (a placement is
@@ -9196,12 +9313,18 @@ fn deliver_replaced_batch_member(
         // which is analyzed by that carve-out.
         let took_plain_zone_transfer;
         match (split_component_survivor, to, library_placement.as_ref()) {
-            (Some(_), _, position) => {
+            (Some(survivor_successor), _, position) => {
                 // CR 730.3 + CR 730.3c: an absorbed component arrives without
                 // independently leaving the battlefield; retain its successor
                 // link and sole incarnation bump in the existing component mover.
                 took_plain_zone_transfer = false;
-                crate::game::merge::put_component_into_zone(state, object_id, to, events);
+                crate::game::merge::put_component_into_zone(
+                    state,
+                    object_id,
+                    to,
+                    survivor_successor,
+                    events,
+                );
                 if let (Zone::Library, Some(position)) = (to, position) {
                     let owner = state.objects[&object_id].owner;
                     let index = explicit_library_index.or_else(|| library_position_index(position));
@@ -9241,6 +9364,7 @@ fn deliver_replaced_batch_member(
                     events,
                     should_transform,
                     receiver,
+                    merged_departure,
                 );
             }
         }
@@ -14788,6 +14912,7 @@ mod staged_batch_tests {
             pending_return_result_producer: None,
             own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
             entry_collector: Default::default(),
+            arrangement: ChangeZoneArrangementPlan::OrdinaryDelivery,
         };
         let requests = members
             .iter()
@@ -14795,15 +14920,7 @@ mod staged_batch_tests {
             .collect();
         let mut events = Vec::new();
         assert!(matches!(
-            deliver_staged_change_zone_batch(
-                &mut state,
-                requests,
-                group,
-                tail,
-                None,
-                false,
-                &mut events
-            ),
+            deliver_staged_change_zone_batch(&mut state, requests, group, tail, None, &mut events),
             StagedChangeZoneOutcome::Settled { .. }
         ));
         assert!(members
@@ -14911,6 +15028,7 @@ mod staged_batch_tests {
                 pending_return_result_producer: None,
                 own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
                 entry_collector: Default::default(),
+                arrangement: ChangeZoneArrangementPlan::OrdinaryDelivery,
             };
             let requests = members
                 .iter()
@@ -14925,7 +15043,6 @@ mod staged_batch_tests {
                         group,
                         tail,
                         None,
-                        false,
                         &mut events
                     ),
                     StagedChangeZoneOutcome::Settled { .. }
@@ -15047,6 +15164,7 @@ mod staged_batch_tests {
             approved_post_replacement: None,
             held_decision: None,
             blocked: false,
+            merged_departure: None,
         }
     }
 
@@ -15115,7 +15233,6 @@ mod staged_batch_tests {
             arrangement_cursor: 0,
             population_devour_snapshot: None,
             asking: None,
-            arrange_library_arrivals: false,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             library_reorder: None,
@@ -16416,7 +16533,6 @@ mod staged_batch_tests {
             arrangement_cursor: 0,
             population_devour_snapshot: None,
             asking,
-            arrange_library_arrivals: false,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             library_reorder: None,
@@ -17474,6 +17590,7 @@ mod staged_batch_tests {
                     pending_return_result_producer: None,
                     own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
                     entry_collector: Default::default(),
+                    arrangement: ChangeZoneArrangementPlan::OrdinaryDelivery,
                 }),
                 settled: None,
             }

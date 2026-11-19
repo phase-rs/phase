@@ -9521,6 +9521,8 @@ mod tests {
                     pending_return_result_producer: None,
                     own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
                     entry_collector: Default::default(),
+                    arrangement:
+                        crate::types::game_state::ChangeZoneArrangementPlan::OrdinaryDelivery,
                 }),
                 settled: None,
             },
@@ -9737,6 +9739,8 @@ mod tests {
                     pending_return_result_producer: None,
                     own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
                     entry_collector: Default::default(),
+                    arrangement:
+                        crate::types::game_state::ChangeZoneArrangementPlan::OrdinaryDelivery,
                 }),
                 settled: None,
             },

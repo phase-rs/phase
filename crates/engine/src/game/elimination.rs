@@ -6580,6 +6580,7 @@ mod r4b_staged_elimination_tests {
             approved_post_replacement: None,
             held_decision: None,
             blocked: false,
+            merged_departure: None,
         }
     }
 
@@ -6670,7 +6671,6 @@ mod r4b_staged_elimination_tests {
                 arrangement_cursor: 1,
                 population_devour_snapshot: None,
                 asking: None,
-                arrange_library_arrivals: false,
             }),
             pre_entry_battlefield: None,
         };
@@ -6755,7 +6755,6 @@ mod r4b_staged_elimination_tests {
             arrangement_cursor: 0,
             population_devour_snapshot: None,
             asking: None,
-            arrange_library_arrivals: false,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             library_reorder: None,
@@ -6904,7 +6903,6 @@ mod r4b_staged_elimination_tests {
                 arrangement_cursor: 0,
                 population_devour_snapshot: None,
                 asking: None,
-                arrange_library_arrivals: false,
             }),
             pre_entry_battlefield: None,
         });

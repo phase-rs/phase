@@ -520,14 +520,13 @@ pub fn split_merged_permanent_on_leave(
             Some(route) => route.default_dest,
             None => dest,
         };
-        put_component_into_zone(state, component_id, component_dest, events);
-        // CR 730.3c: record which surviving object this component split from, so an
-        // effect that later finds "the object the merged permanent became" (a
-        // flicker/blink return) brings this component back too, not just the
-        // survivor. See `expand_returned_merge_components`.
-        if let Some(obj) = state.objects.get_mut(&component_id) {
-            obj.split_from_merge_survivor = Some(survivor_successor);
-        }
+        put_component_into_zone(
+            state,
+            component_id,
+            component_dest,
+            survivor_successor,
+            events,
+        );
     }
 
     // The surviving object's merge identity is cleared by its own
@@ -597,7 +596,7 @@ pub(crate) fn move_merged_permanent_for_parent(
     parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
-    let requests = prepare_merged_component_moves(
+    let requests = plan_merged_component_moves(
         state,
         merged_id,
         dest,
@@ -609,12 +608,18 @@ pub(crate) fn move_merged_permanent_for_parent(
     if requests.is_empty() {
         return BatchMoveResult::Done;
     }
-    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
+    zone_pipeline::move_component_batch_then(
+        state,
+        requests,
+        ObjectIncarnationRef::from_object(&state.objects[&merged_id]),
+        parent,
+        events,
+    )
 }
 
-/// CR 730.3d: turn an approved merged departure into physical move requests.
-pub(crate) fn prepare_merged_component_moves(
-    state: &mut GameState,
+/// CR 730.3d: plan the physical moves without changing the live permanent.
+pub(crate) fn plan_merged_component_moves(
+    state: &GameState,
     merged_id: ObjectId,
     dest: Zone,
     library_placement: Option<&LibraryPosition>,
@@ -625,36 +630,11 @@ pub(crate) fn prepare_merged_component_moves(
     let Some(survivor) = state.objects.get(&merged_id) else {
         return Vec::new();
     };
-    if survivor.merged_components.is_empty() {
-        return Vec::new();
-    }
-    let components = survivor.merged_components.clone();
-    let survivor_successor = leave_successor(survivor);
-
-    // CR 730.3 + CR 400.7: restore each physical card's own characteristics
-    // before proposing its destination. Clearing this list also prevents the
-    // survivor's ordinary delivery at the tail of this batch from recursively
-    // entering the raw split seam in `zones::move_to_zone`.
-    remove_merge_layer_effect(state, merged_id);
-    crate::game::layers::flush_layers(state);
-    if let Some(survivor) = state.objects.get_mut(&merged_id) {
-        survivor.merged_components.clear();
-        survivor.merge_kind = None;
-    }
-
-    components
-        .into_iter()
+    survivor
+        .merged_components
+        .iter()
+        .copied()
         .map(|component_id| {
-            if component_id != merged_id {
-                // This live marker distinguishes the absorbed component's
-                // pipeline delivery from an ordinary Battlefield departure.
-                // `put_component_into_zone` restores it after CR 400.7 cleanup.
-                state
-                    .objects
-                    .get_mut(&component_id)
-                    .expect("merged component exists")
-                    .split_from_merge_survivor = Some(survivor_successor);
-            }
             // CR 730.3: every component inherits the final approved destination
             // and position; its own replacement consult may redirect it again.
             let placement = match (dest, library_placement) {
@@ -674,6 +654,27 @@ pub(crate) fn prepare_merged_component_moves(
                 })
         })
         .collect()
+}
+
+/// Non-arranged component delivery keeps the existing serial split path.
+pub(super) fn detach_merge_for_serial_delivery(state: &mut GameState, merged_id: ObjectId) {
+    let survivor = &state.objects[&merged_id];
+    let successor = leave_successor(survivor);
+    remove_merge_layer_effect(state, merged_id);
+    crate::game::layers::flush_layers(state);
+    let survivor = state
+        .objects
+        .get_mut(&merged_id)
+        .expect("merged survivor exists");
+    let components = std::mem::take(&mut survivor.merged_components);
+    survivor.merge_kind = None;
+    for component in components.into_iter().filter(|id| *id != merged_id) {
+        state
+            .objects
+            .get_mut(&component)
+            .expect("merged component exists")
+            .split_from_merge_survivor = Some(successor);
+    }
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness
@@ -944,6 +945,7 @@ pub(crate) fn put_component_into_zone(
     state: &mut GameState,
     component_id: ObjectId,
     dest: Zone,
+    survivor_successor: ObjectIncarnationRef,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 603.10a: snapshot the component's characteristics BEFORE the CR 400.7
@@ -958,21 +960,12 @@ pub(crate) fn put_component_into_zone(
     else {
         return;
     };
-    let split_from_merge_survivor = state
-        .objects
-        .get(&component_id)
-        .and_then(|obj| obj.split_from_merge_survivor);
-
     crate::game::zones::route_component(state, component_id, dest);
 
-    // CR 730.3c: `route_component` performs CR 400.7 cleanup and therefore
-    // clears the live marker used to select this special delivery. Restore the
-    // continuity link only after the component has actually reached its new
-    // zone, so a paused replacement cannot expose it as already split.
-    if let Some(survivor_id) = split_from_merge_survivor {
-        if let Some(obj) = state.objects.get_mut(&component_id) {
-            obj.split_from_merge_survivor = Some(survivor_id);
-        }
+    // CR 730.3c: the cleanup clears previous incarnation links. Stamp the
+    // new link only on arrival so a parked choice cannot expose a split card.
+    if let Some(obj) = state.objects.get_mut(&component_id) {
+        obj.split_from_merge_survivor = Some(survivor_successor);
     }
 
     crate::game::restrictions::record_zone_change(state, &mut record);

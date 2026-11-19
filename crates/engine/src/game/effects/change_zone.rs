@@ -15,9 +15,10 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
-    PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneDeliveryExileTracking, ZoneOpponentChooserPurpose,
+    ChangeZoneArrangementPlan, ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch,
+    MassLibraryOrderMember, PendingCounterPostAction, PendingMassLibraryOrderBatches,
+    PendingMassLibraryOrderChoice, PendingZoneChangeDelivery, WaitingFor,
+    ZoneDeliveryExileTracking, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1982,6 +1983,7 @@ pub fn resolve(
             },
             pending_return_result_producer: None,
             own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
+            arrangement: ChangeZoneArrangementPlan::OrdinaryDelivery,
             // CR 603.10 + CR 611.2e: a later "is/has" instruction of this resolution that applies
             // with the entry takes the population's entry occurrences to the post-action collector.
             entry_collector: crate::game::effects::entry_occurrence_collector(state, Some(ability)),
@@ -1992,7 +1994,6 @@ pub fn resolve(
             logical_zone_change_group,
             tail,
             ctx.origin,
-            false,
             events,
         ) {
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(None),
@@ -3987,7 +3988,7 @@ pub fn resolve_all(
         && effect_library_position.is_some()
         && !random_order
         && matching.len() > 1;
-    let arrange_after_replacements = owner_orders
+    let arrangement = if owner_orders
         && library_shuffle == LibraryShuffleMode::PerObject
         && effect_library_position
             .as_ref()
@@ -3995,8 +3996,13 @@ pub fn resolve_all(
         && matching
             .iter()
             .any(|id| merged_components_of(&state.objects[id]).is_some())
-        && !population_reorders_the_library(state, matching.iter().copied(), dest_zone);
-    if owner_orders && !arrange_after_replacements {
+        && !population_reorders_the_library(state, matching.iter().copied(), dest_zone)
+    {
+        ChangeZoneArrangementPlan::ArrangePhysicalLibraryArrivals
+    } else {
+        ChangeZoneArrangementPlan::OrdinaryDelivery
+    };
+    if owner_orders && arrangement == ChangeZoneArrangementPlan::OrdinaryDelivery {
         // `matching.len() > 1` guarantees at least one owner batch.
         let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
         // CR 401.4: a mass move names no arranger; each owner orders their own.
@@ -4081,6 +4087,7 @@ pub fn resolve_all(
             controller: ability.controller,
             destination: dest_zone,
             count: crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
+            arrangement,
             pending_return_result_producer: None,
             own_exile_links: if matches!(effective_filter, TargetFilter::ExiledBySource) {
                 crate::types::game_state::OwnExileLinkSettlement::Consume
@@ -4096,7 +4103,6 @@ pub fn resolve_all(
             logical_zone_change_group,
             tail,
             ctx.origin,
-            arrange_after_replacements,
             events,
         ) {
             crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(()),
@@ -16475,6 +16481,7 @@ mod tests {
                 pending_return_result_producer: None,
                 own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
                 entry_collector: Default::default(),
+                arrangement: ChangeZoneArrangementPlan::OrdinaryDelivery,
             }),
             settled: Some(ChangeZoneSettled {
                 policy_count: 3,

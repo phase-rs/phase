@@ -396,6 +396,11 @@ pub(crate) fn apply_zone_exit_cleanup(
     // CR 722.3c: the prepare-face copy remains in exile only while its linked
     // permanent remains on the battlefield with the prepared designation.
     if from == Zone::Battlefield {
+        // CR 730.2a + CR 400.7: the departure event and LKI have both
+        // captured the merged permanent. Retire its copy effect and restore
+        // the surviving card's token identity before resetting the object.
+        super::merge::remove_merge_layer_effect(state, object_id);
+        super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
         crate::game::effects::prepare::remove_linked_prepared_copy_if_idle(state, object_id);
     }
 
@@ -1642,7 +1647,7 @@ pub fn move_to_zone(
     to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
-    move_to_zone_with_entry_flags(state, object_id, to, events, false, None);
+    move_to_zone_with_entry_flags(state, object_id, to, events, false, None, None);
 }
 
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
@@ -1689,6 +1694,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
     events: &mut Vec<GameEvent>,
     enter_transformed: bool,
     receiver: Option<PlayerId>,
+    merged_departure: Option<ObjectIncarnationRef>,
 ) {
     // CR 111.8: A token that has left the battlefield can't move to another zone
     // or come back onto the battlefield — "if such a token would change zones, it
@@ -1805,7 +1811,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // object completes its move. No-op for non-merged objects. Done here (while
     // the object is still on the battlefield with its `merged_components` intact,
     // before `apply_zone_exit_cleanup` clears them).
-    {
+    if merged_departure.is_none() {
         let leaving_battlefield = state
             .objects
             .get(&object_id)
@@ -1925,12 +1931,6 @@ pub(crate) fn move_to_zone_with_entry_flags(
     zone_change_record.sync_trigger_source_context();
 
     let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
-    // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
-    // temporarily changed the survivor's token-ness, the ZoneChanged record above
-    // must retain the merged permanent's event-time token-ness. Restore the
-    // survivor only after that snapshot so the moved token component can cease to
-    // exist without corrupting leave-trigger filters.
-    super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
 
     // CR 608.2h: hand the LKI the PRE-SEVER attachment set captured above — the sever
     // has already emptied the live object's attachment list by this point.
@@ -6794,7 +6794,15 @@ mod tests {
         }
 
         let mut events = Vec::new();
-        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true, None);
+        move_to_zone_with_entry_flags(
+            &mut state,
+            id,
+            Zone::Battlefield,
+            &mut events,
+            true,
+            None,
+            None,
+        );
 
         assert_eq!(
             state.objects[&id].zone,
@@ -6904,7 +6912,15 @@ mod tests {
         // back_face intentionally left None (single-faced; the GameState default).
 
         let mut events = Vec::new();
-        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true, None);
+        move_to_zone_with_entry_flags(
+            &mut state,
+            id,
+            Zone::Battlefield,
+            &mut events,
+            true,
+            None,
+            None,
+        );
 
         assert_eq!(
             state.objects[&id].zone,

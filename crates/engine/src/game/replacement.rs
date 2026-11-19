@@ -360,6 +360,7 @@ fn commander_hand_or_library_return_applies(state: &GameState, event: &ProposedE
         object_id,
         from,
         to,
+        merged_departure,
         ..
     } = event
     else {
@@ -373,7 +374,8 @@ fn commander_hand_or_library_return_applies(state: &GameState, event: &ProposedE
             // undivided permanent to Command. Its leave delivery is expanded
             // into component requests, where each commander independently
             // receives the CR 903.9b choice before reaching Hand/Library.
-            object.uses_command_zone_rules() && object.merged_components.is_empty()
+            object.uses_command_zone_rules()
+                && (merged_departure.is_some() || object.merged_components.is_empty())
         })
 }
 
@@ -2667,6 +2669,7 @@ fn discard_applier(
             face_down_profile: None,
             with_entry_effect: None,
             co_entrants: None,
+            merged_departure: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
@@ -18687,6 +18690,7 @@ mod tests {
             face_down_profile: None,
             with_entry_effect: None,
             co_entrants: None,
+            merged_departure: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -22762,6 +22766,7 @@ mod tests {
             face_down_profile: None,
             with_entry_effect: None,
             co_entrants: None,
+            merged_departure: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -24245,6 +24250,7 @@ mod tests {
             face_down_profile: None,
             with_entry_effect: None,
             co_entrants: None,
+            merged_departure: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -27816,6 +27822,7 @@ mod tests {
             face_down_profile: None,
             with_entry_effect: None,
             co_entrants: None,
+            merged_departure: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
@@ -27874,6 +27881,7 @@ mod tests {
             face_down_profile: None,
             with_entry_effect: None,
             co_entrants: None,
+            merged_departure: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,

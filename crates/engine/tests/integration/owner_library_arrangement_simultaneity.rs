@@ -488,7 +488,7 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
         })
         .from_oracle_text_with_keywords(&["Mutate", "Flash"], OCTOPUS_ORACLE)
         .id();
-    let ordinary = scenario.add_creature(P0, "Ordinary creature", 2, 2).id();
+    let ordinary = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
     let burial = add_hallowed_burial(&mut scenario);
     let mut runner = scenario.build();
     // CR 702.140a + CR 702.140c: reach the merged permanent through its
@@ -505,12 +505,12 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
     ));
     runner
         .act(GameAction::ChooseMutateMergeSide {
-            side: engine::game::merge::MergeSide::Bottom,
+            side: engine::game::merge::MergeSide::Top,
         })
         .unwrap();
     assert_eq!(
         runner.state().objects[&host].merged_components,
-        vec![host, rider]
+        vec![rider, host]
     );
     assert_arrangement_finished(&runner);
     let sentinel = library(&runner, P0)[0];
@@ -522,6 +522,53 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
         false,
     );
     let mut events = cast.events().to_vec();
+    // CR 702.140c + CR 730.2a: choosing ranks is not a battlefield exit.
+    let assert_merged = |runner: &GameRunner| {
+        let permanent = &runner.state().objects[&host];
+        assert_eq!(permanent.merged_components, [rider, host]);
+        assert_eq!(permanent.name, "Sea-Dasher Octopus");
+        assert_eq!((permanent.power, permanent.toughness), (Some(2), Some(2)));
+        assert!(runner.state().battlefield.contains(&host));
+        assert!(!runner.state().battlefield.contains(&rider));
+    };
+    assert_merged(&runner);
+    // A forged successor cannot be authorized by repeating it on the
+    // member and its approval: the logical announcement names the real pile.
+    let mut saved =
+        serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+    let frames = saved["state"]["resolution_frames"]["frames"]
+        .as_array_mut()
+        .unwrap();
+    let member = frames
+        .iter_mut()
+        .find_map(|frame| {
+            frame
+                .get_mut("data")?
+                .get_mut("staged")?
+                .get_mut("members")?
+                .as_array_mut()?
+                .iter_mut()
+                .find(|member| member["identity"]["object_id"] == serde_json::json!(rider))
+        })
+        .expect("saved physical arrival");
+    let wrong = serde_json::json!({
+        "object_id": host,
+        "incarnation": runner.state().objects[&host].incarnation + 1,
+    });
+    member["merged_departure"] = wrong.clone();
+    member["approved_event"]["ZoneChange"]["merged_departure"] = wrong;
+    let error = serde_json::from_value::<PersistedGameState>(saved)
+        .unwrap()
+        .into_game_state()
+        .expect_err("forged merge departure must not reopen");
+    assert!(
+        error
+            .to_string()
+            .contains("no matching announced merge departure"),
+        "{error}"
+    );
+    round_trip_arrangement(&mut runner);
+    assert_merged(&runner);
     let mut alternate = GameRunner::from_state(runner.state().clone());
     events.extend(
         runner
@@ -572,6 +619,22 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
             .collect();
         assert_eq!(departures, vec![(origin, Zone::Library)]);
     }
+    // CR 603.10a: the one departure sees the merged permanent, not Courser.
+    let departed = events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            } if *object_id == host => Some(record),
+            _ => None,
+        })
+        .expect("the merged permanent departs");
+    assert_eq!(departed.name, "Sea-Dasher Octopus");
+    assert_eq!((departed.power, departed.toughness), (Some(2), Some(2)));
+    assert_eq!(runner.state().objects[&host].name, "Nyxborn Courser");
     assert_arrangement_finished(&runner);
     assert_arrangement_finished(&alternate);
 }
@@ -651,6 +714,7 @@ fn hallowed_burial_absorbed_commander_choice_and_arrangement_round_trip() {
 }
 
 const OTRIMI_ORACLE: &str = "Mutate {1}{B}{G}{U} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nTrample\nWhenever this creature deals combat damage to a player, return target creature card with mutate from your graveyard to your hand.";
+const ARCADES_ORACLE: &str = "Flying, vigilance\nWhenever a creature you control with defender enters, draw a card.\nEach creature you control with defender assigns combat damage equal to its toughness rather than its power and can attack as though it didn't have defender.";
 
 fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_command: bool) {
     let mut scenario =
@@ -664,9 +728,9 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
     scenario.with_mana_pool(P0, mana);
     scenario.with_library_top(P0, &["Sentinel"]);
     let host = scenario
-        .add_creature_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
+        .add_creature_from_oracle(P0, "Arcades, the Strategist", 3, 5, ARCADES_ORACLE)
         .as_legendary()
-        .with_subtypes(vec!["Nightmare", "Beast"])
+        .with_subtypes(vec!["Elder", "Dragon"])
         .commander()
         .id();
     let rider = scenario
@@ -702,6 +766,13 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
         WaitingFor::ReplacementChoice { player: P0, .. }
     ));
     let mut events = cast.events().to_vec();
+    if !with_ordinary {
+        // The ordinary plan writes the pre-plan ChangeZone payload: no
+        // arrangement field. The following reopen must keep ordinary delivery.
+        let saved =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        assert!(saved_change_zone_tail(&saved).get("arrangement").is_none());
+    }
     round_trip_arrangement(&mut runner);
     events.extend(
         runner
@@ -812,7 +883,7 @@ fn check_hallowed_burial_commander_host_round_trip(with_ordinary: bool, accept_c
     assert_arrangement_finished(&runner);
 }
 
-/// CR 903.9b + CR 903.9c: Otrimi is the representing permanent, with Gemrazer
+/// CR 903.9b + CR 903.9c: Arcades is the representing permanent, with Gemrazer
 /// mutated underneath it. Accepting the command-zone replacement moves only
 /// the commander there, after a resumable, persisted component choice.
 #[test]
@@ -820,14 +891,14 @@ fn hallowed_burial_lone_commander_host_accepts_command_after_round_trip() {
     check_hallowed_burial_commander_host_round_trip(false, true);
 }
 
-/// CR 903.9b + CR 730.3a: Otrimi represents the permanent and Gemrazer is
+/// CR 903.9b + CR 730.3a: Arcades represents the permanent and Gemrazer is
 /// underneath; declining the replacement preserves the component order choice.
 #[test]
 fn hallowed_burial_lone_commander_host_declines_command_after_round_trip() {
     check_hallowed_burial_commander_host_round_trip(false, false);
 }
 
-/// CR 903.9b + CR 903.9c + CR 401.4: Otrimi represents the permanent, but
+/// CR 903.9b + CR 903.9c + CR 401.4: Arcades represents the permanent, but
 /// redirecting it to command leaves only Gemrazer and the ordinary card in the
 /// library order, and neither private permutation changes a viewer's events.
 #[test]
@@ -835,11 +906,131 @@ fn hallowed_burial_interleaved_commander_host_accepts_command_after_round_trip()
     check_hallowed_burial_commander_host_round_trip(true, true);
 }
 
-/// CR 903.9b + CR 730.3a + CR 401.4: Otrimi represents the permanent and
+/// CR 903.9b + CR 730.3a + CR 401.4: Arcades represents the permanent and
 /// Gemrazer is underneath; declining retains the full interleaved physical order.
 #[test]
 fn hallowed_burial_interleaved_commander_host_declines_command_after_round_trip() {
     check_hallowed_burial_commander_host_round_trip(true, false);
+}
+
+/// CR 101.4 + CR 616.1 + CR 903.9c: the active player's merged commander
+/// and the nonactive player's ordinary commander share an approval window.
+#[test]
+fn hallowed_burial_schedules_merged_and_ordinary_commander_choices_apnap() {
+    let mut merged_first = Vec::new();
+    for ordinary_first in [true, false] {
+        let mut scenario =
+            GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut mana = burial_mana();
+        mana.extend(
+            [ManaType::Green, ManaType::Green, ManaType::Colorless]
+                .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![])),
+        );
+        scenario.with_mana_pool(P0, mana);
+        let add_isamaru = |scenario: &mut GameScenario| {
+            scenario
+                .add_creature_from_oracle(P1, "Isamaru, Hound of Konda", 2, 2, "")
+                .as_legendary()
+                .with_subtypes(vec!["Dog"])
+                .commander()
+                .id()
+        };
+        let isamaru = ordinary_first.then(|| add_isamaru(&mut scenario));
+        let host = scenario
+            .add_creature_from_oracle(P0, "Arcades, the Strategist", 3, 5, ARCADES_ORACLE)
+            .as_legendary()
+            .with_subtypes(vec!["Elder", "Dragon"])
+            .commander()
+            .id();
+        let isamaru = isamaru.unwrap_or_else(|| add_isamaru(&mut scenario));
+        let rider = scenario
+            .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
+            .with_subtypes(vec!["Beast"])
+            .id();
+        let bear = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+        let burial = add_hallowed_burial(&mut scenario);
+        let mut runner = scenario.build();
+        let mutate = runner
+            .cast(rider)
+            .alternative_cast(AlternativeCastDecision::Alternative)
+            .casting_variant(CastingVariant::Mutate)
+            .target_object(host)
+            .resolve();
+        assert!(matches!(
+            mutate.final_waiting_for(),
+            WaitingFor::MutateMergeChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::ChooseMutateMergeSide {
+                side: engine::game::merge::MergeSide::Bottom,
+            })
+            .unwrap();
+        let before = library(&runner, P0);
+        // The resolver enumerates the object map, not scenario builder order.
+        merged_first.push(
+            runner
+                .state()
+                .objects
+                .keys()
+                .find(|&&id| id == host || id == isamaru)
+                == Some(&host),
+        );
+        runner.cast(burial).resolve();
+        for expected in [P0, P1] {
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "expected {expected:?}'s commander choice, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, expected, "ordinary_first={ordinary_first}");
+            let index = candidates
+                .iter()
+                .position(|candidate| candidate.description == "Move to command zone")
+                .expect("commander redirect is offered");
+            runner.act(GameAction::ChooseReplacement { index }).unwrap();
+            if expected == P0 {
+                round_trip_arrangement(&mut runner);
+            }
+        }
+        assert_approved_arrangement(&runner.state().waiting_for, P0, &[rider, bear], false);
+        let saved =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        assert_eq!(
+            saved_change_zone_tail(&saved)["arrangement"],
+            "ArrangePhysicalLibraryArrivals"
+        );
+        assert_eq!(library(&runner, P0), before);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![bear, rider],
+            })
+            .unwrap();
+        assert_eq!(
+            library(&runner, P0),
+            [before.as_slice(), &[bear, rider]].concat()
+        );
+        assert_eq!(zone(&runner, host), Zone::Command);
+        assert_eq!(zone(&runner, isamaru), Zone::Command);
+        assert_arrangement_finished(&runner);
+    }
+    assert_ne!(
+        merged_first[0], merged_first[1],
+        "exercise both announcement orders"
+    );
+}
+
+fn saved_change_zone_tail(saved: &serde_json::Value) -> &serde_json::Value {
+    saved["state"]["resolution_frames"]["frames"]
+        .as_array()
+        .expect("saved resolution stack")
+        .iter()
+        .find_map(|frame| frame["data"]["completion"]["ChangeZonePopulationSettled"].get("tail"))
+        .expect("saved ChangeZone completion tail")
 }
 
 /// CR 903.9b + CR 730.3a + CR 401.4: declining the command-zone replacement

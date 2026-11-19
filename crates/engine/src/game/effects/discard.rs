@@ -78,6 +78,7 @@ pub(crate) fn complete_discard_to_graveyard(
         face_down_profile: None,
         with_entry_effect: None,
         co_entrants: None,
+        merged_departure: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
