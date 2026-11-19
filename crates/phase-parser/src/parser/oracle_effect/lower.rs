@@ -2318,15 +2318,17 @@ pub(super) fn change_zone_target_choice_timing(
     has_multi_target: bool,
     fragment_lower: &str,
 ) -> TargetChoiceTiming {
-    // A zone union is a fresh choice even without count metadata. Scalar
-    // filter-only seeds retain their established declaration behavior.
+    // CR 400.1 + CR 115.10a + CR 608.2d: a target filter that names more than
+    // one zone is a multi-origin population (Next of Kin's "from your hand or
+    // from the command zone"). The producer deliberately leaves `origin: None`
+    // because one `Zone` cannot hold the union, so the filter's own zones are
+    // the authority here too; without this the clause falls through to the
+    // battlefield/Stack default and the put card is treated as a stack target
+    // instead of a choice announced while applying the effect.
+    let target_zones = target.extract_zones();
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || (has_multi_target
-            || matches!(target, TargetFilter::Typed(_)) && target.extract_zones().len() > 1)
-            && target
-                .extract_zones()
-                .iter()
-                .any(|zone| *zone != Zone::Battlefield);
+        || (has_multi_target || target_zones.len() > 1)
+            && target_zones.iter().any(|zone| *zone != Zone::Battlefield);
     if off_battlefield_origin {
         // Off-BF non-"target " legs (Relic: "exiles a card from their graveyard")
         // are resolution picks; explicit "target cards …" (Memory's Journey) stay Stack.
@@ -17384,6 +17386,140 @@ mod where_x_tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
+    const QUARTZWOOD_DAMAGE: &str = "the amount of damage those creatures dealt to that player";
+
+    #[test]
+    fn where_x_damage_dealt_binds_trigger_event_amount() {
+        let expected = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        for expression in [
+            "the damage dealt",
+            "the amount of damage dealt",
+            QUARTZWOOD_DAMAGE,
+        ] {
+            assert_eq!(
+                parse_where_x_quantity_expression(expression),
+                expected,
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_x_damage_dealt_preserves_suffix_meaning() {
+        use crate::types::ability::{AggregateFunction, DamageChannel, DamageKindFilter};
+
+        assert_eq!(
+            parse_where_x_quantity_expression("the damage dealt to target opponent this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DamageDealtThisTurn {
+                    source: Box::new(TargetFilter::Any),
+                    target: Box::new(TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Player,
+                            TargetFilter::Typed(
+                                TypedFilter::default().controller(ControllerRef::TargetPlayer),
+                            ),
+                        ],
+                    }),
+                    aggregate: AggregateFunction::Sum,
+                    group_by: None,
+                    damage_kind: DamageKindFilter::Any,
+                    channel: DamageChannel::Total,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression("the damage dealt this way"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::PreviousEffectAmount {
+                    aggregate: AggregateFunction::Sum,
+                    channel: DamageChannel::Total,
+                },
+            })
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression(&format!("{QUARTZWOOD_DAMAGE} this turn")),
+            None
+        );
+        assert_eq!(
+            parse_where_x_quantity_expression(QUARTZWOOD_DAMAGE),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            })
+        );
+    }
+
+    #[test]
+    fn where_x_damage_dealt_explicit_grammar_requires_printed_subject() {
+        use crate::parser::oracle_nom::quantity::parse_quantity_ref_complete;
+
+        for subject in ["they", "it", "this creature"] {
+            let expression = format!("the amount of damage {subject} dealt to that player");
+            assert!(
+                parse_quantity_ref_complete(&expression).is_err(),
+                "{expression}"
+            );
+        }
+        assert_eq!(
+            parse_quantity_ref_complete(QUARTZWOOD_DAMAGE),
+            Ok(("", QuantityRef::EventContextAmount))
+        );
+    }
+
+    #[test]
+    fn where_x_damage_dealt_binds_quartzwood_token_stats() {
+        use crate::types::ability::DamageKindFilter;
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Trample\nWhenever one or more creatures you control with trample deal combat damage to a player, create an X/X green Dinosaur Beast creature token with trample, where X is the amount of damage those creatures dealt to that player.",
+            "Quartzwood Crasher",
+            &[],
+            &["Creature".to_string()],
+            &["Dinosaur".to_string(), "Beast".to_string()],
+        );
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected one trigger, got {:?}", parsed.triggers);
+        };
+        assert_eq!(trigger.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+        assert!(trigger.batched);
+        assert!(trigger.valid_card.is_none());
+        assert_eq!(
+            trigger.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::WithKeyword {
+                        value: crate::types::keywords::Keyword::Trample,
+                    }]),
+            ))
+        );
+        let effect = trigger
+            .execute
+            .as_ref()
+            .expect("expected trigger effect")
+            .effect
+            .as_ref();
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = effect
+        else {
+            panic!("expected token effect, got {effect:?}");
+        };
+        let stat = PtValue::Quantity(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(*power, stat);
+        assert_eq!(*toughness, stat);
+    }
+
     /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
     /// binds X to the rolled value via `EventContextAmount` — the same channel
     /// the inline "equal to the result" class uses. Building-block guard for
@@ -19234,5 +19370,111 @@ mod dq_d_player_set_lift_tests {
             None
         );
         assert_eq!(parse_for_each_multiplier_prefix(" for every"), None);
+    }
+}
+
+#[cfg(test)]
+mod change_zone_target_choice_timing_tests {
+    use super::*;
+
+    fn creature_in(zones: &[Zone]) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![if zones.len() == 1 {
+                FilterProp::InZone { zone: zones[0] }
+            } else {
+                FilterProp::InAnyZone {
+                    zones: zones.to_vec(),
+                }
+            }]),
+        )
+    }
+
+    /// CR 400.1 + CR 115.10a + CR 608.2d: a multi-origin filter is a resolution choice even
+    /// when the producer suppressed the single `origin` field. A single-zone
+    /// off-battlefield filter without `origin` keeps its historical Stack
+    /// default (Deadly Cover-Up's class), and printed "target" still wins.
+    #[test]
+    fn multi_zone_target_is_a_resolution_choice_without_an_explicit_origin() {
+        let fragment = "put a creature card onto the battlefield";
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Hand, Zone::Command]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Exile, Zone::Graveyard]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Hand, Zone::Command]),
+                false,
+                "put target creature card onto the battlefield",
+            ),
+            TargetChoiceTiming::Stack,
+            "a printed target word stays a stack-time target",
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                None,
+                &creature_in(&[Zone::Graveyard]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Stack,
+            "single-zone off-battlefield seeds without an origin keep their historical timing",
+        );
+        assert_eq!(
+            change_zone_target_choice_timing(
+                Some(Zone::Hand),
+                &creature_in(&[Zone::Hand]),
+                false,
+                fragment,
+            ),
+            TargetChoiceTiming::Resolution,
+            "an explicit off-battlefield origin is unchanged",
+        );
+    }
+
+    /// Real-card witness for the wider class the multi-zone timing rule covers:
+    /// a hand/graveyard put that reaches this classifier through the literal
+    /// origin table rather than the new zone-list grammar. Swift Warkite is one
+    /// of nine cards whose put choice was still Stack-timed at base.
+    #[test]
+    fn real_hand_or_graveyard_put_is_resolution_timed() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\nWhen this creature enters, you may put a creature card with mana value 3 or less from your hand or graveyard onto the battlefield. That creature gains haste. Return it to your hand at the beginning of the next end step.",
+            "Swift Warkite",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed.triggers.first().expect("Swift Warkite ETB trigger");
+        let execute = trigger.execute.as_ref().expect("ETB execute");
+        assert_eq!(
+            execute.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "the hand/graveyard put is a resolution choice, not a stack target"
+        );
+        let Effect::ChangeZone { origin, target, .. } = execute.effect.as_ref() else {
+            panic!(
+                "Swift Warkite ETB must be ChangeZone, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(origin, &None);
+        let zones = target.extract_zones();
+        assert!(zones.contains(&Zone::Hand));
+        assert!(zones.contains(&Zone::Graveyard));
     }
 }

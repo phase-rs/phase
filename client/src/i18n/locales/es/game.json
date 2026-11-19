@@ -2452,6 +2452,9 @@
     "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
     "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Mantén pulsado para ver la carta completa"
+  },
   "optionalEffect": {
     "sourceFallback": "Efecto",
     "title": "{{name}} - Efecto opcional",
