@@ -1633,8 +1633,10 @@ pub(crate) fn parent_chain_referents(
 /// `optional_targeting` ("up to one target ..."). CR 115.6 permits zero
 /// targets; CR 603.3d governs the target choice for triggered abilities. Used
 /// by [`parent_chain_referents`] to distinguish "slots were declared but zero
-/// were chosen" (referent = empty set) from "no slots exist at all".
-fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
+/// were chosen" (referent = empty set) from "no slots exist at all", and by
+/// the `HasObjectTarget` condition arm to keep a declined optional target from
+/// borrowing the triggering event's subject as an antecedent.
+pub(crate) fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
     ability.multi_target.is_some()
         || ability.optional_targeting
         || ability

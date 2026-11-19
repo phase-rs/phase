@@ -32879,16 +32879,37 @@ pub(crate) fn evaluate_condition(
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
-        // CR 601.2c + CR 115.1 + CR 608.2c: True iff the parent ability declared at
-        // least one object target. Unlike `TargetMatchesFilter`, there is NO
-        // `TriggeringSource` fallback — a declined variable-count target
-        // (CR 601.2c: zero targets announced) reads false, so the lowering pass's
-        // `And{[HasObjectTarget, …]}` wrapper suppresses a reflexive-target rider
-        // whose anaphor ("that creature") has no antecedent.
-        AbilityCondition::HasObjectTarget => ability
-            .targets
-            .iter()
-            .any(|t| matches!(t, TargetRef::Object(_))),
+        // CR 601.2c + CR 115.1 + CR 608.2c: True iff the anaphor that
+        // `TargetMatchesFilter` and the rider effects would resolve has an
+        // object antecedent. A declared object target is one; a declined
+        // variable-count target (CR 601.2c: zero targets announced) is not.
+        // CR 608.2c + CR 603.2: a chain that declares no target slots at all
+        // ("~ deals 2 damage to it" on a subject-triggered rider) resolves its
+        // anaphor from the triggering event (`TargetFilter::TriggeringSource`
+        // — the same fallback tier `TargetMatchesFilter` uses to bind the
+        // anaphor), so the event subject is an antecedent too. This fallback
+        // is gated on the whole resolving chain declaring no *chooseable*
+        // slots: a chain that declared an "up to N target ..." slot and was
+        // left with zero chosen (CR 115.6) must keep reading false rather
+        // than borrowing an unrelated event subject (Faller's Faithful
+        // "destroy up to one other target creature. If that creature wasn't
+        // dealt damage this turn, ..."). Marauding Raptor's "If a Dinosaur is
+        // dealt damage this way" reached resolution with empty `targets` and
+        // no declared slots and previously suppressed its pump rider here.
+        AbilityCondition::HasObjectTarget => {
+            ability
+                .targets
+                .iter()
+                .any(|t| matches!(t, TargetRef::Object(_)))
+                || !crate::game::targeting::chain_declares_chooseable_target_slots(
+                    crate::game::targeting::resolving_root_ability(state, ability),
+                ) && crate::game::targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::TriggeringSource,
+                    ability.source_id,
+                )
+                .is_some_and(|t| matches!(t, TargetRef::Object(_)))
+        }
         // CR 608.2c: Compound condition — all inner conditions must be true.
         AbilityCondition::And { conditions } => conditions
             .iter()
