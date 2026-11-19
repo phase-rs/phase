@@ -2997,8 +2997,14 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
     {
         return waiting_for;
     }
-    crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
-        .unwrap_or(waiting_for)
+    // CR 603.2c: every caller runs inside the reducer action on its own buffer,
+    // so the drain's window ranges are claimed for the post-action pipeline.
+    crate::game::triggers::drain_on_action_buffer(
+        state,
+        events,
+        crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+    )
+    .unwrap_or(waiting_for)
 }
 
 /// CR 601.2c + CR 115.1: Find the next "of an opponent's choice" slot group — an

@@ -1277,10 +1277,21 @@ pub(crate) fn drain_or_clear_deferred_triggers_after_elimination(
         // keeps the resolution-safe drain (issue #1793).
         let resolution_live =
             state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
+        // CR 603.2c: every route hands down the reducer action's own buffer, and
+        // an effect's loss (CR 104.3e) is scanned by the post-action pipeline
+        // afterwards, so the drain's window ranges are claimed.
         let settled = if resolution_live {
-            super::triggers::drain_deferred_trigger_queue(state, events)
+            super::triggers::drain_on_action_buffer(
+                state,
+                events,
+                super::triggers::drain_deferred_trigger_queue,
+            )
         } else {
-            super::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+            super::triggers::drain_on_action_buffer(
+                state,
+                events,
+                super::triggers::drain_deferred_triggers_after_stack_object_announcement,
+            )
         };
         if let Some(wf) = settled {
             state.waiting_for = wf;

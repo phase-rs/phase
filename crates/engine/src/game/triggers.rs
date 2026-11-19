@@ -1394,6 +1394,26 @@ pub(crate) fn claim_events_for_ordinary_collection(
     .expect("an ordinary-collection claim must have a live journal cause");
 }
 
+/// CR 603.2 + CR 603.2c: run a deferred-trigger drain (or a batch dispatch) on
+/// the reducer action's own event buffer, then claim, for the ordinary
+/// collectors, every event it appended. A drain appends only inside its
+/// dispatch windows' ranges, and each window has already collected its range,
+/// so the post-action pipeline (and a live announcement's staging) must not
+/// collect those occurrences a second time.
+///
+/// `events` must be the whole action buffer: claims are occurrence identities
+/// in it (`trigger_event_occurrence`). A local buffer never goes through here.
+pub(crate) fn drain_on_action_buffer<R>(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    drain: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> R,
+) -> R {
+    let start = events.len();
+    let produced = drain(state, events);
+    claim_events_for_ordinary_collection(state, events, start);
+    produced
+}
+
 /// Resolves, applies, and journals one non-empty trigger/LKI collection append.
 ///
 /// Empty vectors are no-ops, so they deliberately do not allocate a causal
@@ -10221,11 +10241,71 @@ pub(crate) fn process_triggers_observing(
 /// Collects one dispatched context's side effects into `deferred_triggers`: its
 /// target-lock events (`BecomesTarget`, `CrimeCommitted`) and the CR 603.2
 /// `AbilityTriggered` occurrence its push or removal emitted.
+///
+/// CR 603.2c: each target-lock span has exactly one owner. This window owns
+/// the span its dispatched context emits, including an in-window construction
+/// finisher's (`ConstructionSpanOwner::EnclosingWindow`). An action-seam
+/// finisher owns its own span through [`hold_construction_span`]; a synthetic
+/// dispatch's span (a dungeon room) is owned by the `ChooseDungeonRoom` arm's
+/// range collection. When this window runs on the reducer action's own buffer,
+/// the drain that ran it claims the range through [`drain_on_action_buffer`],
+/// so the post-action pipeline does not collect it again.
 fn collect_target_lock_side_effects(state: &mut GameState, events_out: &[GameEvent], from: usize) {
     if from >= events_out.len() {
         return;
     }
     collect_dispatch_side_effects_into_deferred(state, &events_out[from..]);
+}
+
+/// CR 601.2c + CR 603.3d + CR 700.13: which collector owns the target-lock span
+/// (`BecomesTarget`, `CrimeCommitted`) a triggered ability's construction finisher
+/// emits. Each caller of the finisher passes it statically; it is never stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConstructionSpanOwner {
+    /// The finisher runs at an action seam (`SelectTargets`, `ChooseTarget`,
+    /// `SelectModes`); no dispatch window contains its span, so it collects it,
+    /// and its own drain places the queue.
+    Finisher,
+    /// The finisher runs inside a dispatch window (the random-mode re-entry);
+    /// the window's range collection owns the span, and the enclosing
+    /// dispatcher's end-of-batch drain places the queue (CR 603.3b).
+    EnclosingWindow,
+}
+
+/// The abilities a finisher's own span triggered, matched at emission and not
+/// yet queued (CR 603.2e: a "becomes" trigger is decided when the event happens).
+#[must_use]
+pub(crate) struct HeldConstructionSpan {
+    contexts: Vec<PendingTriggerContext>,
+}
+
+/// CR 603.2 + CR 603.2c + CR 603.2e: match `events[start..]` against the game
+/// as it is now and claim the span for ordinary collectors, so the post-action
+/// pipeline (or a live announcement's staging) does not collect it again.
+/// `None` when the enclosing window owns the span.
+pub(crate) fn hold_construction_span(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+    owner: ConstructionSpanOwner,
+) -> Option<HeldConstructionSpan> {
+    match owner {
+        ConstructionSpanOwner::EnclosingWindow => None,
+        ConstructionSpanOwner::Finisher => {
+            let contexts = collect_pending_triggers(state, &events[start.min(events.len())..]);
+            claim_events_for_ordinary_collection(state, events, start);
+            Some(HeldConstructionSpan { contexts })
+        }
+    }
+}
+
+/// CR 603.3 + CR 603.3b: queue the held abilities after the finisher's own
+/// drain, so none joins the process it triggered during; they wait with that
+/// process's remaining queued siblings.
+pub(crate) fn release_construction_span(state: &mut GameState, held: Option<HeldConstructionSpan>) {
+    if let Some(HeldConstructionSpan { contexts }) = held {
+        queue_parked_trigger_contexts(state, contexts, DeferredTriggerBatchOrigin::Ordinary);
+    }
 }
 
 /// CR 603.2 + CR 603.2c: the one collection that admits
@@ -12423,7 +12503,8 @@ pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
     {
-        let _ = drain_deferred_trigger_queue(state, events);
+        // CR 603.2c: the drain's windows run on the action buffer; claim them.
+        let _ = drain_on_action_buffer(state, events, drain_deferred_trigger_queue);
     }
 }
 
@@ -13102,7 +13183,8 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     let candidates = paused_observer_trigger_events(state, candidates);
     collect_action_end_triggers_into_deferred(state, &candidates);
     if !state.deferred_triggers.is_empty() {
-        let _ = drain_deferred_trigger_queue(state, events);
+        // CR 603.2c: the drain's windows run on the action buffer; claim them.
+        let _ = drain_on_action_buffer(state, events, drain_deferred_trigger_queue);
     }
 }
 
@@ -15606,9 +15688,13 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     // the construction finisher's drain, and every deferred-sibling drain in the
     // same batch — deadlocking the batch with its own recipient. What protects
     // an in-flight construction batch instead is unchanged baseline ownership:
-    // `is_pending_trigger_construction_active` above, the empty deferred queue
-    // while `OrderTriggers` is open, and the reducer dispatching on the
-    // `(waiting_for, action)` pair. The only waiting-state-agnostic entries are
+    // `is_pending_trigger_construction_active` above,
+    // `elimination::drain_or_clear_deferred_triggers_after_elimination`'s
+    // `pending_trigger_order.is_some()` guard, and the reducer dispatching on
+    // the `(waiting_for, action)` pair. The deferred queue is not empty while
+    // `OrderTriggers` is open in general: an action-seam construction finisher
+    // queues the abilities its own target choice triggered after its drain
+    // returned on that prompt (CR 603.3b). The only waiting-state-agnostic entries are
     // concession/elimination and debug actions, which is why `elimination.rs`
     // clears that recipient alongside the construction cursors it already
     // clears.
@@ -15868,7 +15954,9 @@ fn stack_object_announcement_is_settled(state: &GameState) -> bool {
 /// post-announcement drain so cast-triggered abilities (e.g. Dragon's Rage
 /// Channeler on a flashback cast) go on the stack while the triggering spell
 /// remains there (issue #2872). During resolution, use the resolution-boundary
-/// drain instead (issue #1793).
+/// drain instead (issue #1793). A finisher that runs inside a dispatch window
+/// (`ConstructionSpanOwner::EnclosingWindow`) does not call it: the enclosing
+/// dispatcher's end-of-batch drain places the queue (CR 603.3b).
 pub(crate) fn drain_deferred_triggers_after_trigger_construction(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
@@ -16012,8 +16100,13 @@ pub(crate) fn finish_trigger_construction_action(
         && state.pending_trigger_order.is_none()
     {
         let queued_before = state.deferred_triggers.len();
-        if let Some(waiting_for) = drain_deferred_triggers_after_trigger_construction(state, events)
-        {
+        // CR 603.2c: the drain's windows run on the action buffer, so their
+        // collected ranges are claimed for the post-action pipeline.
+        if let Some(waiting_for) = drain_on_action_buffer(
+            state,
+            events,
+            drain_deferred_triggers_after_trigger_construction,
+        ) {
             debug_assert!(
                 is_trigger_construction_prompt(&waiting_for),
                 "the construction drain surfaced a wait outside the closed census: {waiting_for:?}",
