@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { DraftCardInstance, DraftPoolGroups } from "../../../adapter/draft-adapter";
+import type {
+  DraftCardInstance,
+  DraftPoolGroupKind,
+  DraftPoolGroups,
+} from "../../../adapter/draft-adapter";
 import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
   moveWorkspaceInstance,
   placeArrivingPoolCards,
+  rebuildWorkspaceZone,
   reconcileWorkspaceState,
   updateWorkspacePlacement,
 } from "../workspace/workspacePlacement";
@@ -42,6 +47,62 @@ function boardPreferences(): Record<DraftZone, DraftBoardPreferences> {
 }
 
 describe("workspace placement", () => {
+
+  describe("color sort with fewer columns than color groups", () => {
+    const COLOR_KINDS: DraftPoolGroupKind[] = [
+      "white", "blue", "black", "red", "green", "multicolor", "colorless",
+    ];
+
+    function sideboardColumns(columnCount: number): Record<string, number> {
+      const pool = COLOR_KINDS.map((kind) => card(kind, kind));
+      const colorGroups: DraftPoolGroups["color_groups"] = pool.map((entry, index) => ({
+        kind: COLOR_KINDS[index],
+        total: 1,
+        cards: [{ card: entry, count: 1, instance_ids: [entry.instance_id] }],
+      }));
+      const state: DraftWorkspaceState = {
+        ...createDraftWorkspaceState(),
+        placements: Object.fromEntries(
+          pool.map((entry) => [entry.instance_id, { zone: "sideboard", row: 0, column: 0, order: 0 }]),
+        ),
+      };
+      const rebuilt = rebuildWorkspaceZone(
+        state,
+        "sideboard",
+        pool,
+        { ...groups(), color_groups: colorGroups },
+        { sort: "color", columnCount, rows: "one", showHeaders: true },
+      );
+      return Object.fromEntries(
+        COLOR_KINDS.map((kind) => [kind, rebuilt.placements[kind].column]),
+      );
+    }
+
+    it("keeps_white_and_blue_in_their_own_columns_at_six_columns", () => {
+      const columns = sideboardColumns(6);
+
+      // Seven color groups on six columns: only the catch-all pair shares.
+      expect(columns).toEqual({
+        white: 0, blue: 1, black: 2, red: 3, green: 4, multicolor: 5, colorless: 5,
+      });
+    });
+
+    it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {
+      expect(sideboardColumns(5)).toEqual({
+        white: 0, blue: 1, black: 2, red: 3, green: 3, multicolor: 4, colorless: 4,
+      });
+    });
+
+    it("gives_each_group_a_column_when_there_is_room_and_spreads_when_far_short", () => {
+      expect(sideboardColumns(7)).toEqual({
+        white: 0, blue: 1, black: 2, red: 3, green: 4, multicolor: 5, colorless: 6,
+      });
+      // Two columns cannot be reached by pairing the tail, so the even spread stays.
+      expect(sideboardColumns(2)).toEqual({
+        white: 0, blue: 0, black: 0, red: 0, green: 1, multicolor: 1, colorless: 1,
+      });
+    });
+  });
   // `draftStore.installWorkspace` and `multiplayerDraftStore.performPick` both
   // call `placeArrivingPoolCards` ahead of their own `applyDestination`. What
   // keeps a sideboard-bound pick out of the deck-sorted columns on those paths

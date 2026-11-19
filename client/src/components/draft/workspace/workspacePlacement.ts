@@ -496,6 +496,21 @@ interface AllocatableGroup {
 
 function allocateGroups(groups: AllocatableGroup[], columnCount: number): void {
   if (groups.length > columnCount) {
+    const overflow = groups.length - columnCount;
+    if (overflow * 2 <= groups.length) {
+      // Fewer columns than groups, but only by a little: fold the TRAILING
+      // groups into pairs and give every leading group its own column. The
+      // engine orders the catch-all groups last (multicolor and colorless
+      // under a color sort), so those share a column first and the five
+      // colors stay apart. An even spread would put white and blue together
+      // whenever seven color groups meet six columns.
+      const leading = groups.length - overflow * 2;
+      groups.forEach((group, index) => {
+        group.columns = [index < leading ? index : leading + Math.floor((index - leading) / 2)];
+      });
+      return;
+    }
+    // Heavily over-subscribed: no tail pairing can fit, so spread evenly.
     groups.forEach((group, index) => {
       group.columns = [Math.floor(index * columnCount / groups.length)];
     });
