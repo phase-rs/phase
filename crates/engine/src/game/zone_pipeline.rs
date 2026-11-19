@@ -1651,7 +1651,7 @@ pub(crate) fn move_component_batch_then(
 
 fn move_arranged_batch_then(
     state: &mut GameState,
-    reqs: Vec<ZoneMoveRequest>,
+    mut reqs: Vec<ZoneMoveRequest>,
     arrangements: Vec<StagedLibraryArrangement>,
     completion: Option<BatchCompletion>,
     mut component_delivery_parent: Option<PendingComponentDeliveryParent>,
@@ -1660,10 +1660,6 @@ fn move_arranged_batch_then(
 ) -> BatchMoveResult {
     let event_start = events.len();
     let zone_change_record_start = state.zone_changes_this_turn.len();
-    let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
-    let logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
-    let group_id = logical_zone_change_group.logical_group_id;
     // CR 730.3a: positional component moves need approval before their owner
     // can arrange the cards that will enter the library.
     // Ordinary staged populations retain their existing admission policy.
@@ -1685,6 +1681,19 @@ fn move_arranged_batch_then(
                 arrangement_seeds,
                 component_delivery_parent.as_ref(),
             )) {
+        // CR 401.4 + CR 730.3a: the rank seed is private. Only the insertion
+        // slots may use it, never the order of consultations or public events.
+        if !delegated
+            && arrangement_seeds.iter().any(|arrangement| {
+                arrangement
+                    .batch
+                    .members
+                    .iter()
+                    .any(|entry| entry.departing_permanent.is_some())
+            })
+        {
+            reqs.sort_unstable_by_key(|request| request.object_id);
+        }
         let arrangements = component_delivery_parent
             .as_ref()
             .map_or(arrangements, |link| link.inherited_arrangements.clone());
@@ -1692,6 +1701,10 @@ fn move_arranged_batch_then(
     } else {
         None
     };
+    let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
+    let logical_zone_change_group =
+        crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
+    let group_id = logical_zone_change_group.logical_group_id;
     let staged_parent = if staged_entry.is_some() {
         component_delivery_parent.take()
     } else {

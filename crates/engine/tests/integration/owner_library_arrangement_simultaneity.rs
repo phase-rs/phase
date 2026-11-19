@@ -7,6 +7,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::game::visibility::filter_events_for_viewer;
 use engine::types::ability::{EffectKind, LibraryPosition};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::events::GameEvent;
@@ -489,6 +490,7 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
     let cast = runner.cast(burial).resolve();
     assert_bottom_arrangement_prompt(cast.final_waiting_for(), P0, &[ordinary, host, rider]);
     let mut events = cast.events().to_vec();
+    let mut alternate = GameRunner::from_state(runner.state().clone());
     events.extend(
         runner
             .act(GameAction::SelectCards {
@@ -497,7 +499,28 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
             .unwrap()
             .events,
     );
+    let mut alternate_events = cast.events().to_vec();
+    alternate_events.extend(
+        alternate
+            .act(GameAction::SelectCards {
+                cards: vec![ordinary, host, rider],
+            })
+            .unwrap()
+            .events,
+    );
     assert_eq!(library(&runner, P0), vec![sentinel, host, ordinary, rider]);
+    assert_eq!(
+        library(&alternate, P0),
+        vec![sentinel, ordinary, host, rider]
+    );
+    // CR 401.4: neither an opponent nor an unseated spectator learns which
+    // order the owner chose from the zone-change event stream.
+    for viewer in [P1, PlayerId(u8::MAX)] {
+        assert_eq!(
+            filter_events_for_viewer(&events, runner.state(), viewer),
+            filter_events_for_viewer(&alternate_events, alternate.state(), viewer),
+        );
+    }
     for (id, origin) in [
         (rider, None),
         (ordinary, Some(Zone::Battlefield)),
@@ -518,6 +541,7 @@ fn hallowed_burial_interleaves_components_with_an_ordinary_creature() {
         assert_eq!(departures, vec![(origin, Zone::Library)]);
     }
     assert_arrangement_finished(&runner);
+    assert_arrangement_finished(&alternate);
 }
 
 /// CR 401.4 + CR 730.3a: Top ordering discriminates verbatim inheritance from

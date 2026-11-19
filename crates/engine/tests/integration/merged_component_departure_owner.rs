@@ -946,8 +946,9 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
     scenario.at_phase(Phase::PreCombatMain);
-    let (mender, brokkos) = add_pile(&mut scenario, P1);
+    // Physical placement order is private and does not choose delivery order.
     let angel = scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    let (mender, brokkos) = add_pile(&mut scenario, P1);
     scenario.add_real_card(P1, "Circuit Mender", Zone::Graveyard, db);
     let lord = scenario.add_real_card(P0, "Lord of Extinction", Zone::Battlefield, db);
     let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
