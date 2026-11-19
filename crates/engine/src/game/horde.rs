@@ -1115,6 +1115,7 @@ fn reveal_library_token(
         source_id: card_id,
         controller: horde,
         attach_to: TokenHostRequest::NotRequested,
+        blocking_attacker: None,
     };
     let proposed = ProposedEvent::CreateToken {
         redirected_to: None,

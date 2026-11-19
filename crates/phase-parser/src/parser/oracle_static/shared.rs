@@ -1256,6 +1256,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsDefendingPlayer { .. }
             | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch

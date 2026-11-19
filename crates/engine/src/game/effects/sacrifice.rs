@@ -2153,6 +2153,7 @@ mod tests {
         // emits for Dark Depths' Marit Lage rider.
         let mut rider = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Test Token".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -2229,6 +2230,7 @@ mod tests {
             }
             let mut rider = ResolvedAbility::new(
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Test Token".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

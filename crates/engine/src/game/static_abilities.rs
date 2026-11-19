@@ -165,6 +165,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // object_has_active_cant_be_regenerated(). Registered as a rule-mod so coverage
     // marks the standalone "can't be regenerated" effect as supported.
     registry.insert(StaticMode::CantBeRegenerated, handle_rule_mod);
+    // CR 701.32a + CR 904.9: "Schemes can't be set in motion" is a passive
+    // rule-modifying marker; enforcement lives in `archenemy.rs`'s
+    // set-in-motion gate. Registered as a rule-mod so coverage marks the
+    // standalone prohibition as supported.
+    registry.insert(StaticMode::CantSetSchemeInMotion, handle_rule_mod);
     // CR 702.34: FlashBack — allows casting from graveyard, exiled after resolution.
     registry.insert(StaticMode::FlashBack, handle_flashback);
     // CR 702.18: Shroud — permanent cannot be the target of spells or abilities.

@@ -27133,6 +27133,7 @@ fn modal_x_target_legality_chooses_x_before_targets() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Eldrazi Spawn".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(1),

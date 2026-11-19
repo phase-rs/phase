@@ -11070,6 +11070,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -12168,6 +12169,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals

@@ -6638,6 +6638,8 @@ pub enum TypeFilter {
     Battle,
     /// CR 308.1: Kindred — each kindred card has another card type; matched via CoreType::Kindred.
     Kindred,
+    /// CR 314.1: Scheme — a card type seen only on nontraditional Archenemy cards.
+    Scheme,
     Permanent,
     Card,
     Any,
@@ -11837,6 +11839,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         // CR 701.33b: abandoning turns the scheme face down and moves it to
         // the scheme deck — a zone change outside any one slot.
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
         | Effect::OpenAttractions { .. }
@@ -16816,6 +16819,7 @@ impl Effect {
             | Effect::Planeswalk
             | Effect::ChaosEnsues
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
             | Effect::OpenAttractions { .. }
@@ -16981,6 +16985,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         Effect::CopySpell { .. } | Effect::EpicCopy { .. } => IndicatedActionCommit::OnAccept,
         Effect::StartYourEngines { .. }
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
@@ -18098,6 +18103,23 @@ pub enum StaticCondition {
         )]
         player: PlayerScope,
     },
+    /// CR 508.5: defending-player IDENTITY as a static predicate — true when
+    /// `player` is the defending player of the attacking creature the
+    /// evaluation context names (CR 508.5a: individually determined per
+    /// attacking creature). Mirrors `IsMonarch`'s subject axis; the anchor
+    /// resolves through the shared `PlayerScope::DefendingPlayer` machinery.
+    ///
+    /// No anchor bindable => false, mirroring DefendingPlayerControls.
+    /// A Not wrapper inverting this is the printed unless and is correct.
+    /// (Unlike the trigger-side sibling, the static side has no combat-anchor
+    /// entry gate; the layers gate is designation-scoped.)
+    IsDefendingPlayer {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// Digital-only Alchemy (no CR entry): "if you have a boon" is true when
     /// `player` holds at least one unconsumed one-time boon. Static-side
     /// spelling of [`TriggerCondition::HasBoon`], bridged 1:1 for
@@ -18473,7 +18495,11 @@ impl StaticCondition {
             // Digital-only Alchemy (no CR entry): a held boon is not a CR
             // designation — several players can hold boons at once — so it
             // carries no designation anchor.
+            // CR 508.5: the defending player is combat-derived per attacking
+            // creature, not a CR 725/726-style designation with vacancy
+            // semantics — no designation anchor either.
             StaticCondition::HasBoon { .. }
+            | StaticCondition::IsDefendingPlayer { .. }
             | StaticCondition::DevotionGE { .. }
             | StaticCondition::IsPresent { .. }
             | StaticCondition::ChosenColorIs { .. }
@@ -18649,6 +18675,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsDefendingPlayer { .. }
             | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
@@ -18895,6 +18922,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsDefendingPlayer { .. }
             | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
@@ -19020,6 +19048,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsDefendingPlayer { .. }
             | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
@@ -23719,6 +23748,13 @@ pub enum Effect {
             skip_serializing_if = "TokenAttackDestination::is_controller_chooses"
         )]
         attack_destination: TokenAttackDestination,
+        /// CR 509.1h + CR 506.3e: the attacker the token enters the
+        /// battlefield blocking. None = no blocking rider. Resolved
+        /// once at creation; every created token is put onto the
+        /// battlefield blocking the resolved attacker via the shared
+        /// combat blocking placement (the Mirror Match path).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_blocking: Option<TargetFilter>,
         /// CR 205.4a: Supertypes for the token (Legendary, Snow, etc.).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         supertypes: Vec<super::card_type::Supertype>,
@@ -26245,6 +26281,16 @@ pub enum Effect {
     /// `Effect::Planeswalk`): the scheme is the ability source, never a target.
     /// RUNTIME: abandon_scheme::resolve via game::archenemy::abandon.
     AbandonScheme,
+    /// CR 701.32b / CR 904.9: Set a scheme in motion again — re-fire the named
+    /// scheme's "when you set this scheme in motion" abilities (My Laughter
+    /// Echoes: "set that scheme in motion again"). The scheme is an
+    /// event-context referent (`TriggeringSource` — the scheme the triggering
+    /// event set in motion), never a chosen target, so resolution emits a
+    /// fresh `SchemeSetInMotion` event without a targeting phase.
+    /// RUNTIME: set_scheme_in_motion::resolve.
+    SetSchemeInMotion {
+        target: TargetFilter,
+    },
     /// CR 311.7 / CR 901.9b: Chaos ensues — the active plane's "whenever chaos
     /// ensues" triggered ability triggers. Payload-less resolving keyword action
     /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
@@ -27980,6 +28026,22 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     }
     // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
     // selection, not stack-push-time targeting.
+    // CR 115.1 + CR 608.2c + CR 109.5: A `RevealHand` whose target is a
+    // player-SET predicate (`PlayerMatching` — "each opponent" as a population,
+    // My Wish Is Your Command's union choice) names no choosable single target:
+    // the resolver pools every matching player's hand. Surfacing it here would
+    // mint a required stack-push-time slot asking the controller to pick ONE
+    // opponent, a choice the Oracle text never offers. Mirrors the `Sacrifice`
+    // carve-out above. The bare `Typed { controller: Opponent }` shape is NOT
+    // exempt: it is the "target opponent" encoding (Duress, Deep-Cavern Bat,
+    // Salt Vampire) and must keep its stack-push-time slot.
+    if let Effect::RevealHand {
+        target: TargetFilter::PlayerMatching { .. },
+        ..
+    } = effect
+    {
+        return None;
+    }
     if let Effect::ChangeZone { origin, target, .. } = effect {
         if matches!(origin, Some(Zone::Hand) | Some(Zone::Library)) {
             return None;
@@ -32205,6 +32267,7 @@ impl Effect {
             | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning names no stack object at all.
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::Unimplemented { .. } => false,
         }
     }
@@ -32460,6 +32523,7 @@ impl Effect {
             | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning resolves its slot as operand.
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
         }
     }
@@ -32579,7 +32643,11 @@ impl Effect {
             // CR 702.55a: Haunt — "exile it haunting target creature". The
             // haunted creature is a real target chosen as the haunt trigger goes
             // on the stack, so it must be surfaced for the target-slot path.
-            | Effect::ExileHaunting { target } => Some(target),
+            | Effect::ExileHaunting { target }
+            // CR 701.32b: the re-fired scheme (an event-context referent, so
+            // `extract_target_filter_from_effect`'s `is_context_ref` guard
+            // still surfaces no stack slot for it).
+            | Effect::SetSchemeInMotion { target } => Some(target),
 
             // CR 115.1 / CR 608.2c: a `Shared` recipient is resolved exactly like
             // `DealDamage::target` — surface it so the same target-slot collection
@@ -33225,7 +33293,8 @@ impl Effect {
             | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
             | Effect::ChangeTargets { target, .. }
-            | Effect::ExileHaunting { target } => Some(target),
+            | Effect::ExileHaunting { target }
+            | Effect::SetSchemeInMotion { target } => Some(target),
 
             Effect::EachSourceDealsDamage {
                 recipient: EachDamageRecipient::Shared(filter),
@@ -34195,6 +34264,7 @@ impl Effect {
             | Effect::PhaseOut { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::Populate
             | Effect::PreventDamage { .. }
             | Effect::Proliferate
@@ -34538,6 +34608,7 @@ impl Effect {
             // (a played card's own token creation is that node's answer).
             | Effect::HordePlayCard { .. }
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             => None,
         }
     }
@@ -35199,6 +35270,7 @@ macro_rules! define_effect_quantity_walk {
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -35537,6 +35609,7 @@ macro_rules! define_nested_definition_walk {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -35906,6 +35979,7 @@ impl Effect {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -36181,6 +36255,7 @@ impl Effect {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -36366,6 +36441,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ArrangePlanarDeckTop { .. } => "ArrangePlanarDeckTop",
         Effect::Planeswalk => "Planeswalk",
         Effect::AbandonScheme => "AbandonScheme",
+        Effect::SetSchemeInMotion { .. } => "SetSchemeInMotion",
         Effect::ChaosEnsues => "ChaosEnsues",
         Effect::RedistributeLifeTotals => "RedistributeLifeTotals",
         Effect::ReverseTurnOrder => "ReverseTurnOrder",
@@ -36628,6 +36704,7 @@ pub enum EffectKind {
     ArrangePlanarDeckTop,
     Planeswalk,
     AbandonScheme,
+    SetSchemeInMotion,
     ChaosEnsues,
     RedistributeLifeTotals,
     ReverseTurnOrder,
@@ -36910,6 +36987,7 @@ impl From<&Effect> for EffectKind {
             Effect::ArrangePlanarDeckTop { .. } => EffectKind::ArrangePlanarDeckTop,
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::AbandonScheme => EffectKind::AbandonScheme,
+            Effect::SetSchemeInMotion { .. } => EffectKind::SetSchemeInMotion,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
             Effect::RedistributeLifeTotals => EffectKind::RedistributeLifeTotals,
             Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
@@ -40980,6 +41058,29 @@ pub enum TriggerCondition {
     /// condition at its entry boundary so `Not` cannot invert a missing anchor
     /// into a firing trigger.
     IsPoisoned { player: PlayerScope },
+    /// CR 508.5 + CR 603.4: defending-player IDENTITY as an intervening-if —
+    /// true when `player` is the defending player of the triggering attacking
+    /// creature (CR 508.5: the player that creature is attacking; CR 508.5a:
+    /// individually determined per attacking creature). Checked at fire time
+    /// and again as the ability resolves (CR 603.4).
+    ///
+    /// `player` is the CR 109.5 subject axis, mirroring `IsMonarch`. "if
+    /// you're the defending player" is [`PlayerScope::Controller`]; "if that
+    /// player is the defending player" is [`PlayerScope::ScopedPlayer`]. The
+    /// anchor resolves through the shared `PlayerScope::DefendingPlayer`
+    /// machinery, so the two can never disagree.
+    ///
+    /// An unresolvable scope makes the condition UNANSWERABLE, not false:
+    /// `triggers::check_trigger_condition_with_source` rejects the whole
+    /// condition at its entry boundary so `Not` cannot invert a missing anchor
+    /// into a firing trigger.
+    IsDefendingPlayer {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// Digital-only Alchemy (no CR entry): "if you have a boon" is true when
     /// `player` holds at least one unconsumed one-time boon (a
     /// `DelayedTriggerKind::Boon` entry they control). Checked at fire time
@@ -41282,11 +41383,23 @@ pub enum TriggerCondition {
     EventTime { condition: Box<TriggerCondition> },
 }
 
+/// CR 508.5: the shared defending-player anchor a combat-role identity leaf
+/// (`TriggerCondition::IsDefendingPlayer`) compares its subject scope
+/// against. A `const` so `evaluation_anchor` can borrow it for the anchor's
+/// lifetime without a field.
+pub const DEFENDING_PLAYER_SCOPE: PlayerScope = PlayerScope::DefendingPlayer;
+
 /// CR 603.4: what must resolve before a leaf is answerable at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerConditionAnchor<'a> {
     /// CR 109.4: the player whose designation the leaf tests.
     Player(&'a PlayerScope),
+    /// CR 508.5 + CR 603.4: a combat-role identity leaf's two scopes — the
+    /// subject under test and the defending-player anchor it is compared
+    /// against. BOTH must resolve; either one dangling makes the leaf
+    /// unanswerable (never false) so `Not` cannot invert a missing anchor
+    /// into a firing trigger.
+    PlayerPair(&'a PlayerScope, &'a PlayerScope),
     /// CR 607.1c + CR 113.2c: the exact trigger occurrence the leaf is linked to.
     OwnTriggerDefinition,
 }
@@ -41295,10 +41408,11 @@ impl TriggerCondition {
     /// CR 603.4: the anchor this leaf needs resolved before it is answerable,
     /// when it needs one at all.
     ///
-    /// Two anchor kinds exist. A designation leaf (CR 109.4) tests a player's
-    /// designation, so it needs its [`PlayerScope`] resolved. A self-linked leaf
-    /// (CR 607.1c) reads this triggered ability's own history, so it needs the
-    /// identity of the trigger occurrence it gates.
+    /// Three anchor kinds exist. A designation leaf (CR 109.4) tests a player's
+    /// designation, so it needs its [`PlayerScope`] resolved. A combat-role
+    /// identity leaf (CR 508.5) compares two scopes, so it needs both resolved.
+    /// A self-linked leaf (CR 607.1c) reads this triggered ability's own
+    /// history, so it needs the identity of the trigger occurrence it gates.
     ///
     /// Exhaustive by design — there is deliberately no wildcard arm. This is
     /// the guard that makes the polarity boundary gate in `game::triggers`
@@ -41316,6 +41430,9 @@ impl TriggerCondition {
         match self {
             TriggerCondition::IsMonarch { player } => Some(TriggerConditionAnchor::Player(player)),
             TriggerCondition::IsPoisoned { player } => Some(TriggerConditionAnchor::Player(player)),
+            TriggerCondition::IsDefendingPlayer { player } => Some(
+                TriggerConditionAnchor::PlayerPair(player, &DEFENDING_PLAYER_SCOPE),
+            ),
             TriggerCondition::AddedManaWithThisAbilityThisTurn => {
                 Some(TriggerConditionAnchor::OwnTriggerDefinition)
             }
@@ -45787,6 +45904,7 @@ mod tests {
             attach_to: None,
             enters_attacking: true,
             attack_destination,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -48915,6 +49033,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -50991,6 +51110,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

@@ -1080,6 +1080,101 @@ pub(super) fn patch_reveal_until_for_library_category_exile(def: &mut AbilityDef
     }
 }
 
+/// CR 701.20a + CR 608.2c: a reveal-until whose revealed set is immediately
+/// chosen from ("Choose one of the revealed creature cards", Dance, Pathetic
+/// Marionette) reveals in place — the choose reads the library-resident
+/// cards, and a later sweep ("Put all other cards revealed this way …")
+/// places the rest. Flip the construction defaults (`KeepEach` + into-hand +
+/// shuffled-into-library, which would phantom-move the kept match and shuffle
+/// the rest) to `RevealOnly` + Library/Library, mirroring the Sanar patch
+/// above.
+///
+/// Fires only on the untouched default tuple (`KeepEach`, kept Hand, rest
+/// Library, `Random` order): any printed placement differs in at least one
+/// slot — except a card printing exactly the default tuple, which is
+/// indistinguishable and accepted as the documented residual risk. A
+/// `Direct` zone scan does not read the revealed set, so only a `Legacy`-pool
+/// choose (the reveal-pool anaphor's lowering) triggers the flip.
+pub(super) fn patch_reveal_until_for_tracked_set_choose(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        patch_reveal_until_for_tracked_set_choose(sub);
+        if let (
+            Effect::RevealUntil {
+                matched_disposition,
+                kept_destination,
+                rest_destination,
+                rest_order,
+                ..
+            },
+            Effect::ChooseFromZone {
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                ..
+            },
+        ) = (&mut *def.effect, &*sub.effect)
+        {
+            let is_default_tuple = matches!(
+                (
+                    &*matched_disposition,
+                    &*kept_destination,
+                    &*rest_destination,
+                    &*rest_order
+                ),
+                (
+                    RevealUntilDisposition::KeepEach,
+                    Zone::Hand,
+                    Zone::Library,
+                    crate::types::ability::DigRestOrder::Random,
+                )
+            );
+            if is_default_tuple {
+                *matched_disposition = RevealUntilDisposition::RevealOnly;
+                *kept_destination = Zone::Library;
+                *rest_destination = Zone::Library;
+            }
+        }
+    }
+}
+
+/// CR 701.20a + CR 608.2c + CR 608.2d: "all OTHER cards revealed this way"
+/// after a choice FROM the revealed set ("Choose one of the revealed
+/// creature cards", Dance, Pathetic Marionette) excludes the PICK, not the
+/// ability's source. The target parser lowers "other" to `FilterProp::Another`
+/// (source exclusion — vacuous here, the source is never revealed), so
+/// rewrite it to `DistinctFrom{ParentTarget}` (the Radiance exclusion, which
+/// reads the resolving ability's targets) whenever a `Legacy`-pool choose —
+/// the reveal-pool anaphor's lowering — precedes the sweep in the chain.
+///
+/// `Legacy`-only on purpose: a `Direct` zone-scan pick is not a member of
+/// the reveal set, so excluding it would be wrong (and a no-choose sweep
+/// keeps its vacuous `Another`, byte-identical to today). Sweeps without an
+/// "other" carry no `Another` and pass through untouched.
+pub(super) fn rewrite_revealed_sweep_other_as_pick_exclusion(def: &mut AbilityDefinition) {
+    fn walk(node: &mut AbilityDefinition, seen_legacy_choose: bool) {
+        let mut seen = seen_legacy_choose;
+        if matches!(
+            &*node.effect,
+            Effect::ChooseFromZone {
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                ..
+            }
+        ) {
+            seen = true;
+        }
+        if seen {
+            if let Effect::ChangeZoneAll { target, .. } = &mut *node.effect {
+                crate::parser::oracle_target::exclude_parent_target_from_others(target);
+            }
+        }
+        if let Some(sub) = node.sub_ability.as_mut() {
+            walk(sub, seen);
+        }
+        if let Some(else_ability) = node.else_ability.as_mut() {
+            walk(else_ability, seen);
+        }
+    }
+    walk(def, false);
+}
+
 /// CR 608.2c + CR 205.2a: A bare "choose land or nonland" is an opaque
 /// labeled choice. It becomes a library-card-kind choice only when a later
 /// clause consumes "the chosen kind" through `MatchesLastChosenCardPredicate`.
@@ -3298,6 +3393,8 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("seek ")),
         value((), tag("connive")),
         value((), tag("they ")),
+        // CR 701.33a-b + CR 608.2c: "abandon ..." starts its own clause (', then abandon this scheme' tails on ongoing schemes). Placed in this 20-arm group to stay within nom's 21-tuple limit.
+        value((), tag("abandon ")),
     )))
     .parse(s)
     .is_ok()
@@ -9081,6 +9178,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -13733,6 +13831,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -13767,6 +13866,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -13799,6 +13899,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

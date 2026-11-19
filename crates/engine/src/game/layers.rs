@@ -2222,6 +2222,10 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         // creature this static applies to), not the source, so this condition is
         // recipient-relative regardless of what its filter reads.
         StaticCondition::DefendingPlayerControls { .. } => true,
+        // CR 508.5: the identity anchor resolves from the recipient attacker
+        // exactly like `DefendingPlayerControls`' — recipient-relative
+        // regardless of the subject scope.
+        StaticCondition::IsDefendingPlayer { .. } => true,
         // CR 303.4m + CR 611.3a: resolve a recipient-anchored monarch subject
         // for each affected object, not once against the source.
         StaticCondition::IsMonarch { player } => {
@@ -2345,6 +2349,8 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        // CR 508.5: combat-derived identity, never board-population-dependent.
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -2460,6 +2466,10 @@ fn static_condition_characteristic_reads_at(
         // CR 509.1a + CR 109.4: per-player board census over a live filter.
         StaticCondition::DefendingPlayerControls { filter } => CharacteristicKinds::CONTROLLER
             .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 508.5: the identity anchor reads the attack target's controller
+        // (planeswalker/battle targets), like `DefendingPlayerControls`' —
+        // CONTROLLER, not EMPTY.
+        StaticCondition::IsDefendingPlayer { .. } => CharacteristicKinds::CONTROLLER,
         // CR 903.3 + CR 613.1b: commander designation is fixed at deck
         // construction; only the control scope is layer-writable.
         StaticCondition::ControlsCommander { .. }
@@ -2656,6 +2666,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        // CR 508.5: declared attacks fix the defending player — a battlefield
+        // entry cannot perturb the identity.
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -3295,6 +3308,21 @@ fn evaluate_condition_inner(
         StaticCondition::IsMonarch { player } => {
             designation_player(state, player, controller, source_id, context)
                 .is_some_and(|player| eval_is_monarch(state, player))
+        }
+        // CR 508.5 + CR 109.5: defending-player IDENTITY — true when the
+        // named scope resolves to the defending player. The subject resolves
+        // like `IsMonarch`'s; the anchor resolves like
+        // `DefendingPlayerControls`' (recipient-or-source attacker, declared
+        // attack authoritative during declaration). No anchor bindable =>
+        // false, and a `Not` wrapper inverting this is the printed "unless".
+        StaticCondition::IsDefendingPlayer { player } => {
+            let subject = designation_player(state, player, controller, source_id, context);
+            let attacking = context.recipient.unwrap_or(source_id);
+            let defending = match context.declared_attack {
+                Some(target) => crate::game::combat::defending_player_for_target(state, target),
+                None => crate::game::combat::defending_player_for_attacker(state, attacking),
+            };
+            matches!((subject, defending), (Some(a), Some(b)) if a == b)
         }
         // Digital-only Alchemy (no CR entry): "if you have a boon" — the
         // player axis resolves like `IsMonarch`'s; the leaf reads the held
@@ -5799,6 +5827,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.

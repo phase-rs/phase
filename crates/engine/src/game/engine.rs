@@ -24084,6 +24084,7 @@ mod stage2_injector_tests {
             let mut a = shape_b(
                 src,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "Cursed Role".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

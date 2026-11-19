@@ -9293,6 +9293,7 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
                     qty: QuantityRef::CardsExiledBySource,
@@ -16410,6 +16411,7 @@ mod tests {
         //     └─ Token{name:"Plant", count: EventContextAmount}
         let create_tokens = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Plant".to_string(),
                 power: PtValue::Fixed(4),
                 toughness: PtValue::Fixed(2),

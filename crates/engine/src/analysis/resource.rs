@@ -3866,6 +3866,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof
@@ -7985,6 +7986,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::Indestructible
         | StaticMode::CantBeDestroyed
         | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
         | StaticMode::FlashBack
         | StaticMode::Shroud
         | StaticMode::Hexproof

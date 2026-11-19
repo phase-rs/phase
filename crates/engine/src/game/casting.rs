@@ -3557,6 +3557,7 @@ fn emerge_sacrifice_description(
         TypeFilter::Land => EmergeSacrificeQuality::Land,
         TypeFilter::Permanent => EmergeSacrificeQuality::Permanent,
         TypeFilter::Planeswalker => EmergeSacrificeQuality::Planeswalker,
+        TypeFilter::Scheme => EmergeSacrificeQuality::Scheme,
         TypeFilter::Sorcery => EmergeSacrificeQuality::Sorcery,
         TypeFilter::Subtype(subtype) => EmergeSacrificeQuality::Subtype(subtype.clone()),
         TypeFilter::Any | TypeFilter::AnyOf(_) | TypeFilter::Non(_) => return None,
@@ -6749,6 +6750,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 109.5 + CR 122.1f: a player-state predicate; like the monarch
         // arm it is not holder-bound by this permission path.

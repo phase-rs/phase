@@ -3519,6 +3519,63 @@ fn operand_dropped_player_possessive_source(rest_lower: &str, target: &TargetFil
     names_anaphoric_zone && !binds_a_player(target)
 }
 
+/// CR 400.12 + CR 115.1 + CR 115.6: strip the "up to <N> " infix between
+/// "from " and a targeted owner possessive — "all cards from up to one
+/// target opponent's graveyard" (Into the Earthen Maw leg 3; the only corpus
+/// member). The "up to <N>" is the TARGETED PLAYER's cardinality (choose up
+/// to N opponents), not the cards': the rewritten operand ("cards from
+/// target opponent's graveyard") re-enters the shared zone-suffix reading
+/// (`Owned{TargetOpponent}` + `InZone`) while the caller attaches the
+/// returned `MultiTargetSpec::up_to(N)` to the sweep. Returns the rewritten
+/// operand pair plus the spec; declines (untouched) unless the infix is
+/// followed by a targeted possessive, so every un-prefixed form keeps
+/// byte-identical behavior. The cut is ASCII-span-verified fail-closed:
+/// `to_lowercase` can shift byte offsets on non-ASCII text, so a non-ASCII
+/// head or infix declines rather than slicing mid-char.
+fn strip_from_up_to_targeted_owner(
+    rest: &str,
+    rest_lower: &str,
+) -> Option<(String, String, MultiTargetSpec)> {
+    let (after_head, head) = take_until::<_, _, OracleError<'_>>("from up to ")
+        .parse(rest_lower)
+        .ok()?;
+    let head_len = head.len();
+    let (after_infix, _) = tag::<_, _, OracleError<'_>>("from up to ")
+        .parse(after_head)
+        .ok()?;
+    let (after_num, n) = nom_primitives::parse_number(after_infix).ok()?;
+    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(after_num).ok()?;
+    alt((
+        tag::<_, _, OracleError<'_>>("target player's "),
+        tag("target opponent's "),
+    ))
+    .parse(after_space)
+    .ok()?;
+    let consumed_len = rest_lower.len() - after_space.len();
+    // Byte-safety: the cut spans must be ASCII in the ORIGINAL (ASCII-ness is
+    // case-invariant, so the lowered match guarantees the shape but not the
+    // offsets — verify before slicing).
+    let head_orig = rest.get(..head_len)?;
+    if !head_orig.is_ascii() {
+        return None;
+    }
+    let infix_orig = rest.get(head_len..consumed_len)?;
+    if !infix_orig.is_ascii() {
+        return None;
+    }
+    let tail = rest.get(consumed_len..)?;
+    let tail_lower = rest_lower.get(consumed_len..)?;
+    // Keep "from ", drop "up to <N> ".
+    let keep_len = head_len + "from ".len();
+    let prefix = rest.get(..keep_len)?;
+    let prefix_lower = rest_lower.get(..keep_len)?;
+    Some((
+        format!("{prefix}{tail}"),
+        format!("{prefix_lower}{tail_lower}"),
+        MultiTargetSpec::up_to(QuantityExpr::Fixed { value: n as i32 }),
+    ))
+}
+
 /// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2 + CR 205.2a: "exile all `[<types>]`
 /// cards from `<possessive>` `<zone>` and `<zone>`" — mass exile of the cards a
 /// player owns across a *union* of zones. Two forms:
@@ -4321,6 +4378,7 @@ pub(super) fn parse_search_and_creation_ast(
                 static_abilities,
                 enters_attacking,
                 attack_destination,
+                enters_blocking,
                 ..
             }) => Some(SearchCreationImperativeAst::Token {
                 token: Box::new(TokenDescription {
@@ -4337,6 +4395,7 @@ pub(super) fn parse_search_and_creation_ast(
                     static_abilities,
                     enters_attacking,
                     attack_destination,
+                    enters_blocking: enters_blocking.clone(),
                 }),
             }),
             _ => None,
@@ -4594,6 +4653,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             attach_to: token.attach_to,
             enters_attacking: token.enters_attacking,
             attack_destination: token.attack_destination,
+            enters_blocking: token.enters_blocking,
             // CR 205.4a: Preserve parsed token supertypes (legendary/snow).
             supertypes: token.supertypes,
             static_abilities: token.static_abilities,
@@ -5532,6 +5592,15 @@ pub(super) fn parse_choose_ast(
         return Some(ast);
     }
 
+    // CR 701.20a + CR 608.2c: "choose one of the revealed [<type>] cards" —
+    // the reveal-pool choose anaphor (Dance, Pathetic Marionette). The pool is
+    // the chain's tracked set (the cards a preceding reveal revealed this
+    // resolution), narrowed by the optional type qualifier. Checked before the
+    // bare "choose " strip for the same reason as the exiled anaphor above.
+    if let Some(ast) = try_parse_choose_revealed_anaphor(lower) {
+        return Some(ast);
+    }
+
     // CR 400.7j + CR 601.2h + CR 602.2b + CR 608.2d: "[An opponent ]choose[s]
     // one of the exiled cards" INSIDE an ability whose own cost exiled non-self
     // cards (Coin of Fate). The anaphor names the cost-payment record, not a
@@ -6049,6 +6118,77 @@ fn try_parse_choose_owned_by_voter(
 /// opponent chooses") is not accepted — it must bind the chooser to the
 /// chosen target slot, so it falls through honestly.
 ///
+/// CR 701.20a + CR 608.2c + CR 608.2d: "choose one of the revealed
+/// [<type>] cards" (Dance, Pathetic Marionette) — pick one card from the
+/// chain's revealed set, narrowed by the optional type qualifier ("creature"
+/// here; "those revealed cards" is the same anaphor with a distal
+/// demonstrative). Mirrors `try_parse_choose_exiled_anaphor`'s typed form:
+/// the pool is the chain tracked set (`Legacy` provenance — the runtime
+/// ignores the zone fields whenever that set exists), the qualifier becomes
+/// the narrowing filter, and the zone fields name the honest fallback (the
+/// revealed cards sit in libraries owned by anyone).
+///
+/// The chooser prefix follows `parse_choose_anaphoric`'s CR 608.2d
+/// convention ("an opponent chooses" → `Chooser::Opponent`); the targeted
+/// form ("target opponent chooses") is not accepted, for the same
+/// chooser-binding reason the exiled arm documents. Count is fixed at one —
+/// no printed card pairs this anaphor with another count. An " at random"
+/// tail maps to `Random` selection, mirroring the from-zone arm.
+fn try_parse_choose_revealed_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, chooser) = alt((
+        value(Chooser::Opponent, tag::<_, _, E>("an opponent chooses ")),
+        value(
+            Chooser::Controller,
+            alt((tag::<_, _, E>("you choose "), tag("choose "))),
+        ),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (rest, _) = tag::<_, _, E>("one of ").parse(rest).ok()?;
+    let (rest, _) = alt((tag::<_, _, E>("the revealed "), tag("those revealed ")))
+        .parse(rest)
+        .ok()?;
+    // The optional type qualifier: "creature cards", "nonland cards", or bare
+    // "cards". Negation is caller-owned (`parse_type_filter_word` has none),
+    // mirroring the reveal-top count gate's prefix strip.
+    let (filter, tail): (TargetFilter, &str) = if rest == "cards" {
+        (TargetFilter::Any, "")
+    } else {
+        let (rest, negated) = map(opt(alt((tag::<_, _, E>("non-"), tag("non")))), |prefix| {
+            prefix.is_some()
+        })
+        .parse(rest)
+        .ok()?;
+        let (rest, word) = crate::parser::oracle_nom::target::parse_type_filter_word(rest).ok()?;
+        let (rest, _) = alt((tag::<_, _, E>(" cards"), tag(" card")))
+            .parse(rest)
+            .ok()?;
+        let type_filter = if negated {
+            TypeFilter::Non(Box::new(word))
+        } else {
+            word
+        };
+        (TargetFilter::Typed(TypedFilter::new(type_filter)), rest)
+    };
+    let selection = match tail {
+        "" => crate::types::ability::CardSelectionMode::Chosen,
+        " at random" => crate::types::ability::CardSelectionMode::Random,
+        _ => return None,
+    };
+    Some(ChooseImperativeAst::FromZone {
+        count: 1,
+        zones: vec![Zone::Library],
+        zone_owner: crate::types::ability::ZoneOwner::AllOwners,
+        filter,
+        chooser,
+        up_to: false,
+        selection,
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+    })
+}
+
 /// The typed forms ("a creature card exiled with ~" / "a nonland card exiled
 /// this way") accept an optional trailing mana-value suffix ("… with mana value
 /// X" — Valki, God of Lies), parsed by the shared `parse_mana_value_suffix`
@@ -12882,6 +13022,16 @@ pub(super) fn parse_exile_ast(
                 multi_target: None,
             });
         }
+        // CR 115.6: "from up to <N> target <player's|opponent's> <zone>"
+        // (Into the Earthen Maw leg 3) — strip the player-cardinality infix
+        // and run the rewritten operand through the shared arms below,
+        // attaching the spec to whichever sweep matches.
+        let up_to_stripped = strip_from_up_to_targeted_owner(rest, rest_lower);
+        let up_to_spec = up_to_stripped.as_ref().map(|(_, _, spec)| spec.clone());
+        let (rest, rest_lower): (&str, &str) = up_to_stripped
+            .as_ref()
+            .map(|(rewritten, rewritten_lower, _)| (rewritten.as_str(), rewritten_lower.as_str()))
+            .unwrap_or((rest, rest_lower));
         // CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2: "exile all cards from <possessive> <zone>
         // and <zone>" (Identity Crisis) — a *union* of origin zones. Recognized
         // before the generic single-origin path below, whose `infer_origin_zone`
@@ -12899,7 +13049,7 @@ pub(super) fn parse_exile_ast(
                 }),
                 all: true,
                 enter_with_counters: vec![],
-                multi_target: None,
+                multi_target: up_to_spec.clone(),
             });
         }
         // CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all <permanent
@@ -12918,7 +13068,7 @@ pub(super) fn parse_exile_ast(
                 target,
                 all: true,
                 enter_with_counters: vec![],
-                multi_target: None,
+                multi_target: up_to_spec.clone(),
             });
         }
         // CR 205.2a + CR 205.3a + CR 608.2c: parse the full target as a
@@ -12966,7 +13116,7 @@ pub(super) fn parse_exile_ast(
             target,
             all: true,
             enter_with_counters: vec![],
-            multi_target: None,
+            multi_target: up_to_spec.clone(),
         });
     }
 
@@ -16502,6 +16652,37 @@ pub(super) fn parse_imperative_family_ast(
         .parse(lower.trim())
         .ok()
         .map(|_| ImperativeFamilyAst::AbandonScheme),
+        // CR 701.32b: "set that scheme in motion (again)" (My Laughter
+        // Echoes) — re-fire a scheme's set-in-motion abilities. Composed
+        // per-axis: verb × scheme referent × ("in"|"into") + "motion" ×
+        // optional "again". "that scheme" is the triggering event's scheme
+        // (`TriggeringSource`); "this scheme" is the ability source
+        // (`SelfRef` — the axis's other leg, no printed card). The "again"
+        // adverb is the effect's identity (a re-application), not a count,
+        // so it is accepted and carries no payload; "into motion" is the
+        // Archenemy's-Charm preposition variant. All-consuming: any other
+        // "set ..." shape fails closed.
+        "set" | "sets" => all_consuming(terminated(
+            (
+                // Longer alternative first, mirroring "abandons" above.
+                alt((
+                    tag::<_, _, OracleError<'_>>("sets "),
+                    tag("set "),
+                )),
+                alt((
+                    value(TargetFilter::TriggeringSource, tag("that scheme")),
+                    value(TargetFilter::SelfRef, tag("this scheme")),
+                )),
+                alt((tag(" into motion"), tag(" in motion"))),
+                opt(tag(" again")),
+            ),
+            opt(tag(".")),
+        ))
+        .parse(lower.trim())
+        .ok()
+        .map(
+            |(_, (_, target, _, _))| ImperativeFamilyAst::SetSchemeInMotion { target },
+        ),
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
@@ -17913,6 +18094,7 @@ fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClaus
                     attach_to: None,
                     enters_attacking: false,
                     attack_destination: TokenAttackDestination::ControllerChooses,
+                    enters_blocking: None,
                     supertypes: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
@@ -19175,6 +19357,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Planeswalk => Effect::Planeswalk,
         // CR 701.33a-b: An ability abandons its source scheme.
         ImperativeFamilyAst::AbandonScheme => Effect::AbandonScheme,
+        // CR 701.32b: An ability sets a scheme in motion again.
+        ImperativeFamilyAst::SetSchemeInMotion { target } => Effect::SetSchemeInMotion { target },
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::AssembleContraptions { count } => {
@@ -31699,6 +31883,61 @@ mod tests {
         assert!(
             !def.optional,
             "expected optional: false for 'abandon this scheme'"
+        );
+    }
+
+    /// CR 701.33a-b + CR 608.2c: ", then abandon this scheme" splits into
+    /// its own clause chained as `sub_ability` (My Tendrils Run Deep's draw
+    /// tail; I Am Untouchable's token tail). "abandon" was missing from the
+    /// clause-starter verb table, gluing the tail onto the head: the draw
+    /// head refused the whole body while a token head silently dropped the
+    /// abandon entirely.
+    #[test]
+    fn then_abandon_this_scheme_chains_as_sub_ability() {
+        let draw = crate::parser::oracle_effect::parse_effect_chain(
+            "Draw two cards, then abandon this scheme.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*draw.effect, Effect::Draw { .. }),
+            "head must be Draw, got {:?}",
+            draw.effect
+        );
+        let draw_tail = draw
+            .sub_ability
+            .as_deref()
+            .expect("abandon tail must chain off Draw");
+        assert!(
+            matches!(*draw_tail.effect, Effect::AbandonScheme),
+            "tail must be AbandonScheme, got {:?}",
+            draw_tail.effect
+        );
+        assert!(
+            !format!("{draw:?}").contains("Unimplemented"),
+            "draw/abandon chain must be fully parsed"
+        );
+
+        let token = crate::parser::oracle_effect::parse_effect_chain(
+            "Create a 4/4 colorless Scarecrow artifact creature token with vigilance, then abandon this scheme.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*token.effect, Effect::Token { .. }),
+            "head must be Token, got {:?}",
+            token.effect
+        );
+        let token_tail = token
+            .sub_ability
+            .as_deref()
+            .expect("abandon tail must chain off Token");
+        assert!(
+            matches!(*token_tail.effect, Effect::AbandonScheme),
+            "tail must be AbandonScheme, got {:?}",
+            token_tail.effect
+        );
+        assert!(
+            !format!("{token:?}").contains("Unimplemented"),
+            "token/abandon chain must be fully parsed"
         );
     }
 

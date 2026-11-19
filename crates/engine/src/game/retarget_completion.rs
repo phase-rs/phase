@@ -203,6 +203,7 @@ fn type_filter_deps(filter: &TypeFilter) -> RetargetDeps {
         | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
+        | TypeFilter::Scheme
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => RetargetDeps::Independent,
     }

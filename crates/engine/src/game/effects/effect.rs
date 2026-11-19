@@ -618,6 +618,41 @@ fn bind_transient_effect(
         }
     }
 
+    // CR 701.32a + CR 904.9 + CR 611.2c: A duration-bound "schemes can't be
+    // set in motion" prohibition (All in Good Time) modifies the rules of the
+    // game, and its population — the scheme deck plus the face-up scheme —
+    // lives in the command zone, which the battlefield broadcast below cannot
+    // reach (it would match zero objects and install nothing). Keep the
+    // affected filter INTACT on one TCE so the archenemy gate
+    // (`scheme_setting_in_motion_prohibited`) reads it via
+    // `transient_grants_static_mode_to_object`, which evaluates intact
+    // filters against the queried object. Mirrors the
+    // `MustAttackAwayFromSource` branch above; like `ReduceAbilityCost` (and
+    // unlike `MustAttackAwayFromSource`) it is never grafted onto objects —
+    // schemes sit outside the layer population — so it stays out of the layer
+    // skip list for the opposite reason: there is nothing to graft to.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::CantSetSchemeInMotion,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+            );
+            return;
+        }
+    }
+
     // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
     // always refers to the source object regardless of `ability.targets`.
     // Short-circuit BEFORE the chosen-targets branch so chained Effect

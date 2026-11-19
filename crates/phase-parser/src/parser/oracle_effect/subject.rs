@@ -7568,6 +7568,21 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
 /// input parsed, trailing fixed phrase consumed last): `take_until` skips to the
 /// final occurrence and `all_consuming` requires the suffix to terminate the
 /// input. Replaces a bare `ends_with` so the dispatch stays combinator-driven.
+/// CR 701.32a + CR 904.9: strip a trailing "that turn" anaphoric extra-turn
+/// window, returning the head. Pattern 2: `take_until` skips to the marker
+/// and `all_consuming` requires the suffix to terminate the input, so an
+/// interior "that turn" never matches. Replaces a bare `ends_with` + slicing
+/// so the dispatch stays combinator-driven.
+fn ends_with_that_turn_window(lower: &str) -> Option<&str> {
+    let (_, head) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" that turn"),
+        tag(" that turn"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(head)
+}
+
 fn ends_with_of_your_choice(lower: &str) -> bool {
     all_consuming(terminated(
         take_until::<_, _, OracleError<'_>>("of your choice"),
@@ -7880,6 +7895,29 @@ fn build_restriction_clause(
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
+    // CR 701.32a + CR 904.9 + CR 608.2c: a trailing "that turn" on a
+    // restriction predicate is the anaphoric extra-turn window (All in Good
+    // Time: "Schemes can't be set in motion that turn"). The generic duration
+    // table has no bare-"that turn" production — it would amputate "Skip the
+    // untap step of that turn" — so the restriction path resolves it here,
+    // where the corpus holds exactly one shape. The window covers the
+    // controller's next (extra) turn and survives this turn's cleanup.
+    let deperioded = predicate.trim_end_matches('.');
+    let (predicate, duration) = match duration {
+        Some(_) => (predicate, duration),
+        None => {
+            let lower_candidate = deperioded.to_lowercase();
+            match ends_with_that_turn_window(&lower_candidate) {
+                Some(_) => (
+                    deperioded[..deperioded.len() - " that turn".len()].trim_end(),
+                    Some(Duration::UntilEndOfNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }),
+                ),
+                None => (predicate, None),
+            }
+        }
+    };
     let lower = predicate.to_lowercase();
 
     // CR 702.18a + CR 109.5: a duration-scoped "can't be the target [of ...]"
@@ -8425,6 +8463,11 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             // bypass in replacement.rs::destroy_applier observes it via
             // active_static_definitions.
             | StaticMode::CantBeRegenerated
+            // CR 701.32a + CR 904.9: CantSetSchemeInMotion is granted to the
+            // scheme subject and must propagate onto its `static_definitions`
+            // as an `AddStaticMode` transient grant — without it the TCE
+            // carries empty modifications and the archenemy gate never sees it.
+            | StaticMode::CantSetSchemeInMotion
             // CR 702.18a / CR 702.11b / CR 109.5: CantBeTargeted is granted to
             // a subject/target creature and must propagate onto its
             // `static_definitions` so the targeting check in `targeting.rs::can_target`
@@ -8674,6 +8717,19 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     .is_ok()
     {
         return Some(vec![StaticMode::CantGainLife]);
+    }
+    // CR 701.32a + CR 904.9: "can't be set in motion" — schemes can't be set
+    // in motion (All in Good Time). Runs on the duration-stripped predicate;
+    // the "that turn" tail is resolved to the extra-turn window by the
+    // anaphoric-window branch in `build_restriction_clause` before this.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("can't be set in motion"),
+        tag("cannot be set in motion"),
+    )))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(vec![StaticMode::CantSetSchemeInMotion]);
     }
     // CR 305.1 + CR 611.1: "can't play lands" — a player can't take the land-play
     // special action (CR 305.1). This is the player-scoped prohibition shared by
@@ -12413,6 +12469,57 @@ mod tests {
             m,
             ContinuousModification::AddStaticMode {
                 mode: StaticMode::CantGainLife
+            }
+        )));
+    }
+
+    /// CR 701.32a + CR 904.9 + CR 608.2c: All in Good Time's tail. "Schemes
+    /// can't be set in motion that turn" builds a `GenericEffect` carrying
+    /// `CantSetSchemeInMotion` over the scheme-typed subject, with the
+    /// trailing "that turn" resolved to the extra-turn window (the grant in
+    /// the preceding sentence) — not `UntilEndOfTurn`, which would expire
+    /// before the extra turn begins. The `AddStaticMode` grant propagation
+    /// is what the archenemy set-in-motion gate queries at runtime.
+    #[test]
+    fn schemes_cant_be_set_in_motion_that_turn_builds_next_turn_restriction() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Schemes can't be set in motion that turn",
+            &mut ctx,
+        )
+        .expect("scheme prohibition should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            end_cost: _,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(target, None);
+        assert_eq!(
+            duration,
+            Some(Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller
+            })
+        );
+        assert_eq!(static_abilities.len(), 1);
+        let def = &static_abilities[0];
+        assert_eq!(def.mode, StaticMode::CantSetSchemeInMotion);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Scheme)))
+        );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantSetSchemeInMotion
             }
         )));
     }

@@ -3399,6 +3399,7 @@ mod tests {
         };
         let ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: name.to_string(),
                 power: crate::types::ability::PtValue::Fixed(0),
                 toughness: crate::types::ability::PtValue::Fixed(0),

@@ -3478,6 +3478,12 @@ pub(crate) fn extract_source_from_event(
         GameEvent::CreatureNoLongerSuspected { object_id } => Some(*object_id),
         GameEvent::Detained { object_id } => Some(*object_id),
         GameEvent::CaseSolved { object_id } => Some(*object_id),
+        // CR 904.9 + CR 701.32b: "that scheme" in a set-in-motion trigger
+        // (My Laughter Echoes: "set that scheme in motion again") is the
+        // scheme the event set in motion. Self-triggers are unaffected: their
+        // ability source IS the event scheme, which is also what every
+        // resolution-site fallback reads on `None`.
+        GameEvent::SchemeSetInMotion { scheme_id, .. } => Some(*scheme_id),
         GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.len() == 1 => {
             attacker_ids.first().copied()
         }

@@ -3180,7 +3180,14 @@ pub fn normalize_card_name_refs_reporting(
                     if matches!(
                         lower_candidate.as_str(),
                         "the" | "a" | "an" | "of" | "in" | "on" | "to" | "for" | "at" | "by"
-                    ) || is_core_type_name(&lower_candidate)
+                    )
+                    // CR 603.1: "when"/"whenever" open triggered abilities —
+                    // never a self-reference, even as the card name's first
+                    // word ("When Will You Learn?"). Without this guard the
+                    // fallback rewrites the leading trigger keyword to `~`
+                    // and the whole line misses trigger routing.
+                    || matches!(lower_candidate.as_str(), "when" | "whenever")
+                    || is_core_type_name(&lower_candidate)
                         || is_non_subtype_subject_name(&lower_candidate)
                         || is_supertype_word(&lower_candidate)
                         // CR 201.5: a sentence-initial imperative verb ("Search
@@ -3993,6 +4000,21 @@ mod tests {
                 "Double Trouble"
             ),
             "Double the power of each creature you control until end of turn."
+        );
+    }
+
+    #[test]
+    fn normalize_trigger_opener_first_word_name_preserves_keyword() {
+        // CR 603.1 + CR 201.5: "When Will You Learn?" opens its Oracle text
+        // with the trigger keyword "When", not a self-reference. The
+        // strategy-5 first-word fallback must not rewrite the opener to `~`
+        // (which would strand the line out of trigger routing entirely).
+        assert_eq!(
+            normalize_card_name_refs(
+                "When you set this scheme in motion, each opponent exiles the top card of their library.",
+                "When Will You Learn?"
+            ),
+            "When you set this scheme in motion, each opponent exiles the top card of their library."
         );
     }
 
