@@ -176,6 +176,7 @@ pub fn roll_planar_die(
         player_id,
         sides: 6,
         result: None,
+        pre_entry_source: None,
     });
     match face {
         // CR 901.9a / CR 901.9c: the Planeswalker symbol triggers the synthetic

@@ -9,6 +9,7 @@ import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import type {
   CounterMatch,
   CounterType,
@@ -30,6 +31,7 @@ import type {
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import {
   CancelButton,
+  ChoiceHeaderConfirm,
   ChoiceOverlay,
   ConfirmButton,
   ScrollableCardStrip,
@@ -402,6 +404,7 @@ export function CardChoiceModal() {
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
           })}
+          reason={t("cardChoice.discard.reason.connive")}
         />
       );
     case "DiscardChoice":
@@ -437,6 +440,7 @@ export function CardChoiceModal() {
           key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
+          reason={t("cardChoice.discard.reason.ward")}
         />
       );
     case "WardSacrificeChoice":
@@ -588,9 +592,9 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               key={id}
               type="button"
               aria-label={obj.name}
-              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
+              className={`relative rounded-lg transition ${
                 isSelected
-                  ? "ring-2 ring-emerald-400/80"
+                  ? "z-10 ring-2 ring-emerald-400/80"
                   : "ring-1 ring-white/10 hover:ring-white/35"
               }`}
               initial={{ opacity: 0, y: 40, scale: 0.9 }}
@@ -601,17 +605,17 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage {...objectImageProps(obj)} size="normal" />
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  isSelected
-                    ? "bg-emerald-500/80 text-white"
-                    : "bg-slate-800/90 text-slate-300"
-                }`}
-              >
-                {isSelected
-                  ? t("cardChoice.badges.selected")
-                  : t("cardChoice.badges.choose")}
-              </span>
+              {/* Over the card, as every strip draws its selection: below lg
+                  the strip sizes its cards to fill its height, so anything
+                  stacked under a card would be cut off. The label wraps inside
+                  a narrow card rather than spilling onto its neighbours. */}
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-center text-xs font-bold text-white [overflow-wrap:anywhere]">
+                    {t("cardChoice.badges.selected")}
+                  </span>
+                </div>
+              )}
             </motion.button>
           );
         })}
@@ -633,6 +637,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       ]?.looked_at,
   );
   const hoverProps = useInspectHoverProps();
+  const isCompactHeight = useIsCompactHeight();
   const [selectedOrder, setSelectedOrder] = useState<ObjectId[]>([]);
   const isOrdered = data.ordering_hint === "OrderedToLibraryTop";
   // The engine records every card the searching player looked at. `cards`
@@ -690,70 +695,93 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
 
   if (!objects) return null;
 
+  const body = (
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
+      <CardOrganizerToolbar
+        className="mx-auto flex items-center gap-2 text-xs text-slate-300"
+        sort={sort}
+        onSortChange={setSort}
+        query={query}
+        onQueryChange={setQuery}
+        showSort={false}
+        showQuery
+      />
+      <ScrollableCardStrip>
+        {visibleCards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const selectedIndex = selectedOrder.indexOf(id);
+          const isSelected = selectedIndex >= 0;
+          const isSelectable = selectableCards.has(id);
+          return (
+            <motion.button
+              key={id}
+              disabled={!isSelectable}
+              className={`relative shrink-0 rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-emerald-400/80"
+                  : isSelectable
+                    ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+                    : "cursor-not-allowed opacity-40 grayscale"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{
+                opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4,
+                y: 0,
+                scale: 1,
+              }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
+              onClick={() => isSelectable && toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+                    {isOrdered
+                      ? formatTopdeckOrderLabel(selectedIndex, t)
+                      : t("cardChoice.badges.choose")}
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </div>
+  );
+
+  // On a short screen (a landscape phone) every line of chrome takes height
+  // from the cards. One header line carries the instruction, with "Search
+  // Library" before it because the instruction alone does not say where the
+  // cards come from, and the confirm sits at the end of that line. The filter
+  // row stays as it is.
+  if (isCompactHeight) {
+    return (
+      <ChoiceOverlay
+        title={t("cardChoice.search.instructionWithTitle", {
+          title: t("cardChoice.search.title"),
+          instruction: subtitle,
+        })}
+        headerActions={<ChoiceHeaderConfirm onClick={handleConfirm} disabled={!countValid} />}
+      >
+        {body}
+      </ChoiceOverlay>
+    );
+  }
+
   return (
     <ChoiceOverlay
       title={t("cardChoice.search.title")}
       subtitle={subtitle}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-2">
-        <CardOrganizerToolbar
-          className="mx-auto flex items-center gap-2 text-xs text-slate-300"
-          sort={sort}
-          onSortChange={setSort}
-          query={query}
-          onQueryChange={setQuery}
-          showSort={false}
-          showQuery
-        />
-        <ScrollableCardStrip>
-          {visibleCards.map((id, index) => {
-            const obj = objects[id];
-            if (!obj) return null;
-            const selectedIndex = selectedOrder.indexOf(id);
-            const isSelected = selectedIndex >= 0;
-            const isSelectable = selectableCards.has(id);
-            return (
-              <motion.button
-                key={id}
-                disabled={!isSelectable}
-                className={`relative shrink-0 rounded-lg transition ${
-                  isSelected
-                    ? "z-10 ring-2 ring-emerald-400/80"
-                    : isSelectable
-                      ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-                      : "cursor-not-allowed opacity-40 grayscale"
-                }`}
-                initial={{ opacity: 0, y: 60, scale: 0.85 }}
-                animate={{
-                  opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4,
-                  y: 0,
-                  scale: 1,
-                }}
-                transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-                whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
-                onClick={() => isSelectable && toggleSelect(id)}
-                {...hoverProps(id)}
-              >
-                <CardImage
-                  {...objectImageProps(obj)}
-                  size="normal"
-                  className={CHOICE_CARD_IMAGE_CLASS}
-                />
-                {isSelected && (
-                  <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
-                    <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                      {isOrdered
-                        ? formatTopdeckOrderLabel(selectedIndex, t)
-                        : t("cardChoice.badges.choose")}
-                    </span>
-                  </div>
-                )}
-              </motion.button>
-            );
-          })}
-        </ScrollableCardStrip>
-      </div>
+      {body}
     </ChoiceOverlay>
   );
 }
@@ -1354,6 +1382,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
+  const isCompactHeight = useIsCompactHeight();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const isTapUntapChoice =
     data.effect_kind === "Untap" || data.effect_kind === "Tap";
@@ -1435,23 +1464,100 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
     : `cardChoice.effectZone.subtitle${mode}Exact`;
   const title = t(`cardChoice.effectZone.title${mode}`);
   const subtitle = t(subtitleKey, { min: minCount, count: data.count });
-  const actionLabel =
+  // Skip or Decline when the prompt may end with nothing chosen.
+  const declineLabel =
     selected.size === 0 && isUpTo && minCount === 0
       ? isSacrifice
         ? t("cardChoice.effectZone.labelSkip")
         : t("cardChoice.effectZone.labelDecline")
-      : isTopdeck && selectedOrderLabels.length > 0
+      : null;
+  // Only a library-order choice has order labels, so an empty list means no order.
+  const orderLabel =
+    selectedOrderLabels.length === 0
+      ? null
+      : isTopdeck
         ? t("cardChoice.effectZone.labelPutOnTop", {
             order: selectedOrderLabels.join(" -> "),
           })
-        : isBottomdeck && selectedOrderLabels.length > 0
-          ? t("cardChoice.effectZone.labelPutOnBottom", {
-              order: selectedOrderLabels.join(" -> "),
-            })
-          : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
-              selected: selected.size,
-              count: data.count,
-            });
+        : t("cardChoice.effectZone.labelPutOnBottom", {
+            order: selectedOrderLabels.join(" -> "),
+          });
+  const countLabel = t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
+    selected: selected.size,
+    count: data.count,
+  });
+  const actionLabel = declineLabel ?? orderLabel ?? countLabel;
+
+  const body = (
+    <ScrollableCardStrip>
+      {data.cards.map((id, index) => {
+        const obj = objects[id];
+        if (!obj) return null;
+        const isSelected = selected.has(id);
+        const selectedIndex = selectedOrder.indexOf(id);
+        const badgeLabel =
+          isLibraryOrder && selectedIndex >= 0
+            ? isBottomdeck
+              ? formatBottomdeckOrderLabel(selectedIndex, selectedOrder.length, t)
+              : formatTopdeckOrderLabel(selectedIndex, t)
+            : t(EFFECT_ZONE_BADGE_KEYS[mode]);
+        return (
+          <motion.button
+            key={id}
+            className={`relative rounded-lg transition ${
+              isSelected
+                ? `z-10 ring-2 ${visualClasses.ring}`
+                : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+            }`}
+            initial={{ opacity: 0, y: 60, scale: 0.85 }}
+            animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+            transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+            whileHover={{ scale: 1.05, y: -6 }}
+            onClick={() => toggleSelect(id)}
+            {...hoverProps(id)}
+          >
+            <CardImage
+              {...objectImageProps(obj)}
+              size="normal"
+              className={CHOICE_CARD_IMAGE_CLASS}
+            />
+            {isSelected && (
+              <div
+                className={`absolute inset-0 flex items-center justify-center rounded-lg ${visualClasses.overlay}`}
+              >
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-bold text-white ${visualClasses.badge}`}
+                >
+                  {badgeLabel}
+                </span>
+              </div>
+            )}
+          </motion.button>
+        );
+      })}
+    </ScrollableCardStrip>
+  );
+
+  // On a short screen (a landscape phone) every line of chrome takes height
+  // from the cards. One header line carries the instruction alone: every
+  // effect-zone title ("Exile", "Put on Library", "Return", ...) only names
+  // the action the instruction already states. The confirm sits at the end of
+  // that line. It counts the selection, or reads Skip or Decline, but never
+  // spells out a library order: each chosen card's badge already shows its
+  // place, and a label that grew with every pick would push the instruction
+  // beside it onto a second line, taking height from the cards mid-choice.
+  if (isCompactHeight) {
+    return (
+      <ChoiceOverlay
+        title={subtitle}
+        headerActions={
+          <ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={declineLabel ?? countLabel} />
+        }
+      >
+        {body}
+      </ChoiceOverlay>
+    );
+  }
 
   return (
     <ChoiceOverlay
@@ -1465,53 +1571,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
         />
       }
     >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          const selectedIndex = selectedOrder.indexOf(id);
-          const badgeLabel =
-            isLibraryOrder && selectedIndex >= 0
-              ? isBottomdeck
-                ? formatBottomdeckOrderLabel(selectedIndex, selectedOrder.length, t)
-                : formatTopdeckOrderLabel(selectedIndex, t)
-              : t(EFFECT_ZONE_BADGE_KEYS[mode]);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${
-                isSelected
-                  ? `z-10 ring-2 ${visualClasses.ring}`
-                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
-              }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage
-                {...objectImageProps(obj)}
-                size="normal"
-                className={CHOICE_CARD_IMAGE_CLASS}
-              />
-              {isSelected && (
-                <div
-                  className={`absolute inset-0 flex items-center justify-center rounded-lg ${visualClasses.overlay}`}
-                >
-                  <span
-                    className={`rounded-full px-3 py-1 text-xs font-bold text-white ${visualClasses.badge}`}
-                  >
-                    {badgeLabel}
-                  </span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
+      {body}
     </ChoiceOverlay>
   );
 }
@@ -2556,6 +2616,11 @@ function PayCostDispatch({ data, promptKey }: { data: PayCost["data"]; promptKey
               ? t("cardChoice.discard.titleManaAbility")
               : t("cardChoice.discard.titleAdditionalCost")
           }
+          reason={
+            isManaAbility
+              ? t("cardChoice.discard.reason.manaAbility")
+              : t("cardChoice.discard.reason.additionalCost")
+          }
           canCancel={!isManaAbility}
         />
       );
@@ -2760,6 +2825,7 @@ function CollectEvidenceModal({
 function DiscardModal({
   data,
   title,
+  reason,
   canCancel = false,
 }: {
   data: { cards: ObjectId[]; count: number } & {
@@ -2767,12 +2833,19 @@ function DiscardModal({
     unless_filter?: TargetFilter;
   };
   title?: string;
+  /**
+   * Why the prompt asks for a discard (Ward, Connive, a cost), when its title
+   * says more than the instruction. A short screen drops the title and puts
+   * the reason before the instruction instead.
+   */
+  reason?: string;
   canCancel?: boolean;
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
+  const isCompactHeight = useIsCompactHeight();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const hasUnlessOption = data.unless_filter != null;
   const isUpTo = data.up_to === true;
@@ -2833,6 +2906,80 @@ function DiscardModal({
   // The confirm button always shows the discard count (even in keep-mode where
   // `selected` tracks the keep set — invert to show how many will be discarded).
   const discardSelectedForLabel = active ? data.cards.length - selected.size : selected.size;
+  const confirmLabel = t("cardChoice.buttons.discardCount", {
+    selected: discardSelectedForLabel,
+    count: data.count,
+  });
+
+  const keepToggle = keepEligible ? (
+    <button
+      type="button"
+      className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
+      onClick={onToggleKeep}
+    >
+      {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
+    </button>
+  ) : null;
+
+  // The grid keeps its place in the tree under either header, so turning the
+  // phone mid-prompt keeps its sort and grouping. On a short screen the
+  // counter is left to screen readers while the confirm shows the same count;
+  // in keep-mode the confirm still counts discards, so the keep count stays.
+  const body = (
+    <>
+      {!isCompactHeight && keepToggle && <div className="px-1 pb-1">{keepToggle}</div>}
+      <SelectableCardGrid
+        cards={data.cards}
+        objects={objects}
+        value={selected}
+        onChange={setSelected}
+        cap={cap}
+        tone={tone}
+        badgeLabel={badgeLabel}
+        counterText={counterText}
+        hoverProps={hoverProps}
+        onConfirm={handleConfirm}
+        canConfirm={isReady}
+        counterDisplay={isCompactHeight && !active ? "screenReaderOnly" : "visible"}
+        toolbarControlSize={isCompactHeight ? "touch" : "standard"}
+        toolbarStart={isCompactHeight ? keepToggle : null}
+      />
+    </>
+  );
+
+  // On a short screen (a landscape phone) every line of chrome takes height
+  // from the cards, and the standard layout's title, instruction, counter and
+  // footer confirm each repeat the discard. One header line carries the
+  // instruction and a confirm that shows the count, and "Keep instead" joins
+  // the toolbar row. The instruction stands in for the title, keeping the
+  // reason a title names (Ward, Connive, a cost) in front of it.
+  if (isCompactHeight) {
+    return (
+      <ChoiceOverlay
+        title={
+          reason
+            ? t("cardChoice.discard.instructionWithReason", { reason, instruction: subtitle })
+            : subtitle
+        }
+        headerActions={
+          <>
+            {canCancel && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className={menuButtonClass({ tone: "slate", size: "sm" })}
+              >
+                {t("choiceOverlay.cancel")}
+              </button>
+            )}
+            <ChoiceHeaderConfirm onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
+          </>
+        }
+      >
+        {body}
+      </ChoiceOverlay>
+    );
+  }
 
   return (
     <ChoiceOverlay
@@ -2841,53 +2988,14 @@ function DiscardModal({
       footer={
         canCancel ? (
           <CostActionFooter onCancel={handleCancel}>
-            <ConfirmButton
-              onClick={handleConfirm}
-              disabled={!isReady}
-              label={t("cardChoice.buttons.discardCount", {
-                selected: discardSelectedForLabel,
-                count: data.count,
-              })}
-            />
+            <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
           </CostActionFooter>
         ) : (
-          <ConfirmButton
-            onClick={handleConfirm}
-            disabled={!isReady}
-            label={t("cardChoice.buttons.discardCount", {
-              selected: discardSelectedForLabel,
-              count: data.count,
-            })}
-          />
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={confirmLabel} />
         )
       }
     >
-      <>
-        {keepEligible && (
-          <div className="px-1 pb-1">
-            <button
-              type="button"
-              className="rounded-md border border-emerald-400/40 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20"
-              onClick={onToggleKeep}
-            >
-              {active ? t("cardChoice.bulk.discardInstead") : t("cardChoice.bulk.keepInstead")}
-            </button>
-          </div>
-        )}
-        <SelectableCardGrid
-          cards={data.cards}
-          objects={objects}
-          value={selected}
-          onChange={setSelected}
-          cap={cap}
-          tone={tone}
-          badgeLabel={badgeLabel}
-          counterText={counterText}
-          hoverProps={hoverProps}
-          onConfirm={handleConfirm}
-          canConfirm={isReady}
-        />
-      </>
+      {body}
     </ChoiceOverlay>
   );
 }

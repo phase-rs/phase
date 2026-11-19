@@ -57,6 +57,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 use crate::types::zones::Zone;
 
 use super::casting::{
@@ -2375,6 +2376,7 @@ fn pay_ability_cost_inner(
                     is_cost_payment: true,
                     enters_modified_if: None,
                     duration: None,
+                    privacy_zones: None,
                 };
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,
@@ -2467,6 +2469,9 @@ fn pay_ability_cost_inner(
                         source_id,
                         counter_type.clone(),
                         resolved_cost_count(count),
+                        // CR 614.16: paying a counter cost is neither a
+                        // resolving effect nor a replacement — fail closed.
+                        CounterCause::Other,
                         events,
                     ) {
                         return Ok(PaymentOutcome::Paused {
@@ -2692,7 +2697,15 @@ fn pay_ability_cost_inner(
             count,
         } => {
             match super::effects::player_counter::add_player_counter_with_replacement(
-                state, player, player, *counter_kind, *count, events,
+                state,
+                player,
+                player,
+                *counter_kind,
+                *count,
+                // CR 614.16: paying a counter cost is neither a resolving
+                // effect nor a replacement — fail closed.
+                CounterCause::Other,
+                events,
             ) {
                 super::effects::player_counter::PlayerCounterAdditionOutcome::Applied => {}
                 super::effects::player_counter::PlayerCounterAdditionOutcome::Prevented => {
@@ -2762,6 +2775,9 @@ fn pay_ability_cost_inner(
                         source_id,
                         crate::types::counter::CounterType::Loyalty,
                         amount as u32,
+                        // CR 614.16: paying a loyalty cost is neither a
+                        // resolving effect nor a replacement — fail closed.
+                        CounterCause::Other,
                         events,
                     ) {
                         return Ok(PaymentOutcome::Paused {
@@ -3685,6 +3701,8 @@ fn player_counter_gain_is_prohibited(
         payer,
         counter_kind,
         count,
+        // CR 614.16: this preview projects a cost payment — fail closed.
+        CounterCause::Other,
     )
     .is_prohibited()
 }
@@ -3704,6 +3722,8 @@ fn self_counter_placement_is_prohibited(
             ObjectIncarnationRef::from_object(object),
             counter_type,
             count,
+            // CR 614.16: this preview projects a cost payment — fail closed.
+            CounterCause::Other,
         )
         .is_some_and(super::effects::counters::CounterAdditionPreview::is_prohibited)
     })

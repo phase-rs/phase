@@ -17784,6 +17784,7 @@ mod tests {
         );
         state.waiting_for = WaitingFor::EffectZoneChoice {
             performed_by: None,
+            privacy_zones: None,
             player: ai,
             cards,
             count,
@@ -18798,6 +18799,7 @@ mod tests {
             let source = vanilla_in_hand(state, PlayerId(0));
             WaitingFor::EffectZoneChoice {
                 performed_by: None,
+                privacy_zones: None,
                 player: PlayerId(0),
                 cards: hand_pool(state, PlayerId(0), 3),
                 count: 1,
@@ -19786,6 +19788,7 @@ mod tests {
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
+                    selected_taps_for_mana: Vec::new(),
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,

@@ -12,7 +12,7 @@
 //! CR 608.2h + CR 119.3: the count is read when the trigger resolves, over
 //! every player (including the controller) whose life was lost this turn. The
 //! parse must lower "for each player who lost life this turn" to a dynamic
-//! `PlayerCount{PlayerAttribute{relation: All, attr: LifeLostThisTurn, GE 1}}`
+//! `PlayerCount{PlayerAttribute{relation: All, attr: LifeLost, GE 1}}`
 //! count, not a frozen `Fixed(1)`.
 //!
 //! Revert map: with the opponent-only for-each grammar reverted, the clause does

@@ -2,6 +2,7 @@ import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useFocusScopePortalBranch } from "./FocusScope";
 
 const MENU_GAP_PX = 4;
@@ -11,23 +12,6 @@ const MENU_MAX_HEIGHT_PX = 280;
 const MOBILE_TAB_BAR_RESERVE_PX = 76;
 /** Shell tab bar appears below this width — menus become bottom sheets. */
 const MOBILE_SHEET_MEDIA_QUERY = "(max-width: 819px)";
-
-function useMobileSheetLayout(): boolean {
-  const [mobileSheet, setMobileSheet] = useState(() =>
-    typeof window !== "undefined"
-      ? window.matchMedia(MOBILE_SHEET_MEDIA_QUERY).matches
-      : false,
-  );
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia(MOBILE_SHEET_MEDIA_QUERY);
-    const handleChange = () => setMobileSheet(mediaQuery.matches);
-    mediaQuery.addEventListener("change", handleChange);
-    return () => mediaQuery.removeEventListener("change", handleChange);
-  }, []);
-
-  return mobileSheet;
-}
 
 function getViewportBottomInset(): number {
   if (window.matchMedia("(min-width: 820px)").matches) {
@@ -222,7 +206,7 @@ export function MenuSelect({
   onOptionHover,
 }: MenuSelectProps) {
   const listboxId = useId();
-  const mobileSheet = useMobileSheetLayout();
+  const mobileSheet = useMediaQuery(MOBILE_SHEET_MEDIA_QUERY);
   const useBottomSheet = menuLayout === "auto" && mobileSheet;
   const [open, setOpen] = useState(false);
   const [filterText, setFilterText] = useState("");

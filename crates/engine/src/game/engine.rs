@@ -24,10 +24,10 @@ use crate::types::game_state::{
     DistributionScope, DistributionUnit, GameState, LandPlayRecord, ManaAbilityResume,
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
     PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
-    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
-    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, UntapStepProgress, WaitingFor,
+    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
+    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
+    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
+    StackResolutionSession, UntapStepProgress, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -36,7 +36,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
-use crate::types::resolution::{ResolutionFrame, ResolutionStack};
+use crate::types::resolution::ResolutionFrame;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
     ResolvedOncePerTurnPermission, ResolvedRulesCommand,
@@ -1826,11 +1826,19 @@ fn apply_action_boundary_core(
             // triggers. A token realization and an owed final part on the same action
             // share one pass.
             let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+            // CR 603.3 + CR 603.6d: a direct-return handler (`handle_tribute_choice`) that
+            // settled an as-enters continuation runs no pipeline of its own, so the parked
+            // entry is released by this convergence pass, the action's first, ahead of its
+            // SBA check.
+            let settled_entry_continuation_is_parked =
+                matches!(result.waiting_for, WaitingFor::Priority { .. })
+                    && !state.deferred_entry_events.is_empty();
             if ((resumed_parked_root || reconciled_unless_payment)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
                 || settled_entry_batch
                 || owed_spell_final_part_is_due
+                || settled_entry_continuation_is_parked
             {
                 if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
                     if committed_departure.is_some() {
@@ -4063,7 +4071,14 @@ pub(crate) fn pinned_decisions_to_points(
                 let mut tappable: Vec<crate::types::identifiers::ObjectId> = state
                     .objects
                     .values()
-                    .filter(|o| o.is_convoke_eligible(controller))
+                    .filter(|o| {
+                        super::casting::tap_payment_eligible(
+                            state,
+                            o,
+                            controller,
+                            ConvokeMode::Convoke,
+                        )
+                    })
                     .map(|o| o.id)
                     .collect();
                 tappable.sort_by_key(|id| id.0);
@@ -7199,8 +7214,11 @@ fn materialize_object_growth_shortcut(
     result.waiting_for = state.waiting_for.clone();
 }
 
-/// Appends one committed repetition of a taken shortcut, opened by its marker.
+/// Appends one committed repetition of a taken shortcut, opened by its marker, and retires the
+/// action-scoped journal entries it recorded from `journal_start` on (CR 732.1b).
 fn commit_repetition(
+    state: &mut GameState,
+    journal_start: usize,
     events: &mut Vec<GameEvent>,
     controller: PlayerId,
     repetition: u32,
@@ -7211,6 +7229,7 @@ fn commit_repetition(
         repetition,
     });
     events.append(cycle);
+    state.retire_repetition_journal(journal_start);
 }
 
 /// CR 732.1b: the shortcut's result is the board; the record keeps the first and last repetition,
@@ -7292,6 +7311,7 @@ pub(crate) fn drive_persistent_axis_collapse(
         take_cost.begin_cycle();
         reseed(state);
         let before = predicted.map(|_| state.clone());
+        let journal_start = state.resolved_rules_journal.entries().len();
         let mut cycle_events = Vec::new();
         let ended = super::period_confirm::perform_cycle(
             state,
@@ -7315,7 +7335,14 @@ pub(crate) fn drive_persistent_axis_collapse(
         let verdict = repetition_verdict(&ended, departure);
         if predicted.is_some() && verdict == RepetitionVerdict::Ended {
             delivered += 1;
-            commit_repetition(events, controller, delivered, &mut cycle_events);
+            commit_repetition(
+                state,
+                journal_start,
+                events,
+                controller,
+                delivered,
+                &mut cycle_events,
+            );
             #[cfg(feature = "test-support")]
             take_cost.end_cycle();
             break;
@@ -7332,6 +7359,7 @@ pub(crate) fn drive_persistent_axis_collapse(
             delivered = 0;
             for k in 0..prefix {
                 reseed(state);
+                let journal_start = state.resolved_rules_journal.entries().len();
                 let mut cycle_events = Vec::new();
                 match super::period_confirm::perform_cycle(
                     state,
@@ -7342,7 +7370,14 @@ pub(crate) fn drive_persistent_axis_collapse(
                 ) {
                     CycleEnd::CameRound => {
                         delivered += 1;
-                        commit_repetition(events, controller, delivered, &mut cycle_events);
+                        commit_repetition(
+                            state,
+                            journal_start,
+                            events,
+                            controller,
+                            delivered,
+                            &mut cycle_events,
+                        );
                     }
                     CycleEnd::Refused(OfferRefusal::LifeChangeUnrepresentable { player }) => {
                         *state = snapshot;
@@ -7358,7 +7393,14 @@ pub(crate) fn drive_persistent_axis_collapse(
             break;
         }
         delivered += 1;
-        commit_repetition(events, controller, delivered, &mut cycle_events);
+        commit_repetition(
+            state,
+            journal_start,
+            events,
+            controller,
+            delivered,
+            &mut cycle_events,
+        );
         #[cfg(feature = "test-support")]
         take_cost.end_cycle();
     }
@@ -8885,9 +8927,9 @@ pub(super) fn resume_pending_continuation_if_priority(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     loop {
-        let before = SubtreePosition::at(&state.resolution_stack);
+        let before = state.resolution_stack.position();
         resume_pending_continuation_pass(state, events)?;
-        let after = SubtreePosition::at(&state.resolution_stack);
+        let after = state.resolution_stack.position();
         // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
         // leaves a copy owner or a post-replacement drain on top has exposed it (a
         // substitute's drain retired, or an inner copy owner completed). The work
@@ -8895,9 +8937,16 @@ pub(super) fn resume_pending_continuation_if_priority(
         // creation the substitute replaced is still resolving), so no player may
         // receive priority: pass again. The repeat follows the whole pass, so that
         // pass's entry commits land first (CR 614.12a).
+        // CR 608.2c: a retired as-enters dispatch can also expose the zone-move
+        // owner above the spell's parked tail. Finish that move before returning
+        // priority, so its later instructions resume in this same action.
         let exposes_resolving_owner = matches!(
             state.resolution_stack.last(),
-            Some(ResolutionFrame::CopyToken(_) | ResolutionFrame::PostReplacement(_))
+            Some(
+                ResolutionFrame::CopyToken(_)
+                    | ResolutionFrame::PostReplacement(_)
+                    | ResolutionFrame::ChangeZone(_)
+            )
         );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
@@ -8921,38 +8970,6 @@ pub(super) fn resume_pending_continuation_if_priority(
             }
             return Ok(());
         }
-    }
-}
-
-/// The loop's progress measure: stack depth, then the drain count of the active
-/// post-replacement frame. Positional on purpose: it only has to be
-/// well-founded, not to name the subtree (that is `ReplacementSubtreeBoundary`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SubtreePosition {
-    resolution_depth: usize,
-    enclosing_post_replacement_drains: usize,
-}
-
-impl SubtreePosition {
-    fn at(stack: &ResolutionStack) -> Self {
-        Self {
-            resolution_depth: stack.len(),
-            enclosing_post_replacement_drains: stack
-                .active_post_replacement_or_paired_parent()
-                .map_or(0, PostReplacementDrainStack::len),
-        }
-    }
-
-    /// Strictly less of the subtree remains: the stack is lower, or as high
-    /// with fewer drains in the enclosing frame (lexicographic on ℕ×ℕ).
-    fn is_strictly_inside(&self, before: &Self) -> bool {
-        (
-            self.resolution_depth,
-            self.enclosing_post_replacement_drains,
-        ) < (
-            before.resolution_depth,
-            before.enclosing_post_replacement_drains,
-        )
     }
 }
 
@@ -13475,6 +13492,7 @@ fn apply_non_priority_pass_action(
                             *mode,
                             choices,
                             &chosen,
+                            paid_cost,
                             &mut events,
                         )?
                     }
@@ -15072,9 +15090,9 @@ fn apply_non_priority_pass_action(
                 .get(&object_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
             let is_eligible = match mode {
-                ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
-                ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
-                ConvokeMode::Improvise => obj.is_improvise_eligible(*player),
+                mode @ (ConvokeMode::Convoke | ConvokeMode::Waterbend | ConvokeMode::Improvise) => {
+                    super::casting::tap_payment_eligible(state, obj, *player, mode)
+                }
                 // CR 702.66a: delve has a dedicated handler arm below (exile, not tap).
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
@@ -18413,11 +18431,14 @@ fn park_land_played_for_deferred_entry(
     object_id: ObjectId,
     origin_zone: Zone,
 ) {
-    state.deferred_entry_events.push(GameEvent::LandPlayed {
-        object_id,
-        player_id: player,
-        from_zone: origin_zone,
-    });
+    crate::game::engine_replacement::park_pending_entry(
+        state,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: player,
+            from_zone: origin_zone,
+        },
+    );
 }
 
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {
@@ -23964,6 +23985,7 @@ mod stage2_injector_tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: asked,

@@ -491,6 +491,7 @@ fn parked_created_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => None,
         })
         .last()

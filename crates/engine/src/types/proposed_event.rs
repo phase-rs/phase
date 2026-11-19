@@ -310,6 +310,26 @@ impl DrawEventStage {
     }
 }
 
+/// CR 614.16: provenance of a counter placement for "if an effect would put
+/// one or more counters" replacement effects. A placement is eligible when its
+/// cause is [`CounterCause::ResolvingEffect`] (the effect of a resolving spell
+/// or ability put the counter on) or [`CounterCause::ReplacementOrPrevention`]
+/// (another replacement or prevention effect did so, even when the original
+/// event being modified was not itself an effect). [`CounterCause::Other`] is
+/// the fail-closed default: cost payment, turn-based action, or any producer
+/// not yet classified. Real cause assignment owns to the callers (Phase 3);
+/// every direct constructor stamps `Other` until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum CounterCause {
+    /// The placement comes from resolving a spell or ability effect.
+    ResolvingEffect,
+    /// The placement comes from another replacement or prevention effect.
+    ReplacementOrPrevention,
+    /// Fail-closed default: cost, turn-based action, or unclassified producer.
+    #[default]
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CounterPlacement {
@@ -318,15 +338,24 @@ pub enum CounterPlacement {
         actor: PlayerId,
         object_id: ObjectId,
         counter_type: CounterType,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Player {
         actor: PlayerId,
         player_id: PlayerId,
         counter_kind: PlayerCounterKind,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Energy {
         actor: PlayerId,
         player_id: PlayerId,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
 }
 
@@ -352,6 +381,42 @@ impl CounterPlacement {
             | CounterPlacement::Player { actor, .. }
             | CounterPlacement::Energy { actor, .. } => *actor,
         }
+    }
+}
+
+impl ProposedEvent {
+    /// CR 614.16: promote a counter placement's [`CounterCause`] to
+    /// [`CounterCause::ReplacementOrPrevention`] once a replacement modifies
+    /// it. "If an effect would put one or more counters" replacements "also
+    /// apply if another replacement or prevention effect does so, even if the
+    /// original event being modified wasn't itself an effect" — so the
+    /// modified placement is effect-eligible whatever its original cause was
+    /// (cost payment and turn-based actions stamp `Other`, which fails the
+    /// gate until a replacement touches the placement). Callers are the
+    /// counter appliers that return a modified placement (`add_counter_applier`'s
+    /// three `Modified` arms and `apply_compleated_replacement`); every other
+    /// shape — including the move's remove stage, which is not a "put" — is
+    /// returned unchanged.
+    pub fn promote_counter_placement_cause(mut event: ProposedEvent) -> ProposedEvent {
+        match &mut event {
+            ProposedEvent::AddCounter { placement, .. } => match placement {
+                CounterPlacement::Object { cause, .. }
+                | CounterPlacement::Player { cause, .. }
+                | CounterPlacement::Energy { cause, .. } => {
+                    *cause = CounterCause::ReplacementOrPrevention;
+                }
+            },
+            ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Add,
+                cause,
+                ..
+            } => {
+                *cause = CounterCause::ReplacementOrPrevention;
+            }
+            ProposedEvent::MoveCounter { .. } => {}
+            _ => {}
+        }
+        event
     }
 }
 
@@ -834,6 +899,9 @@ pub enum ProposedEvent {
         remove_count: u32,
         add_count: u32,
         stage: CounterMoveStage,
+        /// CR 614.16 provenance of the initiating placement; inert until gate.
+        #[serde(default)]
+        cause: CounterCause,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -1948,6 +2016,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(1),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -1972,6 +2041,7 @@ mod tests {
                     actor: PlayerId(0),
                     object_id: ObjectId(1),
                     counter_type: CounterType::Plus1Plus1,
+                    ..
                 },
                 count: 1,
                 ..
@@ -1986,6 +2056,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(1),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -2005,8 +2076,87 @@ mod tests {
                     actor: PlayerId(0),
                     object_id: ObjectId(1),
                     counter_type: CounterType::Plus1Plus1,
+                    ..
                 },
                 count: 1,
+                ..
+            }
+        ));
+    }
+
+    /// P1-1: every `CounterCause` field defaults to fail-closed `Other`, and a
+    /// pre-cause save (no `cause` key) loads with `Other`. Revert-fails in both
+    /// directions: remove any `#[serde(default)]` and the legacy half fails to
+    /// deserialize; stop stamping `Other` and the fresh-save assertions fail.
+    #[test]
+    fn counter_cause_default_and_backcompat() {
+        assert_eq!(CounterCause::default(), CounterCause::Other);
+        let placements = [
+            CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
+            },
+            CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Rad,
+                cause: CounterCause::Other,
+            },
+            CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                cause: CounterCause::Other,
+            },
+        ];
+        for placement in placements {
+            let event = ProposedEvent::AddCounter {
+                placement,
+                count: 1,
+                applied: HashSet::new(),
+            };
+            let mut wire = serde_json::to_value(&event).unwrap();
+            // Reach-guard: a fresh save actually carries the new field.
+            assert_eq!(wire["AddCounter"]["cause"], serde_json::json!("Other"));
+            wire["AddCounter"].as_object_mut().unwrap().remove("cause");
+            let legacy: ProposedEvent = serde_json::from_value(wire).unwrap();
+            assert!(matches!(
+                legacy,
+                ProposedEvent::AddCounter {
+                    placement: CounterPlacement::Object {
+                        cause: CounterCause::Other,
+                        ..
+                    } | CounterPlacement::Player {
+                        cause: CounterCause::Other,
+                        ..
+                    } | CounterPlacement::Energy {
+                        cause: CounterCause::Other,
+                        ..
+                    },
+                    ..
+                }
+            ));
+        }
+        let moved = ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(1),
+            destination_id: ObjectId(2),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            stage: CounterMoveStage::Add,
+            cause: CounterCause::Other,
+            applied: HashSet::new(),
+        };
+        let mut wire = serde_json::to_value(&moved).unwrap();
+        assert_eq!(wire["MoveCounter"]["cause"], serde_json::json!("Other"));
+        wire["MoveCounter"].as_object_mut().unwrap().remove("cause");
+        let legacy: ProposedEvent = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            legacy,
+            ProposedEvent::MoveCounter {
+                cause: CounterCause::Other,
                 ..
             }
         ));
@@ -2039,6 +2189,7 @@ mod tests {
             remove_count: 1,
             add_count: 1,
             stage: CounterMoveStage::Remove,
+            cause: CounterCause::Other,
             applied: HashSet::new(),
         };
         let add = ProposedEvent::MoveCounter {
@@ -2049,6 +2200,7 @@ mod tests {
             remove_count: 1,
             add_count: 1,
             stage: CounterMoveStage::Add,
+            cause: CounterCause::Other,
             applied: HashSet::new(),
         };
 

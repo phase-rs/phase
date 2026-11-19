@@ -1954,7 +1954,7 @@ fn rebuking_ceremony_schedules_merged_and_ordinary_commander_choices_apnap() {
         let pending = &mut saved["state"]["pending_replacement"];
         let mut wrong_boundary = pending["proposed"].clone();
         assert!(!wrong_boundary["ZoneChange"]["merged_departure"].is_null());
-        wrong_boundary["ZoneChange"]["enter_tapped"] = serde_json::json!(true);
+        wrong_boundary["ZoneChange"]["enter_tapped"] = serde_json::json!("Tapped");
         pending["delivery_boundary"] = wrong_boundary;
         let error = serde_json::from_value::<PersistedGameState>(saved)
             .unwrap()

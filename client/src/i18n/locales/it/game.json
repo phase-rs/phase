@@ -152,7 +152,8 @@
     "loading": "Caricamento {{name}}",
     "unimplemented": "Non implementato: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "TAPpata"
+    "tapped": "TAPpata",
+    "reloadArt": "Tocca per ricaricare l'illustrazione"
   },
   "preview": {
     "holdCtrlBack": "Tieni premuto Ctrl per il retro",
@@ -161,6 +162,8 @@
     "flip": "Gira",
     "report": "Segnala un problema",
     "reported": "Segnalato ✓",
+    "reportNotSent": "Non inviato",
+    "reloadArt": "Ricarica l'illustrazione",
     "altParsedAbilities": "Alt: abilità analizzate",
     "debugId": "ID: {{id}}",
     "engineParse": "Analisi del motore",
@@ -1552,6 +1555,7 @@
     },
     "search": {
       "title": "Cerca nel grimorio",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Scegli {{count}} carta",
       "subtitleExact_other": "Scegli {{count}} carte",
       "subtitleUpTo_one": "Scegli fino a {{count}} carta",
@@ -1856,6 +1860,13 @@
       "titleExact_one": "Scarta una carta",
       "titleExact_other": "Scarta {{count}} carte",
       "titleWard": "Difesa — Scarta una carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Difesa",
+        "connive": "Connivere",
+        "additionalCost": "Costo aggiuntivo",
+        "manaAbility": "Abilità di mana"
+      },
       "subtitleUpTo_one": "Scegli fino a {{count}} carta da scartare",
       "subtitleUpTo_other": "Scegli fino a {{count}} carte da scartare",
       "subtitleUnless": "Scegli {{count}} carte o 1 carta corrispondente da scartare",
@@ -2448,6 +2459,9 @@
     "optionalTriggers": "Abilità innescate facoltative ({{count, number}})",
     "replacementChoices": "Scelte di sostituzione ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Tieni premuto per vedere la carta intera"
+  },
   "optionalEffect": {
     "sourceFallback": "Effetto",
     "title": "{{name}} - Effetto facoltativo",
@@ -2562,7 +2576,7 @@
     "appliedLast": "Applicato per ultimo — questo prevale",
     "resultLabel": "Risultato: {{outcome}}",
     "confirmOrder": "Conferma ordine",
-    "dragHint": "Trascina per riordinare, o usa le frecce.",
+    "dragHint": "Trascina la maniglia <grip>⠿</grip> per riordinare, o usa le frecce.",
     "chooseSubtitle": "Scegli quale effetto di sostituzione applicare.",
     "candidateFallback": "Effetto di sostituzione {{number}}",
     "orderSubtitleComposing": "Questi effetti cambiano tutti il modo in cui accade questo evento. Trascina per impostare l'ordine di applicazione: si applicano tutti, quindi l'ordine cambia il risultato (CR 616.1).",
@@ -2571,6 +2585,7 @@
     "composesNote": "Ogni effetto si applica — l'ordine cambia come si combinano.",
     "moveUpNamed": "Sposta {{name}} prima",
     "moveDownNamed": "Sposta {{name}} dopo",
+    "dragHandleNamed": "Trascina {{name}} per riordinare",
     "positionAnnounce": "Posizione {{position}} di {{total}}"
   },
   "retargetChoice": {
@@ -2696,6 +2711,20 @@
     "EndCombat": "Fine combattimento",
     "PostCombatMain": "Fase principale 2",
     "End": "Sottofase finale",
+    "Cleanup": "Ripulitura"
+  },
+  "phaseShortName": {
+    "Untap": "STAP",
+    "Upkeep": "Mantenimento",
+    "Draw": "Pesca",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combattimento",
+    "DeclareAttackers": "Attaccanti",
+    "DeclareBlockers": "Bloccanti",
+    "CombatDamage": "Danno",
+    "EndCombat": "Fine combatt.",
+    "PostCombatMain": "Principale 2",
+    "End": "Finale",
     "Cleanup": "Ripulitura"
   },
   "counterMoveDistribution": {

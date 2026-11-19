@@ -1628,7 +1628,20 @@ fn evacuation_rejects_unowned_merge_authority_on_an_absorbed_commander() {
             GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
         scenario.at_phase(Phase::PreCombatMain);
         let host = scenario.add_real_card(P0, "Gemrazer", Zone::Battlefield, db);
-        let commander = scenario.add_real_card(P0, "Otrimi, the Ever-Playful", Zone::Command, db);
+        let commander = scenario
+            .add_creature_to_hand_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
+            .as_legendary()
+            .with_subtypes(vec!["Nightmare", "Beast"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Black,
+                    ManaCostShard::Green,
+                    ManaCostShard::Blue,
+                ],
+                generic: 3,
+            })
+            .id();
+        scenario.with_commander(commander);
         let evacuation = scenario.add_real_card(P0, "Evacuation", Zone::Hand, db);
         scenario.with_mana_pool(
             P0,
@@ -1639,12 +1652,6 @@ fn evacuation_rejects_unowned_merge_authority_on_an_absorbed_commander() {
                 .collect(),
         );
         let mut runner = scenario.build();
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&commander)
-            .unwrap()
-            .is_commander = true;
         runner
             .cast(commander)
             .alternative_cast(AlternativeCastDecision::Alternative)

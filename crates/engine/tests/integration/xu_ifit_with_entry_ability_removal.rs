@@ -1600,6 +1600,7 @@ fn change_zone_choice(
         enters_modified_if: None,
         duration: None,
         performed_by: None,
+        privacy_zones: None,
     }
 }
 

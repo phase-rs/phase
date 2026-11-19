@@ -2445,6 +2445,7 @@ pub struct SpellCast<'a> {
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
     casting_variant_face: Option<CastingVariantFace>,
+    casting_keyword: Option<crate::types::keywords::Keyword>,
     free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
@@ -2475,6 +2476,7 @@ impl<'a> SpellCast<'a> {
             adventure_creature: None,
             casting_variant: None,
             casting_variant_face: None,
+            casting_keyword: None,
             free_cast: false,
             modes: None,
             x: None,
@@ -2562,6 +2564,14 @@ impl<'a> SpellCast<'a> {
     ) -> Self {
         self.casting_variant = Some(variant);
         self.casting_variant_face = Some(face);
+        self
+    }
+
+    /// With [`Self::casting_variant`], choose the option that pays this keyword
+    /// instance, for a card with several instances of one alternative-cost
+    /// keyword (CR 113.2c + CR 601.2b).
+    pub fn casting_keyword(mut self, keyword: crate::types::keywords::Keyword) -> Self {
+        self.casting_keyword = Some(keyword);
         self
     }
 
@@ -2716,6 +2726,7 @@ impl<'a> SpellCast<'a> {
             adventure_creature,
             casting_variant,
             casting_variant_face,
+            casting_keyword,
             free_cast,
             modes,
             x,
@@ -2854,7 +2865,10 @@ impl<'a> SpellCast<'a> {
                             .enumerate()
                             .filter_map(|(index, option)| {
                                 (option.variant == variant
-                                    && casting_variant_face.is_none_or(|face| option.face == face))
+                                    && casting_variant_face.is_none_or(|face| option.face == face)
+                                    && casting_keyword.as_ref().is_none_or(|keyword| {
+                                        option.alternative_cost_keyword.as_ref() == Some(keyword)
+                                    }))
                                 .then_some(index)
                             })
                             .collect();

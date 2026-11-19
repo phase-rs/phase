@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::TurnWindow;
 pub(crate) use crate::types::ability::{
     effect_owns_resolution_zone_choice, effect_refs_parent_target,
     effect_requires_parent_target_object, filter_refs_parent_or_event_subject,
@@ -61,6 +62,7 @@ use crate::types::player::{Player, PlayerId};
 use crate::types::resolution::{
     AbilityContinuationFrame, ChildStackDepth, FrameGate, OptionalEffectFrame,
     PendingRepeatedOptionalPayment, RepeatedOptionalPaymentFrame, ResolutionFrame,
+    ResolutionPosition,
 };
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -769,6 +771,22 @@ pub(crate) fn player_control_count_compares(
     )
 }
 
+/// Whether `attr` is a spell-count attr that [`candidate_player_scalar`] can
+/// read off a candidate `Player` (the unfiltered last-turn snapshot). The single
+/// predicate shared by the reader arm and by `coverage`'s nested-attr
+/// classifier, so a spell attr the reader fails closed on can never be
+/// classified supported.
+pub(crate) fn candidate_scalar_reads_spell_attr(attr: &QuantityRef) -> bool {
+    matches!(
+        attr,
+        QuantityRef::SpellsCast {
+            filter: None,
+            window: TurnWindow::LastTurn,
+            ..
+        }
+    )
+}
+
 /// CR 402.1 / 119.1 / 119.3 / 122.1f: Read scalar `attr` for one
 /// candidate player DIRECTLY off the candidate `Player` (NOT via the
 /// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
@@ -782,8 +800,24 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
     match attr {
         // CR 402.1: cards in the candidate's hand.
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
-        // CR 119.3: life lost this turn is tracked per candidate player.
-        QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
+        // CR 119.3: life lost is tracked per candidate player; the window picks
+        // the live this-turn counter or the snapshot latched at the turn
+        // boundary (CR 500), so a last-turn attr never reads this turn.
+        QuantityRef::LifeLost { window, .. } => Some(u32_to_i32_saturating(match window {
+            TurnWindow::ThisTurn => p.life_lost_this_turn,
+            TurnWindow::LastTurn => p.life_lost_last_turn,
+        })),
+        // CR 601.2i + CR 603.4: spells the candidate cast during the previous
+        // turn, read from the per-player snapshot latched at the turn boundary
+        // ("a player cast two or more spells last turn"). Gated by
+        // `candidate_scalar_reads_spell_attr`: every other spell attr (a
+        // filtered last-turn count, any this-turn count) has no per-candidate
+        // reader and falls to `None`, failing the candidate closed.
+        QuantityRef::SpellsCast {
+            filter: None,
+            window: TurnWindow::LastTurn,
+            ..
+        } => Some(u32_to_i32_saturating(p.spells_cast_last_turn)),
         // CR 119.3: life gained this turn is tracked per candidate player — the
         // gained-direction sibling of the arm above, read by the all-players
         // "for each player who gained life this turn" population.
@@ -1031,6 +1065,7 @@ fn forwarded_zone_result_from_events<'a>(
             .map(|pin| TargetRef::Object(pin.object_id))
             .collect(),
         object_incarnations: arrivals,
+        phase_population: false,
     }
 }
 
@@ -1075,6 +1110,18 @@ fn rebind_child_to_forwarded_objects(
         return Vec::new();
     }
     let attachment_candidates = attach::attachment_candidates_from_zone_change(state, child, moved);
+    // CR 701.3a + CR 608.2c: "attach them to ~" names what the producer created as its
+    // attachment, so its `~` recipient stays the ability's source (Outfitted Jouster). The
+    // forwarded result still reaches a later instruction it carries.
+    if matches!(
+        child.effect,
+        Effect::Attach {
+            attachment: TargetFilter::LastCreated,
+            ..
+        }
+    ) {
+        return attachment_candidates;
+    }
     // CR 201.5 + CR 400.7j: a primary SelfRef names the printed source,
     // not the object returned by the preceding instruction. Keep the moved
     // referent in its separate context; generic result grants were bound above.
@@ -1494,6 +1541,7 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
             child.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
+                phase_population: false,
             }));
         }
     }
@@ -1665,6 +1713,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             head_payment_origin,
             // Consumed by the payment answer that announced X, before this drain.
             x_announcement: _,
+            replacement_action,
         } = cont;
         debug_assert!(
             pending_return_result_producer.is_none(),
@@ -1690,6 +1739,10 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let trigger_snapshot = trigger_context
             .as_ref()
             .map(|ctx| super::triggers::push_resolving_trigger_context(state, ctx));
+        // CR 614.6 + CR 615.5 + CR 608.2c: work a replacement's action left behind a child
+        // prompt resumes inside that action, so its "that many" is still the amount the action
+        // owns. Held until the chain and its detached tail have run, like the trigger context.
+        let resumed_action = crate::game::quantity::resume_replacement_action(replacement_action);
         let mut chain = chain;
         // An unsettled moved-object referent must never fall back to the original source.
         if chain.context.pending_forwarded_zone_result.is_some() {
@@ -1698,6 +1751,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             chain.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
+                phase_population: false,
             }));
         }
         let enclosing_die_publication = state.die_result_publication.take();
@@ -1789,6 +1843,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // CR 608.2c: the detached "after each player" tail is the rest of the same
         // ability, so it runs under the frame's trigger context too; restore the
         // outer context only once both the chain and its tail have run.
+        drop(resumed_action);
         // CR 706.2 + CR 608.2c: each die's result is its final value after modifiers;
         // the ability's own instruction determines how multiple dice are used.
         // Actual writer authority, not event kind or scalar inequality, determines
@@ -1825,6 +1880,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             // CR 615.5: a resumed continuation completes its own paused
             // resident drain only after it has not raised another choice.
             state.finish_active_paused_post_replacement_dispatch();
+            crate::game::engine_replacement::finish_spell_resolution_exposed_by_retired_drain(
+                state, events,
+            );
             // CR 608.2c: retiring a nested dispatch can expose the outer
             // dispatch's own later instructions as the active continuation;
             // they are the next written instructions, so run them now.
@@ -2102,6 +2160,42 @@ pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
     }
 }
 
+/// CR 615.5 + CR 608.2c: dispatch the active post-replacement frame's resident, then each
+/// Ready entry that becomes its resident in turn, in the order it was queued
+/// (`PostReplacementDrainStack::install_behind_paused_resident`): Pyroclasm's Phyrexian Hydra
+/// counters and Lichenthrope's (a substitution that by CR 614.6 + CR 615.5 should come first,
+/// Command Zone #172) wait behind a Bear's paused Test of Faith counters, and both run once
+/// those finish.
+///
+/// Stops at the first pause (`waiting_for` leaves `Priority`), when other work sits on top of
+/// the frame, or once the frame is gone: exhausted, which removes it. A post-replacement frame
+/// it then exposes beneath is not this frame's work and is left to its own resume.
+fn dispatch_resident_post_replacement_work(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let frame_depth = state.resolution_stack.len();
+    loop {
+        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            state, None, None, None, events,
+        );
+        sweep_ownerless_post_replacement_strand(state);
+        if state.resolution_stack.len() < frame_depth {
+            return;
+        }
+        let Some(ResolutionFrame::PostReplacement(drains)) = state.resolution_stack.last() else {
+            return;
+        };
+        if drains.is_empty() {
+            let _ = state
+                .resolution_stack
+                .take_active_post_replacement()
+                .expect("post-replacement dispatcher may remove only its active frame");
+            return;
+        }
+        if !drains.has_ready() || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return;
+        }
+    }
+}
+
 /// CR 504.1 + CR 805.4b: a draw-step draw whose replacement asked a player to
 /// choose ("each player returns a permanent they control … instead") stays
 /// parked at the front of `pending_team_draw_step` while that choice is open.
@@ -2138,6 +2232,9 @@ fn continue_team_draw_step_after_resumed_draw(
 /// paused `PostReplacement` drain is a paired child; all other `MultiDraw`
 /// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
 /// which retires only its exact completed child and paired paused parent.
+///
+/// A step that exposes a paused parent whose child has finished resumes again
+/// (`exposes_paused_parent`), so that parent continues in the same pass.
 pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         if waits_for_resolution_choice(&state.waiting_for) {
@@ -2155,6 +2252,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
     let Some(frame) = state.resolution_stack.last().cloned() else {
         return;
     };
+    let entry_position = state.resolution_stack.position();
 
     match frame {
         ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::ChangeZone(_) => {
@@ -2166,6 +2264,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         // what puts the encode after the spell's other effects (issue #7470).
         ResolutionFrame::CipherEncode(_) => {
             crate::game::cipher::arm_parked_encode_offer(state, events);
+        }
+        // CR 508.4: an entrant put onto the battlefield attacking whose
+        // as-enters continuation paused, with no logical owner to seat it, joins
+        // combat here, once the entry's whole child stack has retired.
+        ResolutionFrame::EntryAttackSeat(_) => {
+            crate::game::zone_pipeline::resume_entry_attack_seat(state);
         }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state, events),
@@ -2301,36 +2405,29 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // A permanent spell's entry is resumed only by the exact parked
             // replacement action. This frame remains its parent while any
             // replacement-produced child work resolves; Priority does not
-            // authorize a synthetic entry completion.
+            // authorize a synthetic entry completion. The exception is a
+            // retiring drain that exposes it:
+            // `finish_spell_resolution_exposed_by_retired_drain`, called from the
+            // PostReplacement arm below and from `drain_pending_continuation`.
         }
         ResolutionFrame::PostReplacement(drains) => {
             let retired_paused_dispatch = matches!(
                 drains.resident().map(|drain| &drain.status),
                 Some(crate::types::game_state::DrainStatus::Paused)
             );
+            // CR 615.5 + CR 608.2c: work queued behind the paused dispatch
+            // (`PostReplacementDrainStack::install_behind_paused_resident`: Dralnu, Lich
+            // Lord's sacrifice behind Test of Faith's counters) becomes the resident when
+            // that dispatch retires, and runs in the same pass.
+            let queued_behind = retired_paused_dispatch && drains.has_ready_behind_resident();
             if retired_paused_dispatch {
                 // CR 614.6 + CR 615.5: the direct child has answered the
                 // continuation's prompt, so retire precisely the resident
                 // paused dispatch before considering later ready work.
                 state.finish_active_paused_post_replacement_dispatch();
-            } else {
-                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    state, None, None, None, events,
-                );
-                sweep_ownerless_post_replacement_strand(state);
-                if state
-                    .active_post_replacement_drains()
-                    .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
-                    && matches!(
-                        state.resolution_stack.last(),
-                        Some(ResolutionFrame::PostReplacement(_))
-                    )
-                {
-                    let _ = state
-                        .resolution_stack
-                        .take_active_post_replacement()
-                        .expect("post-replacement dispatcher may remove only its active frame");
-                }
+            }
+            if !retired_paused_dispatch || queued_behind {
+                dispatch_resident_post_replacement_work(state, events);
             }
             // CR 608.2c + CR 117.2e: retiring the paused dispatch can expose the
             // interrupted instruction's own parked completion (a gift's delivery, the
@@ -2353,6 +2450,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             {
                 counters::drain_pending_counter_additions(state, events);
             }
+            crate::game::engine_replacement::finish_spell_resolution_exposed_by_retired_drain(
+                state, events,
+            );
             // CR 608.2c + CR 614.12a + CR 615.5: Retiring a paused replacement
             // dispatch, or removing an exhausted frame after a nested child
             // already retired its dispatch, can expose the next ordinary
@@ -2364,10 +2464,59 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         }
     }
 
+    // CR 615.5 + CR 608.2c: this step can retire a nested dispatch and expose
+    // the outer paused dispatch of the same frame with nothing above it. Swans
+    // of Bryn Argoll's draw finishes while an Abundance reveal that replaced one
+    // of its cards is still running, so the reveal's end, whether the draw's
+    // last step or the bottom order, exposes the Swans' rider. Nothing above it
+    // is left to run, so its instruction is over: resume again, so the frame's
+    // own arm retires that dispatch and runs the work queued behind it before
+    // the game moves on. Every route that finishes a resolution step passes
+    // through here.
+    //
+    // CR 706.3b + CR 608.2c: the same holds for a die-roll frame re-parked under
+    // a results-table row whose child stack has now retired. Farideh's Fireball's
+    // row damage, replaced by Delaying Shield, puts counters that Doubling Season
+    // and Pir make the player order (CR 616.1); once that answer finishes the
+    // counters and Shield's dispatch, the roll's remaining instruction is the next
+    // work, and the spell still owes its graveyard move (CR 608.2n). No player has
+    // priority until it ends (CR 117.2e, CR 117.3b), so the frame continues here.
+    if exposes_paused_parent(state, entry_position) {
+        resume_resolution_frames(state, events);
+    }
+
     clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
     }
+}
+
+/// Whether a `resume_resolution_frames` step that began at `entry` left a paused
+/// parent on top, with `waiting_for` back at `Priority`: a paused post-replacement
+/// dispatch as the top frame's resident, or a die-roll frame re-parked mid-loop
+/// (`roll_die::active_die_roll_is_resumable`).
+///
+/// The step must have made progress (`ResolutionPosition::is_strictly_inside`),
+/// so a parent the step itself paused, which pushes rather than pops, is never
+/// taken for a finished one, and the re-resume terminates. A pending life
+/// payment's resume owns its resolution depth (CR 118.3b + CR 119.4 + CR 616.1,
+/// `engine::resume_pending_continuation_pass`), so a parent at or below that
+/// depth is left to the payment's own boundary.
+fn exposes_paused_parent(state: &GameState, entry: ResolutionPosition) -> bool {
+    matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.resolution_stack.position().is_strictly_inside(&entry)
+        && state
+            .pending_deferred_life_cost_resume
+            .as_ref()
+            .is_none_or(|resume| state.resolution_stack.len() > resume.resume_at_resolution_depth())
+        && match state.resolution_stack.last() {
+            Some(ResolutionFrame::PostReplacement(drains)) => matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(crate::types::game_state::DrainStatus::Paused)
+            ),
+            Some(ResolutionFrame::DieRoll(_)) => roll_die::active_die_roll_is_resumable(state),
+            Some(_) | None => false,
+        }
 }
 
 /// CR 608.2c + CR 117.2e: settling the top frame can expose the next written
@@ -2815,6 +2964,30 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
             ) {
+                // CR 508.4: the paused member's entry has completed, so an owed
+                // attacking seat is taken and the entrant seated before its entry
+                // is collected. With several legal attack targets the frame stays
+                // exactly as read for the answer, whose resume finds the seat
+                // already taken.
+                let owed_seat = crate::game::engine_replacement::take_owed_entry_attack_seat(
+                    state,
+                    &paused_current.delivery_events,
+                );
+                if let Some(player) =
+                    crate::game::zone_pipeline::seat_owed_entry_attacker(state, owed_seat)
+                {
+                    crate::game::replacement::park_waiting_for(state, player);
+                    return;
+                }
+                // CR 603.6d + CR 603.2c: this owner resumes only after the paused
+                // member's as-enters continuation completed, so its parked entry
+                // is collected here, once, against the realized entrant: custody
+                // takes the park (and runs its delayed half), then the owner's
+                // segment collects the ordinary half.
+                crate::game::engine_replacement::take_entry_continuation_custody(
+                    state,
+                    &paused_current.delivery_events,
+                );
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment_for(
                     state,
                     &mut logical_zone_change_group,
@@ -2822,6 +2995,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     collector,
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
+            } else {
+                // An `AlreadyCounted` member paused its move itself
+                // (`NeedsAuraAttachmentChoice`) before it was on the battlefield,
+                // so no as-enters continuation can have parked its entry.
+                debug_assert!(paused_current.delivery_events.iter().all(|event| {
+                    !crate::game::engine_replacement::entry_event_is_parked(state, event)
+                }));
             }
             logical_zone_change_group
                 .record_delivery_completion(
@@ -2857,6 +3037,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // members moved in this resume join the logical co-departed group and
         // their observer triggers are collected with earlier pause segments.
         let events_before_drain = events.len();
+        let mut entrants =
+            crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
         // CR 603.6a + CR 614.12: each member applies the entry modifications
         // resolved before the event's first member moved; never recompute
         // against the partly-moved board.
@@ -2915,6 +3097,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             );
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
                 state,
+                &mut entrants,
                 &ctx,
                 member,
                 owner,
@@ -3555,6 +3738,17 @@ fn append_to_pending_continuation_with_scope(
             return;
         }
     }
+    // CR 614.6 + CR 608.2c: a replacement action's work and the work around it resume under
+    // different scopes, so a tail of one owner never merges into the other's frame. It waits
+    // beneath the active frame instead, which keeps the merge's order (that frame's chain first).
+    if state.active_ability_continuation().is_some_and(|active| {
+        active.replacement_action != crate::game::quantity::current_replacement_action()
+    }) {
+        state
+            .insert_ability_continuation_parent_of_active(PendingContinuation::new(tail, state))
+            .expect("an active continuation accepts the tail that follows it as its parent");
+        return;
+    }
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
         if scope.is_some() {
             frame.pending.install_player_scope_tail(scope);
@@ -3719,10 +3913,13 @@ fn prepend_to_pending_continuation_with_producer(
     // combine a payment's marked rider with another chain: the answer's stamp
     // would reach both. Merge only when neither side is marked; otherwise park
     // `head` as its own frame above (the same order a merge gives).
+    // CR 614.6 + CR 608.2c: likewise a replacement action's work never merges with work of
+    // another owner (`PendingContinuation::replacement_action`).
     if x_announcement.is_none()
-        && state
-            .active_ability_continuation()
-            .is_some_and(|active| active.x_announcement.is_none())
+        && state.active_ability_continuation().is_some_and(|active| {
+            active.x_announcement.is_none()
+                && active.replacement_action == crate::game::quantity::current_replacement_action()
+        })
     {
         let frame = state
             .take_active_ability_continuation()
@@ -3742,6 +3939,7 @@ fn prepend_to_pending_continuation_with_producer(
             player_scope_tail,
             player_scope_queue_end,
             x_announcement: existing_x_announcement,
+            replacement_action,
             // The existing record is fresh: a latched one was parked above.
             head_payment_origin: _,
         } = existing;
@@ -3772,6 +3970,7 @@ fn prepend_to_pending_continuation_with_producer(
                 player_scope_tail,
                 player_scope_queue_end,
                 x_announcement: None,
+                replacement_action,
                 // CR 118.12: the latch belongs to the chain's head, which is
                 // now the spliced instruction.
                 head_payment_origin,
@@ -5417,6 +5616,11 @@ pub(crate) fn apply_parent_chain_context(
     // latch is node-local: a non-ChangeZone parent (a hand reveal, a target
     // declaration) carries none, so the wholesale hand-off must not erase it.
     let child_duration_events = std::mem::take(&mut child.context.duration_events);
+    // CR 510.2 + CR 700.1: settled damage guards belong to the remaining portions of one
+    // simultaneous batch, stamped node by node. A later instruction is a new event.
+    let child_settled_guards = std::mem::take(&mut child.context.settled_damage_guards);
+    // CR 616.1 + CR 101.4: so does a parked batch's outstanding work.
+    let child_parked_batch = std::mem::take(&mut child.context.parked_damage_batch);
     // CR 608.2c + CR 608.2d: the NamedChoice answer handler records this
     // ability's own player choices directly onto the parked continuation,
     // which can run ahead of this hand-off (as with `chosen_players` below),
@@ -5428,7 +5632,32 @@ pub(crate) fn apply_parent_chain_context(
         ..SpellContext::default()
     };
     child.context = parent.context.clone();
+    child.context.settled_damage_guards = child_settled_guards;
+    child.context.parked_damage_batch = child_parked_batch;
     child.context.face_down_in_exile |= child_face_down_in_exile;
+    // CR 608.2c: a phase action's resolved population is a one-hop input to
+    // the application-filter consumer the phase branch bound it to. It is not
+    // a producer's `forward_result` antecedent for the rest of the chain: a
+    // later instruction owns its own declarations, and a numbered
+    // `ParentTargetSlot` keeps indexing the DECLARED slots rather than the
+    // population. A zone-move `forward_result` context, by contrast,
+    // intentionally stays readable by later instructions.
+    //
+    // Known, deliberate limit: a DESCENDANT of the consuming rider is also a
+    // later instruction, so it reads the chain root's declared targets rather
+    // than the population. Every printed phase rider is immediate — Barn's
+    // "they phase out … those permanents phase in" is a separate delayed
+    // trigger that carries its own `parent_target_snapshot`, not a chain
+    // descendant — so re-stamping a descendant would reintroduce exactly the
+    // cross-instruction leak scoping this population removes.
+    if child
+        .context
+        .forwarded_result_context
+        .as_ref()
+        .is_some_and(|result| result.phase_population)
+    {
+        child.context.forwarded_result_context = None;
+    }
     for event in child_duration_events {
         if !child.context.duration_events.contains(&event) {
             child.context.duration_events.push(event);
@@ -5880,7 +6109,9 @@ fn spell_cast_in_flight(state: &GameState) -> Option<ObjectId> {
 /// CR 603.6a). Nothing is observed while an entry may still be in progress — a resolution
 /// choice or a parked replacement is pending (CR 614.12a), so `next` is parked and its resume
 /// is its own boundary — or while `entry_observation_deferred` holds (CR 611.2e / CR 303.4f /
-/// CR 603.6a + CR 101.4).
+/// CR 603.6a + CR 101.4). An entrant whose own as-enters continuation is running or paused is
+/// parked in `deferred_entry_events` (CR 603.6d + CR 614.1c) and skipped by
+/// `settle_battlefield_entry_observations`; the other entries of the same buffer still settle.
 fn settle_entries_before_instruction(
     state: &mut GameState,
     events: &[GameEvent],
@@ -6037,6 +6268,7 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -6497,7 +6729,8 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
         | ResolutionFrame::LifeTotalAssignment(_)
         | ResolutionFrame::SpellResolution(_)
         | ResolutionFrame::MutateMerge(_)
-        | ResolutionFrame::CipherEncode(_) => false,
+        | ResolutionFrame::CipherEncode(_)
+        | ResolutionFrame::EntryAttackSeat(_) => false,
     }
 }
 
@@ -6674,6 +6907,7 @@ impl MovedObjectsSource {
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::Draw { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -7160,6 +7394,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -7694,6 +7929,7 @@ fn node_with_entry_modifications(
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachPlayerCopyChosen { .. }
         | Effect::EachSourceDealsDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EmpowerJace { .. }
         | Effect::Encore
         | Effect::EndCombatPhase
@@ -9737,6 +9973,7 @@ fn instruction_outlives_declined_gate(
         illegal_target_slots: _,
         unjudged_target_slots: _,
         illegal_local_target_slots: _,
+        declared_player_target_slots: _, // announce-time role identity, no per-seat read
         controller: _,
         original_controller: _,
         context: _,
@@ -10019,6 +10256,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -11460,6 +11698,7 @@ fn effect_fields_read_filter_population(
         // duration, cost or choice: only their quantities (read above) and
         // nested definitions (the nested walk's) can read.
         Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::Explore
         | Effect::Investigate
         | Effect::Tribute { .. }
@@ -11704,6 +11943,7 @@ fn delayed_trigger_condition_reads_filter_population(
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => false,
     }
 }
@@ -12316,6 +12556,9 @@ fn replacement_condition_reads_filter_population(
         ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. } => {
             has_quantity(lhs) || has_quantity(rhs)
         }
+        ReplacementCondition::OnlyIfStatic { condition } => {
+            static_condition_reads_filter_population(condition, leaf)
+        }
         ReplacementCondition::DealtDamageThisTurnBySource { source } => has_filter(source),
         ReplacementCondition::IfControlsMatching { filter, .. } => has_filter(filter),
         // Filter-free: nothing to read.
@@ -12335,6 +12578,7 @@ fn replacement_condition_reads_filter_population(
         | ReplacementCondition::SourceTappedState { .. }
         | ReplacementCondition::EventSourceControlledBy { .. }
         | ReplacementCondition::EffectCausedDiscard
+        | ReplacementCondition::EffectCausedPlacement
         | ReplacementCondition::OnlyExtraTurn
         | ReplacementCondition::TokenSubtypeMatches { .. }
         | ReplacementCondition::TokenCoreTypeMatches { .. }
@@ -14386,6 +14630,7 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         illegal_target_slots: _,         // CR 608.2b legality stamp
         unjudged_target_slots: _,        // CR 608.2b legality stamp
         illegal_local_target_slots: _,   // CR 608.2b legality stamp
+        declared_player_target_slots: _, // CR 115.1 declared player-role identity
         controller: _,                   // player id
         original_controller: _,          // player id
         scoped_player: _,                // the seat's binding
@@ -15163,7 +15408,9 @@ fn resolve_effect_node(
         }
         // CR 608.2c: a damage instruction that pauses between its events stashes
         // its remaining recipients followed by this ability's tail, so the stash
-        // owns the tail; the chain driver must not place it a second time.
+        // owns the tail; the chain driver must not place it a second time. This
+        // includes a fight (CR 701.14a) and a parked two-phase batch, whose park
+        // reports the same contract.
         effect if deal_damage::is_multi_event_damage_instruction(effect) => {
             let (tail, progress) = LegacyEffectBoundary::run(state, ability, |state, boundary| {
                 let tail = deal_damage::resolve_instruction(state, ability, events)
@@ -15178,6 +15425,27 @@ fn resolve_effect_node(
                     deal_damage::DamageTail::Caller => TailOwnership::Caller,
                     deal_damage::DamageTail::Stashed => TailOwnership::Transferred,
                 },
+            })
+        }
+        Effect::ChangeZone { .. } => {
+            let (result, progress) =
+                LegacyEffectBoundary::run(state, ability, |state, boundary| {
+                    let result = change_zone::resolve(state, ability, events)?;
+                    retire_empty_replacement_frames(state, boundary);
+                    Ok(result)
+                })?;
+            // CR 603.2c + CR 608.2c: Detention Sphere pattern — ChangeZone to Exile
+            // resolved the same-name mass exile continuation inline as one logical
+            // event, so transfer ownership of the tail to avoid resolving it again.
+            let tail = if change_zone::same_name_mass_exile_sub(ability).is_some() {
+                TailOwnership::Transferred
+            } else {
+                TailOwnership::Caller
+            };
+            Ok(EffectStep {
+                progress,
+                result,
+                tail,
             })
         }
         _ => {
@@ -15220,9 +15488,6 @@ fn resolve_legacy_effect(
     match &ability.effect {
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
         Effect::ChangeSpeed { .. } => speed_effects::resolve_change_speed(state, ability, events),
-        Effect::ApplyPostReplacementDamage { .. } => {
-            deal_damage::resolve_post_replacement(state, ability, events)
-        }
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
         Effect::PairWith { .. } => pair_with::resolve(state, ability, events),
@@ -15257,7 +15522,6 @@ fn resolve_legacy_effect(
         Effect::UnattachAll { .. } => attach::resolve_unattach_all(state, ability, events),
         Effect::ControlNextTurn { .. } => control_next_turn::resolve(state, ability, events),
         Effect::Surveil { .. } => surveil::resolve(state, ability, events),
-        Effect::Fight { .. } => fight::resolve(state, ability, events),
         Effect::Bounce { .. } => bounce::resolve(state, ability, events),
         Effect::BounceAll { .. } => bounce::resolve_all(state, ability, events),
         Effect::Explore => explore::resolve(state, ability, events),
@@ -15290,7 +15554,10 @@ fn resolve_legacy_effect(
         | Effect::DamageAll { .. }
         | Effect::DamageEachPlayer { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
-        | Effect::EachSourceDealsDamage { .. } => {
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Fight { .. }
+        | Effect::ResumeDamageBatch { .. }
+        | Effect::ApplyPostReplacementDamage { .. } => {
             unreachable!("multi-event damage dispatch precedes the legacy adapter")
         }
         Effect::ExileTopCardContest { .. } => {
@@ -15626,24 +15893,31 @@ fn resolve_legacy_effect(
             choose_counter_adjustment::resolve(state, ability, events)
         }
         Effect::Unimplemented { name, .. } => {
-            // Log warning and return Ok (no-op) for unimplemented effects
-            eprintln!("Warning: Unimplemented effect: {}", name);
-            // Diagnostics: record the source card so the telemetry `game_summary`
-            // surface can report which cards hit an unimplemented effect this game.
-            // Oracle id when available; object name fallback covers tokens/emblems
-            // (`printed_ref == None`).
-            if let Some(obj) = state.objects.get(&ability.source_id) {
-                let id = obj
-                    .printed_ref
-                    .as_ref()
-                    .map(|p| p.oracle_id.clone())
-                    .unwrap_or_else(|| obj.name.clone());
-                state.unimplemented_oracle_ids.insert(id);
-            }
+            // A no-op for unimplemented effects, recorded as unsupported.
+            record_runtime_unimplemented(state, ability.source_id, name);
             Ok(())
         }
     }?;
     Ok(None)
+}
+
+/// The game's one runtime "unsupported" record: log `name` and record
+/// `source_id`'s card in `unimplemented_oracle_ids`, so the telemetry
+/// `game_summary` surface can report which cards hit an unsupported behaviour
+/// this game. Oracle id when available; the object's name covers tokens and
+/// emblems (`printed_ref == None`). Used by the `Effect::Unimplemented`
+/// resolver arm and by any engine route that meets a card behaviour it cannot
+/// run, so the outcome is reported rather than silently skipped.
+pub(crate) fn record_runtime_unimplemented(state: &mut GameState, source_id: ObjectId, name: &str) {
+    eprintln!("Warning: Unimplemented effect: {}", name);
+    if let Some(obj) = state.objects.get(&source_id) {
+        let id = obj
+            .printed_ref
+            .as_ref()
+            .map(|p| p.oracle_id.clone())
+            .unwrap_or_else(|| obj.name.clone());
+        state.unimplemented_oracle_ids.insert(id);
+    }
 }
 
 /// Returns true if the given effect has a handler in the engine.
@@ -16980,6 +17254,119 @@ fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
     false
 }
 
+/// CR 608.2c: True for a filter that names the phase action's resolved
+/// population itself, not an object population that merely reads the parent
+/// referent through a controller/owner qualifier.
+fn is_phase_population_referent(filter: &TargetFilter) -> bool {
+    // CR 608.2c: only the broad `ParentTarget` anaphor names the producer's
+    // forwarded result as a population. A `ParentTargetSlot { index }` is a
+    // NUMBERED declared slot of the resolving chain: it is owned by the later
+    // declaration that created it, so a phase result must never replace it.
+    matches!(filter, TargetFilter::ParentTarget)
+}
+
+/// CR 608.2c: True when `effect` is the population-shaped continuous rider
+/// that consumes a preceding phase action's result. An independently targeted
+/// rider is excluded even when its controller qualifier names the parent.
+fn phase_rider_reads_phase_population(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } if target.as_ref().is_none_or(is_phase_population_referent)
+            && static_abilities.iter().any(|static_def| {
+                static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(is_phase_population_referent)
+            })
+    )
+}
+
+/// CR 115.1 + CR 702.26b: the population a phase instruction hands to its
+/// following rider. Explicit object targets are the SELECTED population — a
+/// selected Aura is included even though it phased out indirectly with its host,
+/// while an incidental attachment is not. A mass phase action declares no
+/// object target, so it falls back to the DIRECTLY phased creatures; indirect
+/// attachments ride with their host rather than becoming separate members.
+fn phase_result_objects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    effect_events: &[GameEvent],
+) -> Vec<ObjectId> {
+    match &ability.effect {
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. } => {
+            let declared_explicit: Vec<ObjectId> = ability
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            if declared_explicit.is_empty() {
+                // A mass phase action declares no object target. Its affected
+                // creatures are the directly phased objects; indirect
+                // attachments ride with them and are not separate members of
+                // "each creature target player controls". A phase-in has no
+                // indirect marker, so every phase-in event belongs.
+                effect_events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::PermanentPhasedOut {
+                            object_id,
+                            indirect: false,
+                        } => Some(*object_id),
+                        GameEvent::PermanentPhasedIn { object_id }
+                            if matches!(&ability.effect, Effect::PhaseIn { .. }) =>
+                        {
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                // CR 115.1 + CR 702.26b: the phase handler publishes the
+                // objects it actually changed phase status for. A selected
+                // attachment that phased out indirectly with its selected host
+                // still has its own event; a stale pinned target that the
+                // handler dropped (CR 400.7) has none, so the raw declared ID
+                // must not be repinned downstream.
+                let actual: HashSet<ObjectId> = effect_events
+                    .iter()
+                    .filter_map(|event| match (&ability.effect, event) {
+                        (
+                            Effect::PhaseOut { .. },
+                            GameEvent::PermanentPhasedOut { object_id, .. },
+                        ) => Some(*object_id),
+                        (Effect::PhaseIn { .. }, GameEvent::PermanentPhasedIn { object_id }) => {
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                // CR 400.7 + CR 603.7c: membership is the SELECTED occurrence
+                // as it exists now, not the bare storage id. A stale selected
+                // occurrence must not be re-admitted just because a new
+                // incarnation of the same id appears in the incidental event
+                // slice. Preserve selection order among live occurrences.
+                ability
+                    .live_object_targets(state)
+                    .into_iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .filter(|object_id| actual.contains(object_id))
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn affected_objects_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -16997,6 +17384,28 @@ fn affected_objects_from_events(
                 } else {
                     None
                 }
+            })
+            .collect(),
+        // CR 702.26b: the DIRECTLY phased permanents are the mass population
+        // a following "they"/"those creatures" instruction names. An
+        // attachment phased out indirectly with its host is not a separate
+        // member of that population; a selected attachment is carried
+        // separately by `phase_result_objects`' explicit-target branch.
+        Effect::PhaseOut { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedOut {
+                    object_id,
+                    indirect: false,
+                } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
+        Effect::PhaseIn { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedIn { object_id } => Some(*object_id),
+                _ => None,
             })
             .collect(),
         // CR 508.1a + CR 608.2c + CR 603.7c + CR 611.2c + CR 615.11 (issue
@@ -23093,6 +23502,7 @@ fn set_player_scope_sacrifice_waiting_for(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 }
 
@@ -25141,6 +25551,9 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // CR 603.7a + CR 608.2c: "that combat" names a phase this resolution's
     // own instructions added, never one an earlier resolution added.
     state.last_added_phase_ids.clear();
+    // CR 603.7a + CR 608.2c: likewise "that turn" names a turn this
+    // resolution's own instructions granted.
+    state.last_granted_extra_turn_ids.clear();
     // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
     // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
     // alongside `last_zone_changed_ids` so cross-resolution leakage is
@@ -25516,16 +25929,10 @@ fn offer_optional_in_apnap_order(
         };
     };
     let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
+    let offer = OptionalEffectFrame::live_offer(hydrated_ability, state);
     state
         .install_direct_choice_frame(
-            ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                parked_poll: None,
-                ability: Box::new(hydrated_ability),
-                trigger_event: state.current_trigger_event.clone(),
-                trigger_events: state.current_trigger_events.clone(),
-                trigger_match_count: state.current_trigger_match_count,
-                return_result_occurrence: state.active_return_result_occurrence,
-            }),
+            ResolutionFrame::OptionalEffect(offer),
             WaitingFor::OpponentMayChoice {
                 player: first,
                 decision_subject_id,
@@ -25845,6 +26252,7 @@ fn resolve_chain_body(
                 .map(|&pid| {
                     let mut seat = per_target.clone();
                     seat.targets = vec![TargetRef::Player(pid)];
+                    seat.declared_player_target_slots.clear();
                     seat.multi_target = None;
                     (pid, seat)
                 })
@@ -25948,6 +26356,17 @@ fn resolve_chain_body(
         _ => Cow::Borrowed(ability),
     };
     let ability = ability.as_ref();
+    // CR 608.2f: read here, after the "instead" swap, because the swapped-in clause is the
+    // one that can start a run (Kamahl's Sledge: "instead Kamahl's Sledge deals 4 damage to
+    // that creature and 4 damage to that creature's controller").
+    let joined_run_owned;
+    let ability = match deal_damage::settle_joined_damage_run(state, ability) {
+        Some(stamped) => {
+            joined_run_owned = stamped;
+            &*joined_run_owned
+        }
+        None => ability,
+    };
 
     // CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: A random
     // `Effect::Choose` ("choose a player at random") or `Effect::ChooseFromZone`
@@ -27034,16 +27453,13 @@ fn resolve_chain_body(
                 )?;
                 return Ok(progress);
             }
+            let offer = OptionalEffectFrame::live_offer(
+                ability_with_event_context_targets(state, ability),
+                state,
+            );
             state
                 .install_direct_choice_frame(
-                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                        parked_poll: None,
-                        ability: Box::new(ability_with_event_context_targets(state, ability)),
-                        trigger_event: state.current_trigger_event.clone(),
-                        trigger_events: state.current_trigger_events.clone(),
-                        trigger_match_count: state.current_trigger_match_count,
-                        return_result_occurrence: state.active_return_result_occurrence,
-                    }),
+                    ResolutionFrame::OptionalEffect(offer),
                     WaitingFor::ResolutionOptionalPaymentChoice {
                         player: payer,
                         source_id: ability.source_id,
@@ -27084,28 +27500,12 @@ fn resolve_chain_body(
         }
         let hydrated_ability = ability_with_event_context_targets(state, ability);
         let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
+        // CR 614.6 + CR 615.5: a "may" reached inside a replacement's own action is offered with
+        // that action's amount (`OptionalEffectFrame::replacement_action`).
+        let offer = OptionalEffectFrame::live_offer(hydrated_ability, state);
         state
             .install_direct_choice_frame(
-                ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                    parked_poll: None,
-                    ability: Box::new(hydrated_ability),
-                    // CR 608.2: capture the triggering event in lockstep with the stashed
-                    // ability while `current_trigger_event` is still live (we are inside
-                    // `execute_effect`). Restored when the optional decision resumes so an
-                    // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-                    // other event-context refs exactly as a non-optional trigger would.
-                    trigger_event: state.current_trigger_event.clone(),
-                    // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
-                    // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
-                    // `CounterAdded` occurrence when the decision resumes.
-                    trigger_events: state.current_trigger_events.clone(),
-                    // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-                    // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-                    // permanent-from-hand sub-effect) resumes with the same
-                    // `EventContextAmount` the pre-pause resolution observed.
-                    trigger_match_count: state.current_trigger_match_count,
-                    return_result_occurrence: state.active_return_result_occurrence,
-                }),
+                ResolutionFrame::OptionalEffect(offer),
                 WaitingFor::OptionalEffectChoice {
                     player: prompt_player,
                     decision_subject_id,
@@ -28469,6 +28869,17 @@ fn resolve_chain_body(
         vec![]
     };
     let effect_events = &events[events_before..];
+    // CR 608.2c: collect the phase population only when the immediate rider
+    // actually consumes it. The owned vector ends the borrow of `events` before
+    // later resolution steps mutate the event log.
+    let phase_result_for_rider = (matches!(
+        &ability.effect,
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+    ) && ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub| phase_rider_reads_phase_population(&sub.effect)))
+    .then(|| phase_result_objects(state, ability, effect_events));
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
@@ -29502,6 +29913,13 @@ fn resolve_chain_body(
                 ability.effect,
                 Effect::RollDie { .. } | Effect::GiftDelivery { .. }
             ) || sub_clone.reads_return_result.is_some()
+                || matches!(
+                    ability.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                )
                 || state
                     .resolution_stack
                     .copy_token_at_child_boundary(child_stack_start)
@@ -29513,14 +29931,18 @@ fn resolve_chain_body(
                 // so insert it outside the whole child stack, at the boundary captured
                 // before resolving the producer. A named-result reader needs this because
                 // a replacement post-effect may have parked a continuation beneath the
-                // producer's batch frame; a copy-token producer parks its own batch owner
-                // at that boundary; a die roll parks its DieRoll frame, and a gift delivery
+                // producer's batch frame; a battlefield move must finish its entry
+                // replacements before its later instructions (Flash's payment);
+                // a copy-token producer parks its own batch owner at that boundary;
+                // a die roll parks its DieRoll frame, and a gift delivery
                 // (`gift_delivery::resolve`) its own completion, at the boundary captured
                 // before the producer, so the rest of the chain is inserted outside both.
                 // CR 608.2c + CR 616.1g: a damage instruction reaches here only when it
                 // stashed nothing (`DamageTail::Caller`) — its last recipient's substitute
                 // left a prompt open inside the child stack (a Szadek mill after its
-                // counters), and the next instruction follows all of that work.
+                // counters), or its rider paused and its remaining recipients, or its
+                // parked batch, wait inside the child stack — and the next instruction
+                // follows all of that work.
                 let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
                 pending.pending_return_result_producer = pending_return_result_producer;
                 state
@@ -29900,6 +30322,18 @@ fn resolve_chain_body(
         });
         let sub = bound_sub.as_ref().unwrap_or(sub);
 
+        // CR 608.2c: only a population-shaped continuous rider needs the phase
+        // action's resolved set forwarded. A direct `ParentTarget` instruction
+        // (Oubliette's "Tap that creature as it phases in") is bound by the
+        // ordinary parent-target propagation and must keep that path. A
+        // `GenericEffect` that declares its own real target keeps that target's
+        // authority even when its controller qualifier names the parent: the
+        // qualifier parameterizes the rider's own population, it does not make
+        // the parent's phase result the rider's antecedent. Only a pure
+        // `ParentTarget`/`ParentTargetSlot` referent on both the instruction and
+        // its application filter forwards the phase population.
+        let phase_rider_reads_population = phase_rider_reads_phase_population(&sub.effect);
+
         // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
         // complement, and that binding is EMPTY — the pick exhausted the eligible
         // pool, so "the other" names no object at all
@@ -30044,6 +30478,36 @@ fn resolve_chain_body(
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 attachment_candidates,
             );
+            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+        } else if matches!(
+            &ability.effect,
+            Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+        ) && phase_rider_reads_population
+        {
+            // CR 608.2c: a phase instruction's resolved population is the
+            // antecedent for a following `ParentTarget` continuous rider.
+            // Forward the actual objects through the result-binding authority
+            // a producer uses, marked as a phase population so the hand-off
+            // below keeps it scoped to this application-filter consumer.
+            // `effect.rs`'s inherited-target path then binds one transient
+            // effect per phased permanent. Install the context even when the
+            // set is EMPTY: a completed zero-object phase action must bind no
+            // rider, not fall back to the player-only parent target.
+            let mut sub_with_context = sub.as_ref().clone();
+            apply_parent_chain_context(
+                &mut sub_with_context,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            // CR 608.2c: phase-out/phase-in affect a resolved population, not a
+            // declared object target. The vector was collected only because
+            // this immediate rider was recognized as its consumer.
+            sub_with_context.context.forwarded_result_context =
+                Some(Box::new(ForwardedResultContext::phase_population(
+                    state,
+                    phase_result_for_rider.as_deref().unwrap_or(&[]),
+                )));
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -32592,6 +33056,7 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ControllerControlledMatchingAsCast { filter } => ability
             .context
             .controller_controlled_as_cast
+            .as_slice()
             .iter()
             .any(|snapshot_filter| snapshot_filter == filter),
         // CR 608.2c: "If it's your turn" — check active player against the
@@ -33607,6 +34072,7 @@ mod tests {
                                         Some(Box::new(ForwardedResultContext {
                                             targets: vec![],
                                             object_incarnations: vec![],
+                                            phase_population: false,
                                         }));
                                 }
                                 "detached-tail" => {
@@ -33643,6 +34109,7 @@ mod tests {
                                     player_id: P0,
                                     sides: 1,
                                     result: Some(1),
+                                    ..
                                 }
                             )), "{site}, links={links}: the die must publish before its branch");
                             let body_gain = if site == "detached-tail" { 2 } else { 0 };
@@ -34058,6 +34525,46 @@ mod tests {
             .iter()
             .any(|event| matches!(event, GameEvent::DieRolled { .. })));
         assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed fixture: no printed card resumes a continuation whose die
+    /// instruction rolls zero dice. Hydradoodle and Neverwinter Hydra entering
+    /// with X = 0 (CR 107.3m) are the nearest printed anchors. CR 706.1 +
+    /// CR 706.4 + CR 608.2c: the zero-dice instruction's result is a determined
+    /// 0, published like every instruction result, so the continuation drain
+    /// keeps it instead of restoring the caller's earlier scalar.
+    #[test]
+    fn continuation_drain_preserves_a_zero_dice_results_zero() {
+        let (mut state, source, ambient) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 0 },
+            sides: 6,
+            modifier: None,
+            results: vec![],
+        });
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::RollDie,
+                    source_id,
+                    ..
+                } if *source_id == source
+            )),
+            "reach: the zero-dice instruction resolved"
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DieRolled { .. })));
+        assert_eq!(state.die_result_this_resolution, Some(0));
+        assert_eq!(state.die_result_publication, Some(Some(0)));
         assert_eq!(state.current_trigger_event, Some(ambient.clone()));
         assert_eq!(state.current_trigger_events, vec![ambient]);
         assert_eq!(state.current_trigger_match_count, Some(17));
@@ -35219,9 +35726,10 @@ mod tests {
                         scope: crate::types::ability::CountScope::Controller,
                         card_types: vec![],
                     },
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         filter: Some(filter.clone()),
                         scope: crate::types::ability::CountScope::Controller,
+                        window: TurnWindow::ThisTurn,
                     },
                     QuantityRef::SpellsCastBeforeTriggeringSpell {
                         filter: Some(filter.clone()),
@@ -36286,8 +36794,9 @@ mod tests {
                 QuantityRef::StartingLifeTotal {
                     player: player.clone(),
                 },
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: player.clone(),
+                    window: TurnWindow::ThisTurn,
                 },
                 QuantityRef::PartySize {
                     player: player.clone(),
@@ -44417,6 +44926,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         crate::game::engine::apply(
@@ -44658,6 +45168,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -44705,6 +45216,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             });
             state.waiting_for = WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
@@ -50746,6 +51258,546 @@ mod tests {
         );
     }
 
+    /// CR 115.1 + CR 702.26b: a phase instruction hands its SELECTED objects
+    /// to a following rider. A selected attachment is kept even when it phased
+    /// out indirectly with its host (Barn); an incidental attachment is not
+    /// (Oubliette). A mass phase action uses only directly phased creatures.
+    #[test]
+    fn phase_result_objects_use_selected_targets_not_incidental_attachments() {
+        let host = ObjectId(1);
+        let aura = ObjectId(2);
+        let direct = GameEvent::PermanentPhasedOut {
+            object_id: host,
+            indirect: false,
+        };
+        let indirect = GameEvent::PermanentPhasedOut {
+            object_id: aura,
+            indirect: true,
+        };
+
+        let selected = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(aura)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let state = GameState::new_two_player(42);
+        assert_eq!(
+            phase_result_objects(&state, &selected, &[direct.clone(), indirect.clone()]),
+            vec![host, aura],
+            "the selected host and selected Aura must both forward"
+        );
+
+        let mass = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        assert_eq!(
+            phase_result_objects(&state, &mass, &[direct, indirect]),
+            vec![host],
+            "a mass phase action must not add an incidental indirect attachment"
+        );
+    }
+
+    /// CR 115.1 + CR 400.7 + CR 702.26b: the forwarded phase population is the
+    /// objects the handler actually changed, not the raw declared IDs. A stale
+    /// pinned phase-in target publishes no event and must not be repinned; a
+    /// selected attachment that phased out indirectly with its selected host
+    /// does publish one and must stay in the set.
+    #[test]
+    fn phase_result_objects_publish_handler_results_not_stale_declared_ids() {
+        let host = ObjectId(1);
+        let selected_aura = ObjectId(2);
+        let stale = ObjectId(3);
+        let incidental = ObjectId(4);
+
+        let phase_out = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(selected_aura)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let phase_out_events = [
+            GameEvent::PermanentPhasedOut {
+                object_id: host,
+                indirect: false,
+            },
+            GameEvent::PermanentPhasedOut {
+                object_id: selected_aura,
+                indirect: true,
+            },
+            GameEvent::PermanentPhasedOut {
+                object_id: incidental,
+                indirect: true,
+            },
+        ];
+        assert_eq!(
+            phase_result_objects(
+                &GameState::new_two_player(42),
+                &phase_out,
+                &phase_out_events
+            ),
+            vec![host, selected_aura],
+            "selected indirect attachment stays; incidental attachment and stale ID do not"
+        );
+
+        let phase_in = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(stale)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let phase_in_events = [GameEvent::PermanentPhasedIn { object_id: host }];
+        assert_eq!(
+            phase_result_objects(&GameState::new_two_player(42), &phase_in, &phase_in_events),
+            vec![host],
+            "a stale declared phase-in target must not be repinned or forwarded"
+        );
+
+        // CR 400.7 + CR 603.7c: the stale selected occurrence must not be
+        // re-admitted merely because a NEW incarnation of the same storage id
+        // phases in indirectly with a live host.
+        let mut state = GameState::new_two_player(42);
+        let returned = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(77),
+            PlayerId(1),
+            "Returned Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&returned).unwrap().incarnation = 2;
+        let mut stale_phase_in = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(returned)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        stale_phase_in.target_incarnations =
+            vec![crate::types::identifiers::ObjectIncarnationRef::of(
+                returned, 1,
+            )];
+        assert!(
+            phase_result_objects(
+                &state,
+                &stale_phase_in,
+                &[GameEvent::PermanentPhasedIn {
+                    object_id: returned
+                }]
+            )
+            .is_empty(),
+            "an incidental phase-in of a new incarnation must not revive the stale selected occurrence"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2b: a `GenericEffect` that independently declares its
+    /// own target must keep that target even when its controller qualifier reads
+    /// the parent referent. The parent phase result is not its antecedent.
+    #[test]
+    fn phase_result_does_not_override_an_independently_targeted_rider() {
+        let mut state = GameState::new_two_player(42);
+        let phased = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Phased A".to_string(),
+            Zone::Battlefield,
+        );
+        let rider_target = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rider B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [phased, rider_target] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        let source = ObjectId(99);
+        let rider = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ParentTargetController),
+                )),
+                end_cost: None,
+            },
+            vec![TargetRef::Object(rider_target)],
+            source,
+            PlayerId(0),
+        );
+        let chain = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(phased)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(rider);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let bound = state
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.source_id == source)
+            .expect("the rider must install a transient effect");
+        assert_eq!(
+            bound.affected,
+            TargetFilter::SpecificObject { id: rider_target },
+            "the rider must bind its independently declared target, not the phased object"
+        );
+    }
+
+    /// CR 608.2c + CR 702.26b: a phase action's resolved population is scoped to
+    /// the immediate application-filter consumer. The grant that consumes the
+    /// population binds the object the phase action changed; a following
+    /// numbered `ParentTargetSlot` still indexes the DECLARED slots and must not
+    /// read the phase result in the population grant's place.
+    #[test]
+    fn phase_population_stays_with_its_rider_and_a_numbered_slot_keeps_its_declaration() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let declared = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Declared".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Phased".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [declared, phased] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let population_grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTargetSlot { index: 0 })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTargetSlot { index: 0 }),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        ));
+        let chain = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(declared)],
+            source,
+            P0,
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(phased)],
+                source,
+                P0,
+            )
+            .sub_ability(population_grant),
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let affected_for = |keyword: Keyword| {
+            state
+                .transient_continuous_effects
+                .iter()
+                .find(|effect| {
+                    effect
+                        .modifications
+                        .contains(&ContinuousModification::AddKeyword {
+                            keyword: keyword.clone(),
+                        })
+                })
+                .map(|effect| effect.affected.clone())
+                .unwrap_or_else(|| panic!("missing grant for {keyword:?}"))
+        };
+        assert_eq!(
+            affected_for(Keyword::Flying),
+            TargetFilter::SpecificObject { id: phased },
+            "the population grant must bind the object the phase action changed"
+        );
+        assert_eq!(
+            affected_for(Keyword::Haste),
+            TargetFilter::SpecificObject { id: declared },
+            "the numbered slot must index the declared slot, not the phase population"
+        );
+    }
+
+    /// CR 608.2c + CR 115.1: a numbered-slot rider is not a phase-population
+    /// consumer. Directly following the phase action, it binds the slot declared
+    /// before the phase action rather than indexing the phase result by number.
+    #[test]
+    fn phase_population_is_not_forwarded_to_a_numbered_slot_rider() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let declared = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Declared".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Phased".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [declared, phased] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let chain = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(declared)],
+            source,
+            P0,
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(phased)],
+                source,
+                P0,
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTargetSlot { index: 0 })
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTargetSlot { index: 0 }),
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the slot rider must still install its grant"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject { id: declared },
+            "slot 0 names the declaration before the phase action, not the phase result"
+        );
+    }
+
+    /// CR 608.2c: a phase population is consumed by its application-filter
+    /// rider and is spent there. A later instruction that declares its own B
+    /// owns that referent, so a grant riding it binds B — never the phased A
+    /// the earlier rider consumed.
+    #[test]
+    fn phase_population_is_not_reused_by_a_later_declaration() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Phased A".to_string(),
+            Zone::Battlefield,
+        );
+        let newly_declared = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Newly Declared B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [phased, newly_declared] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let population_rider = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        )
+        .sub_ability(
+            // The newly declared B: an instruction that owns its own referent.
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(newly_declared)],
+                source,
+                P0,
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        );
+        let chain = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(phased)],
+            source,
+            P0,
+        )
+        .sub_ability(population_rider);
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let affected_for = |keyword: Keyword| {
+            state
+                .transient_continuous_effects
+                .iter()
+                .find(|effect| {
+                    effect
+                        .modifications
+                        .contains(&ContinuousModification::AddKeyword {
+                            keyword: keyword.clone(),
+                        })
+                })
+                .map(|effect| effect.affected.clone())
+                .unwrap_or_else(|| panic!("missing grant for {keyword:?}"))
+        };
+        assert_eq!(
+            affected_for(Keyword::Flying),
+            TargetFilter::SpecificObject { id: phased },
+            "the population rider binds the object the phase action changed"
+        );
+        assert_eq!(
+            affected_for(Keyword::Haste),
+            TargetFilter::SpecificObject { id: newly_declared },
+            "a later declaration owns its referent; the phase population must not be reused"
+        );
+    }
+
     /// CR 608.2c + CR 701.15a + CR 122.1: when a counter instruction is
     /// followed by "goad each creature that had counters put on it this way",
     /// the countered objects publish as the tracked set consumed by GoadAll.
@@ -53294,6 +54346,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -53343,6 +54396,7 @@ mod tests {
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             },
             GameAction::SelectCards {
                 cards: vec![second],
@@ -63110,13 +64164,13 @@ mod tests {
             PlayerId(0),
         )
         .context(SpellContext {
-            controller_controlled_as_cast: vec![filter],
+            controller_controlled_as_cast: vec![filter].into(),
             ..SpellContext::default()
         });
 
         assert!(evaluate_condition(&condition, &state, &ability));
 
-        ability.context.controller_controlled_as_cast.clear();
+        ability.context.controller_controlled_as_cast = Default::default();
         assert!(!evaluate_condition(&condition, &state, &ability));
     }
 
@@ -66237,8 +67291,9 @@ mod tests {
         assert_eq!(
             candidate_player_scalar(
                 p,
-                &QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::ScopedPlayer
+                &QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window: TurnWindow::ThisTurn,
                 }
             ),
             Some(3)
@@ -71356,7 +72411,10 @@ mod entry_observation_settlement_tests {
                     record.co_departed.push(ObjectId(999));
                 }
             }
-            state.deferred_entry_events = vec![parked_event];
+            state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+                parked_event,
+                None,
+            )];
             state.waiting_for = WaitingFor::CopyTargetChoice {
                 player: PlayerId(0),
                 source_id: parked,
@@ -71376,6 +72434,42 @@ mod entry_observation_settlement_tests {
                 "only the unparked entry (perturb={perturb})"
             );
         }
+    }
+
+    /// U4-T1. CR 603.6d + CR 614.1c: parking is per entrant. At a boundary
+    /// with no resolution choice and no parked replacement (an inline as-enters
+    /// continuation), the entrant whose own continuation is running is parked
+    /// by its ledger key and skipped; the other entry of the same buffer still
+    /// settles.
+    #[test]
+    fn boundary_skips_only_the_parked_as_enters_entrant() {
+        let completed = node(return_to_battlefield());
+        let next = node(put_counter());
+        let mut state = GameState::new_two_player(3);
+        let (_, mut events) = entered(&mut state, 1);
+        let (other, more) = entered(&mut state, 2);
+        events.extend(more);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_replacement.is_none());
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            events[0].clone(),
+            None,
+        )];
+        settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
+        let observed: Vec<ObjectId> = state
+            .battlefield_entry_observations
+            .values()
+            .map(|row| row.identity.reference.object_id)
+            .collect();
+        assert_eq!(observed, vec![other], "only the unparked entrant");
+
+        // Positive pair: with nothing parked, both entrants are observed.
+        let mut state = GameState::new_two_player(3);
+        let (_, mut events) = entered(&mut state, 1);
+        let (_, more) = entered(&mut state, 2);
+        events.extend(more);
+        settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
+        assert_eq!(state.battlefield_entry_observations.len(), 2);
     }
 
     /// S-b: the resume call (`completed = None`) settles a completed entry before a resumed
@@ -74087,6 +75181,494 @@ mod parser_oracle_effect_tests {
 }
 
 #[cfg(test)]
+mod replacement_action_continuation_tests {
+    use super::*;
+    use crate::game::quantity::with_replacement_action_scope;
+    use crate::types::game_state::ReplacementActionScope;
+
+    fn draw(value: i32) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    fn draws(mut chain: &ResolvedAbility) -> Vec<i32> {
+        let mut counts = Vec::new();
+        loop {
+            if let Effect::Draw {
+                count: QuantityExpr::Fixed { value },
+                ..
+            } = &chain.effect
+            {
+                counts.push(*value);
+            }
+            match chain.sub_ability.as_deref() {
+                Some(next) => chain = next,
+                None => return counts,
+            }
+        }
+    }
+
+    fn frame(frame: Option<&ResolutionFrame>) -> &PendingContinuation {
+        match frame {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => &frame.pending,
+            other => panic!("expected an ability continuation, got {other:?}"),
+        }
+    }
+
+    fn life(amount: QuantityExpr) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount,
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    fn action_life() -> ResolvedAbility {
+        life(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        })
+    }
+
+    fn paid_life(value: i32) -> ResolvedAbility {
+        let mut rider =
+            life(QuantityExpr::Fixed { value }).condition(AbilityCondition::effect_performed());
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        rider
+    }
+
+    fn draw_payment() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::EffectCost {
+                    effect: Box::new(draw(1).effect),
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    // This is a typed continuation seam witness: no printed sequence is claimed to
+    // create these adjacent records. The nearest printed draw cost is Psychic Vortex's
+    // cumulative upkeep; it does not carry this synthetic fresh-payment tail.
+    // The actual PayCost and amount readers run normally.
+    // CR 118.12 + CR 608.2c: only the accepted payment head keeps its latch.
+    #[test]
+    fn latched_payment_and_replacement_action_keep_separate_continuation_heads() {
+        use crate::game::scenario::{GameScenario, P1};
+        let mut scenario = GameScenario::new();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Maralen of the Mornsong",
+            2,
+            3,
+            "Players can't draw cards.\nAt the beginning of each player's draw step, that player loses 3 life, searches their library for a card, puts it into their hand, then shuffles.",
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        crate::game::layers::evaluate_layers(state);
+        let accepted = draw_payment()
+            .sub_ability(paid_life(3).sub_ability(draw_payment().sub_ability(paid_life(13))));
+        with_replacement_action_scope(Some(2), || {
+            prepend_to_pending_continuation_with_producer(
+                state,
+                accepted,
+                None,
+                None,
+                ResolutionPaymentOrigin::LatchedSuffix,
+            );
+            prepend_to_pending_continuation(state, action_life());
+        });
+        assert_eq!(
+            state.resolution_stack.len(),
+            2,
+            "the latch cannot move to the new head"
+        );
+        let active = frame(state.resolution_stack.last());
+        assert!(active.head_payment_origin.is_fresh_choice());
+        assert_eq!(
+            active.replacement_action,
+            Some(ReplacementActionScope { amount: 2 })
+        );
+        let accepted = frame(state.resolution_stack.active_predecessor());
+        assert_eq!(
+            accepted.head_payment_origin,
+            ResolutionPaymentOrigin::LatchedSuffix
+        );
+        assert!(matches!(accepted.chain.effect, Effect::PayCost { .. }));
+        assert_eq!(
+            accepted.replacement_action,
+            Some(ReplacementActionScope { amount: 2 })
+        );
+
+        prepend_to_pending_continuation(state, draw_payment().sub_ability(paid_life(11)));
+        assert_eq!(
+            state.resolution_stack.len(),
+            3,
+            "ordinary work owns a separate record"
+        );
+        let ordinary = frame(state.resolution_stack.last());
+        assert!(ordinary.head_payment_origin.is_fresh_choice());
+        assert_eq!(ordinary.replacement_action, None);
+        drain_pending_continuation(state, &mut Vec::new());
+        assert_eq!(
+            state.players[0].life, 25,
+            "fresh impossible payment earns no rider; action reads 2; latched payment earns 3"
+        );
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.resolving_head_payment_origin.is_fresh_choice());
+        assert_eq!(crate::game::quantity::current_replacement_action(), None);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    // A typed replacement-action entry is deliberate: this isolates the continuation
+    // contract without inventing a printed replacement with a draw-then-life action.
+    // Delaying Shield is the nearest printed action-amount reader, but adds counters.
+    // CR 614.17c + CR 614.6: the stale draw is ignored, but the action still owns its tail.
+    #[test]
+    fn impossible_parked_draw_preserves_replacement_action_continuation_amount() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::actions::GameAction;
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(
+            P0,
+            &["Plains", "Island", "Swamp", "Mountain", "Forest", "Plains"],
+        );
+        let imp = scenario.add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text("Flying\nWhenever this creature deals combat damage to a creature, destroy that creature.\nDredge 5 (If you would draw a card, you may mill five cards instead. If you do, return this card from your graveyard to your hand.)").id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Maralen of the Mornsong",
+            2,
+            3,
+            "Players can't draw cards.\nAt the beginning of each player's draw step, that player loses 3 life, searches their library for a card, puts it into their hand, then shuffles.",
+        );
+        let humility = scenario
+            .add_enchantment_from_oracle(
+                P1,
+                "Humility",
+                "All creatures lose all abilities and have base power and toughness 1/1.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        let library_before = runner.state().players[0].library.len();
+        runner.state_mut().current_trigger_match_count = Some(9);
+        with_replacement_action_scope(Some(2), || {
+            resolve_ability_chain(
+                runner.state_mut(),
+                &draw(1).sub_ability(action_life()),
+                &mut Vec::new(),
+                1,
+            )
+            .unwrap();
+        });
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        assert!(runner.state().resolution_stack.iter().any(|frame| matches!(
+            frame, ResolutionFrame::AbilityContinuation(frame)
+                if frame.pending.replacement_action == Some(ReplacementActionScope { amount: 2 })
+        )), "the paused draw has an action-owned continuation parent");
+        let state = runner.state_mut();
+        state.battlefield.retain(|id| *id != humility);
+        state.objects.get_mut(&humility).unwrap().zone = Zone::Graveyard;
+        crate::game::layers::evaluate_layers(state);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        let state = runner.state();
+        assert_eq!(
+            state.players[0].library.len(),
+            library_before,
+            "no draw or dredge mill"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&imp),
+            "the impossible draw cannot return the Imp"
+        );
+        assert_eq!(
+            state.players[0].life, 22,
+            "the resumed action reads its own 2 rather than the enclosing trigger's 9"
+        );
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.pending_replacement.is_none());
+        assert_eq!(crate::game::quantity::current_replacement_action(), None);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 614.6 + CR 615.5 + CR 608.2c: a continuation parked inside a replacement's action
+    /// carries that action (and its amount) for the later `apply()` that resumes it. Work of the
+    /// same action merges into it; work of another owner never does. A tail appended from
+    /// outside waits beneath it (it runs after, as a merge would have run it), and a head
+    /// prepended from outside is parked above it (it runs first, as a merge would have run it).
+    #[test]
+    fn a_replacement_actions_continuation_never_merges_with_work_of_another_owner() {
+        let action = Some(ReplacementActionScope { amount: 2 });
+        let mut state = GameState::new_two_player(42);
+        with_replacement_action_scope(Some(2), || {
+            let pending = PendingContinuation::new(Box::new(draw(1)), &state);
+            state.park_ability_continuation(pending);
+            append_to_pending_continuation(&mut state, Some(Box::new(draw(2))));
+        });
+        assert_eq!(state.resolution_stack.len(), 1, "same owner: merged");
+        let active = frame(state.resolution_stack.last());
+        assert_eq!(active.replacement_action, action);
+        assert_eq!(draws(&active.chain), vec![1, 2]);
+
+        append_to_pending_continuation(&mut state, Some(Box::new(draw(3))));
+        assert_eq!(state.resolution_stack.len(), 2, "other owner: not merged");
+        let active = frame(state.resolution_stack.last());
+        assert_eq!(active.replacement_action, action);
+        assert_eq!(draws(&active.chain), vec![1, 2]);
+        let beneath = frame(state.resolution_stack.active_predecessor());
+        assert_eq!(beneath.replacement_action, None);
+        assert_eq!(draws(&beneath.chain), vec![3]);
+
+        prepend_to_pending_continuation(&mut state, draw(4));
+        assert_eq!(state.resolution_stack.len(), 3, "other owner: not merged");
+        let active = frame(state.resolution_stack.last());
+        assert_eq!(active.replacement_action, None);
+        assert_eq!(draws(&active.chain), vec![4]);
+        let beneath = frame(state.resolution_stack.active_predecessor());
+        assert_eq!(beneath.replacement_action, action);
+        assert_eq!(draws(&beneath.chain), vec![1, 2]);
+    }
+
+    /// The positive life changes in `events`.
+    fn gains(events: &[GameEvent]) -> Vec<i32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The damage dealt to `player` in `events`.
+    fn dealt_to_player(events: &[GameEvent], player: PlayerId) -> Vec<u32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    target: TargetRef::Player(target),
+                    amount,
+                    ..
+                } if *target == player => Some(*amount),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The replacement action the live optional prompt was offered in, if any.
+    fn offered_in(state: &GameState) -> Option<ReplacementActionScope> {
+        state
+            .active_optional_effect_frame()
+            .expect("a live optional frame")
+            .replacement_action
+    }
+
+    /// After an answer: the action settled, no frame is left, and no replacement action's
+    /// scope outlived it.
+    fn assert_answer_settled(state: &GameState) {
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            state.waiting_for
+        );
+        assert!(state.resolution_stack.is_empty());
+        assert_eq!(crate::game::quantity::current_replacement_action(), None);
+    }
+
+    // A typed seam witness: no printed replacement's action holds a plain "you may gain that
+    // much life". The nearest printed reader is Channel Harm ("If damage is prevented this way,
+    // you may have Channel Harm deal that much damage to target creature."), whose rows are in
+    // `unpreventable_damage_prevention_effects`. The optional gate and the amount reader run
+    // normally.
+    // CR 614.6 + CR 615.5 + CR 608.2d: a "may" reached inside a replacement's own action is
+    // answered by a later action, and its "that much" is still the action's amount.
+    #[test]
+    fn a_may_reached_inside_a_replacement_action_resolves_inside_it() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::actions::GameAction;
+        let mut may = action_life();
+        may.optional = true;
+        for accept in [true, false] {
+            let mut runner = GameScenario::new().build();
+            with_replacement_action_scope(Some(2), || {
+                resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+            });
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OptionalEffectChoice { player: P0, .. }
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(
+                offered_in(runner.state()),
+                Some(ReplacementActionScope { amount: 2 })
+            );
+            assert_eq!(crate::game::quantity::current_replacement_action(), None);
+            let events = runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap()
+                .events;
+            assert_eq!(gains(&events), if accept { vec![2] } else { vec![] });
+            assert_eq!(runner.state().players[0].life, if accept { 22 } else { 20 });
+            assert_answer_settled(runner.state());
+        }
+
+        // The positive control: the same "may" offered outside any replacement action, or inside
+        // one that owns no amount, carries none.
+        for scope in [None, Some(None)] {
+            let mut runner = GameScenario::new().build();
+            match scope {
+                None => {
+                    resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+                }
+                Some(amount) => with_replacement_action_scope(amount, || {
+                    resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+                }),
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            assert_eq!(offered_in(runner.state()), None, "scope: {scope:?}");
+        }
+    }
+
+    // A typed seam witness: no printed replacement's action holds an any-player "may" (an
+    // Oracle census finds only activation permissions). Browbeat ("Any player may have
+    // Browbeat deal 5 damage to them. If no one does, target player draws three cards.") is
+    // the nearest printed head shape; these fixtures read the action's amount instead of 5.
+    // CR 614.6 + CR 615.5 + CR 608.2d + CR 101.4: each seat's answer resolves inside the
+    // action the offer was made in, the all-declined completion and the next seat's re-offer
+    // included.
+    #[test]
+    fn an_any_player_may_inside_a_replacement_action_resolves_inside_it() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::actions::GameAction;
+
+        // "Any opponent may gain that much life for you. If no one does, gain that much life."
+        for accept in [true, false] {
+            let mut runner = GameScenario::new().build();
+            let mut may =
+                action_life().sub_ability(action_life().condition(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                }));
+            may.optional = true;
+            may.optional_for = Some(OpponentMayScope::AnyOpponent);
+            with_replacement_action_scope(Some(2), || {
+                resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+            });
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OpponentMayChoice { player: P1, .. }
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(
+                offered_in(runner.state()),
+                Some(ReplacementActionScope { amount: 2 })
+            );
+            let events = runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap()
+                .events;
+            assert_eq!(gains(&events), vec![2], "accept: {accept}");
+            assert_answer_settled(runner.state());
+        }
+
+        // "Any player may have ~ deal that much damage to them."
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Damage Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let mut may = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        may.optional = true;
+        may.optional_for = Some(OpponentMayScope::AnyPlayer);
+        with_replacement_action_scope(Some(2), || {
+            resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+        });
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::OpponentMayChoice { player: P0, remaining, .. } if *remaining == [P1]
+            ),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            offered_in(runner.state()),
+            Some(ReplacementActionScope { amount: 2 })
+        );
+        let events = runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap()
+            .events;
+        assert_eq!(dealt_to_player(&events, P0), vec![2]);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OpponentMayChoice { player: P1, .. }
+            ),
+            "the acceptance re-offers the next seat: {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            offered_in(runner.state()),
+            Some(ReplacementActionScope { amount: 2 }),
+            "the re-offer belongs to the same action"
+        );
+        assert_eq!(crate::game::quantity::current_replacement_action(), None);
+        let events = runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap()
+            .events;
+        assert_eq!(dealt_to_player(&events, P1), vec![2]);
+        assert_eq!(runner.state().players[0].life, 18);
+        assert_eq!(runner.state().players[1].life, 18);
+        assert_answer_settled(runner.state());
+    }
+}
+
+#[cfg(test)]
 mod library_reorder_iteration_carrier_tests {
     use super::*;
     use crate::game::zones::{create_object, LibraryReorderOperation};
@@ -74210,8 +75792,10 @@ mod library_reorder_iteration_carrier_tests {
         let incarnations = [state.objects[&a].incarnation, state.objects[&b].incarnation];
 
         let reorder = LibraryReorderOperation::begin(&state, &[b, a]);
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[b, a]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[b, a], Zone::Library),
+        );
         state.push_change_zone_iteration(PendingChangeZoneIteration {
             library_reorder: Some(reorder),
             logical_zone_change_group,
@@ -75885,6 +77469,71 @@ mod saturating_amount_tests {
             Some(i32::MAX)
         );
         assert_eq!(excess(&fight, &[damage(5, 2)]), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod last_turn_candidate_scalar_tests {
+    use super::*;
+    use crate::types::ability::{CountScope, TypedFilter};
+    use crate::types::game_state::GameState;
+
+    fn spells(filter: Option<TargetFilter>, window: TurnWindow) -> QuantityRef {
+        QuantityRef::SpellsCast {
+            scope: CountScope::ScopedPlayer,
+            filter,
+            window,
+        }
+    }
+
+    /// CR 601.2i + CR 603.4: the per-candidate reader behind
+    /// `PlayerFilter::PlayerAttribute` answers the unfiltered last-turn spell count off each
+    /// candidate's own snapshot (Gatstaf Howler: "a player cast two or more spells last turn")
+    /// and fails closed (`None`) for every spell attr it cannot answer: a last-turn count with a
+    /// spell filter (no per-spell data survives the turn boundary) and any this-turn count.
+    #[test]
+    fn candidate_reads_each_players_last_turn_spell_snapshot_and_fails_closed_otherwise() {
+        let mut state = GameState::new_two_player(3);
+        state.players[0].spells_cast_last_turn = 2;
+        state.players[1].spells_cast_last_turn = 0;
+        let attr = spells(None, TurnWindow::LastTurn);
+        assert_eq!(candidate_player_scalar(&state.players[0], &attr), Some(2));
+        assert_eq!(candidate_player_scalar(&state.players[1], &attr), Some(0));
+        assert!(candidate_scalar_reads_spell_attr(&attr));
+        for unreadable in [
+            spells(
+                Some(TargetFilter::Typed(TypedFilter::creature())),
+                TurnWindow::LastTurn,
+            ),
+            spells(None, TurnWindow::ThisTurn),
+        ] {
+            assert_eq!(
+                candidate_player_scalar(&state.players[0], &unreadable),
+                None
+            );
+            assert!(!candidate_scalar_reads_spell_attr(&unreadable));
+        }
+    }
+
+    /// CR 500 + CR 119.3: a last-turn life attr reads the snapshot latched at the turn boundary,
+    /// never the this-turn counter (a `{ .. }` wildcard would read this turn for either window).
+    #[test]
+    fn candidate_life_lost_attr_reads_the_window_it_names() {
+        let mut state = GameState::new_two_player(3);
+        state.players[0].life_lost_this_turn = 3;
+        state.players[0].life_lost_last_turn = 7;
+        let life = |window| QuantityRef::LifeLost {
+            player: PlayerScope::ScopedPlayer,
+            window,
+        };
+        assert_eq!(
+            candidate_player_scalar(&state.players[0], &life(TurnWindow::ThisTurn)),
+            Some(3)
+        );
+        assert_eq!(
+            candidate_player_scalar(&state.players[0], &life(TurnWindow::LastTurn)),
+            Some(7)
+        );
     }
 }
 
