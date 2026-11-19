@@ -349,6 +349,7 @@ mod twilight_prophet_upkeep_drain_1375;
 mod twinflame_paused_copy_referent;
 mod twinned_vision_cast_origin;
 mod type_phrase_union_rows;
+mod typed_trigger_compound_counter_anaphor;
 mod typhoon_per_opponent_island_count;
 mod tyvar_activate_as_though_haste;
 mod uba_mask_draw_to_exile_play;
