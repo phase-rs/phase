@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, posix, resolve } from "node:path";
+import { dirname, posix, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
@@ -146,9 +146,9 @@ describe("adapter boundary guardrails", () => {
     ]);
 
     const srcDir = resolve(repoRoot(), "client/src");
-    const sources = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter(
-      (file) => /\.tsx?$/.test(file) && !/(^|\/)__tests__\//.test(file) && !file.startsWith("wasm/"),
-    );
+    const sources = readdirSync(srcDir, { recursive: true, encoding: "utf8" })
+      .map((file) => file.split(sep).join("/"))
+      .filter((file) => /\.tsx?$/.test(file) && !/(^|\/)__tests__\//.test(file) && !file.startsWith("wasm/"));
     expect(sources.length).toBeGreaterThan(100);
 
     const importers = new Map([...allowedImporters.keys()].map((target) => [target, [] as string[]]));
