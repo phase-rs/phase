@@ -9,7 +9,7 @@ use crate::types::ability::{
     TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, ZoneChangeAnnouncement};
 use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -220,8 +220,10 @@ pub fn resolve(
         }
     }
     if unique_targets.len() >= 2 {
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(state, &unique_targets);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            state,
+            &ZoneChangeAnnouncement::all(&unique_targets, Zone::Graveyard),
+        );
         let requests = unique_targets
             .iter()
             .map(|&object_id| {
@@ -429,8 +431,10 @@ pub fn resolve_all(
     // CR 101.4 + CR 616.1: its replacement decisions are asked in APNAP order
     // by the staged batch's scheduler (`zone_pipeline::drive_staged_approval`).
     if matching.len() >= 2 {
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            state,
+            &ZoneChangeAnnouncement::all(&matching, Zone::Graveyard),
+        );
         let requests = matching
             .iter()
             .map(|&object_id| {

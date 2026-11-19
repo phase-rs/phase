@@ -9590,11 +9590,15 @@ mod tests {
         let b_ref = ObjectIncarnationRef::of(b, state.objects[&b].incarnation);
         let a_event = ProposedEvent::zone_change(a, Zone::Battlefield, Zone::Library, None);
         let b_event = ProposedEvent::zone_change(b, Zone::Battlefield, Zone::Library, None);
-        let mut group = state.allocate_logical_zone_change_group(&[a, b]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[a, b], Zone::Library),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .unwrap();
-        let mut child_group = state.allocate_logical_zone_change_group(&[b]);
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[b], Zone::Library),
+        );
         child_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .unwrap();

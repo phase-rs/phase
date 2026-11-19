@@ -6895,7 +6895,7 @@ mod r4b_staged_elimination_tests {
         }];
         let parent_group = crate::game::triggers::allocate_logical_zone_change_group(
             &mut state,
-            &[host, ordinary],
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[host, ordinary], Zone::Library),
         );
         let parent_group_id = parent_group.logical_group_id;
         let event = members[0].approved_event.clone().unwrap();
@@ -6929,8 +6929,10 @@ mod r4b_staged_elimination_tests {
             pre_entry_battlefield: None,
         };
         let mut child = parent.clone();
-        child.logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[host]);
+        child.logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[host], Zone::Library),
+        );
         child.component_delivery_parent = Some(PendingComponentDeliveryParent {
             parent_group_id,
             member: paused.member,
@@ -7117,7 +7119,10 @@ mod r4b_staged_elimination_tests {
             "Leaving staged B".to_string(),
             Zone::Battlefield,
         );
-        let group = crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[a, b]);
+        let group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[a, b], Zone::Library),
+        );
         let group_id = group.logical_group_id;
         let members = vec![member(&state, a, 0), member(&state, b, 1)];
         let arrangements = vec![StagedLibraryArrangement {

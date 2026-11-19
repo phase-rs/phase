@@ -1783,10 +1783,10 @@ pub(crate) fn move_component_batch_then(
 #[allow(clippy::too_many_arguments)]
 fn move_arranged_batch_then(
     state: &mut GameState,
-    mut reqs: Vec<ZoneMoveRequest>,
+    reqs: Vec<ZoneMoveRequest>,
     arrangements: Vec<StagedLibraryArrangement>,
     completion: Option<BatchCompletion>,
-    mut component_delivery_parent: Option<PendingComponentDeliveryParent>,
+    component_delivery_parent: Option<PendingComponentDeliveryParent>,
     library_reorder: Option<crate::types::game_state::LibraryReorderOperation>,
     merged_departure: Option<ObjectIncarnationRef>,
     events: &mut Vec<GameEvent>,
@@ -10748,9 +10748,6 @@ fn prepare_zone_move_proposal(
     enter_transformed: bool,
     enter_tapped: EtbTapState,
     enters_attacking: bool,
-    // CR 508.4: who seats an attacking entrant whose as-enters continuation
-    // pauses; passed to both deliveries below.
-    attack_seat: PausedEntryAttackSeat,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -10975,6 +10972,9 @@ fn execute_zone_move_with_applied_terminal(
     enter_transformed: bool,
     enter_tapped: EtbTapState,
     enters_attacking: bool,
+    // CR 508.4: who seats an attacking entrant whose as-enters continuation
+    // pauses; passed to both deliveries below.
+    attack_seat: PausedEntryAttackSeat,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
