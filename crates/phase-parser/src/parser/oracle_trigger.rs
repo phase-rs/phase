@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, anychar, digit1, multispace0, one_of, space1};
+use nom::character::complete::{alpha1, anychar, digit1, multispace0, one_of, space0, space1};
 use nom::combinator::{
     all_consuming, consumed, eof, fail, map, map_opt, not, opt, peek, recognize, rest, value,
     verify,
@@ -18859,6 +18859,16 @@ fn try_parse_event(
         Err(_) => (subject.clone(), rest),
     };
     if let Ok((tail, ())) = parse_draws_card.parse(draws_rest) {
+        // CR 121.1 + CR 603.2: a qualifier on the drawn card ("draws a card
+        // with the chosen name" — Booby Trap) narrows which draw triggers, and
+        // `Drawn` has no drawn-card filter. Decline rather than fire on every
+        // draw.
+        if preceded(space0::<_, OracleError<'_>>, tag("with "))
+            .parse(tail)
+            .is_ok()
+        {
+            return None;
+        }
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
         def.valid_target = Some(draws_subject.clone());
@@ -20850,6 +20860,15 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
         else {
             continue;
         };
+        // CR 508.1b: "one or more creatures attack you" (Orim's Prayer,
+        // Sabotage Strategist, Reveille Squad) needs the controller as the
+        // attacked player, which only the count condition below carries. At
+        // count one there is no count condition, so the arm would fire for an
+        // attack on ANY player; leave it to the `Attacks` arm that binds the
+        // controller as the attacked player.
+        if attacks_you && min_count == 1 {
+            continue;
+        }
 
         // CR 303.4: Strip optional "that are enchanted/equipped by an <X> you control"
         // relative clause and capture it as a non-source-relative attachment filter.

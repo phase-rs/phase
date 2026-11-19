@@ -2461,6 +2461,76 @@ pub(super) fn propagate_committed_choice_type_to_guesses(ability: &mut AbilityDe
     }
 }
 
+/// CR 608.2c: a verbless "all / each ..." continuation re-heads with the
+/// previous verb only when the shared target grammar reads the WHOLE tail as
+/// its population. A tail with an unconsumed qualifier ("all other cards from
+/// graveyards with the same name as that card" — Moratorium Stone) would
+/// otherwise re-head into a broader population than the card names, so it
+/// stays an honest gap.
+fn mass_tail_names_whole_population(text: &str, ctx: &ParseContext) -> bool {
+    let only_punctuation = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
+    };
+    let (_, rem) = parse_target_with_ctx(text, &mut ctx.clone_player_antecedents());
+    if only_punctuation(rem) {
+        return true;
+    }
+    // A trailing zone phrase is part of the population: the mass zone-change
+    // parser reads it through the same shared zone grammar. CR 115.6: an
+    // "up to N" target-player quantifier inside it ("from up to one target
+    // opponent's graveyard" — Into the Earthen Maw) is the slot's cardinality,
+    // carried separately, so the zone phrase is checked without it.
+    let rem_lower = rem.trim_start().to_lowercase();
+    let zone_text = match (
+        tag::<_, _, OracleError<'_>>("from up to "),
+        nom_primitives::parse_number,
+        tag(" "),
+    )
+        .parse(rem_lower.as_str())
+    {
+        Ok((rest, _)) => format!("from {rest}"),
+        Err(_) => rem_lower.clone(),
+    };
+    crate::parser::oracle_target::parse_zone_suffix(&zone_text)
+        .is_some_and(|(_, _, consumed)| only_punctuation(&zone_text[consumed..]))
+}
+
+/// CR 110.2 + CR 608.2c: a resolution-scoped `Choose(Opponent)` followed by
+/// `GainControl` names the chosen opponent as the new controller ("an
+/// opponent gains control of ..."). The runtime binds that recipient only for
+/// the source itself (`SelfRef`, Wishclaw Talisman's "an opponent gains
+/// control of ~"); for any other object set ("tap Rohgahh and all creatures
+/// named Kobolds of Kher Keep, then an opponent gains control of them")
+/// `GainControl` would hand control to the ability's controller instead. Fail
+/// closed so the card stays an honest gap rather than a wrong green.
+pub(super) fn fail_closed_chosen_recipient_gain_control(ability: &mut AbilityDefinition) {
+    let chooses_opponent = matches!(
+        ability.effect.as_ref(),
+        Effect::Choose {
+            choice_type: ChoiceType::Opponent { .. },
+            ..
+        }
+    );
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        if chooses_opponent
+            && matches!(
+                sub.effect.as_ref(),
+                Effect::GainControl { target } if !matches!(target, TargetFilter::SelfRef)
+            )
+        {
+            *sub.effect = Effect::unimplemented(
+                "chosen_recipient_gain_control",
+                "an opponent gains control of objects other than the source",
+            );
+        }
+        fail_closed_chosen_recipient_gain_control(sub);
+    }
+    if let Some(els) = ability.else_ability.as_deref_mut() {
+        fail_closed_chosen_recipient_gain_control(els);
+    }
+}
+
 /// CR 607.2d + CR 101.4: A `NumberRange` choice must PERSIST whenever a later
 /// clause in the same resolution reads the chosen number back. Without
 /// persistence the answer is dropped the instant the prompt is answered, and
@@ -54941,7 +55011,8 @@ fn parse_effect_chain_ir_body(
                         ))
                         .parse(text_no_qty_lower.as_str())
                         .is_ok()
-                        && !subject_application_is_player_scoped(&text_no_qty, ctx)))
+                        && !subject_application_is_player_scoped(&text_no_qty, ctx)
+                        && mass_tail_names_whole_population(&text_no_qty, ctx)))
             {
                 if let Some(verb) = builder
                     .clauses()
