@@ -858,4 +858,92 @@ describe("persisted store hydration", () => {
       setItemSpy.mockRestore();
     }
   });
+
+  // ── F1 regression: cross-tab profile deletion ───────────────────────────────
+
+  it("prunes sessionStorage key and remember flag when profile was deleted in another tab", async () => {
+    // Tab A has profile p1 with remembered key
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+        {
+          id: "p2",
+          name: "Other",
+          provider: "OpenAi",
+          baseUrl: null,
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1", "p2"]));
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        p1: { apiKey: "sk-p1", provider: "Anthropic", endpoint: "" },
+        p2: { apiKey: "sk-p2", provider: "OpenAi", endpoint: "" },
+      }),
+    );
+
+    const { useLlmStore: tabA } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Both keys restored
+    expect(tabA.getState().profiles.find((p) => p.id === "p1")?.apiKey).toBe("sk-p1");
+    expect(tabA.getState().profiles.find((p) => p.id === "p2")?.apiKey).toBe("sk-p2");
+    expect(tabA.getState().profiles.find((p) => p.id === "p1")?.rememberApiKey).toBe(true);
+    expect(tabA.getState().profiles.find((p) => p.id === "p2")?.rememberApiKey).toBe(true);
+
+    // Tab B removes profile p1 (simulated by re-seeding localStorage without p1)
+    seed({
+      profiles: [
+        {
+          id: "p2",
+          name: "Other",
+          provider: "OpenAi",
+          baseUrl: null,
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    // Tab A reloads — p1 should be gone from sessionStorage too
+    const { useLlmStore: tabAReloaded } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const reloadedProfiles = tabAReloaded.getState().profiles;
+    expect(reloadedProfiles).toHaveLength(1);
+    expect(reloadedProfiles[0]?.id).toBe("p2");
+    expect(reloadedProfiles[0]?.apiKey).toBe("sk-p2");
+    expect(reloadedProfiles[0]?.rememberApiKey).toBe(true);
+
+    // Orphaned sessionStorage entries for p1 must be removed
+    expect(sessionStorage.getItem("phase-llm-api-keys")).not.toContain("p1");
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).not.toContain("p1");
+    // p2's entries must survive
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toContain("sk-p2");
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).toContain("p2");
+  });
 });

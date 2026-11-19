@@ -719,8 +719,9 @@ export function hydrateSessionApiKeys(): void {
   if (rememberedIds.size === 0 && Object.keys(hydrated).length === 0) return;
 
   let pruned = false;
-  useLlmStore.setState((current) => ({
-    profiles: current.profiles.map((profile) => {
+  useLlmStore.setState((current) => {
+    const profileIds = new Set(current.profiles.map((p) => p.id));
+    const nextProfiles = current.profiles.map((profile) => {
       const remembered = rememberedIds.has(profile.id);
       const entry = hydrated[profile.id];
       if (!remembered) {
@@ -744,11 +745,30 @@ export function hydrateSessionApiKeys(): void {
         pruned = true;
       }
       return { ...profile, rememberApiKey: true, apiKey: "" };
-    }),
-  }));
+    });
+
+    // Prune orphaned sessionStorage entries for profiles that no longer exist
+    // (e.g., deleted in another tab). This covers both the API key map and
+    // the remembered-ids set.
+    for (const id of Object.keys(hydrated)) {
+      if (!profileIds.has(id)) {
+        delete hydrated[id];
+        pruned = true;
+      }
+    }
+    for (const id of rememberedIds) {
+      if (!profileIds.has(id)) {
+        rememberedIds.delete(id);
+        pruned = true;
+      }
+    }
+
+    return { profiles: nextProfiles };
+  });
 
   if (pruned) {
     writeSessionApiKeys(hydrated);
+    writeSessionRememberedIds(Array.from(rememberedIds));
   }
 }
 
