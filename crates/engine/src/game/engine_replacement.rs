@@ -15203,6 +15203,7 @@ mod entry_continuation_release_tests {
                         enter_attached_to: None,
                         effect_kind: crate::types::ability::EffectKind::ChangeZone,
                     }),
+                    awaiting_batch: None,
                     devour_eligible_snapshot: None,
                 },
             )));
