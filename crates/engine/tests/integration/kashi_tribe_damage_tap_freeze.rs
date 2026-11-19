@@ -716,8 +716,8 @@ fn loop_relational_matsu_pending_recipient_relation_survives_resource_projection
     );
 
     // Controlled raw comparison mutation, NOT an independently played history:
-    // change ONLY the selected journal recipient relation; dealer, carried event,
-    // current board, damage payload and latest snapshots remain identical.
+    // change the recipient relation in both the journal and pending trigger pin;
+    // dealer, carried event, current board, damage payload and snapshots stay identical.
     let mut live = stale.clone();
     live.damage_dealt_this_turn[record_index].target_incarnation =
         Some(live.objects[&crow].incarnation);
