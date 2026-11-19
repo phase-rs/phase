@@ -1335,21 +1335,28 @@ fn a_capped_redirects_part_meets_its_new_recipients_protection() {
         );
 
         assert_settled(&runner);
-        let knight_prevented = events.iter().any(|e| {
-            matches!(
-                e,
-                GameEvent::DamagePrevented { target: TargetRef::Object(id), .. }
-                    if *id == knight
-            )
-        });
+        let knight_prevented: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamagePrevented {
+                    source_id,
+                    target: TargetRef::Object(id),
+                    ..
+                } if *id == knight => Some(*source_id),
+                _ => None,
+            })
+            .collect();
         if stomped {
             assert_eq!(damage_dealt_to(&events, knight), vec![1], "stomped");
             assert_eq!(runner.state().objects[&knight].damage_marked, 1);
-            assert!(!knight_prevented, "stomped: nothing is prevented");
+            assert!(knight_prevented.is_empty(), "stomped: nothing is prevented");
         } else {
             assert!(damage_dealt_to(&events, knight).is_empty());
             assert_eq!(runner.state().objects[&knight].damage_marked, 0);
-            assert!(knight_prevented);
+            // CR 615.13: the batch's aggregate `DamagePrevented` names the shield's host, and
+            // protection's prevention has none, so it carries the sourceless `ObjectId(0)`, not
+            // the Giant.
+            assert_eq!(knight_prevented, vec![ObjectId(0)]);
         }
         assert_eq!(
             damage_dealt_to(&events, nomads),
@@ -1500,40 +1507,64 @@ fn an_answered_capped_redirect_asks_its_recipients_choice_in_apnap_order() {
 /// counter; the Champion's damage back is stashed behind that choice, and the 1 of it the Nomads'
 /// shield then deals to the counterless Champion is still prevented. The Champion's damage meets
 /// Furnace of Rath and the Nomads' redirect, whose order changes what each recipient is dealt
-/// (CR 614.9 + CR 616.1), so it is the second prompt, answered Furnace first.
+/// (CR 614.9 + CR 616.1), so it is the second prompt, answered both ways. Furnace first doubles
+/// the 3 to 6 and the redirect then sends 1 of it to the Champion, leaving 5 on the Nomads; the
+/// redirect first sends 1 of the 3 to the Champion and Furnace doubles the remaining 2 to 4, and
+/// the redirected 1, which Furnace has not yet modified, is a third prompt for P0.
 #[test]
 fn a_paused_fight_keeps_its_guard_reading() {
-    let mut scenario = main_phase();
-    let champion = undergrowth_champion(&mut scenario, P0, 1);
-    let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
-    let furnace = furnace_of_rath(&mut scenario);
-    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
-    let mut runner = scenario.build();
-    activate_shields_at(&mut runner, &[nomads], champion);
+    for furnace_first in [true, false] {
+        let mut scenario = main_phase();
+        let champion = undergrowth_champion(&mut scenario, P0, 1);
+        let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
+        let furnace = furnace_of_rath(&mut scenario);
+        let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+        let mut runner = scenario.build();
+        activate_shields_at(&mut runner, &[nomads], champion);
 
-    let mut events = cast(
-        &mut runner,
-        pit_fight,
-        vec![TargetRef::Object(nomads), TargetRef::Object(champion)],
-    );
-    let prompts = answer(
-        &mut runner,
-        &[Pick::From(champion), Pick::From(furnace)],
-        champion,
-        &mut events,
-    );
+        let mut events = cast(
+            &mut runner,
+            pit_fight,
+            vec![TargetRef::Object(nomads), TargetRef::Object(champion)],
+        );
+        let picks: &[Pick] = if furnace_first {
+            &[Pick::From(champion), Pick::From(furnace)]
+        } else {
+            &[
+                Pick::From(champion),
+                Pick::From(nomads),
+                Pick::From(champion),
+            ]
+        };
+        let prompts = answer(&mut runner, picks, champion, &mut events);
 
-    assert_settled(&runner);
-    assert_eq!(prompts.len(), 2, "{prompts:?}");
-    assert!(prompts[1].sources.contains(&nomads), "{prompts:?}");
-    assert_eq!(prompts[0].watched_counters, 1, "{prompts:?}");
-    assert!(prompts[0].sources.contains(&champion), "{prompts:?}");
-    // The rest of the Champion's damage stays on the Nomads, which dies.
-    assert!(!damage_dealt_to(&events, nomads).is_empty());
-    assert_eq!(runner.state().objects[&nomads].zone, Zone::Graveyard);
-    assert_eq!(prevented(&events), 1);
-    assert!(damage_dealt_to(&events, champion).is_empty());
-    assert_shielded_once(&runner, champion);
+        assert_settled(&runner);
+        assert_eq!(
+            prompts.len(),
+            picks.len(),
+            "furnace first {furnace_first}: {prompts:?}"
+        );
+        assert!(prompts[1].sources.contains(&nomads), "{prompts:?}");
+        assert!(prompts[1].sources.contains(&furnace), "{prompts:?}");
+        if !furnace_first {
+            // The redirected 1 is a part Furnace of Rath has not yet modified, so it meets
+            // Furnace and the Champion's shield, and P0 orders them too (CR 616.1).
+            assert!(prompts[2].sources.contains(&furnace), "{prompts:?}");
+            assert!(prompts[2].sources.contains(&champion), "{prompts:?}");
+        }
+        assert_eq!(prompts[0].watched_counters, 1, "{prompts:?}");
+        assert!(prompts[0].sources.contains(&champion), "{prompts:?}");
+        // The rest of the Champion's damage stays on the Nomads, which dies.
+        assert_eq!(
+            damage_dealt_to(&events, nomads),
+            vec![if furnace_first { 5 } else { 4 }],
+            "furnace first {furnace_first}"
+        );
+        assert_eq!(runner.state().objects[&nomads].zone, Zone::Graveyard);
+        assert_eq!(prevented(&events), 1, "furnace first {furnace_first}");
+        assert!(damage_dealt_to(&events, champion).is_empty());
+        assert_shielded_once(&runner, champion);
+    }
 }
 
 const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.";

@@ -4314,6 +4314,7 @@ fn protection_and_szadek_are_ordered_by_the_affected_player() {
         }
         assert_eq!(life(&runner, P1), 20);
         assert!(runner.state().pending_combat_lifelink.is_none());
+        assert_at_rest(&runner);
     }
 }
 
@@ -4751,8 +4752,8 @@ fn combat_order_answer_drains_in_its_own_portion() {
 /// where the card gives one.
 /// This gap is Force Bubble's own ruling. CR 700.1 ("The text of triggered abilities and
 /// replacement effects defines the event they're looking for") keeps it from carrying over to a
-/// source-qualified substitution, so `damage_substitution_choice_incomplete` does not claim it
-/// for the class. Force Bubble reports unsupported through that fence's protection gap.
+/// source-qualified substitution, so no coverage marker claims it for the class, and none
+/// records it for Force Bubble either: its coverage reports supported.
 #[test]
 fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
     let mut scenario = scenario();
@@ -4790,8 +4791,8 @@ fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
 /// two prompts where the card gives one.
 /// This gap is Force Bubble's own ruling. CR 700.1 ("The text of triggered abilities and
 /// replacement effects defines the event they're looking for") keeps it from carrying over to a
-/// source-qualified substitution, so `damage_substitution_choice_incomplete` does not claim it
-/// for the class. Force Bubble reports unsupported through that fence's protection gap.
+/// source-qualified substitution, so no coverage marker claims it for the class, and none
+/// records it for Force Bubble either: its coverage reports supported.
 #[test]
 fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
     let mut scenario = scenario();

@@ -944,8 +944,10 @@ mod legacy_trigger_definition_ref_map {
 /// (nothing was prevented, so there is nothing to attribute); a POPULATED
 /// legacy tally is rejected with an explicit diagnosis — its recipients
 /// cannot be recovered and must not be guessed (a wrong recipient would
-/// fire a shield's rider against damage meant for someone else). The wire
-/// version is unchanged: only saves suspended mid-batch with a populated
+/// fire a shield's rider against damage meant for someone else). The shape
+/// change carries a protocol version bump (the `full` and `wire` surfaces);
+/// this bridge governs what a legacy payload that still reaches the
+/// deserializer becomes: only saves suspended mid-batch with a populated
 /// tally are affected, and they fail LOUDLY at the restore boundary
 /// instead of deserializing into a misattributed batch.
 fn deserialize_prevention_tally_with_legacy_reject<'de, D>(
@@ -4286,9 +4288,6 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
-            // CR 615.13 + CR 616.1e (Matt M1): inherit the ambient drain
-            // owner — a chain re-parked mid-tail is still its batch's chain.
-            // `None` outside a batch-tail drain, as for every other ambient.
             x_announcement: None,
             replacement_action: crate::game::quantity::current_replacement_action(),
             head_payment_origin: ResolutionPaymentOrigin::FreshChoice,
@@ -4316,8 +4315,6 @@ impl PendingContinuation {
             attachment_remainder: None,
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
-            // CR 615.13 + CR 616.1e (Matt M1): same ambient inheritance as
-            // `new` — the twin constructor must not drop the drain owner.
             x_announcement: None,
             replacement_action: crate::game::quantity::current_replacement_action(),
             head_payment_origin: ResolutionPaymentOrigin::FreshChoice,

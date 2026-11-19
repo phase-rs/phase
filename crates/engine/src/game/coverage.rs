@@ -10494,25 +10494,6 @@ enum StructuralFeature {
     /// carry it. Narrowing it to the two in-batch drains is Command Zone #267. The card parses,
     /// and outside combat the choice is asked, so nothing else in coverage can see it.
     DamageReplacementChoiceUnaskedInCombat,
-    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement
-    /// `replacement::is_damage_substitution` selects: Phytohydra, Force Bubble, Nefarious Lich,
-    /// Soul-Scar Mage, Szadek, Lord of Secrets, Undead Alchemist) whose CR 616.1 choice is not
-    /// offered against protection. Protection prevents the damage at the pre-replacement gate,
-    /// before the substitution is offered ("Any damage that would be dealt by sources that have the
-    /// stated quality to a permanent or player with protection is prevented."), so the affected
-    /// player never chooses between them (CR 616.1e): Pyroclasm at a Silver Knight under an
-    /// opposing Soul-Scar Mage, or Szadek's combat damage to a player under Teferi's Protection.
-    /// The card parses. This fence records the missing order choice against protection, so nothing
-    /// else in coverage can see it.
-    DamageSubstitutionChoiceIncomplete,
-    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next 1 damage that would be
-    /// dealt to this creature this turn is dealt to target creature you control instead." —
-    /// Nomads en-Kor) sends its part to a recipient where protection from the source prevents it
-    /// at the pre-replacement gate, ahead of any other prevention shield there (Test of Faith),
-    /// so the recipient's controller is not offered the order CR 616.1 gives them. The card
-    /// parses, and with no competing shield on the recipient it works, so nothing else in
-    /// coverage can see it.
-    CappedRedirectRecipientChoiceIncomplete,
     /// CR 615.7: several sources of one simultaneous damage instruction can deal damage to one
     /// recipient (Allies at Last: "each deal damage equal to their power to target creature";
     /// Rakdos Charm: "Each creature deals 1 damage to its controller"). A limited shield there
@@ -10547,12 +10528,6 @@ impl StructuralFeature {
             CounterExileRiderTailDropped => "structural:counter_exile_rider_tail_dropped",
             DamageReplacementChoiceUnaskedInCombat => {
                 "structural:damage_replacement_choice_unasked_in_combat"
-            }
-            DamageSubstitutionChoiceIncomplete => {
-                "structural:damage_substitution_choice_incomplete"
-            }
-            CappedRedirectRecipientChoiceIncomplete => {
-                "structural:capped_redirect_recipient_choice_incomplete"
             }
             SharedShieldSplitUnoffered => "structural:shared_shield_split_unoffered",
         }
@@ -10590,17 +10565,6 @@ impl StructuralFeature {
             // `damage_substitution_replacements::a_parked_may_gets_no_automatic_yes_in_combat`
             // (Battletide Alchemist: the Ogre's 3 combat damage is neither dealt nor prevented).
             DamageReplacementChoiceUnaskedInCombat => FeatureSupport::Unhandled,
-            // MEASURED UNHANDLED: `damage_substitution_replacements`
-            // (`protection_prevents_ahead_of_a_substitutions_choice`,
-            // `protection_prevents_ahead_of_soul_scar_mages_choice`,
-            // `protection_prevents_ahead_of_szadeks_choice`: the protected recipient's player is
-            // never asked, and no counters are put).
-            DamageSubstitutionChoiceIncomplete => FeatureSupport::Unhandled,
-            // MEASURED UNHANDLED: `unpreventable_damage_prevention_effects`
-            // (`a_capped_redirects_part_meets_protection_before_a_competing_shield`: the pro-red
-            // Silver Knight's protection prevents the redirected point and Test of Faith is never
-            // offered, so no counter is placed).
-            CappedRedirectRecipientChoiceIncomplete => FeatureSupport::Unhandled,
             // MEASURED UNHANDLED: `damage_substitution_replacements`
             // (`a_batch_keeps_a_shared_shield_for_the_players_choice`: Mending Hands meets the
             // Hill Giant's or the Rumbling Baloth's damage in full, giving 3/20 or 0/23; the
@@ -11388,20 +11352,6 @@ fn extract_ability_features_with_token_statics(
     ) {
         emit_structural(features, StructuralFeature::SharedShieldSplitUnoffered);
     }
-    // CR 614.9: a shield that redirects only the next N damage.
-    if matches!(
-        &*def.effect,
-        Effect::CreateDamageReplacement {
-            redirect_to: Some(_),
-            redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
-            ..
-        }
-    ) {
-        emit_structural(
-            features,
-            StructuralFeature::CappedRedirectRecipientChoiceIncomplete,
-        );
-    }
     if prevention_rider_asks_a_choice_in_combat(def) {
         emit_structural(
             features,
@@ -11563,14 +11513,6 @@ fn extract_damage_replacement_choice_feature(
         emit_structural(
             features,
             StructuralFeature::DamageReplacementChoiceUnaskedInCombat,
-        );
-    }
-    // CR 614.1a: the runtime's own substitution predicate, so the fence and the engine select
-    // the same class.
-    if crate::game::replacement::is_damage_substitution(repl) {
-        emit_structural(
-            features,
-            StructuralFeature::DamageSubstitutionChoiceIncomplete,
         );
     }
 }
@@ -17028,24 +16970,22 @@ mod tests {
     }
 
     /// (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types)
-    type DamageSubstitutionCase = (
+    type DamageShieldCase = (
         &'static str,
         &'static str,
         &'static [&'static str],
         &'static [&'static str],
     );
 
-    const DAMAGE_SUBSTITUTION_TAG: &str = "structural:damage_substitution_choice_incomplete";
-
-    /// CR 614.1a + CR 616.1 + CR 702.16e: the protection fence keys on the runtime's substitution
-    /// predicate (`replacement::is_damage_substitution`), so it covers the class uniformly:
-    /// Soul-Scar Mage, Szadek and Undead Alchemist, whose substitution the fence is the only gap
-    /// of, and the "If damage would be dealt to …, … instead" lines (Phytohydra, Force Bubble,
-    /// Nefarious Lich). A prevention shield (Test of Faith, Phantom Centaur) and an amount
-    /// modification (Furnace of Rath) are not substitutions and are not fenced.
+    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement the runtime's
+    /// `replacement::is_damage_substitution` selects) is offered beside protection's prevention,
+    /// so its affected player orders them, and it carries no coverage gap: Soul-Scar Mage, Szadek,
+    /// Undead Alchemist, and the "If damage would be dealt to …, … instead" lines (Phytohydra,
+    /// Force Bubble). Nefarious Lich's exile choice keeps its own
+    /// `damage_replacement_choice_unasked_in_combat` gap.
     #[test]
-    fn a_damage_substitution_is_a_coverage_gap() {
-        let fenced_alone: [DamageSubstitutionCase; 3] = [
+    fn a_damage_substitution_has_no_coverage_gap() {
+        let cases: [DamageShieldCase; 5] = [
             (
                 "Soul-Scar Mage",
                 "Prowess\nIf a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
@@ -17064,24 +17004,6 @@ mod tests {
                 &[],
                 &["Creature"],
             ),
-        ];
-        for (name, oracle, keywords, types) in fenced_alone {
-            let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(DAMAGE_SUBSTITUTION_TAG),
-                Some(&FeatureSupport::Unhandled),
-                "{name}"
-            );
-            assert_eq!(
-                card_face_gaps(&face),
-                vec![format!("ResolverFeature:{DAMAGE_SUBSTITUTION_TAG}")],
-                "{name}: the fence is the face's only gap"
-            );
-        }
-
-        let fenced: [DamageSubstitutionCase; 3] = [
             (
                 "Phytohydra",
                 "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
@@ -17094,57 +17016,16 @@ mod tests {
                 &[],
                 &["Enchantment"],
             ),
-            (
-                "Nefarious Lich",
-                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.",
-                &[],
-                &["Enchantment"],
-            ),
         ];
-        for (name, oracle, keywords, types) in fenced {
-            let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(DAMAGE_SUBSTITUTION_TAG),
-                Some(&FeatureSupport::Unhandled),
-                "{name}"
-            );
-        }
-
-        let unfenced: [DamageSubstitutionCase; 3] = [
-            (
-                "Test of Faith",
-                "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
-                &[],
-                &["Instant"],
-            ),
-            (
-                "Furnace of Rath",
-                "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
-                &[],
-                &["Enchantment"],
-            ),
-            (
-                "Phantom Centaur",
-                "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
-                &["Protection"],
-                &["Creature"],
-            ),
-        ];
-        for (name, oracle, keywords, types) in unfenced {
+        for (name, oracle, keywords, types) in cases {
             let face = counter_rider_face(name, oracle, keywords, types);
             assert!(
-                !face.abilities.is_empty()
-                    || face
-                        .replacements
-                        .iter()
-                        .any(|repl| repl.event == ReplacementEvent::DamageDone),
-                "{name}: reach guard — the damage line parses"
+                face.replacements
+                    .iter()
+                    .any(crate::game::replacement::is_damage_substitution),
+                "{name}: reach guard — the substitution parses"
             );
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
+            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
         }
     }
 
@@ -17187,9 +17068,6 @@ mod tests {
                     .any(crate::game::replacement::is_damage_substitution),
                 "{name}: no replacement is a damage substitution"
             );
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
             assert!(!coverage.is_supported(), "{name}");
         }
     }
@@ -17386,60 +17264,40 @@ mod tests {
         }
     }
 
-    /// CR 614.9 + CR 616.1: a capped redirect ("The next N damage ... is dealt to ... instead")
-    /// is fenced as `capped_redirect_recipient_choice_incomplete`, as an activated ability
-    /// (Nomads en-Kor), a spell (Harm's Way) and a granted ability (Martyrdom). An uncapped
-    /// redirect (Pariah: "All damage that would be dealt to you is dealt to enchanted creature
-    /// instead.") is not.
+    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next N damage ... is dealt to ...
+    /// instead") offers its part's recipient protection beside any other prevention shield there,
+    /// so it carries no coverage gap, as an activated ability (Nomads en-Kor) or a spell (Harm's
+    /// Way).
     #[test]
-    fn a_capped_redirect_is_a_coverage_gap() {
-        const TAG: &str = "structural:capped_redirect_recipient_choice_incomplete";
-        type Case = (
-            &'static str,
-            &'static str,
-            &'static [&'static str],
-            &'static [&'static str],
-            bool,
-        );
-        let cards: [Case; 4] = [
+    fn a_capped_redirect_has_no_coverage_gap() {
+        let cards: [DamageShieldCase; 2] = [
             (
                 "Nomads en-Kor",
                 "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.",
                 &[],
                 &["Creature"],
-                true,
             ),
             (
                 "Harm's Way",
                 "The next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead.",
                 &[],
                 &["Instant"],
-                true,
-            ),
-            (
-                "Martyrdom",
-                "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.",
-                &[],
-                &["Instant"],
-                true,
-            ),
-            (
-                "Pariah",
-                "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.",
-                &["Enchant"],
-                &["Enchantment"],
-                false,
             ),
         ];
-        for (name, oracle, keywords, types, fenced) in cards {
+        for (name, oracle, keywords, types) in cards {
             let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(TAG),
-                fenced.then_some(&FeatureSupport::Unhandled),
-                "{name}"
+            assert!(
+                face.abilities.iter().any(|def| matches!(
+                    &*def.effect,
+                    Effect::CreateDamageReplacement {
+                        redirect_to: Some(_),
+                        redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
+                        ..
+                    }
+                )),
+                "{name}: reach guard — the capped redirect parses"
             );
+            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
         }
     }
 

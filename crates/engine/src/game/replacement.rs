@@ -4106,9 +4106,8 @@ fn damage_execute_substitutes_event_type(state: &GameState, rid: ReplacementId) 
 /// for the class: the applier (Branch 3), the stash's amount latch
 /// (`replaced_event_amount`) and its order (`stash_damage_substitute`), the
 /// batch hold's timing (`hold_damage_rider`), the CR 120.8 candidate block, the
-/// CR 615.12 shape (`damage_shape_prevents`), the CR 616.1 materiality
-/// (`candidate_materiality`) and coverage's `damage_substitution_choice_incomplete`
-/// all read it, so they can never disagree.
+/// CR 615.12 shape (`damage_shape_prevents`) and the CR 616.1 materiality
+/// (`candidate_materiality`) all read it, so they can never disagree.
 pub(crate) fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
     if repl.event != ReplacementEvent::DamageDone
         || !matches!(repl.shield_kind, ShieldKind::None)

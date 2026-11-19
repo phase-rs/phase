@@ -4962,6 +4962,14 @@ impl ResolutionStack {
     /// the exact stack depth observed before it invoked the child producer.
     /// The boundary must therefore precede at least one currently active child
     /// frame; a producer with no child parks its frame normally.
+    ///
+    /// One shape places the frame lower: when the producer's only child is the
+    /// draw of an active paused post-replacement/draw pair whose
+    /// `PostReplacement` half lies below the boundary, an `AbilityContinuation`
+    /// goes outside the whole pair
+    /// ([`Self::insert_ability_continuation_outside_active_post_replacement_draw`]),
+    /// since only a continuation is promoted back once the draw completes. Any
+    /// other frame keeps the boundary placement.
     pub fn insert_parent_at_child_boundary(
         &mut self,
         frame: ResolutionFrame,
@@ -4971,22 +4979,23 @@ impl ResolutionStack {
         if stack_len == 0 {
             return Err(ResolutionStackError::NoActiveChild);
         }
-        // CR 608.2c: a paused post-replacement frame and its multi-draw child are one pair. A
-        // drain that joined a post-replacement frame below the boundary raises only its draw
-        // above it, so the parent goes outside the pair, never between its halves.
-        if let Some(child) = self.frames.slot_at_captured_depth(child_stack_start) {
-            if let (Some(ResolutionFrame::MultiDraw(_)), Some(parent)) =
-                (self.frames.get(child), self.frames.below(child))
+        // CR 608.2c: a paused post-replacement frame and its multi-draw child are one pair. When a
+        // drain that joined a post-replacement frame below the boundary raised only its draw above
+        // it, a continuation goes outside the pair, never between its halves, and
+        // `promote_ability_continuation_after_post_replacement_draw` lifts it back once the draw
+        // completes.
+        let frame = match frame {
+            ResolutionFrame::AbilityContinuation(continuation)
+                if self.has_active_post_replacement_draw_pair()
+                    && self.frames.slot_at_captured_depth(child_stack_start)
+                        == self.frames.top() =>
             {
-                if matches!(
-                    self.frames.get(parent),
-                    Some(ResolutionFrame::PostReplacement(_))
-                ) {
-                    self.frames.insert_below(parent, frame);
-                    return Ok(());
-                }
+                return self.insert_ability_continuation_outside_active_post_replacement_draw(
+                    continuation,
+                );
             }
-        }
+            frame => frame,
+        };
         if !self
             .frames
             .insert_at_child_boundary(child_stack_start, frame)
@@ -9492,6 +9501,49 @@ mod tests {
         assert_eq!(
             stack.pop_expected(FrameKind::CoinFlip),
             Err(ResolutionStackError::Empty)
+        );
+    }
+
+    /// A producer whose only child is the draw of an active paused
+    /// post-replacement/draw pair (the `PostReplacement` half below its
+    /// boundary): a continuation parent goes outside the whole pair, and any
+    /// other parent keeps the boundary placement, between the halves.
+    #[test]
+    fn a_boundary_child_draw_of_a_paused_pair_moves_only_a_continuation_outside_it() {
+        let paired_stack = || {
+            let mut stack = ResolutionStack::default();
+            stack.push_inner(paused_post_replacement_frame());
+            let boundary = stack.capture_child_boundary();
+            stack.push_inner(active_multi_draw_frame());
+            assert!(stack.has_active_post_replacement_draw_pair());
+            (stack, boundary)
+        };
+
+        let (mut stack, boundary) = paired_stack();
+        stack
+            .insert_parent_at_child_boundary(continuation_frame(1), boundary)
+            .expect("a continuation parent is placed outside the pair");
+        assert_eq!(
+            stack.iter().map(ResolutionFrame::kind).collect::<Vec<_>>(),
+            vec![
+                FrameKind::AbilityContinuation,
+                FrameKind::PostReplacement,
+                FrameKind::MultiDraw,
+            ]
+        );
+        assert!(stack.has_active_post_replacement_draw_pair());
+
+        let (mut stack, boundary) = paired_stack();
+        stack
+            .insert_parent_at_child_boundary(batch_delivery_frame(2), boundary)
+            .expect("a non-continuation parent keeps the boundary placement");
+        assert_eq!(
+            stack.iter().map(ResolutionFrame::kind).collect::<Vec<_>>(),
+            vec![
+                FrameKind::PostReplacement,
+                FrameKind::BatchDelivery,
+                FrameKind::MultiDraw,
+            ]
         );
     }
 
