@@ -14,7 +14,6 @@ const RUG_OF_SMOTHERING: &str =
     "Flying\nWhenever a player casts a spell, they lose 1 life for each spell they've cast this turn.";
 const MAGEBANE_LIZARD: &str = "Whenever a player casts a noncreature spell, this creature deals damage to that player equal to the number of noncreature spells they've cast this turn.";
 const DAMPING_SPHERE: &str = "If a land is tapped for two or more mana, it produces {C} instead of any other type and amount.\nEach spell a player casts costs {1} more to cast for each other spell that player has cast this turn.";
-const NO_OP_SPELL: &str = "You gain 0 life.";
 
 fn cast_and_assert_life_delta(
     runner: &mut engine::game::scenario::GameRunner,
@@ -39,11 +38,11 @@ fn give_priority_to_p1(runner: &mut engine::game::scenario::GameRunner) {
 fn rug_counts_the_triggering_players_spells() {
     let mut scenario = GameScenario::new();
     let p0_history_a = scenario
-        .add_spell_to_hand_from_oracle(P0, "P0 History A", true, NO_OP_SPELL)
+        .add_spell_to_hand(P0, "P0 History A", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     let p0_history_b = scenario
-        .add_spell_to_hand_from_oracle(P0, "P0 History B", true, NO_OP_SPELL)
+        .add_spell_to_hand(P0, "P0 History B", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     let rug = scenario
@@ -51,11 +50,11 @@ fn rug_counts_the_triggering_players_spells() {
         .with_mana_cost(ManaCost::zero())
         .id();
     let p1_spell_a = scenario
-        .add_spell_to_hand_from_oracle(P1, "P1 Spell A", true, NO_OP_SPELL)
+        .add_spell_to_hand(P1, "P1 Spell A", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     let p1_spell_b = scenario
-        .add_spell_to_hand_from_oracle(P1, "P1 Spell B", true, NO_OP_SPELL)
+        .add_spell_to_hand(P1, "P1 Spell B", true)
         .with_mana_cost(ManaCost::zero())
         .id();
 
@@ -118,7 +117,7 @@ fn magebane_lizard_filters_the_triggering_players_noncreature_spells() {
         .with_mana_cost(ManaCost::zero())
         .id();
     let p1_noncreature_a = scenario
-        .add_spell_to_hand_from_oracle(P1, "P1 Noncreature A", true, NO_OP_SPELL)
+        .add_spell_to_hand(P1, "P1 Noncreature A", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     let p1_creature = scenario
@@ -126,7 +125,7 @@ fn magebane_lizard_filters_the_triggering_players_noncreature_spells() {
         .with_mana_cost(ManaCost::zero())
         .id();
     let p1_noncreature_b = scenario
-        .add_spell_to_hand_from_oracle(P1, "P1 Noncreature B", true, NO_OP_SPELL)
+        .add_spell_to_hand(P1, "P1 Noncreature B", true)
         .with_mana_cost(ManaCost::zero())
         .id();
 
@@ -172,15 +171,15 @@ fn magebane_lizard_filters_the_triggering_players_noncreature_spells() {
 fn damping_sphere_counts_the_player_casting_the_spell() {
     let mut scenario = GameScenario::new();
     let p0_history_a = scenario
-        .add_spell_to_hand_from_oracle(P0, "P0 History A", true, NO_OP_SPELL)
+        .add_spell_to_hand(P0, "P0 History A", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     let p0_history_b = scenario
-        .add_spell_to_hand_from_oracle(P0, "P0 History B", true, NO_OP_SPELL)
+        .add_spell_to_hand(P0, "P0 History B", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     let p1_history = scenario
-        .add_spell_to_hand_from_oracle(P1, "P1 History", true, NO_OP_SPELL)
+        .add_spell_to_hand(P1, "P1 History", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     let damping_sphere = scenario
@@ -188,7 +187,7 @@ fn damping_sphere_counts_the_player_casting_the_spell() {
         .with_mana_cost(ManaCost::zero())
         .id();
     let p1_next_spell = scenario
-        .add_spell_to_hand_from_oracle(P1, "P1 Next Spell", true, NO_OP_SPELL)
+        .add_spell_to_hand(P1, "P1 Next Spell", true)
         .with_mana_cost(ManaCost::zero())
         .id();
     scenario.with_mana_pool(
