@@ -145,10 +145,10 @@ export function StackTargetArcs({
 // ── RAF position polling (specialized for heterogeneous selectors) ───────
 
 /**
- * The part of an element that is on show. A stack entry the panel's pile has
- * scrolled partly or wholly out of view (#11119) is cut to the pile's visible
- * band, so an arc starts or ends at what shows of it, or at the band's nearest
- * edge, rather than behind the header or over the board.
+ * The rect an arc uses for an element: its own, except that a stack entry the
+ * panel's pile has scrolled partly or wholly out of view (#11119) is cut to
+ * the pile's visible band, so an arc starts or ends at what shows of it, or at
+ * the band's nearest edge, rather than behind the header or over the board.
  */
 function visibleRect(element: Element): DOMRect {
   const rect = element.getBoundingClientRect();

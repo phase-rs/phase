@@ -389,8 +389,8 @@ export function StackDisplay({
   // stays put: the split layout starts the prompt below its seat panes, and
   // pushing a tall panel under it there would only leave its pile less room.
   // Any other panel starts no higher than the gap below the prompt. With no
-  // prompt both edges are 0, so the panel keeps its viewport-clamped top (the
-  // 12px inset already exceeds the 8px gap).
+  // prompt both edges are 0, so the panel keeps the top found above its bottom
+  // limit (the 12px inset already exceeds the 8px gap).
   //
   // The check is vertical only, even where the centred prompt does not reach
   // the panel horizontally: the panel's horizontal extent depends on the rail

@@ -643,7 +643,7 @@ describe("StackDisplay with a stack taller than its room", () => {
       expect(scroller.scrollTop).toBe(0);
     });
 
-    it("lets a swipe on a capped pile scroll it", () => {
+    it("gives a capped pile touch scrolling, with nothing in it claiming the swipe", () => {
       seed(DEEP_STACK);
       render(board());
 
@@ -692,6 +692,34 @@ describe("StackDisplay with a stack taller than its room", () => {
       fireEvent.scroll(scroller);
       settle();
       expect(arcStart()).toEqual({ x: ENTRY_CENTRE_X, y: 94 });
+    });
+
+    // Scrolled to the oldest entries, the pile's band (49px to 291px) shows
+    // the ninth entry's card from 255px down, and none of the top entry's,
+    // which starts at 303px.
+    it.each([
+      ["partly", 108, (255 + 291) / 2],
+      ["wholly", NEXT_TO_RESOLVE_ID, 291],
+    ] as const)("draws a target arc from an entry scrolled %s below the pile's band", (_case, entryId, y) => {
+      vi.useFakeTimers();
+      seed(DEEP_STACK, {
+        [String(entryId)]: {
+          source_name: "Test Trigger",
+          kind_label: "Triggered Ability",
+          targets: [{ target: { Player: 1 }, label: "Opponent" }],
+        },
+      });
+      render(board());
+      const settle = () => act(() => {
+        vi.advanceTimersByTime(ARC_SETTLE_MS);
+      });
+      settle();
+
+      const scroller = pileScroller();
+      scroller.scrollTop = 0;
+      fireEvent.scroll(scroller);
+      settle();
+      expect(arcStart()).toEqual({ x: ENTRY_CENTRE_X, y });
     });
   });
 });
