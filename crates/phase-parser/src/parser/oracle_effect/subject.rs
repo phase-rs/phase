@@ -13268,10 +13268,12 @@ mod tests {
 
         // (a) Self-object. "can't block this creature" is printed (Screeching
         // Griffin, Kozilek's Pathfinder: "Target creature can't block this
-        // creature this turn."). "can't block ~" and "can't block it" are not
-        // printed anywhere (nearest printed cards: the same two); kept because
-        // `parse_restriction_list_atom` already owns both forms, and this pins
-        // that the new arm does not take them. Their existing `CantBlock`
+        // creature this turn."). "can't block it" is printed too (Battering
+        // Wurm: "Creatures with power less than this creature's power can't
+        // block it."). "can't block ~" is not printed anywhere (nearest printed
+        // card: Screeching Griffin); kept because `parse_restriction_list_atom`
+        // already owns these forms, and this pins that the new arm does not
+        // take them. Their existing `CantBlock`
         // lowering is NOT asserted correct here.
         assert!(
             parse_cant_block_object_predicate("can't block detectives").is_ok(),
