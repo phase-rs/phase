@@ -799,6 +799,20 @@ fn f7h_hostile_siblings_in_one_divided_finalize() {
             with_nowhere,
         );
         let (tar_pit, giant, bonecrusher) = (theirs[0], theirs[1], theirs[2]);
+        // Reach guard (CR 603.2): the zero-count below only means something if
+        // Bonecrusher Giant carries its parsed, executable spell-only observer.
+        let giant_triggers = &runner.state().objects[&bonecrusher].base_trigger_definitions;
+        assert!(
+            giant_triggers.iter().any(|def| {
+                def.mode == TriggerMode::BecomesTarget
+                    && def.valid_source == Some(TargetFilter::StackSpell)
+                    && def
+                        .execute
+                        .as_ref()
+                        .is_some_and(|ability| matches!(*ability.effect, Effect::DealDamage { .. }))
+            }),
+            "Bonecrusher Giant parses a BecomesTarget(StackSpell) trigger that deals damage: {giant_triggers:?}"
+        );
         let result = select_targets(
             &mut runner,
             vec![obj(tar_pit), obj(giant), obj(bonecrusher)],
