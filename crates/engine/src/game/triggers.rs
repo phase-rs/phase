@@ -44131,6 +44131,27 @@ pub mod tests {
         );
     }
 
+    /// CR 115.1 + CR 702.26b: "each creature target player controls phases
+    /// out" targets the PLAYER, not a creature. The companion player slot
+    /// supplies the declaration and the creature population expands at
+    /// resolution, so the object filter must not add a creature slot
+    /// (issue #10266).
+    #[test]
+    fn extract_target_skips_mass_phase_out_creatures_target_player_controls() {
+        for (label, controller) in [
+            ("TargetPlayer", ControllerRef::TargetPlayer),
+            ("TargetOpponent", ControllerRef::TargetOpponent),
+        ] {
+            let effect = Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+            };
+            assert!(
+                extract_target_filter_from_effect(&effect).is_none(),
+                "PhaseOut{{Creature, {label}}} is a player-targeted population, not a creature target"
+            );
+        }
+    }
+
     /// CR 115.1: "Target creature phases out" still requires a target slot.
     #[test]
     fn extract_target_keeps_targeted_phase_out_creature() {
@@ -59796,6 +59817,7 @@ pub mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         crate::game::engine::apply_as_current(
