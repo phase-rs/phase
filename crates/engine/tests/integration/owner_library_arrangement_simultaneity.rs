@@ -5,14 +5,16 @@
 //! completes once; a player leaving mid-arrangement is reconciled with the
 //! players and objects still in the game.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::game::visibility::filter_events_for_viewer;
 use engine::types::ability::{DigRestSplitScope, EffectKind, LibraryPosition};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastingVariant, PersistedGameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -1612,6 +1614,99 @@ fn evacuation_merged_commander_choice_reopens_before_the_answer() {
         assert_eq!(zone(&runner, rider), Zone::Hand, "accept={accept_command}");
         assert_eq!(zone(&runner, evacuation), Zone::Graveyard);
         assert!(runner.state().active_batch_delivery().is_none());
+        assert_arrangement_finished(&runner);
+    }
+}
+
+/// CR 730.3c: Evacuation's serial component choice must use the split card's
+/// actual survivor, not a departure authority supplied by the saved proposal.
+#[test]
+fn evacuation_rejects_unowned_merge_authority_on_an_absorbed_commander() {
+    let db = super::support::shared_card_db().expect("integration card fixture must load");
+    for accept_command in [false, true] {
+        let mut scenario =
+            GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario.add_real_card(P0, "Gemrazer", Zone::Battlefield, db);
+        let commander = scenario.add_real_card(P0, "Otrimi, the Ever-Playful", Zone::Command, db);
+        let evacuation = scenario.add_real_card(P0, "Evacuation", Zone::Hand, db);
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::Black, ManaType::Green]
+                .into_iter()
+                .chain([ManaType::Blue; 9])
+                .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&commander)
+            .unwrap()
+            .is_commander = true;
+        runner
+            .cast(commander)
+            .alternative_cast(AlternativeCastDecision::Alternative)
+            .casting_variant(CastingVariant::Mutate)
+            .target_object(host)
+            .resolve();
+        runner
+            .act(GameAction::ChooseMutateMergeSide {
+                side: engine::game::merge::MergeSide::Bottom,
+            })
+            .unwrap();
+        assert_eq!(
+            runner.state().objects[&host].merged_components,
+            [host, commander]
+        );
+        runner.cast(evacuation).resolve();
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Evacuation must ask Otrimi's owner before moving the split card");
+        };
+        assert_eq!(*player, P0);
+        let index = candidates
+            .iter()
+            .position(|candidate| {
+                (candidate.description == "Move to command zone") == accept_command
+            })
+            .expect("both answers are offered");
+
+        let mut saved =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        let proposed = &mut saved["state"]["pending_replacement"]["proposed"]["ZoneChange"];
+        assert_eq!(proposed["object_id"], serde_json::json!(commander));
+        assert!(proposed.get("merged_departure").is_none());
+        proposed["merged_departure"] =
+            serde_json::json!({"object_id": evacuation, "incarnation": 0});
+        let error = serde_json::from_value::<PersistedGameState>(saved)
+            .unwrap()
+            .into_game_state()
+            .expect_err("a serial proposal cannot carry a staged merge departure");
+        assert!(error.to_string().contains("no staged approval"), "{error}");
+
+        round_trip_arrangement(&mut runner);
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        assert_eq!(zone(&runner, host), Zone::Hand);
+        assert_eq!(
+            zone(&runner, commander),
+            if accept_command {
+                Zone::Command
+            } else {
+                Zone::Hand
+            }
+        );
+        let survivor = runner.state().objects[&commander]
+            .split_from_merge_survivor
+            .expect("the absorbed commander names the survivor after the split");
+        assert_eq!(
+            survivor,
+            ObjectIncarnationRef::from_object(&runner.state().objects[&host])
+        );
+        assert_eq!(zone(&runner, evacuation), Zone::Graveyard);
         assert_arrangement_finished(&runner);
     }
 }

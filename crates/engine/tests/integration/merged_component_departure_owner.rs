@@ -1948,6 +1948,19 @@ fn rebuking_ceremony_schedules_merged_and_ordinary_commander_choices_apnap() {
         };
         cast_until_resolved_or_asked(&mut runner, ceremony, &targets);
         assert_commander_prompt(runner.state(), P0, brokkos);
+        // Even the right survivor is not authority for a different pause.
+        let mut saved =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        let pending = &mut saved["state"]["pending_replacement"];
+        let mut wrong_boundary = pending["proposed"].clone();
+        assert!(!wrong_boundary["ZoneChange"]["merged_departure"].is_null());
+        wrong_boundary["ZoneChange"]["enter_tapped"] = serde_json::json!(true);
+        pending["delivery_boundary"] = wrong_boundary;
+        let error = serde_json::from_value::<PersistedGameState>(saved)
+            .unwrap()
+            .into_game_state()
+            .expect_err("the physical proposal no longer matches its staged pause");
+        assert!(error.to_string().contains("no staged approval"), "{error}");
         save_and_restore(&mut runner);
         answer(&mut runner, 0);
         assert_commander_prompt(runner.state(), P1, karn);

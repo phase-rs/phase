@@ -3306,6 +3306,60 @@ pub(crate) fn hold_answer_repark(
     ))
 }
 
+fn proposal_merge_departure(event: &ProposedEvent) -> Option<ObjectIncarnationRef> {
+    match event {
+        ProposedEvent::ZoneChange {
+            merged_departure, ..
+        } => *merged_departure,
+        _ => None,
+    }
+}
+
+fn matches_physical_merge_proposal(event: &ProposedEvent, member: &StagedBatchMember) -> bool {
+    matches!(
+        event,
+        ProposedEvent::ZoneChange {
+            object_id,
+            from: Zone::Battlefield,
+            merged_departure: Some(departure),
+            ..
+        } if *object_id == member.identity.object_id && Some(*departure) == member.merged_departure
+    )
+}
+
+/// CR 730.3c: only the exact staged consultation may carry a merge departure.
+/// A serial component move uses the successor stamped on the split card.
+fn validate_published_merge_proposal(state: &GameState) -> Result<(), String> {
+    let Some(pending) = &state.pending_replacement else {
+        return Ok(());
+    };
+    let boundary = pending.delivery_boundary_event();
+    if proposal_merge_departure(boundary).is_none()
+        && proposal_merge_departure(&pending.proposed).is_none()
+    {
+        return Ok(());
+    }
+    let member = boundary
+        .affected_object_id()
+        .and_then(|id| state.objects.get(&id))
+        .and_then(|object| {
+            parked_staged_approval_member(
+                state,
+                ObjectIncarnationRef::from_object(object),
+                boundary,
+            )
+        })
+        .map(|(_, member)| member);
+    if member.is_some_and(|member| {
+        matches_physical_merge_proposal(boundary, member)
+            && matches_physical_merge_proposal(&pending.proposed, member)
+    }) {
+        Ok(())
+    } else {
+        Err("a physical merge proposal has no staged approval matching its exact pause".into())
+    }
+}
+
 /// Checked restore of the replacement-choice scheduler (CR 616.1 + CR 101.4):
 /// every held decision has a chooser in seat range and a present subject that
 /// no other held decision is about, its pause boundary is the event its
@@ -3321,6 +3375,7 @@ pub(crate) fn hold_answer_repark(
 /// states the terms it was raised on until it is next to be asked
 /// (CR 614.12a).
 pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<(), String> {
+    validate_published_merge_proposal(state)?;
     let published = staged_decision_is_published(state);
     for owner in state.resolution_stack.staged_batch_owners() {
         let Some(staged) = owner.staged.as_ref() else {
@@ -3380,24 +3435,12 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
                         "a physical move does not belong to the live merged permanent".into(),
                     );
                 }
-                let matches = |event: &ProposedEvent| {
-                    matches!(
-                        event,
-                        ProposedEvent::ZoneChange { object_id, merged_departure: Some(survivor), .. }
-                            if *object_id == member.identity.object_id && *survivor == departure
-                    )
-                };
-                if owner.paused_current.as_ref().is_some_and(|paused| {
-                    paused.member == member.identity
-                        && (!matches(&paused.expected_event)
-                            || state.pending_replacement.as_ref().is_some_and(|pending| {
-                                pending.parks_delivery(&paused.expected_event)
-                                    && !matches(&pending.proposed)
-                            }))
-                }) || member
-                    .held_decision
-                    .as_ref()
-                    .is_some_and(|held| held.boundary.is_some() && !matches(&held.pending.proposed))
+            }
+            if let Some(paused) = &owner.paused_current {
+                if paused.member == member.identity
+                    && (member.merged_departure.is_some()
+                        || proposal_merge_departure(&paused.expected_event).is_some())
+                    && !matches_physical_merge_proposal(&paused.expected_event, member)
                 {
                     return Err("a parked component choice names another merge departure".into());
                 }
@@ -3405,6 +3448,19 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
             let Some(decision) = &member.held_decision else {
                 continue;
             };
+            let carries_departure = proposal_merge_departure(&decision.pending.proposed).is_some()
+                || proposal_merge_departure(decision.pending.delivery_boundary_event()).is_some();
+            if (carries_departure
+                || (decision.boundary.is_some() && member.merged_departure.is_some()))
+                && !decision.boundary.as_ref().is_some_and(|boundary| {
+                    matches_physical_merge_proposal(&boundary.expected_event, member)
+                        && matches_physical_merge_proposal(&decision.pending.proposed, member)
+                })
+            {
+                return Err(
+                    "a held merge proposal has no staged approval matching its exact pause".into(),
+                );
+            }
             if !subjects
                 .insert(decision_subject(&decision.pending).unwrap_or(member.identity.object_id))
             {
@@ -5048,6 +5104,18 @@ pub(crate) fn staged_approval_owner_for(
     identity: ObjectIncarnationRef,
     expected_event: &ProposedEvent,
 ) -> Option<(LogicalZoneChangeGroupId, bool)> {
+    let (batch, member) = parked_staged_approval_member(state, identity, expected_event)?;
+    Some((
+        batch.logical_zone_change_group.logical_group_id,
+        member.pending_outcome.is_none(),
+    ))
+}
+
+fn parked_staged_approval_member<'a>(
+    state: &'a GameState,
+    identity: ObjectIncarnationRef,
+    expected_event: &ProposedEvent,
+) -> Option<(&'a PendingBatchDeliveries, &'a StagedBatchMember)> {
     // CR 616.1: the owner is on top, or directly below the asking member's own
     // ready drain (put back when its held decision was published).
     let batch = state.active_batch_delivery().or_else(|| {
@@ -5084,10 +5152,7 @@ pub(crate) fn staged_approval_owner_for(
     if !compatible {
         return None;
     }
-    Some((
-        batch.logical_zone_change_group.logical_group_id,
-        member.pending_outcome.is_none(),
-    ))
+    Some((batch, member))
 }
 
 /// Whether the staged owner still has work before the shared Execute epilogue.
