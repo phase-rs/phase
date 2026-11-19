@@ -20458,6 +20458,11 @@ impl GameState {
         Ok(())
     }
 
+    fn validate_restored_replacement_authority(&self) -> Result<(), String> {
+        self.validate_nested_replacement_merge_departures()?;
+        crate::game::zone_pipeline::validate_restored_staged_scheduler(self)
+    }
+
     /// CR 118.12 + CR 702.24a + CR 800.4a: a parked unless payment
     /// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]) is an
     /// execution owner: its resume performs the unpaid remainder for the payer
@@ -20571,6 +20576,7 @@ impl GameState {
         }
         nested
             .validate_parked_unless_payment()
+            .and_then(|()| nested.validate_restored_replacement_authority())
             .map_err(|error| format!("recovery checkpoint: {error}"))?;
         nested
             .refuse_unresolvable_persisted_stack()
@@ -21205,9 +21211,7 @@ impl PersistedGameState {
             return Err(PersistedRestoreError::UnresumableSharedBatchPause { member });
         }
         state
-            .validate_nested_replacement_merge_departures()
-            .map_err(PersistedRestoreError::InvalidStagedScheduler)?;
-        crate::game::zone_pipeline::validate_restored_staged_scheduler(&state)
+            .validate_restored_replacement_authority()
             .map_err(PersistedRestoreError::InvalidStagedScheduler)?;
         let recovered_terminal_rest =
             crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
