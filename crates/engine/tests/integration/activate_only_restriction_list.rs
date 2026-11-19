@@ -907,6 +907,7 @@ fn manticore_gained_damage_checks_quicksilver_not_opposing_donor() {
             .id();
         let blocked = scenario.add_vanilla(P0, 2, 5);
         let target = scenario.add_vanilla(P0, 2, 5);
+        let other_blocker = scenario.add_vanilla(P1, 0, 5);
         let lands = add_blue_sources::<3>(&mut scenario, P1);
         let mut runner = scenario.build();
         assert_printed_creature(&runner, source, "Elemental", (3, 4), "{3}{U}{U}");
@@ -920,13 +921,10 @@ fn manticore_gained_damage_checks_quicksilver_not_opposing_donor() {
             attackers.push(donor);
         }
         attack(&mut runner, &attackers);
-        let assignment = [(source, blocked)];
-        let blocks = if source_blocks {
-            assignment.as_slice()
-        } else {
-            &[]
-        };
-        advance_to_declare_blockers_priority(&mut runner, blocks);
+        let blocker = if source_blocks { source } else { other_blocker };
+        advance_to_declare_blockers_priority(&mut runner, &[(blocker, blocked)]);
+        let combat = runner.state().combat.as_ref().expect("live combat");
+        assert_eq!(combat.blocker_to_attacker[&blocker], [blocked]);
         runner.act(GameAction::PassPriority).unwrap();
         tap_blue_sources(&mut runner, &lands);
         let gain = ability_index(runner.state(), source, |effect| {
