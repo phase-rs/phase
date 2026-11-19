@@ -12220,7 +12220,7 @@ fn for_each_one_distributes_copy_over_chosen_targets() {
     assert_eq!(count, QuantityExpr::Fixed { value: 1 });
 }
 
-/// CR 115.1d + CR 601.2c + CR 608.2c + CR 701.6a: Your Own Face Mocks You,
+/// CR 115.1d + CR 601.2c + CR 608.2c + CR 701.7a: Your Own Face Mocks You,
 /// verbatim Oracle. Sentence 1 declares up to two opponent-creature targets;
 /// sentence 2 copies each one; sentence 3 gates Scarecrow creation on
 /// "fewer than two tokens created this way" and sizes the brood by the
@@ -47115,7 +47115,7 @@ fn my_wealth_will_bury_you_full_oracle_parses_treasure_floor() {
 
 #[test]
 fn only_blood_ends_your_nightmares_full_oracle_parses_sacrifice_tail() {
-    // CR 701.32a + CR 904.9 + CR 701.17a + CR 608.2c + CR 109.5: verbatim
+    // CR 701.32a + CR 904.9 + CR 701.21a + CR 608.2c + CR 109.5: verbatim
     // Oracle. Each opponent sacrifices a creature; each opponent who didn't
     // sacrifice a creature this way discards two cards (the Kroxa-class
     // decline tail with the sacrifice verb).

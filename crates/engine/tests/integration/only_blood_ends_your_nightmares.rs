@@ -5,7 +5,7 @@
 //! discards two cards."
 //!
 //! CR 701.32a + CR 904.9: the set-in-motion trigger runs the edict.
-//! CR 701.17a + CR 608.2c + CR 109.5: the second sentence is the Kroxa-class
+//! CR 701.21a + CR 608.2c + CR 109.5: the second sentence is the Kroxa-class
 //! decline tail with the sacrifice verb — gated per opponent on
 //! `Not(ZoneChangedThisWay)`, so an opponent who sacrificed nothing (no
 //! creatures at all) still discards.

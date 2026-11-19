@@ -875,7 +875,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // CR 701.33b: abandoning moves command-zone→scheme-deck, never a
         // battlefield departure.
         | Effect::AbandonScheme
-        // CR 904.10: re-firing a face-up scheme's abilities moves nothing off
+        // CR 701.32b: re-firing a face-up scheme's abilities moves nothing off
         // the battlefield.
         | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues

@@ -508,7 +508,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // bottom of its owner's scheme deck — whether that is good depends on
         // the scheme (ongoing pressure vs. cycling to the next scheme).
         | Effect::AbandonScheme
-        // CR 904.10: re-firing a face-up scheme's abilities — whether that is
+        // CR 701.32b: re-firing a face-up scheme's abilities — whether that is
         // good depends on the scheme being set in motion again.
         | Effect::SetSchemeInMotion { .. }
         | Effect::AddRestriction { .. }
