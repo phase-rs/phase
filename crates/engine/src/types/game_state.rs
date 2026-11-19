@@ -19523,6 +19523,13 @@ pub enum PersistedRestoreError {
     UnelectedCopyAnnouncer { copy_id: ObjectId },
     #[error("persisted legacy pending cast cannot be restored: {0}")]
     LegacyPendingCastNotRestorable(String),
+    /// CR 120.2a + CR 120.2b + CR 400.7: a save written before the per-kind
+    /// damage latch cannot prove whether this object dealt combat damage in an
+    /// earlier turn, and its own static reads that history ("hasn't dealt
+    /// combat damage yet"). The history is never inferred, so the save is
+    /// refused rather than loaded with an invented kind.
+    #[error("persisted damage history of {object_id:?} is ambiguous: its static reads whether it has dealt combat damage, which the save cannot prove")]
+    AmbiguousLegacyDamageHistory { object_id: ObjectId },
 }
 
 /// CR 118.12 + CR 400.7: the object-naming prompts a staged payment parks
@@ -19887,7 +19894,7 @@ impl PersistedGameState {
         // shared by server-core and engine-wasm; it runs before printed-face
         // rehydration and the finalizing layer flush, and is a no-op on
         // current-format state.
-        crate::game::effects::deal_damage::recover_legacy_dealt_damage_kinds(&mut state);
+        crate::game::effects::deal_damage::recover_legacy_dealt_damage_kinds(&mut state)?;
         // CR 702.16p: an older save's slot-keyed start snapshots move to their
         // occurrence keys before anything can flush layers. Otherwise a
         // flush's refresh would take a fresh snapshot under the new key, and

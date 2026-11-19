@@ -11910,16 +11910,18 @@ mod tests {
         ];
 
         impl History {
+            /// `None`: the save cannot prove its combat history and Ruric\'s static
+            /// reads it, so the restore is refused (CR 120.2a + CR 120.2b).
             /// (combat latch, noncombat latch, hexproof) after restore.
-            fn expected(self) -> (bool, bool, bool) {
+            fn expected(self) -> Option<(bool, bool, bool)> {
                 match self {
-                    History::None => (false, false, true),
-                    History::SameTurnCombat => (true, false, false),
-                    // Policy A: unprovable history is attributed to combat.
-                    History::PreviousTurn => (true, false, false),
-                    History::SameTurnNoncombatEntrant => (false, true, true),
-                    // Policy A: an incarnation-less record is not trusted.
-                    History::PreFieldNoncombatEntrant => (true, false, false),
+                    History::None => Some((false, false, true)),
+                    History::SameTurnCombat => Some((true, false, false)),
+                    // Unprovable earlier history is refused, never attributed to a kind.
+                    History::PreviousTurn => None,
+                    History::SameTurnNoncombatEntrant => Some((false, true, true)),
+                    // An incarnation-less record is not trusted: refused.
+                    History::PreFieldNoncombatEntrant => None,
                 }
             }
         }
@@ -12076,7 +12078,9 @@ mod tests {
                     latch.has(DamageKindFilter::NoncombatOnly),
                     has_hexproof(obj),
                 ),
-                history.expected(),
+                history
+                    .expected()
+                    .expect("a restored history has expectations"),
                 "{history:?}: (combat latch, noncombat latch, hexproof)"
             );
         }
@@ -12090,8 +12094,19 @@ mod tests {
                 let (pre, ruric, json) = old_save(&db, history);
                 persisted.state = serde_json::from_value::<PersistedGameState>(json)
                     .expect("old-format persisted state decodes");
-                let restored = GameSession::from_persisted(persisted, &db, &ComboTable::default())
-                    .unwrap_or_else(|error| panic!("{history:?}: restore failed: {error}"));
+                let result = GameSession::from_persisted(persisted, &db, &ComboTable::default());
+                if history.expected().is_none() {
+                    let error = result.err().unwrap_or_else(|| {
+                        panic!("{history:?}: an ambiguous save must be refused")
+                    });
+                    assert!(
+                        error.to_string().contains("ambiguous"),
+                        "{history:?}: refused for the ambiguity, got: {error}"
+                    );
+                    continue;
+                }
+                let restored =
+                    result.unwrap_or_else(|error| panic!("{history:?}: restore failed: {error}"));
                 assert_restored(history, &pre, &restored.state, ruric);
             }
         }

@@ -44,7 +44,9 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{CastPaymentMode, DamagePostLossStage, GameState, WaitingFor};
-use engine::types::game_state::{DamageRecord, PersistedGameState, PersistedRestoreFinalization};
+use engine::types::game_state::{
+    DamageRecord, PersistedGameState, PersistedRestoreError, PersistedRestoreFinalization,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaColor, ManaCost};
@@ -1638,6 +1640,33 @@ fn restore(json: Value, db: &CardDatabase) -> GameState {
         .expect("rehydrate and finalize restore")
 }
 
+/// The same chokepoint as [`restore`], returning the refusal instead of
+/// panicking.
+fn try_restore(json: Value, db: &CardDatabase) -> Result<GameState, PersistedRestoreError> {
+    let decoded: PersistedGameState = serde_json::from_value(json).expect("persisted JSON decodes");
+    decoded
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)?
+        .finalize_after_rehydration(|state| {
+            rehydrate_game_from_card_db_with_finalization(
+                state,
+                db,
+                CardDbRehydrationFinalization::Defer,
+            );
+            Ok(())
+        })
+}
+
+/// The ambiguity refusal names the object whose history cannot be proven.
+fn assert_ambiguous_refusal(result: Result<GameState, PersistedRestoreError>, id: ObjectId) {
+    match result {
+        Err(PersistedRestoreError::AmbiguousLegacyDamageHistory { object_id }) => {
+            assert_eq!(object_id, id, "the refusal names the ambiguous object");
+        }
+        Err(other) => panic!("expected the ambiguity refusal, got {other:?}"),
+        Ok(_) => panic!("an ambiguous legacy save must be refused, not loaded"),
+    }
+}
+
 /// Reach-guard: the restore really ran on the saved history (Any-set entry
 /// and records carried over) and finalized with layers flushed (no manual
 /// `flush_layers` in these rows).
@@ -1862,18 +1891,18 @@ fn s2_old_save_same_turn_noncombat_entrant_keeps_hexproof() {
     );
 }
 
-/// S3 - policy A: an Any-set entry whose kind the save cannot prove (Ruric
-/// entered before this turn; the records of earlier turns are gone) is
-/// attributed to combat damage, so hexproof drops.
+/// S3 - CR 120.2a + CR 120.2b: an Any-set entry whose kind the save cannot
+/// prove (Ruric entered before this turn; the records of earlier turns are
+/// gone) is never attributed to a kind. Ruric's own static reads the combat
+/// history, so the restore is refused instead of loading an invented one.
 #[test]
-fn s3_old_save_unprovable_history_follows_policy_a() {
+fn s3_old_save_unprovable_history_is_refused() {
     let db = ruric_face_db();
 
     // (a) Combat in an earlier turn: the records were cleared at the start of
     // this turn.
     let mut scenario = base_scenario();
     let ruric = add_ruric(&mut scenario, P0, 7);
-    let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
     run_combat(&mut runner, &[ruric], &[]);
     let combat_turn = runner.state().turn_number;
@@ -1883,30 +1912,21 @@ fn s3_old_save_unprovable_history_follows_policy_a() {
     assert_eq!(pre.turn_number, combat_turn + 1);
     assert!(records_of(&pre, ruric).is_empty(), "no this-turn record");
     assert!(pre.objects_that_dealt_damage.contains(&ruric));
-    assert!(!has_hexproof(&pre.objects[&ruric]));
     let (json, stripped) = old_format_save(&pre);
     assert_eq!(stripped, 1);
-    let restored = restore(json, &db);
-    assert_restore_ran(&pre, &restored, ruric);
-    assert_eq!(
-        kinds(&restored, ruric),
-        (true, false),
-        "policy A: an Any-set entry with no provable kind is attributed to combat damage"
-    );
-    assert!(!has_hexproof(&restored.objects[&ruric]));
-    assert!(opponent_can_target(restored, ruric, opp_bolt));
+    assert_ambiguous_refusal(try_restore(json, &db), ruric);
 
-    // (b) Policy A over-approximation: Ruric entered before this turn and its
-    // only this-turn record is noncombat; an earlier turn's history could have
-    // been combat, so the save cannot prove "no combat damage" and hexproof
-    // drops although the live Ruric kept it.
+    // (b) The maintainer's witness: Ruric entered before this turn and its
+    // only this-turn record is noncombat (Rabid Bite). The live Ruric keeps
+    // hexproof; an earlier turn's history cannot be proven from the save, so
+    // the restore is refused rather than fabricating combat damage and
+    // dropping hexproof.
     let mut scenario = base_scenario();
     let ruric = add_ruric(&mut scenario, P0, 7);
     let victim = scenario.add_creature(P1, "Victim", 0, 8).id();
     let bite = scenario
         .add_spell_to_hand_from_oracle(P0, "Rabid Bite", false, RABID_BITE)
         .id();
-    let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
     runner.cast(bite).target_objects(&[ruric, victim]).resolve();
     flush_layers(runner.state_mut());
@@ -1920,15 +1940,30 @@ fn s3_old_save_unprovable_history_follows_policy_a() {
     assert!(has_hexproof(&pre.objects[&ruric]), "live: noncombat only");
     let (json, stripped) = old_format_save(&pre);
     assert_eq!(stripped, 1);
+    assert_ambiguous_refusal(try_restore(json, &db), ruric);
+}
+
+/// S3-control - the refusal is scoped to objects whose statics read the
+/// per-kind history: a creature with no such static and an unprovable earlier
+/// history restores, its latch left empty (nothing invented), and the Any-set
+/// entry survives for `DamageKindFilter::Any` readers.
+#[test]
+fn s3_control_ambiguous_history_without_a_kind_reader_restores() {
+    let db = ruric_face_db();
+    let mut scenario = base_scenario();
+    let bear = scenario.add_creature(P0, "Old Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    run_combat(&mut runner, &[bear], &[]);
+    pass_to_next_turn(&mut runner);
+    flush_layers(runner.state_mut());
+    let pre = runner.state().clone();
+    assert!(pre.objects_that_dealt_damage.contains(&bear));
+    assert!(records_of(&pre, bear).is_empty());
+    let (json, stripped) = old_format_save(&pre);
+    assert_eq!(stripped, 1);
     let restored = restore(json, &db);
-    assert_restore_ran(&pre, &restored, ruric);
-    assert_eq!(
-        kinds(&restored, ruric),
-        (true, true),
-        "policy A over-approximation: unprovable earlier history is attributed to combat"
-    );
-    assert!(!has_hexproof(&restored.objects[&ruric]));
-    assert!(opponent_can_target(restored, ruric, opp_bolt));
+    assert_restore_ran(&pre, &restored, bear);
+    assert_eq!(kinds(&restored, bear), (false, false), "nothing invented");
 }
 
 /// S4 - a current-format save restores unchanged (the recovery's trigger is an
@@ -2232,32 +2267,17 @@ fn s8_present_latch_is_never_overwritten() {
 
 /// S9 - a record without `source_incarnation` (a save written before the
 /// field existed) cannot be proven to be this incarnation's and is not
-/// trusted: the same-turn noncombat entrant of S2 falls to policy A. The
+/// trusted: the same-turn noncombat entrant of S2 then has no provable
+/// history, and Ruric's kind-reading static refuses the restore. The
 /// difference from S2 is the absent key alone.
 #[test]
 fn s9_pre_field_record_without_incarnation_is_not_trusted() {
     let db = ruric_face_db();
-    let (pre, ruric, opp_bolt) = same_turn_noncombat_entrant_fixture();
+    let (pre, ruric, _) = same_turn_noncombat_entrant_fixture();
     let (mut json, stripped) = old_format_save(&pre);
     assert_eq!(stripped, 1);
     assert_eq!(strip_record_incarnation(&mut json, ruric), 1);
-    let restored = restore(json, &db);
-    assert_restore_ran(&pre, &restored, ruric);
-    let records = records_of(&restored, ruric);
-    assert_eq!(records.len(), 1);
-    assert!(!records[0].is_combat);
-    assert!(records[0].source_incarnation.is_none());
-    assert_eq!(
-        restored.objects[&ruric].entered_battlefield_turn,
-        Some(restored.turn_number)
-    );
-    assert_eq!(
-        kinds(&restored, ruric),
-        (true, false),
-        "policy A: an untrusted record leaves no provable history"
-    );
-    assert!(!has_hexproof(&restored.objects[&ruric]));
-    assert!(opponent_can_target(restored, ruric, opp_bolt));
+    assert_ambiguous_refusal(try_restore(json, &db), ruric);
 }
 
 /// Builds the S10 fixture: a printed Ruric (`add_real_card`, carrying

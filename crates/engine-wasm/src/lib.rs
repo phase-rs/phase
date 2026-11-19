@@ -14975,16 +14975,18 @@ mod ruric_legacy_restore_tests {
     ];
 
     impl History {
+        /// `None`: the save cannot prove its combat history and Ruric\'s static
+        /// reads it, so the restore is refused (CR 120.2a + CR 120.2b).
         /// (combat latch, noncombat latch, hexproof) after restore.
-        fn expected(self) -> (bool, bool, bool) {
+        fn expected(self) -> Option<(bool, bool, bool)> {
             match self {
-                History::None => (false, false, true),
-                History::SameTurnCombat => (true, false, false),
-                // Policy A: unprovable history is attributed to combat.
-                History::PreviousTurn => (true, false, false),
-                History::SameTurnNoncombatEntrant => (false, true, true),
-                // Policy A: an incarnation-less record is not trusted.
-                History::PreFieldNoncombatEntrant => (true, false, false),
+                History::None => Some((false, false, true)),
+                History::SameTurnCombat => Some((true, false, false)),
+                // Unprovable earlier history is refused, never attributed to a kind.
+                History::PreviousTurn => None,
+                History::SameTurnNoncombatEntrant => Some((false, true, true)),
+                // An incarnation-less record is not trusted: refused.
+                History::PreFieldNoncombatEntrant => None,
             }
         }
     }
@@ -15136,7 +15138,9 @@ mod ruric_legacy_restore_tests {
                 latch.has(DamageKindFilter::NoncombatOnly),
                 has_hexproof(obj),
             ),
-            history.expected(),
+            history
+                .expected()
+                .expect("a restored history has expectations"),
             "{history:?}: (combat latch, noncombat latch, hexproof)"
         );
     }
@@ -15149,8 +15153,18 @@ mod ruric_legacy_restore_tests {
             set_multiplayer_mode(false);
             CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
             let (pre, ruric, json) = old_save(&db, history);
-            restore_game_state_inner(&json.to_string())
-                .unwrap_or_else(|error| panic!("{history:?}: restore failed: {error}"));
+            let result = restore_game_state_inner(&json.to_string());
+            if history.expected().is_none() {
+                let error = result
+                    .err()
+                    .unwrap_or_else(|| panic!("{history:?}: an ambiguous save must be refused"));
+                assert!(
+                    error.to_string().contains("ambiguous"),
+                    "{history:?}: refused for the ambiguity, got: {error}"
+                );
+                continue;
+            }
+            result.unwrap_or_else(|error| panic!("{history:?}: restore failed: {error}"));
             let restored =
                 with_installed_state(|state| state.clone()).expect("restored state installed");
             assert_restored(history, &pre, &restored, ruric);

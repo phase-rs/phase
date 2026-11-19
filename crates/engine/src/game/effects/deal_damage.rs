@@ -1600,21 +1600,21 @@ pub(crate) fn emit_damage_dealt_and_record(
 /// record matched (records are cleared at the start of each turn, so an
 /// earlier entrant may have dealt damage of unknown kind before this turn).
 ///
-/// Policy A for the unrecoverable remainder: when the history is not complete
-/// and no trusted combat record exists, the Any-set entry is attributed to
-/// combat damage. Rationale: an Any-set member is overwhelmingly a combat
-/// damage dealer; the failure direction is the less harmful one ("hasn't
-/// dealt combat damage yet" protection, e.g. hexproof per CR 702.11b, drops
-/// rather than staying undeserved for the rest of the game); it writes no new
-/// state. Pre-field saves (records without `source_incarnation`) therefore
-/// lose the exactness of the "entered this turn, noncombat only: stays
-/// hexproof" case and fall to policy A. `DamageKindFilter::Any` readers consult
-/// only the Any set, so they are unaffected.
+/// Ambiguous remainder: when the history is not complete and no trusted combat
+/// record exists, the save cannot prove whether the incarnation dealt combat
+/// damage in an earlier turn. Nothing is invented. An object whose own statics
+/// read the per-kind history (Ruric Thar's "hasn't dealt combat damage yet"
+/// hexproof) cannot be evaluated correctly, so the restore is refused
+/// ([`PersistedRestoreError::AmbiguousLegacyDamageHistory`]); an object that
+/// reads no kind keeps its recovered (possibly empty) latch, which only
+/// `DamageKindFilter::Any` readers, answered by the Any set, ever consult.
 ///
 /// The direct `GameState` serde path (`GameStateDecodeMode::DirectCurrentRaw`)
 /// is deliberately not migrated: it is limited to the current canonical
 /// representation.
-pub(crate) fn recover_legacy_dealt_damage_kinds(state: &mut GameState) -> bool {
+pub(crate) fn recover_legacy_dealt_damage_kinds(
+    state: &mut GameState,
+) -> Result<bool, crate::types::game_state::PersistedRestoreError> {
     let candidates: Vec<ObjectId> = state.objects_that_dealt_damage.iter().copied().collect();
     let mut changed = false;
     for id in candidates {
@@ -1639,8 +1639,24 @@ pub(crate) fn recover_legacy_dealt_damage_kinds(state: &mut GameState) -> bool {
         }
         let complete = obj.entered_battlefield_turn == Some(state.turn_number) && matched > 0;
         if !recovered.has(DamageKindFilter::CombatOnly) && !complete {
-            // Policy A: unprovable history is attributed to combat damage.
-            recovered.record(true);
+            // CR 120.2a + CR 120.2b: earlier-turn history is unprovable. Never
+            // attribute it to a kind; refuse when a static reads the kind.
+            let reads_kind = obj
+                .static_definitions
+                .iter_all()
+                .chain(obj.base_static_definitions.iter())
+                .any(|def| {
+                    def.condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.reads_damage_kind())
+                });
+            if reads_kind {
+                return Err(
+                    crate::types::game_state::PersistedRestoreError::AmbiguousLegacyDamageHistory {
+                        object_id: id,
+                    },
+                );
+            }
         }
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.dealt_damage_kinds = recovered;
@@ -1650,7 +1666,7 @@ pub(crate) fn recover_legacy_dealt_damage_kinds(state: &mut GameState) -> bool {
     if changed {
         state.layers_dirty.mark_full();
     }
-    changed
+    Ok(changed)
 }
 
 /// CR 702.15b / CR 120.3f: gain the lifelink life for one damage leg. Returns
