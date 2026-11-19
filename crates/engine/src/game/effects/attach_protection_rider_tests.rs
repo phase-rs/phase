@@ -597,7 +597,10 @@ fn granted_rider_board(
         .push(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SpecificObject { id: recipient })
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
     persist_last_static(state, recipient);
 
@@ -1224,7 +1227,10 @@ fn start_blessing_grant_by(
 fn unrelated_static(recipient: ObjectId) -> StaticDefinition {
     StaticDefinition::continuous()
         .affected(TargetFilter::SpecificObject { id: recipient })
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
 }
 
 /// Synthetic stand-in for an effect that changes an attachment's color after

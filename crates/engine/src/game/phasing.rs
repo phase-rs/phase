@@ -577,8 +577,14 @@ mod tests {
                         TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
                     ))
                     .modifications(vec![
-                        ContinuousModification::AddPower { value: 2 },
-                        ContinuousModification::AddToughness { value: 2 },
+                        ContinuousModification::AddPower {
+                            value: 2,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 2,
+                            fraction: Default::default(),
+                        },
                     ]),
             );
         }
@@ -777,7 +783,10 @@ mod tests {
         let anthem_id = setup_creature(&mut state, "Glorious Anthem", PlayerId(0));
         // Attach an "other creatures get +1/+1" continuous static.
         let anthem_static = StaticDefinition::new(StaticMode::Continuous)
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }])
             .affected(TargetFilter::Any);
         state
             .objects

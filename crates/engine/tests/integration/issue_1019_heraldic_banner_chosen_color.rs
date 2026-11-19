@@ -86,7 +86,7 @@ fn heraldic_banner_pumps_creature_of_chosen_color() {
             sd.modifications.iter().any(|m| {
                 matches!(
                     m,
-                    engine::types::ability::ContinuousModification::AddPower { value: 1 }
+                    engine::types::ability::ContinuousModification::AddPower { value: 1, .. }
                 )
             }) && matches!(
                 &sd.affected,

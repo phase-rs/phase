@@ -80,7 +80,9 @@ pub(crate) fn empty_back_face() -> BackFaceData {
     BackFaceData {
         name: String::new(),
         power: None,
+        power_fraction: Default::default(),
         toughness: None,
+        toughness_fraction: Default::default(),
         loyalty: None,
         printed_loyalty: None,
         defense: None,
@@ -198,6 +200,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         }
     }
 

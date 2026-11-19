@@ -121,6 +121,8 @@ fn siege_victory_cast_during_resolution_enters_transformed() {
             casting_options: Vec::new(),
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
     }
 

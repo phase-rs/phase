@@ -1703,6 +1703,8 @@ fn a_damage_trigger_reads_the_damaged_player_through_its_scoped_player() {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         }),
     );
     let on_stack = state.stack.back().expect("entry");
@@ -3481,6 +3483,8 @@ fn a_node_below_a_choice_published_for_a_scoped_player_acts_on_nothing() {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let entry = push_trigger(
             &mut state,

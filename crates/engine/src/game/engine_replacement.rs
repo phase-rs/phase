@@ -32,7 +32,7 @@ use super::ability_utils::build_resolved_from_def_with_targets;
 use super::arithmetic::u32_to_i32_saturating;
 use super::casting_costs::AnsweredLifeGain;
 use super::effects;
-use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
+use super::effects::deal_damage::{apply_damage_after_replacement_exact, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
@@ -642,8 +642,13 @@ fn handle_replacement_choice_inner(
     let parked_lifelink_bonus = state
         .pending_replacement
         .as_ref()
-        .map(|pending| pending.lifelink_bonus)
-        .unwrap_or(0);
+        .map(|pending| {
+            crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                pending.lifelink_bonus,
+                pending.lifelink_bonus_fraction,
+            )
+        })
+        .unwrap_or(crate::types::ability::HalfMagnitude::ZERO);
     // The player-resource policy the parked record was stamped with, captured
     // with the file's other `parked_*` reads before `continue_replacement`
     // consumes it.
@@ -1049,14 +1054,17 @@ fn handle_replacement_choice_inner(
                     // rebuild, so the resumed hit still redirects and a resumed redirect
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
-                    ctx.lifelink_bonus = parked_lifelink_bonus;
+                    let (ll_whole, ll_fraction) = parked_lifelink_bonus.into_whole_and_fraction();
+                    ctx.lifelink_bonus = ll_whole;
+                    ctx.lifelink_bonus_fraction = ll_fraction;
                     // CR 120.4b + CR 120.4c: a portion of a parked two-phase batch rejoins the
                     // batch, which finishes its other portions' replacement before delivering.
                     if !super::effects::deal_damage::return_answered_portion_to_batch(
                         state, &ctx, &damage,
                     ) {
-                        let _ =
-                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                        let _ = apply_damage_after_replacement_exact(
+                            state, &ctx, damage, is_combat, events,
+                        );
                     }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -2158,8 +2166,10 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 702.15b: likewise carry the deferred lifelink bonus onto the
                 // re-parked record so a second ordering choice cannot drop it.
-                if pending.lifelink_bonus == 0 {
-                    pending.lifelink_bonus = parked_lifelink_bonus;
+                if pending.lifelink_bonus == 0 && pending.lifelink_bonus_fraction.is_zero() {
+                    let (ll_whole, ll_fraction) = parked_lifelink_bonus.into_whole_and_fraction();
+                    pending.lifelink_bonus = ll_whole;
+                    pending.lifelink_bonus_fraction = ll_fraction;
                 }
                 if let Some(provenance) = parked_sacrifice_provenance {
                     if pending.proposed.affected_object_id() == Some(provenance.object_id) {
@@ -7672,6 +7682,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -8356,6 +8367,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -8567,6 +8579,7 @@ mod tests {
             amount: 0,
             is_combat: false,
             applied: std::collections::HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut events = Vec::new();
         let _ = apply_damage_after_replacement(&mut state, &_ctx, damage_event, false, &mut events);
@@ -8945,6 +8958,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: vec![ManaColor::White],
                 keywords: vec![Keyword::Flying],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "w_2_2_soldier_flying".to_string(),
             static_abilities: Vec::new(),
@@ -9076,6 +9091,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "c_a_treasure".to_string(),
             static_abilities: Vec::new(),
@@ -9241,6 +9258,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "c_a_treasure".to_string(),
             static_abilities: Vec::new(),
@@ -9422,6 +9441,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "c_a_treasure".to_string(),
             static_abilities: Vec::new(),
@@ -9579,6 +9600,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: vec![crate::types::mana::ManaColor::Green],
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "c_a_dog".to_string(),
             static_abilities: Vec::new(),
@@ -9723,6 +9746,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "c_a_treasure".to_string(),
             static_abilities: Vec::new(),
@@ -10261,6 +10286,7 @@ mod tests {
                 blockers: vec![crate::types::game_state::DamageSlot {
                     blocker_id: other,
                     lethal_minimum: 2,
+                    lethal_minimum_fraction: Default::default(),
                 }],
                 assignment_modes: vec![Default::default()],
                 trample: None,
@@ -10268,6 +10294,7 @@ mod tests {
                 attack_target: crate::game::combat::AttackTarget::Player(PlayerId(1)),
                 pw_loyalty: None,
                 pw_controller: None,
+                total_damage_fraction: Default::default(),
             },
             WaitingFor::ScryChoice {
                 player: PlayerId(0),
@@ -10336,6 +10363,7 @@ mod tests {
                     player_id: PlayerId(1),
                     amount: 1,
                     applied: HashSet::new(),
+                    amount_fraction: Default::default(),
                 },
                 &mut events,
             ) else {

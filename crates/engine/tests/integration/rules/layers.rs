@@ -7,9 +7,13 @@ use engine::types::ability::ContinuousModification;
 /// Helper: build a lord's continuous static modifications (+P/+T).
 fn lord_mods(add_power: i32, add_toughness: i32) -> Vec<ContinuousModification> {
     vec![
-        ContinuousModification::AddPower { value: add_power },
+        ContinuousModification::AddPower {
+            value: add_power,
+            fraction: Default::default(),
+        },
         ContinuousModification::AddToughness {
             value: add_toughness,
+            fraction: Default::default(),
         },
     ]
 }
@@ -17,9 +21,13 @@ fn lord_mods(add_power: i32, add_toughness: i32) -> Vec<ContinuousModification> 
 /// Helper: build a set-P/T continuous static modifications.
 fn set_pt_mods(set_power: i32, set_toughness: i32) -> Vec<ContinuousModification> {
     vec![
-        ContinuousModification::SetPower { value: set_power },
+        ContinuousModification::SetPower {
+            value: set_power,
+            fraction: Default::default(),
+        },
         ContinuousModification::SetToughness {
             value: set_toughness,
+            fraction: Default::default(),
         },
     ]
 }

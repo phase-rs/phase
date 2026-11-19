@@ -7007,6 +7007,7 @@ mod tests {
             player: PlayerId(1),
             commander,
             damage: 18,
+            damage_fraction: Default::default(),
         });
         let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
 
@@ -7041,11 +7042,13 @@ mod tests {
             player: PlayerId(1),
             commander: cmd_a,
             damage: 18,
+            damage_fraction: Default::default(),
         });
         state.commander_damage.push(CommanderDamageEntry {
             player: PlayerId(1),
             commander: cmd_b,
             damage: 18,
+            damage_fraction: Default::default(),
         });
         let chump_a = add_creature(&mut state, PlayerId(1), "TokenA", 1, 1, vec![]);
         let chump_b = add_creature(&mut state, PlayerId(1), "TokenB", 1, 1, vec![]);
@@ -7079,6 +7082,7 @@ mod tests {
                 player: PlayerId(1),
                 commander,
                 damage: 16,
+                damage_fraction: Default::default(),
             });
         }
 
@@ -7102,6 +7106,7 @@ mod tests {
             player: PlayerId(1),
             commander,
             damage: 18,
+            damage_fraction: Default::default(),
         });
 
         assert!(
@@ -7159,6 +7164,7 @@ mod tests {
             player: PlayerId(1),
             commander,
             damage: 18,
+            damage_fraction: Default::default(),
         });
         let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
 
@@ -7198,6 +7204,7 @@ mod tests {
             player: PlayerId(1),
             commander,
             damage: 18,
+            damage_fraction: Default::default(),
         });
         let chump = add_creature(&mut state, PlayerId(1), "Bear", 3, 3, vec![]);
 
@@ -9683,8 +9690,14 @@ mod tests {
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
                     .modifications(vec![
-                        CMod::SetPower { value: power },
-                        CMod::SetToughness { value: toughness },
+                        CMod::SetPower {
+                            value: power,
+                            fraction: Default::default(),
+                        },
+                        CMod::SetToughness {
+                            value: toughness,
+                            fraction: Default::default(),
+                        },
                         CMod::AddType {
                             core_type: CoreType::Creature,
                         },

@@ -16333,6 +16333,8 @@ mod tests {
             source_amounts: vec![],
             total_damage: 11,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         }];
 
         let mut ability = ResolvedAbility::new(
@@ -26083,6 +26085,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         });

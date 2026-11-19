@@ -382,6 +382,8 @@ fn a_replacement_that_leaves_a_non_aura_entrant_still_creates_the_token() {
             supertypes: vec![],
             colors: vec![],
             keywords: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         },
         script_name: "Spirit".to_string(),
         static_abilities: vec![],

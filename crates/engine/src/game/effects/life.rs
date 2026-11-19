@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 
 use crate::game::engine::EngineError;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::resolve_quantity_with_targets_exact;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, HalfFraction, HalfMagnitude, HalfSigned, ResolvedAbility,
+    TargetFilter,
+};
 use crate::types::events::{GameEvent, LifeTotalReading};
 use crate::types::game_state::{
     GameState, IngressLifeWindow, PendingEffectResolutionEvent, PendingEffectResolved,
@@ -92,6 +95,18 @@ enum SubstitutionDrainOutcome {
 /// redirect substitutes a full mill resolution for the bare life mutation, and
 /// that mill can pause on its own replacement choice (CR 616.1) — which the
 /// settle must surface as [`LifeChangeError::Deferred`], never swallow.
+enum ExactLifeChangeError {
+    Deferred(ReplacementDeferred),
+    Unrepresentable(LifeChangeUnrepresentable),
+}
+
+type LifeSettleExactFn = fn(
+    &mut GameState,
+    ProposedEvent,
+    UnrepresentablePolicy,
+    &mut Vec<GameEvent>,
+) -> Result<HalfMagnitude, ExactLifeChangeError>;
+
 type LifeSettleFn = fn(
     &mut GameState,
     ProposedEvent,
@@ -170,9 +185,9 @@ pub fn resolve_gain(
         return Ok(());
     }
 
-    let final_amount = resolve_quantity_with_targets(state, amount, ability);
+    let exact_amount = resolve_quantity_with_targets_exact(state, amount, ability);
 
-    if final_amount <= 0 {
+    if exact_amount <= HalfSigned::ZERO {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -181,9 +196,12 @@ pub fn resolve_gain(
         return Ok(());
     }
 
+    let (gain_amount, amount_fraction) =
+        exact_amount.clamp_non_negative().into_whole_and_fraction();
     let proposed = ProposedEvent::LifeGain {
         player_id,
-        amount: final_amount as u32,
+        amount: gain_amount,
+        amount_fraction,
         applied: HashSet::new(),
     };
 
@@ -228,12 +246,12 @@ pub fn resolve_gain(
 
 /// The proposed `LifeGain` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_gain(
+fn proposed_life_gain_exact(
     state: &GameState,
     player_id: PlayerId,
-    amount: u32,
+    amount: HalfMagnitude,
 ) -> Option<ProposedEvent> {
-    if amount == 0 {
+    if amount.is_zero() {
         return None;
     }
     // CR 119.7: Short-circuit BEFORE the replacement pipeline — "can't gain life"
@@ -242,21 +260,31 @@ fn proposed_life_gain(
     if crate::game::static_abilities::player_has_cant_gain_life(state, player_id) {
         return None;
     }
+    let (whole, amount_fraction) = amount.into_whole_and_fraction();
     Some(ProposedEvent::LifeGain {
         player_id,
-        amount,
+        amount: whole,
+        amount_fraction,
         applied: HashSet::new(),
     })
 }
 
-/// The proposed `LifeLoss` event for an entry, or `None` when the change is
-/// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_loss(
+fn proposed_life_gain(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
 ) -> Option<ProposedEvent> {
-    if amount == 0 {
+    proposed_life_gain_exact(state, player_id, HalfMagnitude::from_whole(amount))
+}
+
+/// The proposed `LifeLoss` event for an entry, or `None` when the change is
+/// vacuous or suppressed before the replacement pipeline.
+fn proposed_life_loss_exact(
+    state: &GameState,
+    player_id: PlayerId,
+    amount: HalfMagnitude,
+) -> Option<ProposedEvent> {
+    if amount.is_zero() {
         return None;
     }
     // CR 119.8: A player who can't lose life is unaffected. Short-circuit
@@ -264,28 +292,40 @@ fn proposed_life_loss(
     if crate::game::static_abilities::player_has_cant_lose_life(state, player_id) {
         return None;
     }
+    let (whole, amount_fraction) = amount.into_whole_and_fraction();
     Some(ProposedEvent::LifeLoss {
         player_id,
-        amount,
+        amount: whole,
+        amount_fraction,
         applied: HashSet::new(),
     })
+}
+
+fn proposed_life_loss(
+    state: &GameState,
+    player_id: PlayerId,
+    amount: u32,
+) -> Option<ProposedEvent> {
+    proposed_life_loss_exact(state, player_id, HalfMagnitude::from_whole(amount))
 }
 
 /// Collapses an ordinary-policy core result to the ordinary entries' contract.
 /// `IgnoreImpossible` never returns `Unrepresentable` from settlement: with an
 /// ingress window it records failure for the public boundary, and without one
 /// it uses the logged compatibility skip. This remains a defensive arm.
-fn ordinary_life_outcome(result: Result<u32, LifeChangeError>) -> Result<u32, ReplacementDeferred> {
+fn ordinary_life_outcome_exact(
+    result: Result<HalfMagnitude, ExactLifeChangeError>,
+) -> Result<HalfMagnitude, ReplacementDeferred> {
     match result {
         Ok(applied) => Ok(applied),
-        Err(LifeChangeError::Deferred(deferred)) => Err(deferred),
-        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+        Err(ExactLifeChangeError::Deferred(deferred)) => Err(deferred),
+        Err(ExactLifeChangeError::Unrepresentable(unrepresentable)) => {
             debug_assert!(
                 false,
                 "IgnoreImpossible settlement records ingress failure or skips without returning an error"
             );
             unrepresentable.log_discarded("ordinary life entry");
-            Ok(0)
+            Ok(HalfMagnitude::ZERO)
         }
     }
 }
@@ -330,6 +370,45 @@ fn run_ingress_life_change(
 /// serialized `PendingReplacement` policy payloads), NOT a CR 101.3
 /// impossibility: public boundaries reject the action and restore their entry
 /// state instead.
+fn apply_life_change_core_exact(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    settle: LifeSettleExactFn,
+    policy: UnrepresentablePolicy,
+    events: &mut Vec<GameEvent>,
+) -> Result<HalfMagnitude, ExactLifeChangeError> {
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            let applied = settle(state, event, policy, events)?;
+            match drain_substitution_continuation(state, events) {
+                SubstitutionDrainOutcome::Completed => Ok(applied),
+                SubstitutionDrainOutcome::Deferred => Err(ExactLifeChangeError::Deferred(
+                    ReplacementDeferred::SubstitutionContinuation {
+                        applied: applied.whole_floor(),
+                    },
+                )),
+            }
+        }
+        ReplacementResult::Prevented => match drain_substitution_continuation(state, events) {
+            SubstitutionDrainOutcome::Completed => Ok(HalfMagnitude::ZERO),
+            SubstitutionDrainOutcome::Deferred => Err(ExactLifeChangeError::Deferred(
+                ReplacementDeferred::SubstitutionContinuation { applied: 0 },
+            )),
+        },
+        ReplacementResult::NeedsChoice(player) => {
+            debug_assert!(
+                state.ingress_life_window.is_none() || state.pending_replacement.is_some(),
+                "an ingress life change that parks must leave its stamped record pending"
+            );
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            Err(ExactLifeChangeError::Deferred(
+                ReplacementDeferred::ReplacementChoice,
+            ))
+        }
+    }
+}
+
 fn apply_life_change_core(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -398,22 +477,32 @@ fn apply_life_change_core(
 /// state; outside one, ordinary resolution and legacy parked records retain the
 /// compatibility behavior of logging and skipping the change. Direct action-
 /// ingress callers use [`try_apply_life_gain`] to reject it explicitly.
+pub fn apply_life_gain_exact(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: HalfMagnitude,
+    events: &mut Vec<GameEvent>,
+) -> Result<HalfMagnitude, ReplacementDeferred> {
+    let Some(proposed) = proposed_life_gain_exact(state, player_id, amount) else {
+        return Ok(HalfMagnitude::ZERO);
+    };
+    ordinary_life_outcome_exact(apply_life_change_core_exact(
+        state,
+        proposed,
+        settle_life_gain_exact,
+        UnrepresentablePolicy::IgnoreImpossible,
+        events,
+    ))
+}
+
 pub fn apply_life_gain(
     state: &mut GameState,
     player_id: PlayerId,
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, ReplacementDeferred> {
-    let Some(proposed) = proposed_life_gain(state, player_id, amount) else {
-        return Ok(0);
-    };
-    ordinary_life_outcome(apply_life_change_core(
-        state,
-        proposed,
-        settle_life_gain,
-        UnrepresentablePolicy::IgnoreImpossible,
-        events,
-    ))
+    apply_life_gain_exact(state, player_id, HalfMagnitude::from_whole(amount), events)
+        .map(|applied| applied.whole_floor())
 }
 
 /// Action-ingress life gain: like [`apply_life_gain`], except that a final
@@ -548,6 +637,7 @@ pub fn settle_staged_life_gains(
             ProposedEvent::LifeGain {
                 player_id,
                 amount,
+                amount_fraction: HalfFraction::Zero,
                 applied: HashSet::new(),
             },
             events,
@@ -627,15 +717,16 @@ fn drain_substitution_continuation(
 /// window records the failure for the owning public boundary to reject and
 /// restore; without one, ordinary resolution and legacy parked records use the
 /// logged compatibility skip.
-fn settle_life_gain(
+fn settle_life_gain_exact(
     state: &mut GameState,
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeError> {
+) -> Result<HalfMagnitude, ExactLifeChangeError> {
     let ProposedEvent::LifeGain {
         player_id: pid,
         amount: gain_amount,
+        amount_fraction: gain_fraction,
         ..
     } = event
     else {
@@ -643,59 +734,69 @@ fn settle_life_gain(
             false,
             "settle_life_gain called with non-LifeGain ProposedEvent"
         );
-        return Ok(0);
+        return Ok(HalfMagnitude::ZERO);
     };
     if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life gain") {
-        return settled.map_err(LifeChangeError::Unrepresentable);
+        return settled
+            .map(HalfMagnitude::from_whole)
+            .map_err(ExactLifeChangeError::Unrepresentable);
     }
     if ingress_window_has_failed(state) {
-        return Ok(0);
+        return Ok(HalfMagnitude::ZERO);
     }
 
-    // Horde Magic (casual variant): the Horde seat has no life total, so life
-    // gain does nothing to it (mirrors the CR 119.7 "can't gain life" no-op
-    // shape, though here the cause is the absence of a life total, not a
-    // static ability). No mutation, no LifeChanged event.
     if crate::game::horde::player_has_no_life_total(state, pid) {
-        return Ok(0);
+        return Ok(HalfMagnitude::ZERO);
     }
 
-    // CR 119.8: gaining 0 life doesn't count as gaining life — no state
-    // mutation and no journal command; the event below still fires as before.
-    if gain_amount != 0 {
-        let edit = i32::try_from(gain_amount)
-            .map_err(|_| LifeChangeUnrepresentable { player: pid })
-            .and_then(|delta| apply_final_life_edit(state, pid, delta));
+    let exact_gain = HalfMagnitude::from_whole_and_fraction(gain_amount, gain_fraction);
+    let signed_delta = i32::try_from(gain_amount)
+        .ok()
+        .and_then(|w| i64::try_from(exact_gain.0).ok().map(|_| (w, gain_fraction)));
+    if !exact_gain.is_zero() {
+        let edit = signed_delta
+            .map(|(delta, fraction)| HalfSigned::from_whole_and_fraction(delta, fraction))
+            .ok_or(LifeChangeUnrepresentable { player: pid })
+            .and_then(|delta| apply_final_life_edit_exact(state, pid, delta));
         if let Err(unrepresentable) = edit {
             return settle_unrepresentable(state, unrepresentable, policy, "life gain")
-                .map_err(LifeChangeError::Unrepresentable);
+                .map(HalfMagnitude::from_whole)
+                .map_err(ExactLifeChangeError::Unrepresentable);
         }
     }
-    // CR 611.3a + CR 119: gate escalation on a live life-reading static.
     crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    let (emit_amount, emit_fraction) = signed_delta.unwrap_or((gain_amount as i32, gain_fraction));
+    let after_player = state.players.iter().find(|player| player.id == pid);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
-        amount: gain_amount as i32,
-        // CR 119.3: read back after the edit, so a run of life changes carries
-        // each intermediate total rather than only the final snapshot's.
-        new_total: LifeTotalReading(
-            state
-                .players
-                .iter()
-                .find(|player| player.id == pid)
-                .map(|player| player.life),
-        ),
+        amount: emit_amount,
+        amount_fraction: emit_fraction,
+        new_total: LifeTotalReading(after_player.map(|player| player.life)),
+        new_total_fraction: after_player.map_or(HalfFraction::Zero, |player| player.life_fraction),
     });
-    Ok(gain_amount)
+    Ok(exact_gain)
+}
+
+fn settle_life_gain(
+    state: &mut GameState,
+    event: ProposedEvent,
+    policy: UnrepresentablePolicy,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
+    match settle_life_gain_exact(state, event, policy, events) {
+        Ok(m) => Ok(m.whole_floor()),
+        Err(ExactLifeChangeError::Deferred(d)) => Err(LifeChangeError::Deferred(d)),
+        Err(ExactLifeChangeError::Unrepresentable(u)) => Err(LifeChangeError::Unrepresentable(u)),
+    }
 }
 
 /// Applies the final signed life delta through the checked scalar authority.
-fn apply_final_life_edit(
+fn apply_final_life_edit_exact(
     state: &mut GameState,
     player: PlayerId,
-    delta: i32,
+    delta: HalfSigned,
 ) -> Result<(), LifeChangeUnrepresentable> {
-    apply_final_player_resource_edit(state, player, ResolvedPlayerEdit::Life { delta })
+    apply_final_player_resource_edit(state, player, ResolvedPlayerEdit::life_exact(delta))
 }
 
 /// Applies a final player-resource gain or life change through the checked
@@ -879,22 +980,32 @@ pub(crate) fn ordinary_settlement<T>(
 /// and restore; without one, ordinary resolution and legacy parked records use
 /// the logged compatibility skip. Direct action-ingress callers use
 /// [`try_apply_life_loss`] to reject explicitly.
+pub fn apply_life_loss_exact(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: HalfMagnitude,
+    events: &mut Vec<GameEvent>,
+) -> Result<HalfMagnitude, ReplacementDeferred> {
+    let Some(proposed) = proposed_life_loss_exact(state, player_id, amount) else {
+        return Ok(HalfMagnitude::ZERO);
+    };
+    ordinary_life_outcome_exact(apply_life_change_core_exact(
+        state,
+        proposed,
+        settle_life_loss_exact,
+        UnrepresentablePolicy::IgnoreImpossible,
+        events,
+    ))
+}
+
 pub fn apply_life_loss(
     state: &mut GameState,
     player_id: PlayerId,
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, ReplacementDeferred> {
-    let Some(proposed) = proposed_life_loss(state, player_id, amount) else {
-        return Ok(0);
-    };
-    ordinary_life_outcome(apply_life_change_core(
-        state,
-        proposed,
-        settle_life_loss,
-        UnrepresentablePolicy::IgnoreImpossible,
-        events,
-    ))
+    apply_life_loss_exact(state, player_id, HalfMagnitude::from_whole(amount), events)
+        .map(|applied| applied.whole_floor())
 }
 
 /// Action-ingress life loss: the loss twin of [`try_apply_life_gain`].
@@ -927,6 +1038,15 @@ pub(crate) fn try_apply_life_loss_with_prohibition_board(
 /// CR 120.3a: Damage dealt to a player normally causes that player to lose
 /// that much life. This damage-specific seam delegates the resulting life-loss
 /// event to the generic CR 119.3 authority.
+pub fn apply_damage_life_loss_exact(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: HalfMagnitude,
+    events: &mut Vec<GameEvent>,
+) -> Result<HalfMagnitude, ReplacementDeferred> {
+    apply_life_loss_exact(state, player_id, amount, events)
+}
+
 pub fn apply_damage_life_loss(
     state: &mut GameState,
     player_id: PlayerId,
@@ -938,15 +1058,16 @@ pub fn apply_damage_life_loss(
 
 /// CR 119.3: Settle a post-replacement `ProposedEvent::LifeLoss`: the loss twin
 /// of [`settle_life_gain`] (same order, same per-policy failure branch).
-fn settle_life_loss(
+fn settle_life_loss_exact(
     state: &mut GameState,
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeError> {
+) -> Result<HalfMagnitude, ExactLifeChangeError> {
     let ProposedEvent::LifeLoss {
         player_id: pid,
         amount: loss_amount,
+        amount_fraction: loss_fraction,
         ..
     } = event
     else {
@@ -954,83 +1075,81 @@ fn settle_life_loss(
             false,
             "settle_life_loss called with non-LifeLoss ProposedEvent"
         );
-        return Ok(0);
+        return Ok(HalfMagnitude::ZERO);
     };
     if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life loss") {
-        return settled.map_err(LifeChangeError::Unrepresentable);
+        return settled
+            .map(HalfMagnitude::from_whole)
+            .map_err(ExactLifeChangeError::Unrepresentable);
     }
     if ingress_window_has_failed(state) {
-        return Ok(0);
+        return Ok(HalfMagnitude::ZERO);
     }
 
-    // Horde Magic (casual variant): the Horde seat has no life total. Damage it
-    // suffers (CR 120.3a: damage to a player causes that much life loss) and any
-    // direct life loss (CR 119.3) is redirected to milling that many cards from
-    // the top of its own library — the milled count stands in for the "loss".
-    // The Horde's `life` is NOT decremented and `life_lost_this_turn` is NOT
-    // incremented, so it can never lose to the CR 704.5a life state-based
-    // action. Lifelink is unaffected: the dealer's life GAIN is a separate
-    // upstream `LifeGain` event, not routed through this loss-mutation point.
+    let exact_loss = HalfMagnitude::from_whole_and_fraction(loss_amount, loss_fraction);
+
     if crate::game::horde::player_has_no_life_total(state, pid) {
-        // Single authority for the Horde damage→mill redirect. It proposes a
-        // real Mill event through the replacement pipeline (so the Bruvac
-        // doubling class folds its count) and applies the community advanced
-        // legendary rule when the ruleset opts in (a milled legendary
-        // permanent enters + phases out instead of being buried). A mill
-        // replacement choice that parks mid-redirect surfaces here as a
-        // `Deferred` pause — the prompt is already in `waiting_for` — so the
-        // caller stops exactly as it would for a life-loss ordering choice.
-        match crate::game::horde::mill_from_loss(state, pid, loss_amount, events) {
-            crate::game::horde::MillFromLossOutcome::Settled => return Ok(loss_amount),
+        match crate::game::horde::mill_from_loss(state, pid, exact_loss.whole_floor(), events) {
+            crate::game::horde::MillFromLossOutcome::Settled => return Ok(exact_loss),
             crate::game::horde::MillFromLossOutcome::Paused => {
-                return Err(LifeChangeError::Deferred(
+                return Err(ExactLifeChangeError::Deferred(
                     ReplacementDeferred::ReplacementChoice,
                 ));
             }
         }
     }
 
-    // CR 119.8: losing 0 life doesn't count as losing life — no state
-    // mutation and no journal command; the event below still fires as before.
-    if loss_amount != 0 {
+    let signed_delta = i32::try_from(loss_amount)
+        .ok()
+        .and_then(|_| i64::try_from(exact_loss.0).ok())
+        .map(|halves| HalfSigned(-halves));
+
+    if !exact_loss.is_zero() {
         let before = crate::game::players::team_life_total(state, pid);
-        // A loss negates a value that already fit an `i32`, so the negation
-        // itself cannot overflow.
-        let edit = i32::try_from(loss_amount)
-            .map_err(|_| LifeChangeUnrepresentable { player: pid })
-            .and_then(|magnitude| apply_final_life_edit(state, pid, -magnitude));
+        let edit = signed_delta
+            .ok_or(LifeChangeUnrepresentable { player: pid })
+            .and_then(|delta| apply_final_life_edit_exact(state, pid, delta));
         if let Err(unrepresentable) = edit {
             return settle_unrepresentable(state, unrepresentable, policy, "life loss")
-                .map_err(LifeChangeError::Unrepresentable);
+                .map(HalfMagnitude::from_whole)
+                .map_err(ExactLifeChangeError::Unrepresentable);
         }
         let after = crate::game::players::team_life_total(state, pid);
-        // The clone-local preview observes the real edit before events or a
-        // substitution continuation can introduce later, unrelated work.
         crate::game::life_safety::record_life_mutation_receipt(
             state,
             pid,
             before,
             after,
-            loss_amount,
+            exact_loss.whole_floor(),
         );
     }
-    // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
-    // static. Also the sink for non-infect player damage (deal_damage.rs).
     crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    let (loss_whole, loss_fraction) = exact_loss.into_whole_and_fraction();
+    let (emit_amount, emit_fraction) = signed_delta
+        .map(|d| d.into_whole_and_fraction())
+        .unwrap_or((-(loss_whole as i32), loss_fraction));
+    let after_player = state.players.iter().find(|player| player.id == pid);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
-        amount: -(loss_amount as i32),
-        // CR 119.3: read back after the edit, so a run of combat-damage life
-        // losses carries each intermediate total rather than only the final one.
-        new_total: LifeTotalReading(
-            state
-                .players
-                .iter()
-                .find(|player| player.id == pid)
-                .map(|player| player.life),
-        ),
+        amount: emit_amount,
+        amount_fraction: emit_fraction,
+        new_total: LifeTotalReading(after_player.map(|player| player.life)),
+        new_total_fraction: after_player.map_or(HalfFraction::Zero, |player| player.life_fraction),
     });
-    Ok(loss_amount)
+    Ok(exact_loss)
+}
+
+fn settle_life_loss(
+    state: &mut GameState,
+    event: ProposedEvent,
+    policy: UnrepresentablePolicy,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
+    match settle_life_loss_exact(state, event, policy, events) {
+        Ok(m) => Ok(m.whole_floor()),
+        Err(ExactLifeChangeError::Deferred(d)) => Err(LifeChangeError::Deferred(d)),
+        Err(ExactLifeChangeError::Unrepresentable(u)) => Err(LifeChangeError::Unrepresentable(u)),
+    }
 }
 
 /// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` under the
@@ -1104,6 +1223,33 @@ pub enum LifeAssignmentOutcome {
 /// must stop mutating on `None` rather than substituting zero: a partial
 /// assignment would be observable if no boundary rolled it back. Shared by
 /// every site that feeds the life authority a difference.
+pub(super) fn exact_life_total_difference(
+    state: &mut GameState,
+    player: PlayerId,
+    target: HalfSigned,
+    current: HalfSigned,
+    site: &'static str,
+) -> Option<HalfSigned> {
+    let diff_halves = target.0.checked_sub(current.0);
+    let valid_whole = diff_halves.and_then(|d| {
+        let whole = if d >= 0 { d / 2 } else { -((-d) / 2) };
+        i32::try_from(whole).ok().map(|_| HalfSigned(d))
+    });
+    match valid_whole {
+        Some(diff) => Some(diff),
+        None => {
+            let unrepresentable = LifeChangeUnrepresentable { player };
+            let _ = settle_unrepresentable(
+                state,
+                unrepresentable,
+                UnrepresentablePolicy::IgnoreImpossible,
+                site,
+            );
+            None
+        }
+    }
+}
+
 pub(super) fn life_total_difference(
     state: &mut GameState,
     player: PlayerId,
@@ -1804,6 +1950,7 @@ mod tests {
                     player_id,
                     amount,
                     new_total,
+                    ..
                 } if *player_id == PlayerId(0) => Some((*amount, new_total.0)),
                 _ => None,
             })
@@ -3137,11 +3284,13 @@ mod tests {
             let gain_event = || ProposedEvent::LifeGain {
                 player_id: player,
                 amount: 3,
+                amount_fraction: HalfFraction::Zero,
                 applied: HashSet::new(),
             };
             let loss_event = || ProposedEvent::LifeLoss {
                 player_id: player,
                 amount: 3,
+                amount_fraction: HalfFraction::Zero,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();

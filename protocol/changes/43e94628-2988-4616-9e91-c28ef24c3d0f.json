@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "PtValue gains HalfPoints for printed half-point power/toughness (Unhinged: Vile Bile, Little Girl); a pre-bump peer cannot deserialize a CardFace carrying it"
+  "reason": "PtValue::HalfPoints and HalfFraction side-car fields preserve exact half-point P/T, damage, and life across state, wire actions, and events (issue #11111)"
 }

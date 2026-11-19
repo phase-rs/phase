@@ -1823,6 +1823,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
 
         let draw = ResolvedAbility::new(
@@ -2342,6 +2344,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
 
         // CR 608.2c: Build the IfYouDo SequentialSibling Draw rider — exact
@@ -2513,6 +2517,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
 
         let mut draw = ResolvedAbility::new(
@@ -2915,6 +2921,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         state.current_trigger_event = Some(event_b.clone());
         let context_b = ResolvingTriggerContext::capture(&state)
@@ -2998,6 +3006,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
 
         let mut draw = ResolvedAbility::new(
@@ -3130,6 +3140,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 2,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
 
         let mut draw = ResolvedAbility::new(
@@ -4309,6 +4321,8 @@ mod tests {
                 player_id: PlayerId(0),
                 amount: 1,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             })),
             3,
             "the trigger event's amount must not cap a per-unit payment"

@@ -646,6 +646,7 @@ fn vanilla_damage_snapshot() -> DamageContextSnapshot {
         combat_damage_poison: 0,
         excess_recipient: None,
         lifelink_bonus: 0,
+        lifelink_bonus_fraction: Default::default(),
     }
 }
 
@@ -689,6 +690,7 @@ fn batch_damage_effects_stay_neutral() {
                 context: vanilla_damage_snapshot(),
                 target: TargetRef::Object(ObjectId(1)),
                 amount: 3,
+                amount_fraction: Default::default(),
                 is_combat: false,
             },
         ),

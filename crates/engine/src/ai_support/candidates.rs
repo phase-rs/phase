@@ -3526,6 +3526,7 @@ pub fn candidate_actions_broad_with_probe(
             player,
             attacker_id,
             total_damage,
+            total_damage_fraction,
             blockers,
             assignment_modes,
             trample,
@@ -3533,11 +3534,29 @@ pub fn candidate_actions_broad_with_probe(
             attack_target,
             ..
         } => {
-            let mut remaining = *total_damage;
+            use crate::types::ability::{HalfFraction, HalfMagnitude};
+            let mut remaining =
+                HalfMagnitude::from_whole_and_fraction(*total_damage, *total_damage_fraction);
             let mut assignments = Vec::new();
+            let mut assignments_fraction = Vec::new();
             for slot in blockers {
-                let assign = remaining.min(slot.lethal_minimum);
-                assignments.push((slot.blocker_id, assign));
+                let raw_lethal = HalfMagnitude::from_whole_and_fraction(
+                    slot.lethal_minimum,
+                    slot.lethal_minimum_fraction,
+                );
+                // Integer-power sources cannot split 1 point into ½+½; round lethal
+                // up to the next integer when the remaining pool has no half point.
+                let effective_lethal = if !remaining.has_half() && raw_lethal.has_half() {
+                    HalfMagnitude(raw_lethal.0.saturating_add(1))
+                } else {
+                    raw_lethal
+                };
+                let assign = remaining.min(effective_lethal);
+                let (w, f) = assign.into_whole_and_fraction();
+                assignments.push((slot.blocker_id, w));
+                if f.is_half() {
+                    assignments_fraction.push((slot.blocker_id, f));
+                }
                 remaining = remaining.saturating_sub(assign);
             }
             let has_recipient = state
@@ -3558,33 +3577,57 @@ pub fn candidate_actions_broad_with_probe(
                 .is_some();
             // CR 506.4c + CR 702.19b: without a current excess recipient,
             // ordinary trample still permits all damage to the blockers.
-            if (trample.is_none() || !has_recipient) && remaining > 0 {
-                if let Some(last) = assignments.last_mut() {
-                    last.1 += remaining;
-                    remaining = 0;
+            if (trample.is_none() || !has_recipient) && remaining > HalfMagnitude::ZERO {
+                if let Some((last_id, last_w)) = assignments.last_mut() {
+                    let prev_f = assignments_fraction
+                        .iter()
+                        .find(|(fid, _)| fid == last_id)
+                        .map_or(HalfFraction::Zero, |(_, f)| *f);
+                    let updated = HalfMagnitude::from_whole_and_fraction(*last_w, prev_f)
+                        .saturating_add(remaining);
+                    let (w, f) = updated.into_whole_and_fraction();
+                    *last_w = w;
+                    assignments_fraction.retain(|(fid, _)| fid != last_id);
+                    if f.is_half() {
+                        assignments_fraction.push((*last_id, f));
+                    }
+                    remaining = HalfMagnitude::ZERO;
                 }
             }
             // CR 702.19c: For trample-over-PW attacking a PW, split excess:
             // loyalty-worth to PW, remainder to controller.
-            let (trample_dmg, ctrl_dmg) = if *trample
+            let (trample_exact, ctrl_exact) = if *trample
                 == Some(crate::game::combat::TrampleKind::OverPlaneswalkers)
                 && matches!(
                     attack_target,
                     crate::game::combat::AttackTarget::Planeswalker(_)
                 ) {
-                let loyalty = pw_loyalty.unwrap_or(0);
+                let loyalty = HalfMagnitude::from_whole(pw_loyalty.unwrap_or(0));
                 let to_pw = remaining.min(loyalty);
                 let to_ctrl = remaining.saturating_sub(to_pw);
                 (to_pw, to_ctrl)
             } else {
-                (if trample.is_some() { remaining } else { 0 }, 0)
+                (
+                    if trample.is_some() {
+                        remaining
+                    } else {
+                        HalfMagnitude::ZERO
+                    },
+                    HalfMagnitude::ZERO,
+                )
             };
+            let (trample_damage, trample_damage_fraction) = trample_exact.into_whole_and_fraction();
+            let (controller_damage, controller_damage_fraction) =
+                ctrl_exact.into_whole_and_fraction();
             let mut candidates = vec![candidate(
                 GameAction::AssignCombatDamage {
                     mode: crate::types::game_state::CombatDamageAssignmentMode::Normal,
                     assignments,
-                    trample_damage: trample_dmg,
-                    controller_damage: ctrl_dmg,
+                    assignments_fraction,
+                    trample_damage,
+                    trample_damage_fraction,
+                    controller_damage,
+                    controller_damage_fraction,
                 },
                 TacticalClass::Selection,
                 Some(*player),
@@ -3597,8 +3640,11 @@ pub fn candidate_actions_broad_with_probe(
                         mode:
                             crate::types::game_state::CombatDamageAssignmentMode::AsThoughUnblocked,
                         assignments: Vec::new(),
+                        assignments_fraction: Vec::new(),
                         trample_damage: 0,
+                        trample_damage_fraction: HalfFraction::Zero,
                         controller_damage: 0,
+                        controller_damage_fraction: HalfFraction::Zero,
                     },
                     TacticalClass::Selection,
                     Some(*player),
@@ -3614,15 +3660,23 @@ pub fn candidate_actions_broad_with_probe(
         WaitingFor::AssignBlockerDamage {
             player,
             total_damage,
+            total_damage_fraction,
             attackers,
             ..
         } => {
             let mut assignments: Vec<(crate::types::identifiers::ObjectId, u32)> = Vec::new();
+            let mut assignments_fraction = Vec::new();
             if let Some(first) = attackers.first() {
                 assignments.push((*first, *total_damage));
+                if total_damage_fraction.is_half() {
+                    assignments_fraction.push((*first, *total_damage_fraction));
+                }
             }
             vec![candidate(
-                GameAction::AssignBlockerDamage { assignments },
+                GameAction::AssignBlockerDamage {
+                    assignments,
+                    assignments_fraction,
+                },
                 TacticalClass::Selection,
                 Some(*player),
             )]
@@ -7977,7 +8031,9 @@ mod tests {
             trigger_printed_origins: Vec::new(),
             name: "Prepared Spell Face".to_string(),
             power: None,
+            power_fraction: Default::default(),
             toughness: None,
+            toughness_fraction: Default::default(),
             loyalty: None,
             printed_loyalty: None,
             defense: None,

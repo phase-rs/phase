@@ -1560,6 +1560,8 @@ fn an_adventure_cast_again_after_exiling_itself_gains_no_adventure_permission_fr
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Adventure),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
 
     let has_adventure_permission = |state: &GameState| {

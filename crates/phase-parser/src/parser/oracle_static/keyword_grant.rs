@@ -1488,12 +1488,12 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     {
         let after = rest_tp.original.trim();
         if let Some((p, t)) = parse_pt_mod(after) {
-            modifications.push(ContinuousModification::AddPower { value: p });
-            modifications.push(ContinuousModification::AddToughness { value: t });
+            modifications.push(ContinuousModification::add_power(p));
+            modifications.push(ContinuousModification::add_toughness(t));
         }
     } else if let Some((p, t)) = parse_fixed_pt_in_text(unquoted_tp.lower) {
-        modifications.push(ContinuousModification::AddPower { value: p });
-        modifications.push(ContinuousModification::AddToughness { value: t });
+        modifications.push(ContinuousModification::add_power(p));
+        modifications.push(ContinuousModification::add_toughness(t));
     }
 
     // CR 205.4a + CR 205.4b: additive supertype grant on a compound aura/equip
@@ -1620,15 +1620,15 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::SetToughnessDynamic { value: toughness });
     } else if !push_base_pt_mana_value_dynamic_modifications(&mut modifications, &unquoted_lower) {
         if let Some((power, toughness)) = parse_base_pt_mod(&unquoted_text) {
-            modifications.push(ContinuousModification::SetPower { value: power });
-            modifications.push(ContinuousModification::SetToughness { value: toughness });
+            modifications.push(ContinuousModification::set_power(power));
+            modifications.push(ContinuousModification::set_toughness(toughness));
         }
     }
     if let Some(power) = parse_base_power_mod(&unquoted_text) {
-        modifications.push(ContinuousModification::SetPower { value: power });
+        modifications.push(ContinuousModification::set_power(power));
     }
     if let Some(toughness) = parse_base_toughness_mod(&unquoted_text) {
-        modifications.push(ContinuousModification::SetToughness { value: toughness });
+        modifications.push(ContinuousModification::set_toughness(toughness));
     }
 
     // CR 509.1b + CR 613.4b: "can't be blocked [this turn] and has/have base power

@@ -5603,10 +5603,28 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::CopyChosen => "copy chosen".into(),
         ContinuousModification::SetName { name } => format!("set name {name}"),
         ContinuousModification::SetTextName { name } => format!("set text name {name}"),
-        ContinuousModification::AddPower { value } => format!("power {:+}", value),
-        ContinuousModification::AddToughness { value } => format!("toughness {:+}", value),
-        ContinuousModification::SetPower { value } => format!("base power {value}"),
-        ContinuousModification::SetToughness { value } => format!("base toughness {value}"),
+        ContinuousModification::AddPower { value, fraction } => {
+            let exact =
+                crate::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction);
+            let sign = if exact.0 >= 0 { "+" } else { "" };
+            format!("power {sign}{}", exact.fmt_display())
+        }
+        ContinuousModification::AddToughness { value, fraction } => {
+            let exact =
+                crate::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction);
+            let sign = if exact.0 >= 0 { "+" } else { "" };
+            format!("toughness {sign}{}", exact.fmt_display())
+        }
+        ContinuousModification::SetPower { value, fraction } => format!(
+            "base power {}",
+            crate::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction)
+                .fmt_display()
+        ),
+        ContinuousModification::SetToughness { value, fraction } => format!(
+            "base toughness {}",
+            crate::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction)
+                .fmt_display()
+        ),
         ContinuousModification::AddKeyword { keyword } => {
             format!("grant {}", keyword_label(keyword))
         }
@@ -13133,10 +13151,14 @@ fn static_has_pump_modification(
         let mut tough_match = expected_toughness == 0;
         for modif in &stat.modifications {
             match modif {
-                ContinuousModification::AddPower { value } if *value == expected_power => {
+                ContinuousModification::AddPower { value, fraction }
+                    if *value == expected_power && fraction.is_zero() =>
+                {
                     power_match = true;
                 }
-                ContinuousModification::AddToughness { value } if *value == expected_toughness => {
+                ContinuousModification::AddToughness { value, fraction }
+                    if *value == expected_toughness && fraction.is_zero() =>
+                {
                     tough_match = true;
                 }
                 // Dynamic P/T (e.g., "for each" pumps) satisfies any expected magnitude —
@@ -18645,6 +18667,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Goblin".to_string(),
             static_abilities: vec![],
@@ -19839,6 +19863,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             source_card_names: Vec::new(),
             source_card_refs: Vec::new(),

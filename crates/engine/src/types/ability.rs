@@ -1865,6 +1865,8 @@ pub struct DeferredDamageChoice {
     pub source: ObjectId,
     pub target: TargetRef,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
     #[serde(default)]
     pub is_combat: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1873,6 +1875,8 @@ pub struct DeferredDamageChoice {
     pub excess_recipient: Option<ExcessRecipient>,
     #[serde(default)]
     pub lifelink_bonus: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub lifelink_bonus_fraction: HalfFraction,
     /// CR 615.7 + CR 616.1: the replacements the choice offers, so the batch can keep another
     /// portion from spending a shield the choice could still pick.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1922,6 +1926,8 @@ pub struct SplitDamagePortion {
     pub source: ObjectId,
     pub target: TargetRef,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
     #[serde(default)]
     pub is_combat: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1967,6 +1973,13 @@ pub struct SpellContext {
     /// event-delayed trigger, which reads the event that fires it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_lookback_event: Option<Box<crate::types::events::GameEvent>>,
+    /// CR 120.3 + CR 616.1e: Fractional half-point remainder carried by a
+    /// pre-resolved continuation damage node built by `build_remaining_damage_node`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::HalfFraction::is_zero"
+    )]
+    pub remaining_damage_fraction: crate::types::ability::HalfFraction,
     /// CR 603.7a + CR 608.2c: the player each declared group of the creating chain named, still
     /// legal at creation, read through `targeting::carried_declared_player`; stamped only by
     /// `delayed_trigger::resolve`.

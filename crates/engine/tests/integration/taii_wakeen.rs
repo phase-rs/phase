@@ -311,6 +311,7 @@ mod a2_runtime {
             amount,
             is_combat: false,
             applied: Default::default(),
+            amount_fraction: Default::default(),
         }
     }
 

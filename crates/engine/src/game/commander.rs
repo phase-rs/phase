@@ -1945,6 +1945,7 @@ mod tests {
             player: PlayerId(1),
             commander: cmd_id,
             damage: 18,
+            damage_fraction: Default::default(),
         });
         assert_eq!(
             commander_lethal_headroom(&state, PlayerId(1), cmd_id),
@@ -1962,6 +1963,7 @@ mod tests {
             player: PlayerId(1),
             commander: cmd_id,
             damage: 30,
+            damage_fraction: Default::default(),
         });
         assert_eq!(
             commander_lethal_headroom(&state, PlayerId(1), cmd_id),
@@ -1982,17 +1984,20 @@ mod tests {
             player: PlayerId(1),
             commander: cmd_a,
             damage: 5,
+            damage_fraction: Default::default(),
         });
         state.commander_damage.push(CommanderDamageEntry {
             player: PlayerId(1),
             commander: cmd_b,
             damage: 15,
+            damage_fraction: Default::default(),
         });
         // Damage to player 3 must not count toward player 1's headroom either.
         state.commander_damage.push(CommanderDamageEntry {
             player: PlayerId(3),
             commander: cmd_a,
             damage: 19,
+            damage_fraction: Default::default(),
         });
         assert_eq!(
             commander_lethal_headroom(&state, PlayerId(1), cmd_a),

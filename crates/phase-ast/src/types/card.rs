@@ -143,7 +143,11 @@ pub struct TokenImageRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenArtDescriptor {
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "super::ability::HalfFraction::is_zero")]
+    pub power_fraction: super::ability::HalfFraction,
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "super::ability::HalfFraction::is_zero")]
+    pub toughness_fraction: super::ability::HalfFraction,
     pub colors: Vec<crate::types::mana::ManaColor>,
     pub subtypes: Vec<String>,
     /// Keyword family names (one per printed keyword, e.g.

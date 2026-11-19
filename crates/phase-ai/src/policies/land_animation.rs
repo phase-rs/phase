@@ -888,8 +888,14 @@ mod tests {
             &mut runner,
             vault,
             vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ],
         );
         let state = runner.state();
@@ -955,8 +961,14 @@ mod tests {
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ],
         );
         let state = runner.state();
@@ -989,8 +1001,14 @@ mod tests {
             &mut runner,
             stones,
             vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ],
         );
         let state = runner.state();

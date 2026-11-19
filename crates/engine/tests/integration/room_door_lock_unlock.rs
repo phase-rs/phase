@@ -58,6 +58,8 @@ fn room_back_face() -> BackFaceData {
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Split),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     }
 }
 

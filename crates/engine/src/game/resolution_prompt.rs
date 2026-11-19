@@ -1600,6 +1600,7 @@ mod tests {
                     amount: count,
                     is_combat: false,
                     applied: Default::default(),
+                    amount_fraction: Default::default(),
                 }),
                 accounted,
                 "the shield-damage virtual candidate is gated on `amount > 0`"

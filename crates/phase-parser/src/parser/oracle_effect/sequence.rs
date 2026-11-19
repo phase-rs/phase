@@ -17914,7 +17914,7 @@ mod tests {
         let mods = &static_abilities[0].modifications;
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })),
+                .any(|m| matches!(m, ContinuousModification::AddPower { value: 1, .. })),
             "missing +1 power on shared target: {mods:?}"
         );
         assert!(

@@ -18588,7 +18588,7 @@ mod token_anaphor_rewrite_tests {
                     definition: Box::new(
                         StaticDefinition::continuous()
                             .affected(TargetFilter::Typed(TypedFilter::creature()))
-                            .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                            .modifications(vec![ContinuousModification::add_power(1)]),
                     ),
                 }])],
             duration: None,

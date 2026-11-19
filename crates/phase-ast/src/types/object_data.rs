@@ -88,7 +88,11 @@ pub struct DisplayIdentity {
 pub struct BackFaceData {
     pub name: String,
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "super::ability::HalfFraction::is_zero")]
+    pub power_fraction: super::ability::HalfFraction,
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "super::ability::HalfFraction::is_zero")]
+    pub toughness_fraction: super::ability::HalfFraction,
     pub loyalty: Option<u32>,
     /// CR 306.5b: The face's printed loyalty determines loyalty counters on entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]

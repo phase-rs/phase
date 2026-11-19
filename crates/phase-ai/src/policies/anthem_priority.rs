@@ -198,7 +198,10 @@ mod tests {
         obj.static_definitions.push(
             StaticDefinition::continuous()
                 .affected(creature_filter)
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         oid
     }

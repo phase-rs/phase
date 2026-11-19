@@ -42,6 +42,7 @@ fn ghalta_with_9_commander_damage(format: FormatConfig) -> (GameRunner, ObjectId
             player: P1,
             commander: ghalta,
             damage: 9,
+            damage_fraction: Default::default(),
         });
     (runner, ghalta)
 }

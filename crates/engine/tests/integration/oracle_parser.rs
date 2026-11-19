@@ -1432,10 +1432,16 @@ fn elenda_saint_of_dusk_full_card_parser() {
                 })
                 && static_def
                     .modifications
-                    .contains(&ContinuousModification::AddPower { value: 5 })
+                    .contains(&ContinuousModification::AddPower {
+                        value: 5,
+                        fraction: Default::default(),
+                    })
                 && static_def
                     .modifications
-                    .contains(&ContinuousModification::AddToughness { value: 5 })
+                    .contains(&ContinuousModification::AddToughness {
+                        value: 5,
+                        fraction: Default::default(),
+                    })
         }),
         "the additional +5/+5 must use LifeAboveStarting >= 10: {parsed:#?}"
     );

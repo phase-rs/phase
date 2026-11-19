@@ -5192,7 +5192,9 @@ fn redact_counter_added_record(record: &mut crate::types::game_state::CounterAdd
         supertypes,
         keywords,
         power,
+        power_fraction,
         toughness,
+        toughness_fraction,
         colors,
         mana_value,
         controller: _,
@@ -5205,7 +5207,9 @@ fn redact_counter_added_record(record: &mut crate::types::game_state::CounterAdd
     supertypes.clear();
     keywords.clear();
     *power = None;
+    *power_fraction = Default::default();
     *toughness = None;
+    *toughness_fraction = Default::default();
     colors.clear();
     *mana_value = 0;
     counters.clear();
@@ -5290,6 +5294,7 @@ fn redact_damage_record_source(record: &mut crate::types::game_state::DamageReco
         target_incarnation: _,
         source_incarnation: _,
         amount: _,
+        amount_fraction: _,
         is_combat: _,
         source_name,
         source_core_types,
@@ -5297,13 +5302,16 @@ fn redact_damage_record_source(record: &mut crate::types::game_state::DamageReco
         source_supertypes,
         source_keywords,
         source_power,
+        source_power_fraction,
         source_toughness,
+        source_toughness_fraction,
         source_colors,
         source_mana_value,
         source_controller_snapshot: _,
         source_owner: _,
         source_zone: _,
         excess: _,
+        excess_fraction: _,
     } = record;
     *source_name = HIDDEN_CARD_NAME.to_string();
     source_core_types.clear();
@@ -5311,7 +5319,9 @@ fn redact_damage_record_source(record: &mut crate::types::game_state::DamageReco
     source_supertypes.clear();
     source_keywords.clear();
     *source_power = None;
+    *source_power_fraction = Default::default();
     *source_toughness = None;
+    *source_toughness_fraction = Default::default();
     source_colors.clear();
     *source_mana_value = 0;
 }
@@ -5323,9 +5333,13 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         name,
         token_image_ref,
         power,
+        power_fraction,
         toughness,
+        toughness_fraction,
         base_power,
+        base_power_fraction,
         base_toughness,
+        base_toughness_fraction,
         mana_value,
         controller: _,
         owner: _,
@@ -5346,9 +5360,13 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
     *intensity = 0;
     *token_image_ref = None;
     *power = None;
+    *power_fraction = crate::types::ability::HalfFraction::Zero;
     *toughness = None;
+    *toughness_fraction = crate::types::ability::HalfFraction::Zero;
     *base_power = None;
+    *base_power_fraction = crate::types::ability::HalfFraction::Zero;
     *base_toughness = None;
+    *base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
     *mana_value = 0;
     card_types.clear();
     subtypes.clear();
@@ -5369,9 +5387,13 @@ fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRe
     record.trigger_definitions.clear();
     record.trigger_source_context = None;
     record.power = None;
+    record.power_fraction = crate::types::ability::HalfFraction::Zero;
     record.toughness = None;
+    record.toughness_fraction = crate::types::ability::HalfFraction::Zero;
     record.base_power = None;
+    record.base_power_fraction = crate::types::ability::HalfFraction::Zero;
     record.base_toughness = None;
+    record.base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
     record.colors.clear();
     record.mana_value = 0;
     record.cast_from_zone = None;
@@ -5396,7 +5418,13 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         // CR 708.2a + CR 708.4: base characteristics clear here, not in `redact_printed_identity`,
         // because a face-down permanent's or spell's base values are its public characteristics.
         obj.base_power = None;
+        obj.base_power_fraction = crate::types::ability::HalfFraction::Zero;
         obj.base_toughness = None;
+        obj.base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
+        obj.layer_base_power = None;
+        obj.layer_base_power_fraction = crate::types::ability::HalfFraction::Zero;
+        obj.layer_base_toughness = None;
+        obj.layer_base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
         obj.base_loyalty = None;
         obj.base_printed_loyalty = None;
         obj.base_defense = None;
@@ -5411,7 +5439,9 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         Arc::make_mut(&mut obj.abilities).clear();
         obj.clear_keywords();
         obj.power = None;
+        obj.power_fraction = crate::types::ability::HalfFraction::Zero;
         obj.toughness = None;
+        obj.toughness_fraction = crate::types::ability::HalfFraction::Zero;
         obj.loyalty = None;
         obj.printed_loyalty = None;
         obj.defense = None;
@@ -6071,7 +6101,9 @@ mod tests {
             supertypes: Vec::new(),
             keywords: Vec::new(),
             power: Some(3),
+            power_fraction: Default::default(),
             toughness: Some(3),
+            toughness_fraction: Default::default(),
             colors: vec![crate::types::mana::ManaColor::Green],
             mana_value: 4,
             controller: owner,
@@ -11934,6 +11966,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let mut state = GameState::new_two_player(42);
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -12008,6 +12042,7 @@ mod tests {
             player: PlayerId(1),
             commander: cmd,
             damage: 7,
+            damage_fraction: Default::default(),
         });
 
         for viewer in [PlayerId(0), PlayerId(1)] {
@@ -13555,6 +13590,7 @@ mod tests {
                     crate::types::game_state::PendingLifelinkGain {
                         controller: PlayerId(0),
                         amount: 3,
+                        amount_fraction: Default::default(),
                     },
                 ]),
                 batch_events: vec![GameEvent::ZoneChanged {
@@ -13565,6 +13601,7 @@ mod tests {
                 }],
                 damage_to_players: Vec::new(),
                 prevention_tally: Vec::new(),
+                prevention_tally_fractions: Vec::new(),
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
                 replacement: None,
                 phase_c_remnant: None,

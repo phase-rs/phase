@@ -2203,11 +2203,13 @@ fn perpetual_keyword_sign(keywords: &[Keyword]) -> EffectPolarity {
 /// Classify a continuous modification as beneficial/harmful to its target.
 pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarity {
     match m {
-        ContinuousModification::AddPower { value }
-        | ContinuousModification::AddToughness { value } => {
-            if *value > 0 {
+        ContinuousModification::AddPower { value, fraction }
+        | ContinuousModification::AddToughness { value, fraction } => {
+            let exact =
+                engine::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction);
+            if exact > engine::types::ability::HalfSigned::ZERO {
                 EffectPolarity::Beneficial
-            } else if *value < 0 {
+            } else if exact < engine::types::ability::HalfSigned::ZERO {
                 EffectPolarity::Harmful
             } else {
                 EffectPolarity::Contextual
@@ -2960,6 +2962,7 @@ mod temporary_combat_modifier_tests {
     fn empty_until_end_of_turn_grant_is_no_combat_modifier() {
         let control = until_end_of_turn(vec![pump(vec![ContinuousModification::AddPower {
             value: 1,
+            fraction: Default::default(),
         }])]);
         assert!(
             effect_is_temporary_combat_modifier(&control),
@@ -3036,7 +3039,10 @@ mod temporary_combat_modifier_tests {
     fn a_keyword_whose_value_lands_elsewhere_is_no_trick_payload() {
         let mana = || engine::types::mana::ManaCost::zero();
         assert!(
-            trick_payload(vec![ContinuousModification::AddPower { value: 1 }]),
+            trick_payload(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]),
             "reach-guard: a +1/+0 grant is a trick payload"
         );
         for keyword in [
@@ -3065,7 +3071,10 @@ mod temporary_combat_modifier_tests {
     /// since it pays off nowhere else either, but it does not make a payload by itself.
     #[test]
     fn a_mixed_grant_is_a_trick_payload_only_if_nothing_in_it_lands_elsewhere() {
-        let plus_one = || ContinuousModification::AddPower { value: 1 };
+        let plus_one = || ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        };
         assert!(trick_payload(vec![plus_one(), grant(Keyword::Trample)]));
         assert!(trick_payload(vec![plus_one(), grant(Keyword::Changeling)]));
         assert!(trick_payload(vec![

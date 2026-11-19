@@ -114,8 +114,14 @@ fn add_granted_set_pt_static(
     let granted = StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
         .modifications(vec![
-            ContinuousModification::SetPower { value },
-            ContinuousModification::SetToughness { value },
+            ContinuousModification::SetPower {
+                value,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value,
+                fraction: Default::default(),
+            },
         ]);
     let grant = StaticDefinition::continuous()
         .affected(TargetFilter::SpecificObject { id: recipient })
@@ -225,8 +231,14 @@ fn transient_multi_layer_effect_retains_affected_set() {
             ContinuousModification::AddType {
                 core_type: CoreType::Creature,
             },
-            ContinuousModification::SetPower { value: 8 },
-            ContinuousModification::SetToughness { value: 8 },
+            ContinuousModification::SetPower {
+                value: 8,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 8,
+                fraction: Default::default(),
+            },
         ],
         None,
     );
@@ -259,8 +271,14 @@ fn granted_static_multi_layer_effect_retains_affected_set() {
             ContinuousModification::AddType {
                 core_type: CoreType::Creature,
             },
-            ContinuousModification::SetPower { value: 7 },
-            ContinuousModification::SetToughness { value: 7 },
+            ContinuousModification::SetPower {
+                value: 7,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 7,
+                fraction: Default::default(),
+            },
         ]);
     let grant = StaticDefinition::continuous()
         .affected(TargetFilter::SpecificObject { id: recipient })
@@ -407,8 +425,14 @@ fn started_multi_layer_effect_survives_source_ability_removal() {
             ContinuousModification::AddType {
                 core_type: CoreType::Creature,
             },
-            ContinuousModification::SetPower { value: 6 },
-            ContinuousModification::SetToughness { value: 6 },
+            ContinuousModification::SetPower {
+                value: 6,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 6,
+                fraction: Default::default(),
+            },
         ]);
     state
         .objects

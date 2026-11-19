@@ -1,9 +1,8 @@
 use std::str::FromStr;
 
-use crate::game::printed_cards::{half_point_pt, PtSide};
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectError, EffectKind, PtValue, ResolvedAbility,
-    TargetFilter, TargetRef,
+    ContinuousModification, Duration, Effect, EffectError, EffectKind, HalfSigned, PtValue,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -89,25 +88,23 @@ pub(crate) fn animate_modifications(
     // recipient-scoped quantities (CDA "becomes X/X where X is its power") stay
     // dynamic — they remain layer-resolvable.
     match power {
-        Some(PtValue::Fixed(n)) => {
-            modifications.push(ContinuousModification::SetPower { value: n })
+        Some(PtValue::Fixed(n)) => modifications.push(ContinuousModification::set_power(n)),
+        Some(PtValue::HalfPoints(halves)) => {
+            modifications.push(ContinuousModification::set_power_exact(
+                HalfSigned::from_halves(halves),
+            ));
         }
-        Some(PtValue::HalfPoints(halves)) => modifications.push(ContinuousModification::SetPower {
-            value: half_point_pt(halves, PtSide::Power),
-        }),
         Some(PtValue::Quantity(q)) => {
             modifications.push(set_pt_modification(state, ability, q, false))
         }
         Some(PtValue::Variable(_)) | None => {}
     }
     match toughness {
-        Some(PtValue::Fixed(n)) => {
-            modifications.push(ContinuousModification::SetToughness { value: n })
-        }
+        Some(PtValue::Fixed(n)) => modifications.push(ContinuousModification::set_toughness(n)),
         Some(PtValue::HalfPoints(halves)) => {
-            modifications.push(ContinuousModification::SetToughness {
-                value: half_point_pt(halves, PtSide::Toughness),
-            })
+            modifications.push(ContinuousModification::set_toughness_exact(
+                HalfSigned::from_halves(halves),
+            ));
         }
         Some(PtValue::Quantity(q)) => {
             modifications.push(set_pt_modification(state, ability, q, true))
@@ -158,9 +155,9 @@ fn set_pt_modification(
     if crate::game::quantity::quantity_expr_uses_resolution_only_object_scope(&value) {
         let resolved = crate::game::quantity::resolve_quantity_with_targets(state, &value, ability);
         if is_toughness {
-            ContinuousModification::SetToughness { value: resolved }
+            ContinuousModification::set_toughness(resolved)
         } else {
-            ContinuousModification::SetPower { value: resolved }
+            ContinuousModification::set_power(resolved)
         }
     } else if is_toughness {
         ContinuousModification::SetToughnessDynamic { value }
@@ -236,10 +233,13 @@ mod tests {
         assert_eq!(tce.affected, TargetFilter::SpecificObject { id: obj_id });
         assert!(tce
             .modifications
-            .contains(&ContinuousModification::SetPower { value: 7 }));
+            .contains(&ContinuousModification::set_power(7)));
         assert!(tce
             .modifications
-            .contains(&ContinuousModification::SetToughness { value: 7 }));
+            .contains(&ContinuousModification::SetToughness {
+                value: 7,
+                fraction: Default::default(),
+            }));
         assert!(tce
             .modifications
             .contains(&ContinuousModification::AddType {
@@ -289,8 +289,14 @@ mod tests {
             (
                 spirit,
                 vec![
-                    ContinuousModification::SetPower { value: 1 },
-                    ContinuousModification::SetToughness { value: 1 },
+                    ContinuousModification::SetPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::SetToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                     ContinuousModification::AddSubtype {
                         subtype: "Spirit".to_string(),
                     },
@@ -517,7 +523,10 @@ mod tests {
         let tce = &state.transient_continuous_effects[0];
         assert!(
             tce.modifications
-                .contains(&ContinuousModification::SetPower { value: 5 }),
+                .contains(&ContinuousModification::SetPower {
+                    value: 5,
+                    fraction: Default::default(),
+                }),
             "event-scoped base power must be snapshotted to a fixed SetPower(5), got {:?}",
             tce.modifications
         );
@@ -595,7 +604,10 @@ mod tests {
         let tce = &state.transient_continuous_effects[0];
         assert!(
             tce.modifications
-                .contains(&ContinuousModification::SetPower { value: 3 }),
+                .contains(&ContinuousModification::SetPower {
+                    value: 3,
+                    fraction: Default::default(),
+                }),
             "event-scoped intensity must be snapshotted to a fixed SetPower(3), got {:?}",
             tce.modifications
         );

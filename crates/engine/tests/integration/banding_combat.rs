@@ -115,6 +115,7 @@ fn b2_active_player_divides_blocker_damage_into_banded_attacker() {
             blocker_id,
             total_damage,
             attackers,
+            ..
         } => {
             assert_eq!(
                 player, P0,
@@ -131,6 +132,7 @@ fn b2_active_player_divides_blocker_damage_into_banded_attacker() {
     runner
         .act(GameAction::AssignBlockerDamage {
             assignments: vec![(x, 4)],
+            assignments_fraction: Vec::new(),
         })
         .expect("valid blocker-damage division should succeed");
     // Drain any further prompts (the attackers' own damage, etc.) to completion.
@@ -186,6 +188,7 @@ fn b2_blocker_division_must_equal_power() {
     let err = runner
         .act(GameAction::AssignBlockerDamage {
             assignments: vec![(x, 3)],
+            assignments_fraction: Vec::new(),
         })
         .expect_err("under-assigning the blocker's power must be rejected");
     assert!(
@@ -233,6 +236,7 @@ fn b2_blocker_division_target_must_be_blocked_attacker() {
     let err = runner
         .act(GameAction::AssignBlockerDamage {
             assignments: vec![(w, 4)],
+            assignments_fraction: Vec::new(),
         })
         .expect_err("assigning to an unblocked attacker must be rejected");
     assert!(
@@ -403,6 +407,7 @@ fn double_strike_blocker_reprompts_in_regular_substep() {
     runner
         .act(GameAction::AssignBlockerDamage {
             assignments: vec![(x, 2), (y, 2)],
+            assignments_fraction: Vec::new(),
         })
         .expect("first-strike blocker division should succeed");
 
@@ -431,6 +436,7 @@ fn double_strike_blocker_reprompts_in_regular_substep() {
     runner
         .act(GameAction::AssignBlockerDamage {
             assignments: vec![(x, 4)],
+            assignments_fraction: Vec::new(),
         })
         .expect("regular blocker division should succeed");
     for _ in 0..16 {

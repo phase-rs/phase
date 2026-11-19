@@ -1171,8 +1171,8 @@ pub fn room_effects(
                             TypedFilter::creature().controller(ControllerRef::You),
                         )),
                         modifications: vec![
-                            ContinuousModification::AddPower { value: 2 },
-                            ContinuousModification::AddToughness { value: 2 },
+                            ContinuousModification::add_power(2),
+                            ContinuousModification::add_toughness(2),
                             ContinuousModification::AddKeyword {
                                 keyword: Keyword::Trample,
                             },

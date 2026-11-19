@@ -16699,6 +16699,7 @@ fn apply_non_priority_pass_action(
                 player,
                 attacker_id,
                 total_damage,
+                total_damage_fraction,
                 blockers,
                 assignment_modes,
                 trample,
@@ -16710,8 +16711,11 @@ fn apply_non_priority_pass_action(
             GameAction::AssignCombatDamage {
                 mode,
                 assignments,
+                assignments_fraction,
                 trample_damage,
+                trample_damage_fraction,
                 controller_damage,
+                controller_damage_fraction,
             },
         ) => {
             triggers_processed_inline = true;
@@ -16720,6 +16724,7 @@ fn apply_non_priority_pass_action(
                 *player,
                 *attacker_id,
                 *total_damage,
+                *total_damage_fraction,
                 blockers,
                 assignment_modes,
                 *trample,
@@ -16729,8 +16734,11 @@ fn apply_non_priority_pass_action(
                 *pw_controller,
                 mode,
                 &assignments,
+                &assignments_fraction,
                 trample_damage,
+                trample_damage_fraction,
                 controller_damage,
+                controller_damage_fraction,
                 &mut events,
             )?
         }
@@ -16738,21 +16746,28 @@ fn apply_non_priority_pass_action(
         // the active player among the attackers it blocks.
         (
             WaitingFor::AssignBlockerDamage {
-                player,
+                player: _,
                 blocker_id,
                 total_damage,
+                total_damage_fraction,
                 attackers,
             },
-            GameAction::AssignBlockerDamage { assignments },
+            GameAction::AssignBlockerDamage {
+                assignments,
+                assignments_fraction,
+            },
         ) => {
             triggers_processed_inline = true;
             engine_combat::handle_assign_blocker_damage(
                 state,
-                *player,
                 *blocker_id,
-                *total_damage,
+                crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                    *total_damage,
+                    *total_damage_fraction,
+                ),
                 attackers,
                 &assignments,
+                &assignments_fraction,
                 &mut events,
             )?
         }
@@ -21308,6 +21323,8 @@ mod priority_principal_tests {
             casting_options: Vec::new(),
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
         for _ in 0..mana_count {
             runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
@@ -27252,6 +27269,8 @@ mod damage_history_priority_cost_tests {
                     amount: 1,
                     is_combat: false,
                     excess: 0,
+                    amount_fraction: Default::default(),
+                    excess_fraction: Default::default(),
                 }),
                 description: None,
                 source_name: String::new(),

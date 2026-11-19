@@ -33,7 +33,10 @@ fn grant_cant_be_blocked_until_end_of_turn(
         Duration::UntilEndOfTurn,
         TargetFilter::SpecificObject { id: recipient },
         vec![
-            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            },
             ContinuousModification::AddStaticMode {
                 mode: StaticMode::CantBeBlocked,
             },

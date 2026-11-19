@@ -55,7 +55,10 @@ fn attacks_put_difference_counters_on_each_pumped_creature() {
         creature.with_static_definition(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddPower { value: 2 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                }]),
         );
         creature.id()
     };
@@ -102,7 +105,10 @@ fn attacks_use_the_layer_7b_base_power_not_printed_power() {
         creature.with_static_definition(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         creature.id()
     };
@@ -147,7 +153,10 @@ fn sovereign_attack_does_not_count_itself_without_a_power_modifier() {
         creature.with_static_definition(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         creature.id()
     };

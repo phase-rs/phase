@@ -1,8 +1,10 @@
-use crate::game::effects::life::{apply_life_gain, apply_life_loss};
+use crate::game::effects::life::{
+    apply_life_gain_exact, apply_life_loss_exact, exact_life_total_difference,
+};
 use crate::game::static_abilities::{player_has_cant_gain_life, player_has_cant_lose_life};
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectError, EffectKind, PtStat, ResolvedAbility,
-    TargetFilter,
+    ContinuousModification, Duration, Effect, EffectError, EffectKind, HalfMagnitude, PtStat,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -53,8 +55,8 @@ pub fn resolve(
         return Ok(());
     };
     let stat_value = match stat {
-        PtStat::Power => source.power,
-        PtStat::Toughness => source.toughness,
+        PtStat::Power => source.exact_power(),
+        PtStat::Toughness => source.exact_toughness(),
         PtStat::TotalPowerToughness => {
             return Err(EffectError::InvalidParam(
                 "total power and toughness is not exchangeable as a single stat".to_string(),
@@ -76,7 +78,7 @@ pub fn resolve(
         .iter()
         .find(|p| p.id == player_id)
         .ok_or(EffectError::PlayerNotFound)?
-        .life;
+        .exact_life();
 
     // CR 701.12g + CR 119.7 / CR 119.8: All-or-nothing. The player would gain or
     // lose life to reach `stat_value`. If that change is forbidden (can't-gain
@@ -100,7 +102,7 @@ pub fn resolve(
     // is written: a difference the engine cannot represent must fail the whole
     // exchange with no partial mutation (the open ingress window records it;
     // the action boundary then rejects and restores).
-    let Some(diff) = super::life::life_total_difference(
+    let Some(diff) = exact_life_total_difference(
         state,
         player_id,
         stat_value,
@@ -113,8 +115,8 @@ pub fn resolve(
     // CR 613.4b: Set the source's exchanged stat to the player's previous life
     // total via an indefinite (Duration::Permanent) layer-7b continuous effect.
     let modification = match stat {
-        PtStat::Power => ContinuousModification::SetPower { value: old_life },
-        PtStat::Toughness => ContinuousModification::SetToughness { value: old_life },
+        PtStat::Power => ContinuousModification::set_power_exact(old_life),
+        PtStat::Toughness => ContinuousModification::set_toughness_exact(old_life),
         PtStat::TotalPowerToughness => {
             return Err(EffectError::InvalidParam(
                 "total power and toughness is not exchangeable as a single stat".to_string(),
@@ -134,10 +136,21 @@ pub fn resolve(
 
     // CR 701.12g + CR 119.7/CR 119.8: the helpers re-check the life-change
     // prohibitions and route through the replacement pipeline.
-    let deferred = match diff.signum() {
-        1 => apply_life_gain(state, player_id, diff as u32, events).err(),
-        // `unsigned_abs`: the difference may be `i32::MIN`.
-        -1 => apply_life_loss(state, player_id, diff.unsigned_abs(), events).err(),
+    let deferred = match diff.0.signum() {
+        1 => apply_life_gain_exact(
+            state,
+            player_id,
+            HalfMagnitude(diff.0.unsigned_abs()),
+            events,
+        )
+        .err(),
+        -1 => apply_life_loss_exact(
+            state,
+            player_id,
+            HalfMagnitude(diff.0.unsigned_abs()),
+            events,
+        )
+        .err(),
         _ => None,
     };
     if deferred.is_some() {
@@ -223,7 +236,7 @@ mod tests {
         assert!(state.transient_continuous_effects.iter().any(|e| {
             e.source_id == source
                 && e.modifications
-                    .contains(&ContinuousModification::SetToughness { value: 25 })
+                    .contains(&ContinuousModification::set_toughness(25))
         }));
         evaluate_layers(&mut state);
         assert_eq!(state.objects.get(&source).unwrap().toughness, Some(25));

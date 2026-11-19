@@ -7,8 +7,8 @@ use crate::types::ability::AttachmentReferent;
 
 use super::ability::{
     AbilityCost, AbilityDefinition, AbilityTag, AttachmentKind, CostPaidObjectSnapshot, EffectKind,
-    FilterProp, TargetFilter, TargetRef, ThisWayCause, TriggerDefinitionRef, TypeFilter,
-    TypedFilter,
+    FilterProp, HalfFraction, TargetFilter, TargetRef, ThisWayCause, TriggerDefinitionRef,
+    TypeFilter, TypedFilter,
 };
 use super::card::PrintedCardRef;
 use super::card_printing::SharedPrinting;
@@ -360,11 +360,19 @@ pub struct EventObjectSnapshot {
     pub keywords: Vec<Keyword>,
     /// CR 208.1: Power/toughness as of capture.
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub power_fraction: HalfFraction,
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub toughness_fraction: HalfFraction,
     /// CR 208.4b + CR 613.4b: layer-7b base P/T, so `PtComparison { scope: Base }` and
     /// `PowerExceedsBase` are answerable from the snapshot.
     pub base_power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_power_fraction: HalfFraction,
     pub base_toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_toughness_fraction: HalfFraction,
     /// CR 202.3: effective mana value as of capture.
     pub mana_value: u32,
     /// CR 122.1: counters on the subject as of capture.
@@ -1221,6 +1229,8 @@ pub enum GameEvent {
     LifeChanged {
         player_id: PlayerId,
         amount: i32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        amount_fraction: HalfFraction,
         /// CR 119.1 + CR 119.3: the player's own life total once this change has
         /// been applied. Emitted so a presentation layer animating a run of life
         /// changes can show each intermediate total without re-deriving it by
@@ -1228,6 +1238,8 @@ pub enum GameEvent {
         /// replacement effect alters an amount mid-run.
         #[serde(default, skip_serializing_if = "LifeTotalReading::is_unreported")]
         new_total: LifeTotalReading,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        new_total_fraction: HalfFraction,
     },
     ManaAdded {
         player_id: PlayerId,
@@ -1501,10 +1513,14 @@ pub enum GameEvent {
         source_id: ObjectId,
         target: TargetRef,
         amount: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        amount_fraction: HalfFraction,
         is_combat: bool,
         /// CR 120.10: Excess damage beyond lethal for creatures/planeswalkers/battles.
         #[serde(default)]
         excess: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        excess_fraction: HalfFraction,
         /// CR 400.7 + CR 608.2h: the incarnation of the object that dealt the
         /// damage. If it leaves the battlefield and returns before a trigger
         /// that reads "that creature's controller" resolves (a blink), the
@@ -1520,6 +1536,8 @@ pub enum GameEvent {
         source_id: ObjectId,
         target: TargetRef,
         amount: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        amount_fraction: HalfFraction,
     },
     SpellCountered {
         object_id: ObjectId,
@@ -1907,10 +1925,14 @@ pub enum GameEvent {
         /// amounts, so no migration shim could recover `total_damage` regardless.
         #[serde(default)]
         source_amounts: Vec<(ObjectId, u32)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_amount_fractions: Vec<(ObjectId, HalfFraction)>,
         /// CR 120.1: Total actual damage dealt to this player in this combat
         /// damage step — the sum of all `source_amounts` entries.
         #[serde(default)]
         total_damage: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        total_damage_fraction: HalfFraction,
         /// CR 400.7 + CR 608.2h: the incarnation of each `source_amounts`
         /// source as it dealt the damage, carried into the per-source
         /// `DamageDealt` a trigger records. Empty on legacy events.
@@ -2642,6 +2664,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
@@ -2667,6 +2691,8 @@ mod tests {
             source_amounts: vec![(ObjectId(10), 3), (ObjectId(11), 4)],
             total_damage: 7,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();

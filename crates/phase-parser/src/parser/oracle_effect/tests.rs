@@ -9498,8 +9498,8 @@ fn effect_animation_preserves_pump_and_keywords() {
     assert!(modifications.contains(&ContinuousModification::AddSubtype {
         subtype: "Dragon".to_string(),
     }));
-    assert!(modifications.contains(&ContinuousModification::AddPower { value: 5 }));
-    assert!(modifications.contains(&ContinuousModification::AddToughness { value: 3 }));
+    assert!(modifications.contains(&ContinuousModification::add_power(5)));
+    assert!(modifications.contains(&ContinuousModification::add_toughness(3)));
     assert!(modifications.contains(&ContinuousModification::AddKeyword {
         keyword: Keyword::Flying,
     }));
@@ -9594,8 +9594,8 @@ fn effect_vehicle_animation_preserves_pump() {
     assert!(modifications.contains(&ContinuousModification::AddType {
         core_type: CoreType::Creature,
     }));
-    assert!(modifications.contains(&ContinuousModification::AddPower { value: 1 }));
-    assert!(modifications.contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(modifications.contains(&ContinuousModification::add_power(1)));
+    assert!(modifications.contains(&ContinuousModification::add_toughness(1)));
 }
 
 #[test]
@@ -20975,12 +20975,12 @@ fn lose_abilities_and_have_base_pt_parses_as_single_generic_effect() {
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1, .. })),
                 "must contain SetPower(1)"
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1, .. })),
                 "must contain SetToughness(1)"
             );
         }
@@ -21025,12 +21025,12 @@ fn that_creature_cant_be_blocked_and_has_base_pt_parses_as_single_generic_effect
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1, .. })),
                 "must contain SetPower(1): {mods:?}"
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1, .. })),
                 "must contain SetToughness(1): {mods:?}"
             );
         }
@@ -21087,12 +21087,12 @@ fn comma_list_type_change_and_has_base_pt_parses_as_single_generic_effect() {
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1, .. })),
                 "must contain SetPower(1): {mods:?}"
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1, .. })),
                 "must contain SetToughness(1): {mods:?}"
             );
         }
@@ -21617,10 +21617,10 @@ fn flare_of_faith_binds_its_instead_body_to_the_selected_creature() {
         ability.affected == Some(TargetFilter::ParentTarget)
             && ability
                 .modifications
-                .contains(&ContinuousModification::AddPower { value: 3 })
+                .contains(&ContinuousModification::add_power(3))
             && ability
                 .modifications
-                .contains(&ContinuousModification::AddToughness { value: 3 })
+                .contains(&ContinuousModification::add_toughness(3))
             && ability
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
@@ -26586,8 +26586,8 @@ fn self_pump_and_bare_becomes_subtypes_stays_one_continuous_effect() {
         "becomes subtype replacement should be absorbed into the pump effect"
     );
     let mods = &static_abilities[0].modifications;
-    assert!(mods.contains(&ContinuousModification::AddPower { value: 3 }));
-    assert!(mods.contains(&ContinuousModification::AddToughness { value: 3 }));
+    assert!(mods.contains(&ContinuousModification::add_power(3)));
+    assert!(mods.contains(&ContinuousModification::add_toughness(3)));
     assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
         set: crate::types::card_type::SubtypeSet::Creature,
     }));
@@ -27343,11 +27343,11 @@ fn effect_emblem_ninjas_get_plus_one() {
             assert!(def
                 .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })));
+                .any(|m| matches!(m, ContinuousModification::AddPower { value: 1, .. })));
             assert!(def
                 .modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })));
+                .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1, .. })));
             // CR 114: the granted rules text is retained on the static so
             // the display layer can show "what it does" in the tooltip.
             assert!(
@@ -43875,8 +43875,8 @@ fn frodo_source_condition_preserves_lifelink_grant() {
         panic!("expected GenericEffect, got {:?}", def.effect);
     };
     let modifications = &static_abilities[0].modifications;
-    assert!(modifications.contains(&ContinuousModification::SetPower { value: 2 }));
-    assert!(modifications.contains(&ContinuousModification::SetToughness { value: 3 }));
+    assert!(modifications.contains(&ContinuousModification::set_power(2)));
+    assert!(modifications.contains(&ContinuousModification::set_toughness(3)));
     assert!(modifications.contains(&ContinuousModification::AddType {
         core_type: CoreType::Creature,
     }));
@@ -89260,11 +89260,11 @@ fn pt_conjunction_is_not_turned_into_a_choice() {
     );
     let modifications = &static_abilities[0].modifications;
     assert!(
-        modifications.contains(&ContinuousModification::AddPower { value: 1 }),
+        modifications.contains(&ContinuousModification::add_power(1)),
         "the pump's power must survive the conjunction: {modifications:?}"
     );
     assert!(
-        modifications.contains(&ContinuousModification::AddToughness { value: 1 }),
+        modifications.contains(&ContinuousModification::add_toughness(1)),
         "the pump's toughness must survive the conjunction: {modifications:?}"
     );
     assert!(

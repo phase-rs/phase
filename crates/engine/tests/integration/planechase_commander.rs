@@ -152,6 +152,7 @@ fn planechase_commander_damage_eliminates_only_that_player() {
         player: PlayerId(1),
         commander: ObjectId(999),
         damage: 21,
+        damage_fraction: Default::default(),
     });
     let mut events = Vec::new();
     check_state_based_actions(&mut state, &mut events);

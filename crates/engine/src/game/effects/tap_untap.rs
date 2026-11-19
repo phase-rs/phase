@@ -525,7 +525,10 @@ mod tests {
                     },
                 },
                 TargetFilter::SpecificObject { id: object_id },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("the fixture's duration begins")
@@ -828,6 +831,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: Some(source_epoch),
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         (state, source, recipient)
     }

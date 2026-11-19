@@ -1,9 +1,7 @@
 use crate::game::filter;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::evaluate_condition;
-use crate::game::quantity::{
-    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
-};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
     EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
@@ -1323,29 +1321,45 @@ pub(crate) fn snapshot_transient_modifications(
             ContinuousModification::AddDynamicPower { value }
                 if !quantity_expr_uses_recipient(value) =>
             {
+                let (whole, fraction) =
+                    crate::game::quantity::resolve_quantity_with_targets_exact(state, value, ability)
+                        .into_whole_and_fraction();
                 ContinuousModification::AddPower {
-                    value: resolve_quantity_with_targets(state, value, ability),
+                    value: whole,
+                    fraction,
                 }
             }
             ContinuousModification::AddDynamicToughness { value }
                 if !quantity_expr_uses_recipient(value) =>
             {
+                let (whole, fraction) =
+                    crate::game::quantity::resolve_quantity_with_targets_exact(state, value, ability)
+                        .into_whole_and_fraction();
                 ContinuousModification::AddToughness {
-                    value: resolve_quantity_with_targets(state, value, ability),
+                    value: whole,
+                    fraction,
                 }
             }
             ContinuousModification::SetPowerDynamic { value }
                 if !quantity_expr_uses_recipient(value) =>
             {
+                let (whole, fraction) =
+                    crate::game::quantity::resolve_quantity_with_targets_exact(state, value, ability)
+                        .into_whole_and_fraction();
                 ContinuousModification::SetPower {
-                    value: resolve_quantity_with_targets(state, value, ability),
+                    value: whole,
+                    fraction,
                 }
             }
             ContinuousModification::SetToughnessDynamic { value }
                 if !quantity_expr_uses_recipient(value) =>
             {
+                let (whole, fraction) =
+                    crate::game::quantity::resolve_quantity_with_targets_exact(state, value, ability)
+                        .into_whole_and_fraction();
                 ContinuousModification::SetToughness {
-                    value: resolve_quantity_with_targets(state, value, ability),
+                    value: whole,
+                    fraction,
                 }
             }
             // CR 608.2h: an effect that requires information from the game (such
@@ -1363,11 +1377,16 @@ pub(crate) fn snapshot_transient_modifications(
                 if quantity_expr_uses_recipient(value) =>
             {
                 match single_target {
-                    Some(recipient) => ContinuousModification::AddPower {
-                        value: resolve_quantity_with_targets_and_recipient(
+                    Some(recipient) => {
+                        let (whole, fraction) = crate::game::quantity::resolve_quantity_with_targets_and_recipient_exact(
                             state, value, ability, recipient,
-                        ),
-                    },
+                        )
+                        .into_whole_and_fraction();
+                        ContinuousModification::AddPower {
+                            value: whole,
+                            fraction,
+                        }
+                    }
                     // No single object recipient: leave the payload dynamic so
                     // the live per-recipient resolution still applies.
                     None => modification.clone(),
@@ -1378,11 +1397,16 @@ pub(crate) fn snapshot_transient_modifications(
                 if quantity_expr_uses_recipient(value) =>
             {
                 match single_target {
-                    Some(recipient) => ContinuousModification::AddToughness {
-                        value: resolve_quantity_with_targets_and_recipient(
+                    Some(recipient) => {
+                        let (whole, fraction) = crate::game::quantity::resolve_quantity_with_targets_and_recipient_exact(
                             state, value, ability, recipient,
-                        ),
-                    },
+                        )
+                        .into_whole_and_fraction();
+                        ContinuousModification::AddToughness {
+                            value: whole,
+                            fraction,
+                        }
+                    }
                     None => modification.clone(),
                 }
             }
@@ -1391,11 +1415,16 @@ pub(crate) fn snapshot_transient_modifications(
                 if quantity_expr_uses_recipient(value) =>
             {
                 match single_target {
-                    Some(recipient) => ContinuousModification::SetPower {
-                        value: resolve_quantity_with_targets_and_recipient(
+                    Some(recipient) => {
+                        let (whole, fraction) = crate::game::quantity::resolve_quantity_with_targets_and_recipient_exact(
                             state, value, ability, recipient,
-                        ),
-                    },
+                        )
+                        .into_whole_and_fraction();
+                        ContinuousModification::SetPower {
+                            value: whole,
+                            fraction,
+                        }
+                    }
                     None => modification.clone(),
                 }
             }
@@ -1404,11 +1433,16 @@ pub(crate) fn snapshot_transient_modifications(
                 if quantity_expr_uses_recipient(value) =>
             {
                 match single_target {
-                    Some(recipient) => ContinuousModification::SetToughness {
-                        value: resolve_quantity_with_targets_and_recipient(
+                    Some(recipient) => {
+                        let (whole, fraction) = crate::game::quantity::resolve_quantity_with_targets_and_recipient_exact(
                             state, value, ability, recipient,
-                        ),
-                    },
+                        )
+                        .into_whole_and_fraction();
+                        ContinuousModification::SetToughness {
+                            value: whole,
+                            fraction,
+                        }
+                    }
                     None => modification.clone(),
                 }
             }
@@ -2480,6 +2514,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: Some(source_epoch),
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         let static_def = StaticDefinition::continuous()
@@ -2735,8 +2771,14 @@ mod tests {
             ))
             .modifications(vec![
                 ContinuousModification::RemoveAllAbilities,
-                ContinuousModification::SetPower { value: 0 },
-                ContinuousModification::SetToughness { value: 2 },
+                ContinuousModification::SetPower {
+                    value: 0,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ]);
         let ability = ResolvedAbility::new(
             Effect::GenericEffect {
@@ -2768,10 +2810,16 @@ mod tests {
             .contains(&ContinuousModification::RemoveAllAbilities));
         assert!(tce
             .modifications
-            .contains(&ContinuousModification::SetPower { value: 0 }));
+            .contains(&ContinuousModification::SetPower {
+                value: 0,
+                fraction: Default::default(),
+            }));
         assert!(tce
             .modifications
-            .contains(&ContinuousModification::SetToughness { value: 2 }));
+            .contains(&ContinuousModification::SetToughness {
+                value: 2,
+                fraction: Default::default(),
+            }));
     }
 
     #[test]
@@ -2812,12 +2860,18 @@ mod tests {
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::TargetPlayer),
             ))
-            .modifications(vec![ContinuousModification::SetPower { value: 0 }]);
+            .modifications(vec![ContinuousModification::SetPower {
+                value: 0,
+                fraction: Default::default(),
+            }]);
         let controller_static = StaticDefinition::continuous()
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
             ))
-            .modifications(vec![ContinuousModification::SetToughness { value: 2 }]);
+            .modifications(vec![ContinuousModification::SetToughness {
+                value: 2,
+                fraction: Default::default(),
+            }]);
         let ability = ResolvedAbility::new(
             Effect::GenericEffect {
                 static_abilities: vec![target_player_static, controller_static],
@@ -2842,13 +2896,19 @@ mod tests {
                 })
                 && tce
                     .modifications
-                    .contains(&ContinuousModification::SetPower { value: 0 })
+                    .contains(&ContinuousModification::SetPower {
+                        value: 0,
+                        fraction: Default::default(),
+                    })
         }));
         assert!(state.transient_continuous_effects.iter().any(|tce| {
             tce.affected == (TargetFilter::SpecificObject { id: your_creature })
                 && tce
                     .modifications
-                    .contains(&ContinuousModification::SetToughness { value: 2 })
+                    .contains(&ContinuousModification::SetToughness {
+                        value: 2,
+                        fraction: Default::default(),
+                    })
         }));
         assert!(!state.transient_continuous_effects.iter().any(|tce| {
             matches!(
@@ -3336,6 +3396,8 @@ mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: Some(source_epoch),
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             });
             if blink_recipient {
                 let mut zone_events = Vec::new();
@@ -3713,8 +3775,14 @@ mod tests {
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::ParentTarget)
             .modifications(vec![
-                ContinuousModification::AddPower { value: -2 },
-                ContinuousModification::AddToughness { value: 0 },
+                ContinuousModification::AddPower {
+                    value: -2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 0,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::RemoveKeyword {
                     keyword: Keyword::Flying,
                 },
@@ -3817,7 +3885,10 @@ mod tests {
 
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::ParentTarget)
-            .modifications(vec![ContinuousModification::AddPower { value: -2 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: -2,
+                fraction: Default::default(),
+            }]);
         let mut ability = ResolvedAbility::new(
             Effect::GenericEffect {
                 static_abilities: vec![static_def],
@@ -4336,11 +4407,11 @@ mod tests {
         assert_eq!(state.transient_continuous_effects.len(), 1);
         let modifications = &state.transient_continuous_effects[0].modifications;
         assert!(
-            modifications.contains(&ContinuousModification::AddPower { value: 3 }),
+            modifications.contains(&ContinuousModification::AddPower { value: 3, fraction: Default::default(), }),
             "dynamic power should snapshot to the creature count at resolution, got {modifications:?}"
         );
         assert!(
-            modifications.contains(&ContinuousModification::AddToughness { value: 3 }),
+            modifications.contains(&ContinuousModification::AddToughness { value: 3, fraction: Default::default(), }),
             "dynamic toughness should snapshot to the creature count at resolution, got {modifications:?}"
         );
         assert!(

@@ -116,6 +116,8 @@ fn tamiyo_third_draw_returns_transformed_not_stranded_in_exile() {
         casting_options: vec![],
         layout_kind: None,
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
 
     // Precondition: Tamiyo is on the battlefield, front-face (not transformed).

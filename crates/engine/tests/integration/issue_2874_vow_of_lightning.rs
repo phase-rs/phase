@@ -73,11 +73,17 @@ fn vow_of_lightning_parses_all_three_conjuncts() {
         .unwrap_or_else(|| panic!("expected a Continuous grant def, got {:?}", defs));
     let mods = &grant.modifications;
     assert!(
-        mods.contains(&ContinuousModification::AddPower { value: 2 }),
+        mods.contains(&ContinuousModification::AddPower {
+            value: 2,
+            fraction: Default::default(),
+        }),
         "expected AddPower(2) in {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::AddToughness { value: 2 }),
+        mods.contains(&ContinuousModification::AddToughness {
+            value: 2,
+            fraction: Default::default(),
+        }),
         "expected AddToughness(2) in {mods:?}"
     );
     assert!(

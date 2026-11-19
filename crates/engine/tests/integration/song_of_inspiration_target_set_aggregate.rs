@@ -1599,6 +1599,8 @@ fn parked_declared_player_recorded_illegal_ignores_lists() {
         player_id: P1,
         amount: 0,
         new_total: engine::types::events::LifeTotalReading::default(),
+        amount_fraction: Default::default(),
+        new_total_fraction: Default::default(),
     });
 
     let pending = PendingDieRoll {
@@ -2963,6 +2965,8 @@ fn snapshot_pause_illegal_player_contributes_nothing() {
         player_id: P1,
         amount: 0,
         new_total: engine::types::events::LifeTotalReading::default(),
+        amount_fraction: Default::default(),
+        new_total_fraction: Default::default(),
     });
     let pending = PendingDieRoll {
         source_id: roller,

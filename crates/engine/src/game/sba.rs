@@ -217,12 +217,16 @@ fn run_state_based_action_iterations(
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
-        let pt_snapshot: Vec<(crate::types::identifiers::ObjectId, i32, i32)> = state
+        let pt_snapshot: Vec<(
+            crate::types::identifiers::ObjectId,
+            crate::types::ability::HalfSigned,
+            crate::types::ability::HalfSigned,
+        )> = state
             .battlefield
             .iter()
             .filter_map(|&id| {
                 let obj = state.objects.get(&id)?;
-                Some((id, obj.power?, obj.toughness?))
+                Some((id, obj.exact_power()?, obj.exact_toughness()?))
             })
             .collect();
 
@@ -231,14 +235,18 @@ fn run_state_based_action_iterations(
         // Emit events for P/T changes (creatures only — skip objects that lost P/T).
         for (id, old_p, old_t) in &pt_snapshot {
             if let Some(obj) = state.objects.get(id) {
-                if let (Some(new_p), Some(new_t)) = (obj.power, obj.toughness) {
+                if let (Some(new_p), Some(new_t)) = (obj.exact_power(), obj.exact_toughness()) {
                     if new_p != *old_p || new_t != *old_t {
+                        let new_p_whole = obj.power.unwrap_or(0);
+                        let new_t_whole = obj.toughness.unwrap_or(0);
+                        let old_p_whole = old_p.whole_floor();
+                        let old_t_whole = old_t.whole_floor();
                         events.push(GameEvent::PowerToughnessChanged {
                             object_id: *id,
-                            power: new_p,
-                            toughness: new_t,
-                            power_delta: new_p - old_p,
-                            toughness_delta: new_t - old_t,
+                            power: new_p_whole,
+                            toughness: new_t_whole,
+                            power_delta: new_p_whole - old_p_whole,
+                            toughness_delta: new_t_whole - old_t_whole,
                         });
                     }
                 }
@@ -950,7 +958,12 @@ fn collect_commander_damage_losers(state: &GameState) -> Vec<PlayerId> {
     state
         .commander_damage
         .iter()
-        .filter(|entry| entry.damage >= threshold)
+        .filter(|entry| {
+            crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                entry.damage,
+                entry.damage_fraction,
+            ) >= crate::types::ability::HalfMagnitude::from_whole(threshold)
+        })
         .map(|entry| entry.player)
         .filter(|pid| !state.eliminated_players.contains(pid))
         .filter(|pid| !player_has_cant_lose(state, *pid))
@@ -1021,7 +1034,7 @@ fn check_creature_deaths(
         .filter(|id| {
             live_battlefield_object(state, id).is_some_and(|obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj.toughness.is_some_and(|t| t <= 0)
+                    && obj.exact_toughness().is_some_and(|t| t.0 <= 0)
             })
         })
         .map(CreatureDeathSba::ZeroToughness)
@@ -1044,13 +1057,14 @@ fn lethal_damage_candidates(state: &GameState, battlefield_snapshot: &[ObjectId]
         .filter(|id| {
             live_battlefield_object(state, id).is_some_and(|obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj.toughness.is_some_and(|t| {
-                        t > 0
+                    && obj.exact_toughness().is_some_and(|t| {
+                        let dmg = obj.exact_damage_marked();
+                        t.0 > 0
                             && (
                                 // CR 704.5g: Normal lethal damage requires positive toughness and damage >= toughness.
-                                obj.damage_marked >= t as u32
+                                dmg.0 >= t.0 as u64
                                 // CR 704.5h + CR 702.2b: Deathtouch lethal also requires positive toughness.
-                                || (obj.dealt_deathtouch_damage && obj.damage_marked > 0)
+                                || (obj.dealt_deathtouch_damage && !dmg.is_zero())
                             )
                     })
                     // CR 702.12b: Indestructible creatures are not destroyed by lethal damage.
@@ -4842,6 +4856,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            lifelink_bonus_fraction: Default::default(),
         });
 
         // A concurrent player-loss SBA (P2 at 0 life) — the reason reconcile runs
@@ -5023,6 +5038,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            lifelink_bonus_fraction: Default::default(),
         });
 
         let mut events = Vec::new();
@@ -5096,6 +5112,7 @@ mod tests {
             player: PlayerId(1),
             commander: cmd_id,
             damage: 21,
+            damage_fraction: Default::default(),
         });
         let mut events = Vec::new();
 
@@ -5118,6 +5135,7 @@ mod tests {
             player: PlayerId(1),
             commander: cmd_id,
             damage: 20,
+            damage_fraction: Default::default(),
         });
         let mut events = Vec::new();
 
@@ -5137,6 +5155,7 @@ mod tests {
             player: PlayerId(1),
             commander: cmd_id,
             damage: 100,
+            damage_fraction: Default::default(),
         });
         let mut events = Vec::new();
 
@@ -5281,6 +5300,7 @@ mod tests {
             player: PlayerId(1),
             commander: ObjectId(999),
             damage: 21,
+            damage_fraction: Default::default(),
         });
         let mut events = Vec::new();
 
@@ -5317,11 +5337,13 @@ mod tests {
             player: PlayerId(0),
             commander: cmd_id,
             damage: 10,
+            damage_fraction: Default::default(),
         });
         state.commander_damage.push(CommanderDamageEntry {
             player: PlayerId(1),
             commander: cmd_id,
             damage: 11,
+            damage_fraction: Default::default(),
         });
         let mut events = Vec::new();
 
@@ -5456,6 +5478,7 @@ mod tests {
             player: PlayerId(1),
             commander: ObjectId(999),
             damage: 21,
+            damage_fraction: Default::default(),
         });
         let mut events = Vec::new();
 
@@ -5483,6 +5506,7 @@ mod tests {
             player: PlayerId(0),
             commander: ObjectId(999),
             damage: 21,
+            damage_fraction: Default::default(),
         });
         let mut events = Vec::new();
 

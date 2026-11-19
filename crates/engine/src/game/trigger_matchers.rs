@@ -2037,6 +2037,7 @@ pub(super) fn matching_damage_done_events(
     let GameEvent::CombatDamageDealtToPlayer {
         player_id,
         source_amounts,
+        source_amount_fractions,
         source_incarnations,
         ..
     } = event
@@ -2053,15 +2054,23 @@ pub(super) fn matching_damage_done_events(
         source_incarnations,
     )
     .into_iter()
-    .map(|(src, amt)| GameEvent::DamageDealt {
-        source_id: src,
-        target: TargetRef::Player(*player_id),
-        amount: amt,
-        is_combat: true,
-        excess: 0,
-        // CR 400.7: the source as it dealt the damage, not a later object
-        // at the same id.
-        source_incarnation: combat_source_incarnation(source_incarnations, src),
+    .map(|(src, amt)| {
+        let amount_fraction = source_amount_fractions
+            .iter()
+            .find(|(id, _)| *id == src)
+            .map_or(Default::default(), |(_, f)| *f);
+        GameEvent::DamageDealt {
+            source_id: src,
+            target: TargetRef::Player(*player_id),
+            amount: amt,
+            amount_fraction,
+            is_combat: true,
+            excess: 0,
+            excess_fraction: Default::default(),
+            // CR 400.7: the source as it dealt the damage, not a later object
+            // at the same id.
+            source_incarnation: combat_source_incarnation(source_incarnations, src),
+        }
     })
     .collect()
 }
@@ -2204,6 +2213,7 @@ pub(super) fn matching_damage_done_once_by_controller_event(
         GameEvent::CombatDamageDealtToPlayer {
             player_id,
             source_amounts,
+            source_amount_fractions,
             source_incarnations,
             ..
         } => {
@@ -2230,7 +2240,29 @@ pub(super) fn matching_damage_done_once_by_controller_event(
             if matching_sources.is_empty() {
                 None
             } else {
-                let filtered_total: u32 = matching_sources.iter().map(|(_, amt)| amt).sum();
+                let matching_fractions: Vec<(ObjectId, crate::types::ability::HalfFraction)> =
+                    source_amount_fractions
+                        .iter()
+                        .filter(|(id, _)| matching_sources.iter().any(|(mid, _)| mid == id))
+                        .copied()
+                        .collect();
+                let (filtered_total, filtered_total_fraction) = matching_sources
+                    .iter()
+                    .fold(
+                        crate::types::ability::HalfMagnitude::ZERO,
+                        |acc, (id, amt)| {
+                            let frac = matching_fractions
+                                .iter()
+                                .find(|(fid, _)| fid == id)
+                                .map_or(Default::default(), |(_, f)| *f);
+                            acc.saturating_add(
+                                crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                                    *amt, frac,
+                                ),
+                            )
+                        },
+                    )
+                    .into_whole_and_fraction();
                 // CR 400.7: keep the incarnations of the sources kept.
                 let source_incarnations = source_incarnations
                     .iter()
@@ -2244,7 +2276,9 @@ pub(super) fn matching_damage_done_once_by_controller_event(
                 Some(GameEvent::CombatDamageDealtToPlayer {
                     player_id: *player_id,
                     source_amounts: matching_sources,
+                    source_amount_fractions: matching_fractions,
                     total_damage: filtered_total,
+                    total_damage_fraction: filtered_total_fraction,
                     source_incarnations,
                 })
             }
@@ -10967,6 +11001,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_done(
             &event,
@@ -11036,6 +11072,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let blocker_damage = GameEvent::DamageDealt {
             source_id: source,
@@ -11044,6 +11082,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let nonblocking_creature_damage = GameEvent::DamageDealt {
             source_id: source,
@@ -11052,6 +11092,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         assert!(
@@ -11108,6 +11150,8 @@ mod tests {
             source_amounts: vec![(source_a, 2), (source_b, 3)],
             total_damage: 5,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
         assert!(match_damage_done_once_by_controller(
             &event,
@@ -11160,6 +11204,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -11226,6 +11272,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -11283,6 +11331,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let trigger_source_context = test_trigger_source_context(&state, trigger_source);
 
@@ -11337,6 +11387,8 @@ mod tests {
             source_amounts: vec![(source, 3)],
             total_damage: 3,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         assert!(matching_damage_done_once_by_controller_event(
@@ -11399,6 +11451,8 @@ mod tests {
             source_amounts: vec![(creature_a, 3), (creature_b, 2)],
             total_damage: 5,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         // Trigger matches only Fractal creatures (i.e., creature_a) controlled by you.
@@ -11462,6 +11516,8 @@ mod tests {
             source_amounts: vec![(bearer, 3)],
             total_damage: 3,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         assert!(match_damage_done(
@@ -11535,6 +11591,8 @@ mod tests {
             source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
             total_damage: 5,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         let per_source_event = GameEvent::DamageDealt {
@@ -11544,6 +11602,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_done(
@@ -11618,6 +11678,8 @@ mod tests {
             source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
             total_damage: 5,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         assert!(!match_damage_done(
@@ -11663,6 +11725,8 @@ mod tests {
             source_amounts: vec![(attacker, 2)],
             total_damage: 2,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         assert!(
@@ -11732,6 +11796,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_done(
             &to_creature,
@@ -11749,6 +11815,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &to_player,
@@ -11765,6 +11833,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &to_noncreature,
@@ -11814,6 +11884,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_done(
             &to_pw,
@@ -11829,6 +11901,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &to_player,
@@ -11903,6 +11977,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             match_damage_done(
@@ -11922,6 +11998,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_done(
@@ -11941,6 +12019,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             match_damage_done(
@@ -11996,6 +12076,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_done(
             &to_opp,
@@ -12011,6 +12093,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &to_opp_creature,
@@ -12069,6 +12153,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_done(
             &to_player,
@@ -12085,6 +12171,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &to_creature,
@@ -12138,6 +12226,8 @@ mod tests {
             source_amounts: vec![(attacker, 3)],
             total_damage: 3,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         assert!(listens_on_aggregate_combat_damage_done(&trigger));
@@ -12218,6 +12308,8 @@ mod tests {
             source_amounts: vec![(attacker, 4)],
             total_damage: 4,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         assert!(listens_on_aggregate_combat_damage_done(&trigger));
@@ -12474,6 +12566,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(match_life_gained(
             &event,
@@ -12486,6 +12580,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: -3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(!match_life_gained(
             &loss_event,
@@ -12503,6 +12599,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: -3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(match_life_lost(
             &event,
@@ -12515,6 +12613,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(!match_life_lost(
             &gain_event,
@@ -12536,6 +12636,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(match_life_lost(
             &loss_one,
@@ -12548,6 +12650,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: -2,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(!match_life_lost(
             &loss_two,
@@ -12568,6 +12672,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: -2,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(!match_life_lost(
             &loss_two,
@@ -12580,6 +12686,8 @@ mod tests {
             player_id: PlayerId(0),
             amount: -4,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         assert!(match_life_lost(
             &loss_four,
@@ -15947,6 +16055,8 @@ mod tests {
                 is_combat,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             assert!(match_damage_done(
                 &event,
@@ -15970,6 +16080,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &event,
@@ -15992,6 +16104,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &event,
@@ -16014,6 +16128,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_done(
             &event,
@@ -16044,6 +16160,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         assert!(!match_damage_received(
@@ -16075,6 +16193,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         assert!(match_damage_received(
@@ -16109,6 +16229,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &event,
@@ -16125,6 +16247,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_done(
             &event_opp,
@@ -16173,6 +16297,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_done(
@@ -16192,6 +16318,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             match_damage_done(
@@ -16229,6 +16357,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_done(
             &event,
@@ -16256,6 +16386,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             assert!(
                 match_damage_done(
@@ -16283,6 +16415,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             assert!(match_damage_done(
                 &event,
@@ -16325,6 +16459,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             assert_eq!(
                 match_damage_received(
@@ -16379,6 +16515,8 @@ mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             assert_eq!(
                 match_damage_received(
@@ -16426,6 +16564,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_received(
@@ -16444,6 +16584,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_received(
             &self_damage,
@@ -16497,6 +16639,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             match_damage_received(
@@ -16515,6 +16659,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_received(
@@ -16563,6 +16709,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_received(
@@ -16611,6 +16759,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             match_damage_received(
@@ -16637,6 +16787,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_received(
@@ -16656,6 +16808,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_received(
@@ -16746,6 +16900,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             match_damage_received(
                 &event,
@@ -16884,6 +17040,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: Some(incarnation),
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         let ctx = test_trigger_source_context(&state, watcher);
@@ -16949,6 +17107,8 @@ mod tests {
             source_amounts: vec![(dead_attacker, 2)],
             total_damage: 2,
             source_incarnations: vec![ObjectIncarnationRef::of(dead_attacker, attacker_inc)],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
         let aggregate_done = with_source(TriggerMode::DamageDone, &red_creature);
         assert!(listens_on_aggregate_combat_damage_done(&aggregate_done));
@@ -17003,6 +17163,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_received(
@@ -17021,6 +17183,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             match_damage_received(
@@ -17055,6 +17219,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             !match_damage_received(
@@ -17073,6 +17239,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             match_damage_received(
@@ -17124,6 +17292,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_damage_received(
             &event,
@@ -17139,6 +17309,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_damage_received(
             &own_event,
@@ -17166,6 +17338,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             assert_eq!(
                 match_damage_done(
@@ -17773,6 +17947,8 @@ mod tests {
             is_combat: false,
             excess: 3,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_excess_damage(
             &event,
@@ -17794,6 +17970,8 @@ mod tests {
             is_combat: false,
             excess: 3,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_excess_damage(
             &event,
@@ -17815,6 +17993,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_excess_damage(
             &event,
@@ -17836,6 +18016,8 @@ mod tests {
             is_combat: true,
             excess: 1,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(match_excess_damage_all(
             &event,
@@ -17857,6 +18039,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_excess_damage_all(
             &event,
@@ -17879,6 +18063,8 @@ mod tests {
             is_combat: true,
             excess: 2,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!match_excess_damage_all(
             &event,
@@ -17931,6 +18117,8 @@ mod tests {
             is_combat: false,
             excess: 2,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let non_matching = GameEvent::DamageDealt {
             source_id: ObjectId(99),
@@ -17939,6 +18127,8 @@ mod tests {
             is_combat: false,
             excess: 2,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         assert!(match_excess_damage_all(
@@ -18004,6 +18194,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let to_planeswalker = GameEvent::DamageDealt {
             source_id,
@@ -18012,6 +18204,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let to_player = GameEvent::DamageDealt {
             source_id,
@@ -18020,6 +18214,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         assert!(

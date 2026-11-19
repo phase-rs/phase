@@ -2267,9 +2267,12 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
         player.life_gained_this_turn = 0;
+        player.life_gained_this_turn_fraction = crate::types::ability::HalfFraction::Zero;
         // CR 603.4: Snapshot life lost before reset for "lost life during their last turn" conditions.
         player.life_lost_last_turn = player.life_lost_this_turn;
+        player.life_lost_last_turn_fraction = player.life_lost_this_turn_fraction;
         player.life_lost_this_turn = 0;
+        player.life_lost_this_turn_fraction = crate::types::ability::HalfFraction::Zero;
         player.energy_paid_or_lost_this_turn = 0;
         player.descended_this_turn = false;
         // CR 603.4: Snapshot draws before reset for "if you drew a card last
@@ -4868,7 +4871,10 @@ mod tests {
                     },
                 },
                 TargetFilter::SpecificObject { id: object_id },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("the fixture's duration begins")
@@ -11408,7 +11414,10 @@ card into your hand at the beginning of your next end step.";
                 PlayerId(0),
                 duration,
                 TargetFilter::SpecificObject { id: foe },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
             );
         }

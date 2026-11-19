@@ -7,16 +7,17 @@ use crate::game::effects::{append_to_pending_continuation, mark_pending_continua
 use crate::game::filter;
 use crate::game::keywords;
 use crate::game::quantity::{
-    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
-    resolve_quantity_with_targets_slice,
+    resolve_quantity_with_targets_and_recipient_exact, resolve_quantity_with_targets_exact,
+    resolve_quantity_with_targets_slice_exact,
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
     DamageSource, DeferredDamageChoice, EachDamageRecipient, Effect, EffectError, EffectKind,
-    EventOutcomes, ExcessRecipient, ParkedDamageBatch, PlayerFilter, QuantityExpr,
-    RawDamagePortion, ReplacedDamagePortion, ResolvedAbility, SplitDamagePortion, SubAbilityLink,
-    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
+    EventOutcomes, ExcessRecipient, HalfFraction, HalfMagnitude, HalfSigned, ParkedDamageBatch,
+    PlayerFilter, QuantityExpr, RawDamagePortion, ReplacedDamagePortion, ResolvedAbility,
+    SplitDamagePortion, SubAbilityLink, TargetChoiceTiming, TargetDamageSourceBinding,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -60,6 +61,8 @@ pub(crate) struct DamageContext {
     /// replacement pause+resume (the bonus is threaded through the snapshot and
     /// `PendingReplacement`). `0` on every ordinary damage leg.
     pub(crate) lifelink_bonus: u32,
+    /// CR 702.15b + CR 120.4a: fractional half-point remainder for `lifelink_bonus`.
+    pub(crate) lifelink_bonus_fraction: HalfFraction,
     /// CR 702.16 + CR 608.2h: Source name projection, used for
     /// `ProtectionTarget::ChosenCardName`. Set from captured LKI name when
     /// the source has departed its observed zone (e.g. Clone in graveyard or ceased token).
@@ -426,8 +429,20 @@ impl DamageContext {
             // CR 702.15b: set only on a redirect leg; from_source rebuilds the base
             // context, so the resume restores the bonus from the parked record.
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: HalfFraction::Zero,
             source_name: Some(obj.name.clone()),
         })
+    }
+
+    pub(crate) fn exact_lifelink_bonus(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(self.lifelink_bonus, self.lifelink_bonus_fraction)
+    }
+
+    pub(crate) fn with_exact_lifelink_bonus(mut self, amt: HalfMagnitude) -> Self {
+        let (whole, fraction) = amt.into_whole_and_fraction();
+        self.lifelink_bonus = whole;
+        self.lifelink_bonus_fraction = fraction;
+        self
     }
 
     /// Fallback context when source no longer exists (all keyword flags false).
@@ -447,6 +462,7 @@ impl DamageContext {
             // CR 120.4a: no excess redirect on the source-gone fallback path.
             excess_recipient: None,
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: HalfFraction::Zero,
             source_name: None,
         }
     }
@@ -469,6 +485,7 @@ impl From<DamageContextSnapshot> for DamageContext {
             // CR 702.15b: restore the deferred lifelink bonus so a redirect leg
             // resumed from a snapshot still gains the combined total.
             lifelink_bonus: snapshot.lifelink_bonus,
+            lifelink_bonus_fraction: snapshot.lifelink_bonus_fraction,
             source_name: None,
         }
     }
@@ -490,31 +507,27 @@ impl From<&DamageContext> for DamageContextSnapshot {
             excess_recipient: ctx.excess_recipient,
             // CR 702.15b: preserve the deferred lifelink bonus into the snapshot.
             lifelink_bonus: ctx.lifelink_bonus,
+            lifelink_bonus_fraction: ctx.lifelink_bonus_fraction,
         }
     }
+}
+
+/// Exact outcome of applying damage through the replacement pipeline.
+pub(crate) enum ExactDamageResult {
+    /// Damage applied (possibly modified/prevented). Contains exact post-replacement amount dealt.
+    Applied(HalfMagnitude),
+    /// A replacement effect requires a player choice before damage resolves.
+    NeedsChoice,
 }
 
 /// Outcome of applying damage through the replacement pipeline.
 pub(crate) enum DamageResult {
     /// Damage applied (possibly modified/prevented). Contains post-replacement amount dealt.
-    Applied(u32),
+    Applied(#[allow(dead_code)] u32),
     /// A replacement effect requires a player choice before damage resolves.
     NeedsChoice,
 }
 
-/// CR 120.3 + CR 120.4b: Apply damage from a single source to a single target through
-/// the full replacement/prevention pipeline.
-///
-/// Handles: protection (CR 702.16b), replacement effects (CR 120.4b), damage marking
-/// (CR 120.3e), planeswalker loyalty (CR 120.3c / CR 306.8), wither (CR 702.80),
-/// infect (CR 702.90), toxic (CR 702.164c), deathtouch (CR 702.2b),
-/// lifelink (CR 702.15b), and
-/// DamageDealt event emission.
-///
-/// Event ordering: DamageDealt is emitted before lifelink LifeChanged.
-/// EffectResolved is NOT emitted — that remains the caller's responsibility.
-///
-/// Returns `DamageResult::Applied(actual_amount)` or `DamageResult::NeedsChoice`.
 /// CR 120.2 + CR 120.8 + CR 702.16: Pre-replacement damage gate. Applies the
 /// "would deal 0", source-side `CantDealDamage`, target-side `CantBeDealtDamage`,
 /// object protection, and player protection-from-everything checks that run
@@ -525,11 +538,11 @@ pub(crate) enum DamageResult {
 /// pushed a `DamagePrevented` event where the rules require one). Shared by the
 /// single-source `apply_damage_to_target` path and the combat-damage batch path
 /// so both run identical pre-pipeline gating.
-pub(crate) fn pre_replacement_damage_gate(
+pub(crate) fn pre_replacement_damage_gate_exact(
     state: &GameState,
     ctx: &DamageContext,
     target: &TargetRef,
-    amount: u32,
+    amount: HalfMagnitude,
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> Option<ProposedEvent> {
@@ -540,7 +553,7 @@ pub(crate) fn pre_replacement_damage_gate(
         return None;
     }
     // CR 120.8: If a source would deal 0 damage, it does not deal damage at all.
-    if amount == 0 {
+    if amount == HalfMagnitude::ZERO {
         return None;
     }
 
@@ -566,10 +579,12 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
+    let (amount_whole, amount_fraction) = amount.into_whole_and_fraction();
     let proposed = ProposedEvent::Damage {
         source_id: ctx.source_id,
         target: target.clone(),
-        amount,
+        amount: amount_whole,
+        amount_fraction,
         is_combat,
         applied: HashSet::new(),
     };
@@ -593,7 +608,8 @@ pub(crate) fn pre_replacement_damage_gate(
                 events.push(GameEvent::DamagePrevented {
                     source_id: ctx.source_id,
                     target: target.clone(),
-                    amount,
+                    amount: amount_whole,
+                    amount_fraction,
                 });
                 return None;
             }
@@ -614,7 +630,8 @@ pub(crate) fn pre_replacement_damage_gate(
             events.push(GameEvent::DamagePrevented {
                 source_id: ctx.source_id,
                 target: target.clone(),
-                amount,
+                amount: amount_whole,
+                amount_fraction,
             });
             return None;
         }
@@ -631,14 +648,35 @@ pub(crate) fn apply_damage_to_target(
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<DamageResult, EffectError> {
+    match apply_damage_to_target_exact(
+        state,
+        ctx,
+        target,
+        HalfMagnitude::from_whole(amount),
+        is_combat,
+        events,
+    )? {
+        ExactDamageResult::Applied(exact) => Ok(DamageResult::Applied(exact.whole_floor())),
+        ExactDamageResult::NeedsChoice => Ok(DamageResult::NeedsChoice),
+    }
+}
+
+pub(crate) fn apply_damage_to_target_exact(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: TargetRef,
+    amount: HalfMagnitude,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ExactDamageResult, EffectError> {
     let Some(proposed) =
-        pre_replacement_damage_gate(state, ctx, &target, amount, is_combat, events)
+        pre_replacement_damage_gate_exact(state, ctx, &target, amount, is_combat, events)
     else {
-        return Ok(DamageResult::Applied(0));
+        return Ok(ExactDamageResult::Applied(HalfMagnitude::ZERO));
     };
 
     match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => Ok(apply_damage_after_replacement(
+        ReplacementResult::Execute(event) => Ok(apply_damage_after_replacement_exact(
             state, ctx, event, is_combat, events,
         )),
         ReplacementResult::Prevented => {
@@ -663,7 +701,7 @@ pub(crate) fn apply_damage_to_target(
                 // replacements.
                 crate::game::replacement::drain_damage_rider(state, events);
             }
-            Ok(DamageResult::Applied(0))
+            Ok(ExactDamageResult::Applied(HalfMagnitude::ZERO))
         }
         ReplacementResult::NeedsChoice(player) => {
             // Only set waiting_for for non-combat damage; combat damage cannot pause mid-resolution.
@@ -678,8 +716,9 @@ pub(crate) fn apply_damage_to_target(
             if let Some(pending) = state.pending_replacement.as_mut() {
                 pending.excess_recipient = ctx.excess_recipient;
                 pending.lifelink_bonus = ctx.lifelink_bonus;
+                pending.lifelink_bonus_fraction = ctx.lifelink_bonus_fraction;
             }
-            Ok(DamageResult::NeedsChoice)
+            Ok(ExactDamageResult::NeedsChoice)
         }
     }
 }
@@ -710,31 +749,36 @@ pub(crate) fn apply_damage_to_target(
 fn damage_excess_beyond_lethal(
     state: &GameState,
     target: &TargetRef,
-    actual_amount: u32,
+    actual_amount: HalfMagnitude,
     has_deathtouch: bool,
     loyalty_before: Option<u32>,
     defense_before: Option<u32>,
-) -> u32 {
+) -> HalfMagnitude {
     match target {
         TargetRef::Object(obj_id) => state
             .objects
             .get(obj_id)
             .map(|obj| {
-                let mut excess = 0;
+                let mut excess = HalfMagnitude::ZERO;
 
                 if obj.card_types.core_types.contains(&CoreType::Creature) {
-                    if let Some(toughness) = obj.toughness {
+                    if let Some(toughness) = obj.exact_toughness() {
                         // damage_marked already includes actual_amount.
-                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
+                        let damage_before = obj.exact_damage_marked().saturating_sub(actual_amount);
                         let lethal = if has_deathtouch {
                             // CR 702.2c: Any nonzero damage from deathtouch = lethal.
-                            if damage_before == 0 {
-                                1u32
+                            if damage_before == HalfMagnitude::ZERO {
+                                HalfMagnitude::ONE
                             } else {
-                                0
+                                HalfMagnitude::ZERO
                             }
                         } else {
-                            (toughness as u32).saturating_sub(damage_before)
+                            HalfMagnitude(
+                                toughness
+                                    .clamp_non_negative()
+                                    .0
+                                    .saturating_sub(damage_before.0),
+                            )
                         };
                         excess = excess.max(actual_amount.saturating_sub(lethal));
                     }
@@ -744,25 +788,32 @@ fn damage_excess_beyond_lethal(
                     // CR 120.10: Excess for a planeswalker = damage beyond the
                     // loyalty it had before the damage was dealt (passed in —
                     // loyalty counters have since been removed).
-                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
+                    excess = excess
+                        .max(actual_amount.saturating_sub(HalfMagnitude::from_whole(
+                            loyalty_before.unwrap_or(0),
+                        )));
                 }
 
                 if obj.card_types.core_types.contains(&CoreType::Battle) {
                     // CR 120.10: Excess for a battle = damage beyond the defense it
                     // had before the damage was dealt (passed in — defense
                     // counters have since been removed).
-                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
+                    excess = excess
+                        .max(actual_amount.saturating_sub(HalfMagnitude::from_whole(
+                            defense_before.unwrap_or(0),
+                        )));
                 }
 
                 excess
             })
-            .unwrap_or(0),
-        TargetRef::Player(_) => 0,
+            .unwrap_or(HalfMagnitude::ZERO),
+        TargetRef::Player(_) => HalfMagnitude::ZERO,
     }
 }
 
 /// Caller is responsible for emitting `EffectResolved`. This helper only emits
 /// `DamageDealt` (and downstream `LifeChanged` via the life helpers).
+#[cfg(test)]
 pub(crate) fn apply_damage_after_replacement(
     state: &mut GameState,
     ctx: &DamageContext,
@@ -770,9 +821,23 @@ pub(crate) fn apply_damage_after_replacement(
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> DamageResult {
+    match apply_damage_after_replacement_exact(state, ctx, event, is_combat, events) {
+        ExactDamageResult::Applied(exact) => DamageResult::Applied(exact.whole_floor()),
+        ExactDamageResult::NeedsChoice => DamageResult::NeedsChoice,
+    }
+}
+
+pub(crate) fn apply_damage_after_replacement_exact(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    event: ProposedEvent,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) -> ExactDamageResult {
     let ProposedEvent::Damage {
         target: ref t,
-        amount: actual_amount,
+        amount: actual_whole,
+        amount_fraction: actual_fraction,
         ..
     } = event
     else {
@@ -780,8 +845,9 @@ pub(crate) fn apply_damage_after_replacement(
             false,
             "apply_damage_after_replacement called with non-Damage ProposedEvent"
         );
-        return DamageResult::Applied(0);
+        return ExactDamageResult::Applied(HalfMagnitude::ZERO);
     };
+    let actual_amount = HalfMagnitude::from_whole_and_fraction(actual_whole, actual_fraction);
 
     // CR 120.10: Excess damage to a planeswalker/battle is measured against its
     // loyalty/defense *before* this damage was dealt. Damage application removes
@@ -816,7 +882,7 @@ pub(crate) fn apply_damage_after_replacement(
                     state,
                     *obj_id,
                     CounterType::Loyalty,
-                    actual_amount,
+                    actual_whole,
                     events,
                 );
             }
@@ -829,7 +895,7 @@ pub(crate) fn apply_damage_after_replacement(
                     state,
                     *obj_id,
                     CounterType::Defense,
-                    actual_amount,
+                    actual_whole,
                     events,
                 );
             }
@@ -853,7 +919,7 @@ pub(crate) fn apply_damage_after_replacement(
                     ctx.controller,
                     *obj_id,
                     CounterType::Minus1Minus1,
-                    actual_amount,
+                    actual_whole,
                     // CR 614.16: combat wither/infect is a turn-based-action
                     // placement (`Other`); non-combat is a resolving effect.
                     if is_combat {
@@ -873,12 +939,13 @@ pub(crate) fn apply_damage_after_replacement(
                     state.pending_damage_post_counter = Some(Box::new(PendingDamagePostCounter {
                         ctx: DamageContextSnapshot::from(ctx),
                         target: (*t).clone(),
-                        actual_amount,
+                        actual_amount: actual_whole,
+                        actual_amount_fraction: actual_fraction,
                         loyalty_before,
                         defense_before,
                         is_combat,
                     }));
-                    return DamageResult::NeedsChoice;
+                    return ExactDamageResult::NeedsChoice;
                 }
                 // Inline success runs core + lifelink (the F1 split: the
                 // combat remnant resume runs the core ONLY, since the paused
@@ -893,13 +960,14 @@ pub(crate) fn apply_damage_after_replacement(
                     is_combat,
                     events,
                 ) {
-                    PostCounterFlow::Paused => return DamageResult::NeedsChoice,
+                    PostCounterFlow::Paused => return ExactDamageResult::NeedsChoice,
                     PostCounterFlow::Continue {
                         primary_amount,
                         redirected,
                     } => {
                         if !redirected {
-                            let lifelink_amount = primary_amount + ctx.lifelink_bonus;
+                            let lifelink_amount =
+                                primary_amount.saturating_add(ctx.exact_lifelink_bonus());
                             if gain_lifelink_for_damage_leg(
                                 state,
                                 ctx.has_lifelink,
@@ -912,16 +980,17 @@ pub(crate) fn apply_damage_after_replacement(
                                 // which applies first. All damage has already
                                 // been dealt; only this final lifelink gain is
                                 // deferred.
-                                return DamageResult::NeedsChoice;
+                                return ExactDamageResult::NeedsChoice;
                             }
                         }
-                        return DamageResult::Applied(actual_amount);
+                        return ExactDamageResult::Applied(actual_amount);
                     }
                 }
             } else if is_creature {
                 if let Some(target_obj) = state.objects.get_mut(obj_id) {
                     // CR 120.3e: Damage to a creature marks damage.
-                    target_obj.damage_marked += actual_amount;
+                    let prev_marked = target_obj.exact_damage_marked();
+                    target_obj.set_exact_damage_marked(prev_marked.saturating_add(actual_amount));
                     // CR 702.2b: Track deathtouch for SBA lethal-damage check.
                     if ctx.has_deathtouch {
                         target_obj.dealt_deathtouch_damage = true;
@@ -940,7 +1009,7 @@ pub(crate) fn apply_damage_after_replacement(
                 .find(|p| p.id == *player_id)
                 .is_some_and(|p| p.is_phased_out())
             {
-                return DamageResult::Applied(0);
+                return ExactDamageResult::Applied(HalfMagnitude::ZERO);
             }
             if ctx.has_infect {
                 // CR 120.3b + CR 614.17: Infect deals damage to players as poison
@@ -952,7 +1021,7 @@ pub(crate) fn apply_damage_after_replacement(
                     ctx.controller,
                     *player_id,
                     PlayerCounterKind::Poison,
-                    actual_amount,
+                    actual_whole,
                     // CR 614.16: combat infect is a turn-based-action
                     // placement (`Other`); non-combat is a resolving effect.
                     if is_combat {
@@ -963,12 +1032,17 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
-                    return DamageResult::NeedsChoice;
+                    return ExactDamageResult::NeedsChoice;
                 }
             } else {
                 // CR 120.3a: Damage to a player causes life loss.
-                if super::life::apply_damage_life_loss(state, *player_id, actual_amount, events)
-                    .is_err()
+                if super::life::apply_damage_life_loss_exact(
+                    state,
+                    *player_id,
+                    actual_amount,
+                    events,
+                )
+                .is_err()
                 {
                     // CR 616.1: the loss paused — co-applicable life-loss
                     // replacements, or the Horde damage→mill redirect parking a
@@ -986,17 +1060,19 @@ pub(crate) fn apply_damage_after_replacement(
                             source_incarnation: ctx.source_incarnation,
                             controller: ctx.controller,
                             target: *player_id,
-                            actual_amount,
+                            actual_amount: actual_whole,
+                            actual_amount_fraction: actual_fraction,
                             has_lifelink: ctx.has_lifelink,
                             lifelink_bonus: ctx.lifelink_bonus,
+                            lifelink_bonus_fraction: ctx.lifelink_bonus_fraction,
                             stage: crate::types::game_state::DamagePostLossStage::EmitAndRecord,
                             is_combat,
                         }));
-                    return DamageResult::NeedsChoice;
+                    return ExactDamageResult::NeedsChoice;
                 }
             }
             if is_combat
-                && actual_amount > 0
+                && actual_amount > HalfMagnitude::ZERO
                 && ctx.source_is_creature
                 && ctx.combat_damage_poison > 0
             {
@@ -1015,7 +1091,7 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
-                    return DamageResult::NeedsChoice;
+                    return ExactDamageResult::NeedsChoice;
                 }
             }
         }
@@ -1055,7 +1131,7 @@ pub(crate) fn apply_damage_after_replacement(
         ) {
         excess
     } else {
-        0
+        HalfMagnitude::ZERO
     };
     let primary_amount = actual_amount.saturating_sub(redirect_excess);
     // CR 120.4a: when the excess is redirected, the creature was dealt only its
@@ -1065,13 +1141,14 @@ pub(crate) fn apply_damage_after_replacement(
     // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
     // normal computed `excess` (e.g. plain overkill still reports its excess).
     let primary_excess = excess.saturating_sub(redirect_excess);
-    if redirect_excess > 0 {
+    if redirect_excess > HalfMagnitude::ZERO {
         if let TargetRef::Object(obj_id) = &t {
             // Only the marked-damage path over-marks above; wither/infect deal
             // -1/-1 counters instead (no excess-redirect card uses them).
             if !ctx.has_wither && !ctx.has_infect {
                 if let Some(o) = state.objects.get_mut(obj_id) {
-                    o.damage_marked = o.damage_marked.saturating_sub(redirect_excess);
+                    let prev_marked = o.exact_damage_marked();
+                    o.set_exact_damage_marked(prev_marked.saturating_sub(redirect_excess));
                 }
             }
         }
@@ -1105,7 +1182,7 @@ pub(crate) fn apply_damage_after_replacement(
         TargetRef::Object(obj_id),
     ) = (ctx.excess_recipient, t)
     {
-        if redirect_excess > 0 {
+        if redirect_excess > HalfMagnitude::ZERO {
             if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
                 // CR 120.7: same source object as the primary damage (source_id /
                 // controller / keywords reused). `excess_recipient: None` is a
@@ -1115,15 +1192,15 @@ pub(crate) fn apply_damage_after_replacement(
                 // replacement choice.
                 let redirect_ctx = DamageContext {
                     excess_recipient: None,
-                    lifelink_bonus: primary_amount,
                     ..ctx.clone()
-                };
+                }
+                .with_exact_lifelink_bonus(primary_amount);
                 redirected = true;
                 // Route through the same non-combat single-target pipeline the
                 // primary player-damage path uses (gate + CR 614/615 replacement).
                 // A pause here propagates NeedsChoice; the redirect leg carries
                 // `lifelink_bonus`, so the combined lifelink is still gained on resume.
-                match apply_damage_to_target(
+                match apply_damage_to_target_exact(
                     state,
                     &redirect_ctx,
                     TargetRef::Player(controller),
@@ -1137,9 +1214,9 @@ pub(crate) fn apply_damage_after_replacement(
                     // phased redirect returns `Applied(0)` from the prevention/early
                     // paths BEFORE that gain, so fall through to have the creature leg
                     // gain lifelink for the lethal `primary_amount` it did deal.
-                    Ok(DamageResult::Applied(0)) => redirected = false,
-                    Ok(DamageResult::Applied(_)) => {}
-                    Ok(DamageResult::NeedsChoice) => return DamageResult::NeedsChoice,
+                    Ok(ExactDamageResult::Applied(HalfMagnitude::ZERO)) => redirected = false,
+                    Ok(ExactDamageResult::Applied(_)) => {}
+                    Ok(ExactDamageResult::NeedsChoice) => return ExactDamageResult::NeedsChoice,
                     // A redirect gate failure must not corrupt the primary result;
                     // fall through so the source still gains lifelink for the lethal
                     // portion it actually dealt (the excess was simply not redirected).
@@ -1160,7 +1237,7 @@ pub(crate) fn apply_damage_after_replacement(
     // deferred lethal bonus. Without the rider `lifelink_bonus == 0`, the ordinary
     // gain.
     if !redirected {
-        let lifelink_amount = primary_amount + ctx.lifelink_bonus;
+        let lifelink_amount = primary_amount.saturating_add(ctx.exact_lifelink_bonus());
         if gain_lifelink_for_damage_leg(
             state,
             ctx.has_lifelink,
@@ -1171,11 +1248,11 @@ pub(crate) fn apply_damage_after_replacement(
             // CR 616.1: two or more co-applicable life-gain replacements — the gaining
             // player must choose which applies first. All damage has
             // already been dealt; only this final lifelink gain is deferred.
-            return DamageResult::NeedsChoice;
+            return ExactDamageResult::NeedsChoice;
         }
     }
 
-    DamageResult::Applied(actual_amount)
+    ExactDamageResult::Applied(actual_amount)
 }
 
 /// CR 120.1: push the `DamageDealt` event and record the damage for "was
@@ -1192,25 +1269,29 @@ pub(crate) fn emit_damage_dealt_and_record(
     source_incarnation: Option<u64>,
     controller: PlayerId,
     target: &TargetRef,
-    dealt_amount: u32,
-    record_amount: u32,
-    record_excess: u32,
+    dealt_amount: HalfMagnitude,
+    record_amount: HalfMagnitude,
+    record_excess: HalfMagnitude,
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) {
+    let (record_whole, record_fraction) = record_amount.into_whole_and_fraction();
+    let (excess_whole, excess_fraction) = record_excess.into_whole_and_fraction();
     events.push(GameEvent::DamageDealt {
         source_id,
         target: target.clone(),
-        amount: record_amount,
+        amount: record_whole,
+        amount_fraction: record_fraction,
         is_combat,
-        excess: record_excess,
+        excess: excess_whole,
+        excess_fraction,
         // CR 400.7: the incarnation captured with the damage context, as the
         // damage record below uses.
         source_incarnation,
     });
 
     // CR 120.1: Record damage for "was dealt damage by" condition queries.
-    if dealt_amount > 0 {
+    if dealt_amount > HalfMagnitude::ZERO {
         let target_controller = match target {
             TargetRef::Player(player_id) => *player_id,
             TargetRef::Object(object_id) => state
@@ -1246,14 +1327,16 @@ pub(crate) fn emit_damage_dealt_and_record(
             source_incarnation,
             // CR 120.4a: the permanent was dealt only the lethal portion; the
             // excess is recorded against the controller by the redirect below.
-            amount: record_amount,
+            amount: record_whole,
+            amount_fraction: record_fraction,
             is_combat,
             // CR 120.10: Record excess so "was dealt excess damage this turn"
             // intervening-if conditions can query without re-computing lethal.
             // Redirected excess is recorded against the controller by the redirect
             // leg below, so the creature's record reports `primary_excess` (zero
             // when the rider redirected it).
-            excess: record_excess,
+            excess: excess_whole,
+            excess_fraction,
             // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
             // overwrites these when the source still exists; the empty/default
             // tail (Default::default()) covers the source-already-gone case.
@@ -1268,7 +1351,9 @@ pub(crate) fn emit_damage_dealt_and_record(
             record.source_supertypes = obj.card_types.supertypes.clone();
             record.source_keywords = obj.keywords.clone();
             record.source_power = obj.power;
+            record.source_power_fraction = obj.power_fraction;
             record.source_toughness = obj.toughness;
+            record.source_toughness_fraction = obj.toughness_fraction;
             // CR 202.3d + CR 702.102b: snapshot the source's colors / mana value
             // through the split-aware authority so a FUSED split spell freezes its
             // COMBINED colors and mana value for damage-history source filters. For
@@ -1313,13 +1398,13 @@ pub(crate) fn emit_damage_dealt_and_record(
 fn gain_lifelink_for_damage_leg(
     state: &mut GameState,
     has_lifelink: bool,
-    lifelink_amount: u32,
+    lifelink_amount: HalfMagnitude,
     controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     has_lifelink
-        && lifelink_amount > 0
-        && super::life::apply_life_gain(state, controller, lifelink_amount, events).is_err()
+        && lifelink_amount > HalfMagnitude::ZERO
+        && super::life::apply_life_gain_exact(state, controller, lifelink_amount, events).is_err()
 }
 
 /// Outcome of [`drain_pending_damage_post_loss`].
@@ -1350,6 +1435,14 @@ pub(crate) fn drain_pending_damage_post_loss(
     let Some(stashed) = state.pending_damage_post_loss.take() else {
         return DamagePostLossDrainOutcome::Settled;
     };
+    let actual_amount = HalfMagnitude::from_whole_and_fraction(
+        stashed.actual_amount,
+        stashed.actual_amount_fraction,
+    );
+    let lifelink_bonus = HalfMagnitude::from_whole_and_fraction(
+        stashed.lifelink_bonus,
+        stashed.lifelink_bonus_fraction,
+    );
     if matches!(stashed.stage, DamagePostLossStage::EmitAndRecord) {
         // Players have no excess and the excess-redirect rider is
         // creature-only, so the dealt, recorded, and excess figures are the
@@ -1360,9 +1453,9 @@ pub(crate) fn drain_pending_damage_post_loss(
             stashed.source_incarnation,
             stashed.controller,
             &TargetRef::Player(stashed.target),
-            stashed.actual_amount,
-            stashed.actual_amount,
-            0,
+            actual_amount,
+            actual_amount,
+            HalfMagnitude::ZERO,
             false,
             events,
         );
@@ -1370,7 +1463,7 @@ pub(crate) fn drain_pending_damage_post_loss(
     if gain_lifelink_for_damage_leg(
         state,
         stashed.has_lifelink,
-        stashed.actual_amount + stashed.lifelink_bonus,
+        actual_amount.saturating_add(lifelink_bonus),
         stashed.controller,
         events,
     ) {
@@ -1395,7 +1488,7 @@ pub(crate) enum PostCounterFlow {
     /// `primary_amount` (plus the context bonus) unless `redirected` handed
     /// both the excess and this leg's lifelink to the redirect leg.
     Continue {
-        primary_amount: u32,
+        primary_amount: HalfMagnitude,
         redirected: bool,
     },
 }
@@ -1422,7 +1515,7 @@ pub(crate) fn wither_infect_post_counter_core(
     state: &mut GameState,
     ctx: &DamageContext,
     target: &TargetRef,
-    actual_amount: u32,
+    actual_amount: HalfMagnitude,
     loyalty_before: Option<u32>,
     defense_before: Option<u32>,
     is_combat: bool,
@@ -1482,7 +1575,7 @@ pub(crate) fn wither_infect_post_counter_core(
         ) {
         excess
     } else {
-        0
+        HalfMagnitude::ZERO
     };
     let primary_amount = actual_amount.saturating_sub(redirect_excess);
     // CR 120.4a: when the excess is redirected, the creature was dealt only its
@@ -1492,13 +1585,14 @@ pub(crate) fn wither_infect_post_counter_core(
     // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
     // normal computed `excess` (e.g. plain overkill still reports its excess).
     let primary_excess = excess.saturating_sub(redirect_excess);
-    if redirect_excess > 0 {
+    if redirect_excess > HalfMagnitude::ZERO {
         if let TargetRef::Object(obj_id) = target {
             // Only the marked-damage path over-marks above; wither/infect deal
             // -1/-1 counters instead (no excess-redirect card uses them).
             if !ctx.has_wither && !ctx.has_infect {
                 if let Some(o) = state.objects.get_mut(obj_id) {
-                    o.damage_marked = o.damage_marked.saturating_sub(redirect_excess);
+                    let prev_marked = o.exact_damage_marked();
+                    o.set_exact_damage_marked(prev_marked.saturating_sub(redirect_excess));
                 }
             }
         }
@@ -1532,7 +1626,7 @@ pub(crate) fn wither_infect_post_counter_core(
         TargetRef::Object(obj_id),
     ) = (ctx.excess_recipient, target)
     {
-        if redirect_excess > 0 {
+        if redirect_excess > HalfMagnitude::ZERO {
             if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
                 // CR 120.7: same source object as the primary damage (source_id /
                 // controller / keywords reused). `excess_recipient: None` is a
@@ -1542,15 +1636,15 @@ pub(crate) fn wither_infect_post_counter_core(
                 // replacement choice.
                 let redirect_ctx = DamageContext {
                     excess_recipient: None,
-                    lifelink_bonus: primary_amount,
                     ..ctx.clone()
-                };
+                }
+                .with_exact_lifelink_bonus(primary_amount);
                 redirected = true;
                 // Route through the same non-combat single-target pipeline the
                 // primary player-damage path uses (gate + CR 614/615 replacement).
                 // A pause here propagates NeedsChoice; the redirect leg carries
                 // `lifelink_bonus`, so the combined lifelink is still gained on resume.
-                match apply_damage_to_target(
+                match apply_damage_to_target_exact(
                     state,
                     &redirect_ctx,
                     TargetRef::Player(controller),
@@ -1564,9 +1658,9 @@ pub(crate) fn wither_infect_post_counter_core(
                     // phased redirect returns `Applied(0)` from the prevention/early
                     // paths BEFORE that gain, so fall through to have the creature leg
                     // gain lifelink for the lethal `primary_amount` it did deal.
-                    Ok(DamageResult::Applied(0)) => redirected = false,
-                    Ok(DamageResult::Applied(_)) => {}
-                    Ok(DamageResult::NeedsChoice) => return PostCounterFlow::Paused,
+                    Ok(ExactDamageResult::Applied(HalfMagnitude::ZERO)) => redirected = false,
+                    Ok(ExactDamageResult::Applied(_)) => {}
+                    Ok(ExactDamageResult::NeedsChoice) => return PostCounterFlow::Paused,
                     // A redirect gate failure must not corrupt the primary result;
                     // fall through so the source still gains lifelink for the lethal
                     // portion it actually dealt (the excess was simply not redirected).
@@ -1609,13 +1703,17 @@ pub(crate) fn drain_pending_damage_post_counter(
         return DamagePostCounterDrainOutcome::Settled;
     };
     let ctx = DamageContext::from(stashed.ctx);
+    let actual_amount = HalfMagnitude::from_whole_and_fraction(
+        stashed.actual_amount,
+        stashed.actual_amount_fraction,
+    );
     // CR 120.10: the resume passes the STASHED pre-damage values — never a
     // live reread (loyalty/defense removal already ran before the park).
     match wither_infect_post_counter_core(
         state,
         &ctx,
         &stashed.target,
-        stashed.actual_amount,
+        actual_amount,
         stashed.loyalty_before,
         stashed.defense_before,
         stashed.is_combat,
@@ -1632,7 +1730,7 @@ pub(crate) fn drain_pending_damage_post_counter(
             if gain_lifelink_for_damage_leg(
                 state,
                 ctx.has_lifelink,
-                primary_amount + ctx.lifelink_bonus,
+                primary_amount.saturating_add(ctx.exact_lifelink_bonus()),
                 ctx.controller,
                 events,
             ) {
@@ -1658,12 +1756,13 @@ fn build_remaining_damage_node(
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     target: TargetRef,
-    amount: u32,
+    amount: HalfMagnitude,
 ) -> ResolvedAbility {
-    ResolvedAbility::new(
+    let (whole, fraction) = amount.into_whole_and_fraction();
+    let mut node = ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed {
-                value: amount as i32,
+                value: whole as i32,
             },
             target: TargetFilter::Any,
             damage_source: None,
@@ -1677,7 +1776,9 @@ fn build_remaining_damage_node(
         vec![target],
         damage_source_id,
         ability.controller,
-    )
+    );
+    node.context.remaining_damage_fraction = fraction;
+    node
 }
 
 /// CR 608.2c: who owns the parent's next instruction (`sub_ability`) after a
@@ -1758,7 +1859,7 @@ fn stash_remaining_damage_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
-    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    remaining: impl IntoIterator<Item = (TargetRef, HalfMagnitude)>,
 ) {
     if let Some(head) = remaining_damage_head(state, ability, damage_source_id, remaining) {
         append_to_pending_continuation(state, Some(Box::new(head)));
@@ -1778,7 +1879,7 @@ fn stash_remaining_damage_chain(
 fn park_recipients_behind_paused_rider(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
+    remaining: impl IntoIterator<Item = (ObjectId, TargetRef, HalfMagnitude)>,
     boundary: ChildStackDepth,
 ) -> Result<bool, EffectError> {
     let nodes: Vec<ResolvedAbility> = remaining
@@ -1828,7 +1929,7 @@ enum BatchPortion {
     Ungated {
         ctx: DamageContext,
         target: TargetRef,
-        amount: u32,
+        amount: HalfMagnitude,
     },
 }
 
@@ -1842,6 +1943,7 @@ impl BatchPortion {
                         source_id,
                         target,
                         amount,
+                        amount_fraction,
                         ..
                     },
                 ..
@@ -1849,17 +1951,22 @@ impl BatchPortion {
                 source: *source_id,
                 target: target.clone(),
                 amount: *amount,
+                amount_fraction: *amount_fraction,
             }),
             BatchPortion::Gated { .. } => None,
             BatchPortion::Ungated {
                 ctx,
                 target,
                 amount,
-            } => Some(RawDamagePortion {
-                source: ctx.source_id,
-                target: target.clone(),
-                amount: *amount,
-            }),
+            } => {
+                let (whole, fraction) = amount.into_whole_and_fraction();
+                Some(RawDamagePortion {
+                    source: ctx.source_id,
+                    target: target.clone(),
+                    amount: whole,
+                    amount_fraction: fraction,
+                })
+            }
         }
     }
 }
@@ -1984,7 +2091,7 @@ fn run_damage_batch_phases(
             } => {
                 // CR 120.8 / CR 702.16: the per-portion pre-replacement gate.
                 let Some(proposed) =
-                    pre_replacement_damage_gate(state, &ctx, &target, amount, false, events)
+                    pre_replacement_damage_gate_exact(state, &ctx, &target, amount, false, events)
                 else {
                     continue;
                 };
@@ -2091,12 +2198,13 @@ fn run_damage_batch_phases(
                 continue;
             }
         }
-        let delivered = apply_damage_after_replacement(state, ctx, event.clone(), false, events);
+        let delivered =
+            apply_damage_after_replacement_exact(state, ctx, event.clone(), false, events);
         // CR 104.1: a delivery that ended the game ends the batch.
         if state.game_end.is_some() {
             return Ok(DamageTail::Caller);
         }
-        if matches!(delivered, DamageResult::NeedsChoice) {
+        if matches!(delivered, ExactDamageResult::NeedsChoice) {
             let outcomes = take_event_outcomes(state);
             return park_damage_batch(
                 state,
@@ -2221,13 +2329,17 @@ fn portion_event(portion: &BatchPortion) -> ProposedEvent {
             ctx,
             target,
             amount,
-        } => ProposedEvent::Damage {
-            source_id: ctx.source_id,
-            target: target.clone(),
-            amount: *amount,
-            is_combat: false,
-            applied: HashSet::new(),
-        },
+        } => {
+            let (amount_whole, amount_fraction) = amount.into_whole_and_fraction();
+            ProposedEvent::Damage {
+                source_id: ctx.source_id,
+                target: target.clone(),
+                amount: amount_whole,
+                amount_fraction,
+                is_combat: false,
+                applied: HashSet::new(),
+            }
+        }
     }
 }
 
@@ -2237,6 +2349,7 @@ fn split_event(part: &SplitDamagePortion) -> ProposedEvent {
         source_id: part.source,
         target: part.target.clone(),
         amount: part.amount,
+        amount_fraction: part.amount_fraction,
         is_combat: part.is_combat,
         applied: part.applied.iter().copied().collect(),
     }
@@ -2257,6 +2370,7 @@ fn park_waiting(
             source_id,
             target,
             amount,
+            amount_fraction,
             is_combat,
             applied,
         } = event
@@ -2266,6 +2380,7 @@ fn park_waiting(
                     source: source_id,
                     target,
                     amount,
+                    amount_fraction,
                 });
             } else {
                 let mut applied: Vec<_> = applied.into_iter().collect();
@@ -2274,6 +2389,7 @@ fn park_waiting(
                     source: source_id,
                     target,
                     amount,
+                    amount_fraction,
                     is_combat,
                     applied,
                 });
@@ -2303,11 +2419,12 @@ fn split_portion(
 ) -> Option<BatchPortion> {
     let ctx = DamageContext::from_source(state, part.source)
         .unwrap_or_else(|| DamageContext::fallback(part.source, ability.controller));
-    let mut event = pre_replacement_damage_gate(
+    let exact_amount = HalfMagnitude::from_whole_and_fraction(part.amount, part.amount_fraction);
+    let mut event = pre_replacement_damage_gate_exact(
         state,
         &ctx,
         &part.target,
-        part.amount,
+        exact_amount,
         part.is_combat,
         events,
     )?;
@@ -2333,7 +2450,7 @@ pub(crate) fn run_object_damage_batch(
     state: &mut GameState,
     ability: &ResolvedAbility,
     kind: EffectKind,
-    portions: Vec<(DamageContext, TargetRef, u32)>,
+    portions: Vec<(DamageContext, TargetRef, HalfMagnitude)>,
     events: &mut Vec<GameEvent>,
 ) -> Result<DamageTail, EffectError> {
     let portions = portions
@@ -2368,6 +2485,7 @@ fn take_pending_damage_choice(
         source_id,
         target,
         amount,
+        amount_fraction,
         is_combat,
         applied,
     } = &pending.proposed
@@ -2381,10 +2499,12 @@ fn take_pending_damage_choice(
         source: *source_id,
         target: target.clone(),
         amount: *amount,
+        amount_fraction: *amount_fraction,
         is_combat: *is_combat,
         applied,
         excess_recipient: pending.excess_recipient,
         lifelink_bonus: pending.lifelink_bonus,
+        lifelink_bonus_fraction: pending.lifelink_bonus_fraction,
         candidates: pending.candidates.clone(),
     };
     state.pending_replacement = None;
@@ -2402,12 +2522,14 @@ fn deferred_portion(
         .unwrap_or_else(|| DamageContext::fallback(choice.source, ability.controller));
     ctx.excess_recipient = choice.excess_recipient;
     ctx.lifelink_bonus = choice.lifelink_bonus;
+    ctx.lifelink_bonus_fraction = choice.lifelink_bonus_fraction;
     BatchPortion::Gated {
         ctx,
         event: ProposedEvent::Damage {
             source_id: choice.source,
             target: choice.target,
             amount: choice.amount,
+            amount_fraction: choice.amount_fraction,
             is_combat: choice.is_combat,
             applied: choice.applied.into_iter().collect(),
         },
@@ -2568,12 +2690,14 @@ pub(crate) fn park_damage_batch(
             ProposedEvent::Damage {
                 target,
                 amount,
+                amount_fraction,
                 is_combat,
                 ..
             } => Some(ReplacedDamagePortion {
                 context: DamageContextSnapshot::from(ctx),
                 target: target.clone(),
                 amount: *amount,
+                amount_fraction: *amount_fraction,
                 is_combat: *is_combat,
             }),
             _ => None,
@@ -2706,6 +2830,7 @@ pub(crate) fn return_answered_portion_to_batch(
         source_id,
         target,
         amount,
+        amount_fraction,
         is_combat,
         ..
     } = event
@@ -2738,6 +2863,7 @@ pub(crate) fn return_answered_portion_to_batch(
         context: DamageContextSnapshot::from(ctx),
         target: target.clone(),
         amount: *amount,
+        amount_fraction: *amount_fraction,
         is_combat: *is_combat,
     });
     true
@@ -2768,6 +2894,7 @@ pub(crate) fn resolve_resume_damage_batch(
                 source_id: ctx.source_id,
                 target: portion.target.clone(),
                 amount: portion.amount,
+                amount_fraction: portion.amount_fraction,
                 is_combat: portion.is_combat,
                 applied: HashSet::new(),
             };
@@ -2780,7 +2907,7 @@ pub(crate) fn resolve_resume_damage_batch(
             ctx: DamageContext::from_source(state, portion.source)
                 .unwrap_or_else(|| DamageContext::fallback(portion.source, ability.controller)),
             target: portion.target.clone(),
-            amount: portion.amount,
+            amount: HalfMagnitude::from_whole_and_fraction(portion.amount, portion.amount_fraction),
         })
         .collect();
     let kind = *kind;
@@ -2807,7 +2934,7 @@ fn remaining_damage_head(
     state: &mut GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
-    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    remaining: impl IntoIterator<Item = (TargetRef, HalfMagnitude)>,
 ) -> Option<ResolvedAbility> {
     let head = remaining_damage_chain(state, ability, damage_source_id, remaining);
     let tail = ability
@@ -2832,7 +2959,7 @@ fn remaining_damage_chain(
     state: &GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
-    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    remaining: impl IntoIterator<Item = (TargetRef, HalfMagnitude)>,
 ) -> Option<ResolvedAbility> {
     let node = |target, amount| {
         let mut node = build_remaining_damage_node(ability, damage_source_id, target, amount);
@@ -3105,11 +3232,11 @@ fn pause_for_resolution_division(
     state: &mut GameState,
     ability: &ResolvedAbility,
     unit: crate::types::game_state::DistributionUnit,
-    total: u32,
+    total: HalfMagnitude,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let candidates = resolution_division_candidates(state, ability);
-    if total == 0 || candidates.is_empty() {
+    if total == HalfMagnitude::ZERO || candidates.is_empty() {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -3118,8 +3245,10 @@ fn pause_for_resolution_division(
         return Ok(());
     }
     if let [only] = candidates.as_slice() {
+        let (total_whole, total_fraction) = total.into_whole_and_fraction();
         let mut stamped = ability.clone();
-        stamped.distribution = Some(vec![(TargetRef::Object(*only), total)]);
+        stamped.distribution = Some(vec![(TargetRef::Object(*only), total_whole)]);
+        stamped.context.remaining_damage_fraction = total_fraction;
         // CR 608.2c: instructions are followed in order. The enclosing chain
         // owns the trailing instruction; a replacement-choice pause inside this
         // recursive resolution must not park a second copy of it.
@@ -3145,7 +3274,7 @@ fn pause_for_resolution_division(
     node.else_ability = None;
     state.waiting_for = crate::types::game_state::WaitingFor::DistributeAmong {
         player,
-        total,
+        total: total.whole_floor(),
         targets: candidates.into_iter().map(TargetRef::Object).collect(),
         unit,
         scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
@@ -3165,7 +3294,7 @@ fn stash_remaining_distribution(
     state: &mut GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
-    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+    remaining: impl IntoIterator<Item = (TargetRef, HalfMagnitude)>,
     splice: RemainingDamageSplice,
 ) {
     match splice {
@@ -3193,6 +3322,23 @@ fn resolve_damage(
     })
 }
 
+fn resolve_deal_damage_amount(
+    state: &GameState,
+    amount: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> HalfMagnitude {
+    if !ability.context.remaining_damage_fraction.is_zero() {
+        if let QuantityExpr::Fixed { value } = amount {
+            return HalfSigned::from_whole_and_fraction(
+                *value,
+                ability.context.remaining_damage_fraction,
+            )
+            .clamp_non_negative();
+        }
+    }
+    resolve_quantity_with_targets_exact(state, amount, ability).clamp_non_negative()
+}
+
 /// The body of [`resolve`] and [`resume_resolution_division`], run inside the
 /// damage batch each opens; `splice` says where a pause parks the remaining
 /// portions of a division.
@@ -3202,20 +3348,23 @@ fn resolve_with_splice(
     splice: RemainingDamageSplice,
     events: &mut Vec<GameEvent>,
 ) -> Result<DamageTail, EffectError> {
-    let (num_dmg, damage_source, target_filter): (u32, Option<DamageSource>, &TargetFilter) =
-        match &ability.effect {
-            Effect::DealDamage {
-                amount,
-                damage_source,
-                target,
-                excess: _,
-            } => (
-                resolve_quantity_with_targets(state, amount, ability).max(0) as u32,
-                *damage_source,
-                target,
-            ),
-            _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
-        };
+    let (num_dmg, damage_source, target_filter): (
+        HalfMagnitude,
+        Option<DamageSource>,
+        &TargetFilter,
+    ) = match &ability.effect {
+        Effect::DealDamage {
+            amount,
+            damage_source,
+            target,
+            excess: _,
+        } => (
+            resolve_deal_damage_amount(state, amount, ability),
+            *damage_source,
+            target,
+        ),
+        _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
+    };
 
     // CR 120.1 + CR 601.2c + CR 208.1 + CR 608.2: Multi-source per-power damage —
     // "up to N / any number of target creatures you control each deal damage
@@ -3272,27 +3421,42 @@ fn resolve_with_splice(
     // recipients behind its answer (`park_recipients_behind_paused_rider`).
     let boundary = state.resolution_stack.capture_child_boundary();
     if let Some(distribution) = &ability.distribution {
+        let single_target_frac = if distribution.len() == 1 {
+            ability.context.remaining_damage_fraction
+        } else {
+            HalfFraction::Zero
+        };
         for (i, (target, amount)) in distribution.iter().enumerate() {
-            match apply_damage_to_target(state, &ctx, target.clone(), *amount, false, events)? {
-                DamageResult::Applied(_)
+            let exact_amount = HalfMagnitude::from_whole_and_fraction(*amount, single_target_frac);
+            match apply_damage_to_target_exact(
+                state,
+                &ctx,
+                target.clone(),
+                exact_amount,
+                false,
+                events,
+            )? {
+                ExactDamageResult::Applied(_)
                     if replacement::damage_batch_has_paused_rider(state)
                         && park_recipients_behind_paused_rider(
                             state,
                             ability,
-                            distribution[i + 1..]
-                                .iter()
-                                .map(|(t, a)| (ctx.source_id, t.clone(), *a)),
+                            distribution[i + 1..].iter().map(|(t, a)| {
+                                (ctx.source_id, t.clone(), HalfMagnitude::from_whole(*a))
+                            }),
                             boundary,
                         )? =>
                 {
                     return Ok(DamageTail::Caller);
                 }
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
+                ExactDamageResult::Applied(_) => {}
+                ExactDamageResult::NeedsChoice => {
                     // CR 120.3 + CR 616.1e: Remaining distributed targets must resume
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
-                    let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
+                    let remaining = distribution[i + 1..]
+                        .iter()
+                        .map(|(t, a)| (t.clone(), HalfMagnitude::from_whole(*a)));
                     stash_remaining_distribution(state, ability, ctx.source_id, remaining, splice);
                     return Ok(DamageTail::Stashed);
                 }
@@ -3300,8 +3464,9 @@ fn resolve_with_splice(
         }
     } else {
         for (i, target) in effective_targets.iter().enumerate() {
-            match apply_damage_to_target(state, &ctx, target.clone(), num_dmg, false, events)? {
-                DamageResult::Applied(_)
+            match apply_damage_to_target_exact(state, &ctx, target.clone(), num_dmg, false, events)?
+            {
+                ExactDamageResult::Applied(_)
                     if replacement::damage_batch_has_paused_rider(state)
                         && park_recipients_behind_paused_rider(
                             state,
@@ -3314,8 +3479,8 @@ fn resolve_with_splice(
                 {
                     return Ok(DamageTail::Caller);
                 }
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
+                ExactDamageResult::Applied(_) => {}
+                ExactDamageResult::NeedsChoice => {
                     // CR 120.3 + CR 616.1e: Remaining targets must resume after the
                     // replacement choice resolves.
                     let remaining = effective_targets[i + 1..]
@@ -3344,13 +3509,20 @@ pub fn resolve_post_replacement(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (context, target, amount, is_combat) = match &ability.effect {
+    let (context, target, amount, amount_fraction, is_combat) = match &ability.effect {
         Effect::ApplyPostReplacementDamage {
             context,
             target,
             amount,
+            amount_fraction,
             is_combat,
-        } => (*context, target.clone(), *amount, *is_combat),
+        } => (
+            *context,
+            target.clone(),
+            *amount,
+            *amount_fraction,
+            *is_combat,
+        ),
         _ => {
             return Err(EffectError::MissingParam(
                 "ApplyPostReplacementDamage".to_string(),
@@ -3362,13 +3534,14 @@ pub fn resolve_post_replacement(
         source_id: ctx.source_id,
         target,
         amount,
+        amount_fraction,
         is_combat,
         applied: HashSet::new(),
     };
 
     if matches!(
-        apply_damage_after_replacement(state, &ctx, event, is_combat, events),
-        DamageResult::NeedsChoice
+        apply_damage_after_replacement_exact(state, &ctx, event, is_combat, events),
+        ExactDamageResult::NeedsChoice
     ) {
         return Ok(());
     }
@@ -3791,7 +3964,7 @@ fn resolve_each_target_power_damage(
     // NOTHING to the batch. Without this gate the fallback context would keep it
     // in the batch and `Power{Target}` would read its last known power off LKI,
     // so a source that left the battlefield would still deal damage.
-    let batch: Vec<(ObjectId, DamageContext, u32)> = source_ids
+    let batch: Vec<(ObjectId, DamageContext, HalfMagnitude)> = source_ids
         .iter()
         .filter(|&&source_id| damage_source_eligible(state, source_id))
         .filter_map(|&source_id| {
@@ -3799,14 +3972,14 @@ fn resolve_each_target_power_damage(
             // Resolve the amount against a single-element slice so `Power{Target}`
             // binds to THIS source (CR 120.1: each is an independent source).
             let source_slice = [TargetRef::Object(source_id)];
-            let amt = resolve_quantity_with_targets_slice(
+            let amt = resolve_quantity_with_targets_slice_exact(
                 state,
                 amount,
                 ability.controller,
                 source_id,
                 &source_slice,
             )
-            .max(0) as u32;
+            .clamp_non_negative();
             Some((source_id, ctx, amt))
         })
         .collect();
@@ -3819,7 +3992,7 @@ fn resolve_each_target_power_damage(
     let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(batch.len());
     for (idx, (_, ctx, amt)) in batch.iter().enumerate() {
         if let Some(proposed) =
-            pre_replacement_damage_gate(state, ctx, &recipient, *amt, false, events)
+            pre_replacement_damage_gate_exact(state, ctx, &recipient, *amt, false, events)
         {
             entries.push((idx, ctx));
             proposed_events.push(proposed);
@@ -3913,7 +4086,7 @@ fn resolve_all_portions(
     let shared_num_dmg = if amount_uses_recipient {
         None
     } else {
-        Some(resolve_quantity_with_targets(state, amount, ability).max(0) as u32)
+        Some(resolve_quantity_with_targets_exact(state, amount, ability).clamp_non_negative())
     };
 
     let target_filter =
@@ -4028,17 +4201,17 @@ fn resolve_all_portions(
     recipients.extend(matching_objects.iter().map(|&id| TargetRef::Object(id)));
     recipients.extend(matching_players.iter().map(|&pid| TargetRef::Player(pid)));
 
-    let recipient_amounts: Vec<(TargetRef, u32)> = recipients
+    let recipient_amounts: Vec<(TargetRef, HalfMagnitude)> = recipients
         .into_iter()
         .map(|target| {
             let dmg = match (shared_num_dmg, &target) {
                 (Some(dmg), _) => dmg,
                 (None, TargetRef::Object(id)) => {
-                    resolve_quantity_with_targets_and_recipient(state, amount, ability, *id).max(0)
-                        as u32
+                    resolve_quantity_with_targets_and_recipient_exact(state, amount, ability, *id)
+                        .clamp_non_negative()
                 }
                 (None, TargetRef::Player(_)) => {
-                    resolve_quantity_with_targets(state, amount, ability).max(0) as u32
+                    resolve_quantity_with_targets_exact(state, amount, ability).clamp_non_negative()
                 }
             };
             (target, dmg)
@@ -4047,10 +4220,10 @@ fn resolve_all_portions(
 
     let boundary = state.resolution_stack.capture_child_boundary();
     for (i, (target, num_dmg)) in recipient_amounts.iter().enumerate() {
-        match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
+        match apply_damage_to_target_exact(state, &ctx, target.clone(), *num_dmg, false, events)? {
             // CR 608.2c + CR 616.1: a rider that left its prompt standing (Dralnu, Lich Lord's
             // sacrifice) holds the remaining recipients behind its answer.
-            DamageResult::Applied(_)
+            ExactDamageResult::Applied(_)
                 if replacement::damage_batch_has_paused_rider(state)
                     && park_recipients_behind_paused_rider(
                         state,
@@ -4063,8 +4236,8 @@ fn resolve_all_portions(
             {
                 return Ok(DamageTail::Caller);
             }
-            DamageResult::Applied(_) => {}
-            DamageResult::NeedsChoice => {
+            ExactDamageResult::Applied(_) => {}
+            ExactDamageResult::NeedsChoice => {
                 // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
@@ -4688,44 +4861,52 @@ fn resolve_each_player_portions(
         // object targets so an `ObjectManaValue { scope: Target }` leaf (Lady
         // Loki's "that nonland card's mana value" — the injected exile-until hit)
         // resolves against the hit rather than to 0.
-        let dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
+        let dmg = crate::game::quantity::resolve_quantity_scoped_with_targets_exact(
             state,
             amount_expr,
             ability.source_id,
             *pid,
             &ability.targets,
         )
-        .max(0) as u32;
-        if dmg > 0 {
-            let result =
-                apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?;
+        .clamp_non_negative();
+        if dmg > HalfMagnitude::ZERO {
+            let result = apply_damage_to_target_exact(
+                state,
+                &ctx,
+                TargetRef::Player(*pid),
+                dmg,
+                false,
+                events,
+            )?;
             let rider_paused = crate::game::replacement::damage_batch_has_paused_rider(state);
-            if matches!(result, DamageResult::NeedsChoice) || rider_paused {
+            if matches!(result, ExactDamageResult::NeedsChoice) || rider_paused {
                 // CR 120.3 + CR 616.1e: Remaining players must resume after the
                 // replacement choice resolves. Pre-resolve per-player amounts now
                 // so each continuation node carries a Fixed quantity.
-                let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
+                let remaining: Vec<(TargetRef, HalfMagnitude)> = player_ids[i + 1..]
                     .iter()
                     .filter_map(|&next_pid| {
                         // Thread `ability.targets` here too — otherwise every
                         // opponent AFTER the first (once a replacement pause
                         // occurs) would pre-resolve an `ObjectManaValue
                         // { scope: Target }` leaf to 0.
-                        let next_dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
-                            state,
-                            amount_expr,
-                            ability.source_id,
-                            next_pid,
-                            &ability.targets,
-                        )
-                        .max(0) as u32;
-                        (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
+                        let next_dmg =
+                            crate::game::quantity::resolve_quantity_scoped_with_targets_exact(
+                                state,
+                                amount_expr,
+                                ability.source_id,
+                                next_pid,
+                                &ability.targets,
+                            )
+                            .clamp_non_negative();
+                        (next_dmg > HalfMagnitude::ZERO)
+                            .then_some((TargetRef::Player(next_pid), next_dmg))
                     })
                     .collect();
                 // CR 608.2c + CR 616.1: this player's rider left its prompt standing; the
                 // remaining players wait behind it. With none left, the chain already
                 // parks the spell's later instructions behind the paused rider.
-                if !matches!(result, DamageResult::NeedsChoice) {
+                if !matches!(result, ExactDamageResult::NeedsChoice) {
                     if park_recipients_behind_paused_rider(
                         state,
                         ability,
@@ -4833,13 +5014,13 @@ fn resolve_each_deals_equal_to_power_portions(
     let portions = source_ids
         .iter()
         .filter_map(|&source_id| {
-            let power = object_power_with_lki(state, source_id);
-            (power > 0).then(|| BatchPortion::Ungated {
+            let power = object_exact_power_with_lki(state, source_id).clamp_non_negative();
+            (power > HalfMagnitude::ZERO).then(|| BatchPortion::Ungated {
                 // CR 120.1: each source creature is the source of its own damage.
                 ctx: DamageContext::from_source(state, source_id)
                     .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller)),
                 target: TargetRef::Object(recipient_id),
-                amount: power as u32,
+                amount: power,
             })
         })
         .collect();
@@ -4912,9 +5093,9 @@ fn resolve_each_source_deals_damage_portions(
         crate::types::ability::ObjectScope::BatchSource,
     );
     let amt_uniform = if per_source {
-        0
+        HalfMagnitude::ZERO
     } else {
-        resolve_quantity_with_targets(state, amount, ability).max(0) as u32
+        resolve_quantity_with_targets_exact(state, amount, ability).clamp_non_negative()
     };
 
     // CR 608.2 + CR 120.1: ordinary source classes are evaluated against the
@@ -4975,7 +5156,7 @@ fn resolve_each_source_deals_damage_portions(
     // damage is applied (CR 120.6 + CR 120.10: marks accumulate on a shared
     // recipient so combined lethal/excess is computed once all sources have
     // marked). Each source carries its OWN `DamageContext` (CR 120.1 identity).
-    let mut entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = Vec::new();
+    let mut entries: Vec<(ObjectId, DamageContext, TargetRef, HalfMagnitude)> = Vec::new();
     for &source_id in &source_ids {
         // CR 120.1 + CR 608.2h: each batch member deals its OWN characteristic;
         // resolved per source (live object, LKI fallback via the new scope's
@@ -4984,14 +5165,14 @@ fn resolve_each_source_deals_damage_portions(
         // members deal nothing (skip) — entry-set-equivalent to the uniform
         // path's `if amt > 0` gate.
         let amt = if per_source {
-            crate::game::quantity::resolve_quantity_with_targets_and_damage_source(
+            crate::game::quantity::resolve_quantity_with_targets_and_damage_source_exact(
                 state, amount, ability, source_id,
             )
-            .max(0) as u32
+            .clamp_non_negative()
         } else {
             amt_uniform
         };
-        if amt == 0 {
+        if amt == HalfMagnitude::ZERO {
             continue;
         }
         let ctx = DamageContext::from_source(state, source_id)
@@ -5054,13 +5235,13 @@ fn resolve_each_source_deals_damage_portions(
 /// CR 208.3 + CR 113.7a: A creature's power from current state, falling back to
 /// Last Known Information when the object has left the battlefield. Mirrors the
 /// `ObjectScope::Source` arm of `quantity::resolve_object_pt`.
-fn object_power_with_lki(state: &GameState, id: ObjectId) -> i32 {
+fn object_exact_power_with_lki(state: &GameState, id: ObjectId) -> HalfSigned {
     state
         .objects
         .get(&id)
-        .and_then(|obj| obj.power)
-        .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.power))
-        .unwrap_or(0)
+        .and_then(|obj| obj.exact_power())
+        .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.exact_power()))
+        .unwrap_or(HalfSigned(0))
 }
 
 #[cfg(test)]
@@ -6510,6 +6691,7 @@ mod tests {
                 amount: 1,
                 is_combat: true,
                 applied: HashSet::new(),
+                amount_fraction: Default::default(),
             };
             let mut events = Vec::new();
             apply_damage_after_replacement(state, &ctx, event, true, &mut events);
@@ -6581,6 +6763,7 @@ mod tests {
                 amount: 1,
                 is_combat: false,
                 applied: HashSet::new(),
+                amount_fraction: Default::default(),
             };
             let mut events = Vec::new();
             apply_damage_after_replacement(state, &ctx, event, false, &mut events);
@@ -6651,6 +6834,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut events = Vec::new();
 
@@ -6697,6 +6881,7 @@ mod tests {
             amount: 1,
             is_combat: false,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut events = Vec::new();
         apply_damage_after_replacement(&mut state, &ctx, event, false, &mut events);
@@ -6735,6 +6920,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut events = Vec::new();
         apply_damage_after_replacement(&mut state, &ctx, event, false, &mut events);
@@ -6764,6 +6950,7 @@ mod tests {
             amount: 2,
             is_combat: false,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut events = Vec::new();
 
@@ -9476,6 +9663,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         let ability = ResolvedAbility::new(
@@ -10545,7 +10734,10 @@ mod tests {
             &mut before,
             &node,
             src,
-            [(r1.clone(), 1), (r2.clone(), 2)],
+            [
+                (r1.clone(), HalfMagnitude::from_whole(1)),
+                (r2.clone(), HalfMagnitude::from_whole(2)),
+            ],
             RemainingDamageSplice::BeforeContinuation,
         );
         assert_eq!(
@@ -10558,7 +10750,10 @@ mod tests {
             &mut after,
             &node,
             src,
-            [(r1.clone(), 1), (r2.clone(), 2)],
+            [
+                (r1.clone(), HalfMagnitude::from_whole(1)),
+                (r2.clone(), HalfMagnitude::from_whole(2)),
+            ],
             RemainingDamageSplice::AfterContinuation,
         );
         assert_eq!(
@@ -11102,9 +11297,9 @@ mod attacked_referent_recipient_tests {
             &ability,
             token,
             [
-                (TargetRef::Player(PlayerId(0)), 1),
-                (TargetRef::Player(PlayerId(1)), 2),
-                (TargetRef::Player(PlayerId(0)), 3),
+                (TargetRef::Player(PlayerId(0)), HalfMagnitude::from_whole(1)),
+                (TargetRef::Player(PlayerId(1)), HalfMagnitude::from_whole(2)),
+                (TargetRef::Player(PlayerId(0)), HalfMagnitude::from_whole(3)),
             ],
         )
         .expect("three remaining recipients");

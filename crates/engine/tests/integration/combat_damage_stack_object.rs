@@ -62,6 +62,7 @@ fn combat_damage_entry(
                 source: ObjectIncarnationRef::of(source, 0),
                 target: AssignedDamageRecipient::Object(ObjectIncarnationRef::of(recipient, 0)),
                 amount,
+                amount_fraction: Default::default(),
             }],
         },
     }
@@ -305,11 +306,13 @@ fn combat_damage_entry_round_trips_and_accepts_legacy_incarnations() {
                         2,
                     )),
                     amount: 3,
+                    amount_fraction: Default::default(),
                 },
                 AssignedCombatDamage {
                     source: ObjectIncarnationRef::of(ObjectId(5), 1),
                     target: AssignedDamageRecipient::Player(P1),
                     amount: 2,
+                    amount_fraction: Default::default(),
                 },
             ],
         },

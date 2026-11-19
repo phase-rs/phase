@@ -30,8 +30,14 @@ fn add_morophon_static(state: &mut engine::types::game_state::GameState, moropho
             StaticDefinition::continuous()
                 .affected(morophon_buff_filter())
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                 ]),
         );
 }
@@ -48,7 +54,10 @@ fn add_chosen_name_power_static(
         .push(
             StaticDefinition::continuous()
                 .affected(TargetFilter::HasChosenName)
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
 }
 

@@ -6803,6 +6803,7 @@ fn rw_effect(
             context: _,
             target: _,
             amount: _,
+            amount_fraction: _,
             is_combat: _,
         }
         | Effect::ResumeDamageBatch {

@@ -178,16 +178,30 @@ pub(crate) fn remove_stickers_from_copy(copy: &mut GameObject) {
 /// setter writes over — its prototype values for a prototyped spell, else its
 /// printed P/T.
 pub(crate) fn reset_pt_to_object_baseline(obj: &mut GameObject) {
-    let (power, toughness) = obj
-        .prototype_form
-        .as_ref()
-        .map_or((obj.base_power, obj.base_toughness), |form| {
-            (Some(form.power), Some(form.toughness))
-        });
+    let ((power, power_fraction), (toughness, toughness_fraction)) =
+        obj.prototype_form.as_ref().map_or(
+            (
+                (obj.base_power, obj.base_power_fraction),
+                (obj.base_toughness, obj.base_toughness_fraction),
+            ),
+            |form| {
+                (
+                    (Some(form.power), crate::types::ability::HalfFraction::Zero),
+                    (
+                        Some(form.toughness),
+                        crate::types::ability::HalfFraction::Zero,
+                    ),
+                )
+            },
+        );
     obj.power = power;
+    obj.power_fraction = power_fraction;
     obj.toughness = toughness;
+    obj.toughness_fraction = toughness_fraction;
     obj.layer_base_power = power;
+    obj.layer_base_power_fraction = power_fraction;
     obj.layer_base_toughness = toughness;
+    obj.layer_base_toughness_fraction = toughness_fraction;
 }
 
 /// The inverse of [`insert_name_sticker_words`] (CR 123.6b + CR 123.6c): the
@@ -369,7 +383,7 @@ pub fn append_public_zone_pt_sticker_effects(
                 mod_index: 0,
                 layer: Layer::SetPT,
                 timestamp: *timestamp,
-                modification: ContinuousModification::SetPower { value: *power },
+                modification: ContinuousModification::set_power(*power),
                 affected_filter: affected_filter.clone(),
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,
@@ -387,7 +401,7 @@ pub fn append_public_zone_pt_sticker_effects(
                 mod_index: 1,
                 layer: Layer::SetPT,
                 timestamp: *timestamp,
-                modification: ContinuousModification::SetToughness { value: *toughness },
+                modification: ContinuousModification::set_toughness(*toughness),
                 affected_filter: affected_filter.clone(),
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,

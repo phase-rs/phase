@@ -43,6 +43,8 @@ fn sample_display() -> DisplayIdentity {
             subtypes: vec!["Bear".to_string()],
             keywords: vec![],
             has_abilities: false,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         }),
     }
 }

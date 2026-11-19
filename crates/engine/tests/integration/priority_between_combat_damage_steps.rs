@@ -536,6 +536,9 @@ fn damage_assignment_prompt_in_the_first_step_resumes_into_the_window() {
             assignments: vec![(hit, 1)],
             trample_damage: 0,
             controller_damage: 0,
+            assignments_fraction: Vec::new(),
+            trample_damage_fraction: Default::default(),
+            controller_damage_fraction: Default::default(),
         })
         .expect("the hand-submitted regular-step assignment");
 

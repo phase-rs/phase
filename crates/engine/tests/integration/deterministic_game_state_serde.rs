@@ -1422,6 +1422,8 @@ fn back_face(name: &str) -> BackFaceData {
         casting_options: Vec::new(),
         layout_kind: None,
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     }
 }
 
@@ -1599,6 +1601,7 @@ fn build_populated_state(reverse: bool) -> GameState {
             vec![DamageAssignment {
                 target: DamageTarget::Player(PlayerId(1)),
                 amount: 1,
+                amount_fraction: Default::default(),
             }],
         ),
         (
@@ -1606,6 +1609,7 @@ fn build_populated_state(reverse: bool) -> GameState {
             vec![DamageAssignment {
                 target: DamageTarget::Player(PlayerId(0)),
                 amount: 2,
+                amount_fraction: Default::default(),
             }],
         ),
     ];
@@ -2420,6 +2424,7 @@ fn every_numeric_key_combat_map_round_trips_populated() {
                 vec![DamageAssignment {
                     target: DamageTarget::Player(PlayerId(1)),
                     amount: 1,
+                    amount_fraction: Default::default(),
                 }],
             ),
             (
@@ -2427,6 +2432,7 @@ fn every_numeric_key_combat_map_round_trips_populated() {
                 vec![DamageAssignment {
                     target: DamageTarget::Player(PlayerId(0)),
                     amount: 2,
+                    amount_fraction: Default::default(),
                 }],
             ),
         ]),

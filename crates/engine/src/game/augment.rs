@@ -359,13 +359,37 @@ fn merged_copiable_values(
 
     let (abilities, triggers, trigger_printed_origins, statics, replacements) =
         merged_ability_sets(augment, &host_values);
+    let (merged_power, merged_power_fraction) =
+        crate::types::ability::HalfSigned::from_whole_and_fraction(
+            host_values.power.unwrap_or(0),
+            host_values.power_fraction,
+        )
+        .saturating_add(
+            augment
+                .exact_base_power()
+                .unwrap_or(crate::types::ability::HalfSigned::ZERO),
+        )
+        .into_whole_and_fraction();
+    let (merged_toughness, merged_toughness_fraction) =
+        crate::types::ability::HalfSigned::from_whole_and_fraction(
+            host_values.toughness.unwrap_or(0),
+            host_values.toughness_fraction,
+        )
+        .saturating_add(
+            augment
+                .exact_base_toughness()
+                .unwrap_or(crate::types::ability::HalfSigned::ZERO),
+        )
+        .into_whole_and_fraction();
     let values = CopiableValues {
         name: combine_name(&augment.base_name, &host_values.name),
         mana_cost: host_values.mana_cost,
         color,
         card_types,
-        power: Some(host_values.power.unwrap_or(0) + augment.base_power.unwrap_or(0)),
-        toughness: Some(host_values.toughness.unwrap_or(0) + augment.base_toughness.unwrap_or(0)),
+        power: Some(merged_power),
+        power_fraction: merged_power_fraction,
+        toughness: Some(merged_toughness),
+        toughness_fraction: merged_toughness_fraction,
         loyalty: host_values.loyalty,
         // CR 707.2: The merged object's copiable loyalty characteristic follows its host.
         printed_loyalty: host_values.printed_loyalty,

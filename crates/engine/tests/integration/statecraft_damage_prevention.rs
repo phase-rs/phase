@@ -547,6 +547,7 @@ fn candletrap_prevents_enchanted_creatures_combat_damage() {
         amount: 3,
         is_combat: true,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     };
     let result =
         engine::game::replacement::replace_event(runner.state_mut(), proposed, &mut events);
@@ -794,6 +795,7 @@ fn fog_bank_both_directions_correct_after_unifying_self_ref() {
         amount: 5,
         is_combat: true,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     };
     let result =
         engine::game::replacement::replace_event(runner.state_mut(), proposed, &mut events);
@@ -960,6 +962,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
         amount: 4,
         is_combat: true,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     };
     assert!(
         matches!(
@@ -981,6 +984,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
         amount: 3,
         is_combat: true,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     };
     assert!(
         matches!(
@@ -1003,6 +1007,7 @@ fn gaseous_form_prevents_both_combat_directions_but_not_noncombat_damage() {
         amount: 3,
         is_combat: false,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     };
     match engine::game::replacement::replace_event(
         runner.state_mut(),
@@ -1259,6 +1264,7 @@ fn heart_of_light_real_cast_prevents_combat_and_noncombat_damage() {
         amount: 5,
         is_combat: false,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     };
     let result =
         engine::game::replacement::replace_event(runner.state_mut(), proposed, &mut events);

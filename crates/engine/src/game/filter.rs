@@ -25,9 +25,9 @@ use crate::types::ability::{
     AttachmentReferent, AttackerBlockStatus, BlockPairDirection, CardTypeSetSource,
     CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject,
     ContinuousModification, ControllerRef, CountScope, CrewRelation, FilterGrammarNode, FilterProp,
-    Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    HalfFraction, HalfSigned, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -6736,7 +6736,9 @@ pub fn matches_target_filter_on_counter_added_record(
     );
     obj.controller = record.controller;
     obj.power = record.power;
+    obj.power_fraction = record.power_fraction;
     obj.toughness = record.toughness;
+    obj.toughness_fraction = record.toughness_fraction;
     obj.card_types.core_types = record.core_types.clone();
     obj.card_types.subtypes = record.subtypes.clone();
     obj.card_types.supertypes = record.supertypes.clone();
@@ -6782,9 +6784,13 @@ pub fn matches_target_filter_on_attack_declaration_record(
     );
     obj.controller = record.lki.controller;
     obj.power = record.lki.power;
+    obj.power_fraction = record.lki.power_fraction;
     obj.toughness = record.lki.toughness;
+    obj.toughness_fraction = record.lki.toughness_fraction;
     obj.base_power = record.lki.base_power;
+    obj.base_power_fraction = record.lki.base_power_fraction;
     obj.base_toughness = record.lki.base_toughness;
+    obj.base_toughness_fraction = record.lki.base_toughness_fraction;
     obj.card_types.core_types = record.lki.card_types.clone();
     obj.card_types.subtypes = record.lki.subtypes.clone();
     obj.card_types.supertypes = record.lki.supertypes.clone();
@@ -6870,7 +6876,9 @@ pub fn matches_target_filter_on_damage_record_source(
     );
     obj.controller = record.source_controller_snapshot;
     obj.power = record.source_power;
+    obj.power_fraction = record.source_power_fraction;
     obj.toughness = record.source_toughness;
+    obj.toughness_fraction = record.source_toughness_fraction;
     obj.card_types.core_types = record.source_core_types.clone();
     obj.card_types.subtypes = record.source_subtypes.clone();
     obj.card_types.supertypes = record.source_supertypes.clone();
@@ -7080,11 +7088,15 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         trigger_definitions: Vec::new(),
         trigger_source_context: None,
         power: lki.power,
+        power_fraction: lki.power_fraction,
         toughness: lki.toughness,
+        toughness_fraction: lki.toughness_fraction,
         // CR 208.4b + CR 613.4b: Carry base P/T into the synthesized record so
         // the base-scope `PtComparison` arm reads the LKI base value.
         base_power: lki.base_power,
+        base_power_fraction: lki.base_power_fraction,
         base_toughness: lki.base_toughness,
+        base_toughness_fraction: lki.base_toughness_fraction,
         colors: lki.colors.clone(),
         mana_value: lki.mana_value,
         controller: lki.controller,
@@ -7214,9 +7226,13 @@ pub(crate) fn matches_target_filter_on_event_snapshot(
     object.controller = snapshot.controller;
     object.incarnation = snapshot.identity.incarnation;
     object.power = snapshot.power;
+    object.power_fraction = snapshot.power_fraction;
     object.toughness = snapshot.toughness;
+    object.toughness_fraction = snapshot.toughness_fraction;
     object.base_power = snapshot.base_power;
+    object.base_power_fraction = snapshot.base_power_fraction;
     object.base_toughness = snapshot.base_toughness;
+    object.base_toughness_fraction = snapshot.base_toughness_fraction;
     object.card_types.core_types = snapshot.core_types.clone();
     object.card_types.subtypes = snapshot.subtypes.clone();
     object.card_types.supertypes = snapshot.supertypes.clone();
@@ -9901,9 +9917,13 @@ impl<'a> SourceContext<'a> {
                 name: String::new(),
                 token_image_ref: None,
                 power: None,
+                power_fraction: Default::default(),
                 toughness: None,
+                toughness_fraction: Default::default(),
                 base_power: None,
+                base_power_fraction: Default::default(),
                 base_toughness: None,
+                base_toughness_fraction: Default::default(),
                 mana_value: 0,
                 controller: controller.unwrap_or(PlayerId(0)),
                 owner: PlayerId(0),
@@ -10138,9 +10158,13 @@ fn source_context_from_filter<'a>(
                 name: String::new(),
                 token_image_ref: None,
                 power: None,
+                power_fraction: Default::default(),
                 toughness: None,
+                toughness_fraction: Default::default(),
                 base_power: None,
+                base_power_fraction: Default::default(),
                 base_toughness: None,
+                base_toughness_fraction: Default::default(),
                 mana_value: 0,
                 controller: source_controller.unwrap_or(PlayerId(0)),
                 owner: PlayerId(0),
@@ -10713,31 +10737,78 @@ fn resolve_filter_threshold(
     }
 }
 
-fn pt_value_from_pair(stat: PtStat, power: Option<i32>, toughness: Option<i32>) -> i32 {
-    match stat {
-        PtStat::Power => power.unwrap_or(0),
-        PtStat::Toughness => toughness.unwrap_or(0),
-        PtStat::TotalPowerToughness => power.unwrap_or(0) + toughness.unwrap_or(0),
-    }
-}
-
-fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
-    match scope {
-        PtValueScope::Current => pt_value_from_pair(stat, obj.power, obj.toughness),
-        // CR 208.4b + CR 613.4a-b: base P/T includes characteristic-defining
-        // and setting effects, but excludes layer-7c modifications and counters.
-        PtValueScope::Base => pt_value_from_pair(
-            stat,
-            obj.layer_base_power.or(obj.base_power),
-            obj.layer_base_toughness.or(obj.base_toughness),
+fn resolve_filter_threshold_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    source: &SourceContext<'_>,
+) -> HalfSigned {
+    match source.ability {
+        Some(ability) => {
+            crate::game::quantity::resolve_quantity_with_targets_exact(state, expr, ability)
+        }
+        None => crate::game::quantity::resolve_quantity_with_ctx_exact(
+            state,
+            expr,
+            source.controller.unwrap_or(PlayerId(0)),
+            QuantityContext {
+                granting_object: source.granting_object,
+                ..QuantityContext::new(source.id)
+            },
         ),
     }
 }
 
-fn zone_change_pt_value(record: &ZoneChangeRecord, stat: PtStat, scope: PtValueScope) -> i32 {
+fn exact_opt_pair(whole: Option<i32>, fraction: HalfFraction) -> Option<HalfSigned> {
+    whole.map(|w| HalfSigned::from_whole_and_fraction(w, fraction))
+}
+
+fn pt_value_from_exact_pair(
+    stat: PtStat,
+    power: Option<HalfSigned>,
+    toughness: Option<HalfSigned>,
+) -> HalfSigned {
+    match stat {
+        PtStat::Power => power.unwrap_or(HalfSigned(0)),
+        PtStat::Toughness => toughness.unwrap_or(HalfSigned(0)),
+        PtStat::TotalPowerToughness => power
+            .unwrap_or(HalfSigned(0))
+            .saturating_add(toughness.unwrap_or(HalfSigned(0))),
+    }
+}
+
+fn object_pt_value_exact(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> HalfSigned {
     match scope {
-        PtValueScope::Current => pt_value_from_pair(stat, record.power, record.toughness),
-        PtValueScope::Base => pt_value_from_pair(stat, record.base_power, record.base_toughness),
+        PtValueScope::Current => {
+            pt_value_from_exact_pair(stat, obj.exact_power(), obj.exact_toughness())
+        }
+        // CR 208.4b + CR 613.4a-b: base P/T includes characteristic-defining
+        // and setting effects, but excludes layer-7c modifications and counters.
+        PtValueScope::Base => pt_value_from_exact_pair(
+            stat,
+            obj.exact_layer_base_power()
+                .or_else(|| obj.exact_base_power()),
+            obj.exact_layer_base_toughness()
+                .or_else(|| obj.exact_base_toughness()),
+        ),
+    }
+}
+
+fn zone_change_pt_value_exact(
+    record: &ZoneChangeRecord,
+    stat: PtStat,
+    scope: PtValueScope,
+) -> HalfSigned {
+    match scope {
+        PtValueScope::Current => pt_value_from_exact_pair(
+            stat,
+            exact_opt_pair(record.power, record.power_fraction),
+            exact_opt_pair(record.toughness, record.toughness_fraction),
+        ),
+        PtValueScope::Base => pt_value_from_exact_pair(
+            stat,
+            exact_opt_pair(record.base_power, record.base_power_fraction),
+            exact_opt_pair(record.base_toughness, record.base_toughness_fraction),
+        ),
     }
 }
 
@@ -11500,9 +11571,9 @@ fn matches_filter_prop(
             scope,
             comparator,
             value,
-        } => comparator.evaluate(
-            object_pt_value(obj, *stat, *scope),
-            resolve_filter_threshold(state, value, source),
+        } => comparator.evaluate_half_signed(
+            object_pt_value_exact(obj, *stat, *scope),
+            resolve_filter_threshold_exact(state, value, source),
         ),
         // Disjunctive composite: any inner prop matches.
         FilterProp::AnyOf { props } => props
@@ -11511,7 +11582,10 @@ fn matches_filter_prop(
         // CR 608.2c: Logical negation — the object matches iff the inner prop does NOT.
         FilterProp::Not { prop } => !matches_filter_prop(prop, state, obj, object_id, held, source),
         // CR 509.1b: Object's power is strictly greater than the source object's power.
-        FilterProp::PowerGTSource => obj.power.unwrap_or(0) > source.lki.power.unwrap_or(0),
+        FilterProp::PowerGTSource => {
+            obj.exact_power().unwrap_or(HalfSigned(0))
+                > source.lki.exact_power().unwrap_or(HalfSigned(0))
+        }
         // CR 709.4b: A split card off the stack counts its combined colors.
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(obj.effective_colors().len() as i32, i32::from(*count))
@@ -11625,15 +11699,19 @@ fn matches_filter_prop(
         }
         // CR 510.1c: Match creatures whose toughness exceeds their power.
         FilterProp::ToughnessGTPower => {
-            let power = obj.power.unwrap_or(0);
-            let toughness = obj.toughness.unwrap_or(0);
+            let power = obj.exact_power().unwrap_or(HalfSigned(0));
+            let toughness = obj.exact_toughness().unwrap_or(HalfSigned(0));
             toughness > power
         }
         // CR 208.1 + CR 613.4b: Match creatures whose current (post-layer) power
         // exceeds their base power (layer-7b baseline incl. CDA, before
         // counters/pumps in 7c–7e).
         FilterProp::PowerExceedsBase => {
-            obj.power.unwrap_or(0) > obj.layer_base_power.or(obj.base_power).unwrap_or(0)
+            obj.exact_power().unwrap_or(HalfSigned(0))
+                > obj
+                    .exact_layer_base_power()
+                    .or_else(|| obj.exact_base_power())
+                    .unwrap_or(HalfSigned(0))
         }
         // CR 201.2c: the object has a different name than a group of objects only
         // if it has at least one name and has no name in common with any of
@@ -12070,9 +12148,9 @@ fn zone_change_record_matches_property(
             scope,
             comparator,
             value,
-        } => comparator.evaluate(
-            zone_change_pt_value(record, *stat, *scope),
-            resolve_filter_threshold(state, value, source),
+        } => comparator.evaluate_half_signed(
+            zone_change_pt_value_exact(record, *stat, *scope),
+            resolve_filter_threshold_exact(state, value, source),
         ),
         // CR 202.3: Mana value threshold on the event-time object.
         FilterProp::Cmc { comparator, value } => comparator.evaluate(
@@ -12102,13 +12180,18 @@ fn zone_change_record_matches_property(
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
         }
         // CR 208.1 / CR 107.2: `toughness > power` comparison on the snapshot.
-        FilterProp::ToughnessGTPower => record.toughness.unwrap_or(0) > record.power.unwrap_or(0),
+        FilterProp::ToughnessGTPower => {
+            exact_opt_pair(record.toughness, record.toughness_fraction).unwrap_or(HalfSigned(0))
+                > exact_opt_pair(record.power, record.power_fraction).unwrap_or(HalfSigned(0))
+        }
         // CR 208.1 + CR 613.4b: `power > base power` on the zone-change snapshot —
         // both characteristics are captured at event time, so a look-back
         // ("a creature ... with power greater than its base power deals combat
         // damage") evaluates faithfully against the record.
         FilterProp::PowerExceedsBase => {
-            record.power.unwrap_or(0) > record.base_power.unwrap_or(0)
+            exact_opt_pair(record.power, record.power_fraction).unwrap_or(HalfSigned(0))
+                > exact_opt_pair(record.base_power, record.base_power_fraction)
+                    .unwrap_or(HalfSigned(0))
         }
         // CR 111.1: Token identity as of the zone change. Token-ness is a
         // stable property of the object, captured in the snapshot so that
@@ -12171,7 +12254,10 @@ fn zone_change_record_matches_property(
             &record.colors,
         ),
         // CR 509.1b: Power comparison against the live source.
-        FilterProp::PowerGTSource => record.power.unwrap_or(0) > source.lki.power.unwrap_or(0),
+        FilterProp::PowerGTSource => {
+            exact_opt_pair(record.power, record.power_fraction).unwrap_or(HalfSigned(0))
+                > source.lki.exact_power().unwrap_or(HalfSigned(0))
+        }
         // CR 201.2: Same-name match against the tracked source object.
         FilterProp::SameName => source.lki.name.eq_ignore_ascii_case(&record.name),
         // CR 201.2 + CR 201.2a: Same-name match against the resolving ability's
@@ -12720,8 +12806,8 @@ fn is_land_type(subtype: &str) -> bool {
 
 struct SharedQualitySource<'a> {
     name: &'a str,
-    power: Option<i32>,
-    toughness: Option<i32>,
+    power: Option<HalfSigned>,
+    toughness: Option<HalfSigned>,
     mana_value: u32,
     core_types: &'a [CoreType],
     subtypes: &'a [String],
@@ -12777,15 +12863,15 @@ fn shared_quality_values(
         SharedQuality::ManaValue => HashSet::from([source.mana_value.to_string()]),
         SharedQuality::Power => source
             .power
-            .map_or_else(HashSet::new, |value| HashSet::from([value.to_string()])),
+            .map_or_else(HashSet::new, |value| HashSet::from([value.fmt_display()])),
         SharedQuality::Toughness => source
             .toughness
-            .map_or_else(HashSet::new, |value| HashSet::from([value.to_string()])),
+            .map_or_else(HashSet::new, |value| HashSet::from([value.fmt_display()])),
         SharedQuality::TotalPowerToughness => source
             .power
             .zip(source.toughness)
             .map_or_else(HashSet::new, |(power, toughness)| {
-                HashSet::from([(power + toughness).to_string()])
+                HashSet::from([power.saturating_add(toughness).fmt_display()])
             }),
         SharedQuality::CreatureType => {
             if source
@@ -12862,8 +12948,8 @@ fn object_shared_quality_values(
     shared_quality_values(
         SharedQualitySource {
             name: &obj.name,
-            power: obj.power,
-            toughness: obj.toughness,
+            power: obj.exact_power(),
+            toughness: obj.exact_toughness(),
             // CR 202.3d + CR 202.3e: combined MV off the stack, chosen half (with
             // announced X) on the stack.
             mana_value: obj.effective_mana_value(),
@@ -12887,8 +12973,8 @@ pub(crate) fn lki_shared_quality_values(
     shared_quality_values(
         SharedQualitySource {
             name: &lki.name,
-            power: lki.power,
-            toughness: lki.toughness,
+            power: lki.exact_power(),
+            toughness: lki.exact_toughness(),
             mana_value: lki.mana_value,
             core_types: &lki.card_types,
             subtypes: &lki.subtypes,
@@ -12912,8 +12998,8 @@ fn record_shared_quality_values(
     shared_quality_values(
         SharedQualitySource {
             name: &record.name,
-            power: record.power,
-            toughness: record.toughness,
+            power: exact_opt_pair(record.power, record.power_fraction),
+            toughness: exact_opt_pair(record.toughness, record.toughness_fraction),
             mana_value: record.mana_value,
             core_types: &record.core_types,
             subtypes: &record.subtypes,
@@ -13034,9 +13120,13 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             name: String::new(),
             token_image_ref: None,
             power: None,
+            power_fraction: Default::default(),
             toughness: None,
+            toughness_fraction: Default::default(),
             base_power: None,
+            base_power_fraction: Default::default(),
             base_toughness: None,
+            base_toughness_fraction: Default::default(),
             mana_value: 0,
             controller: context.source_controller,
             owner: PlayerId(0),
@@ -14984,8 +15074,14 @@ mod tests {
             ContinuousModification::AddSubtype {
                 subtype: "Spirit".to_string(),
             },
-            ContinuousModification::SetPower { value: 1 },
-            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::SetPower {
+                value: 1,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 1,
+                fraction: Default::default(),
+            },
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             },
@@ -17273,6 +17369,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
 
@@ -21926,6 +22026,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: departed.objects[&gone].incarnation,
         });
@@ -25382,6 +25486,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -25432,6 +25540,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         let entrant = ObjectId(700);
         let filter = TargetFilter::Typed(
@@ -25572,6 +25684,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         let filter =
             TargetFilter::Typed(
@@ -25720,6 +25836,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
 
         // Left the battlefield TAPPED.
@@ -25865,13 +25985,13 @@ mod tests {
         object.toughness = Some(7);
 
         assert_eq!(
-            object_pt_value(&object, PtStat::Toughness, PtValueScope::Base),
-            4,
+            object_pt_value_exact(&object, PtStat::Toughness, PtValueScope::Base),
+            crate::types::ability::HalfSigned::from_whole(4),
             "base toughness must be the layer-7b value"
         );
         assert_eq!(
-            object_pt_value(&object, PtStat::Toughness, PtValueScope::Current),
-            7,
+            object_pt_value_exact(&object, PtStat::Toughness, PtValueScope::Current),
+            crate::types::ability::HalfSigned::from_whole(7),
             "current toughness must retain the later layer-7c value"
         );
     }
@@ -26621,6 +26741,10 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             departure: crate::types::game_state::ZoneDeparture::Moved,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");
@@ -26717,6 +26841,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -26740,6 +26868,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
 
         let filter =
@@ -26858,6 +26990,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         let filter = TargetFilter::Typed(
             TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
@@ -27003,6 +27139,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
 
@@ -27076,6 +27216,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
 
@@ -29388,7 +29532,10 @@ mod entry_projection_tests {
                 CharacteristicKinds::ABILITIES,
             ),
             (
-                self_static(ContinuousModification::AddPower { value: 1 }),
+                self_static(ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }),
                 CharacteristicKinds::POWER_TOUGHNESS,
             ),
             (
@@ -29409,7 +29556,10 @@ mod entry_projection_tests {
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::Another]),
             ))
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         let enchanted_land = StaticDefinition::continuous()
             .affected(TargetFilter::Typed(
                 TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
@@ -29430,7 +29580,10 @@ mod entry_projection_tests {
     /// contract, so the face itself is supported.
     #[test]
     fn projection_is_proven_per_consumer_reads() {
-        let pt_writer = [self_static(ContinuousModification::AddPower { value: 1 })];
+        let pt_writer = [self_static(ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        })];
         let pt_consumer = TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::PowerGTSource]),
         );
@@ -29562,7 +29715,10 @@ mod entry_projection_tests {
         assert_eq!(
             apply_type_or_color_modification(
                 &mut obj,
-                &ContinuousModification::AddPower { value: 1 },
+                &ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
                 None,
                 None,
                 &types,
@@ -29590,7 +29746,10 @@ mod entry_projection_tests {
         );
         let mut pt = face.clone();
         pt.static_abilities
-            .push(self_static(ContinuousModification::AddPower { value: 1 }));
+            .push(self_static(ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }));
         assert!(
             !has(&pt, ENTRY_PROJECTION_GAP),
             "the Chameleon Spirit shape"
@@ -29687,7 +29846,10 @@ mod entry_projection_tests {
             target_filter_characteristic_reads(&TargetFilter::HasChosenName)
         ));
         assert!(!entry_projection_proven_for(
-            &[self_static(ContinuousModification::AddPower { value: 1 })],
+            &[self_static(ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            })],
             target_filter_characteristic_reads(&TargetFilter::ChosenDamageSource { filter: None })
         ));
         assert!(entry_projection_proven_for(
@@ -29879,6 +30041,7 @@ mod entry_projection_tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            lifelink_bonus_fraction: Default::default(),
         };
 
         // An answer pins the boundary before it changes the proposal.
@@ -30498,9 +30661,13 @@ mod attached_set_host_filter_tests {
             name: String::new(),
             token_image_ref: None,
             power: None,
+            power_fraction: Default::default(),
             toughness: None,
+            toughness_fraction: Default::default(),
             base_power: None,
+            base_power_fraction: Default::default(),
             base_toughness: None,
+            base_toughness_fraction: Default::default(),
             mana_value: 0,
             controller: PlayerId(0),
             owner: PlayerId(0),
@@ -30727,6 +30894,10 @@ mod attached_set_host_filter_tests {
                     kind: crate::types::ability::AttachmentKind::Aura,
                 }],
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
         state.objects.remove(&host);

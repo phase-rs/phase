@@ -694,6 +694,7 @@ mod tests {
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 pw_loyalty: None,
                 pw_controller: None,
+                total_damage_fraction: Default::default(),
             }),
             Some(Phase::CombatDamage),
         );
@@ -704,6 +705,7 @@ mod tests {
                 blocker_id: ObjectId(2),
                 total_damage: 2,
                 attackers: Vec::new(),
+                total_damage_fraction: Default::default(),
             }),
             Some(Phase::CombatDamage),
         );

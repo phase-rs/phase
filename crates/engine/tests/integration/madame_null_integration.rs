@@ -123,6 +123,10 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             is_suspected: false,
             was_prepared: false,
             departure: engine::types::game_state::ZoneDeparture::Moved,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         }),
     });
 }
@@ -239,6 +243,10 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         },
     );
     set_etb_event(&mut state, dead_id);

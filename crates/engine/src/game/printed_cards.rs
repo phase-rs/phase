@@ -2,8 +2,8 @@ use crate::database::card_db::CardDbHandle;
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityDefinition, ChoiceType, ConjureSource, CopiableValues, Effect, PtValue, QuantityExpr,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
+    AbilityDefinition, ChoiceType, ConjureSource, CopiableValues, Effect, HalfFraction, PtValue,
+    QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
     StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionOccurrenceRef,
 };
 // `VoteSubject` is NOT re-imported here: `mod tests`'s only use of it
@@ -127,8 +127,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // `rehydrate_game_from_card_db`. Used below to gate `class_level` seeding.
     let was_initialized = obj.base_characteristics_initialized;
 
-    let power = printed_pt(&card_face.power, PtSide::Power);
-    let toughness = printed_pt(&card_face.toughness, PtSide::Toughness);
+    let (power, power_fraction) = printed_pt_exact(&card_face.power);
+    let (toughness, toughness_fraction) = printed_pt_exact(&card_face.toughness);
     let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
     let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Printed defense number for battles.
@@ -141,7 +141,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 
     obj.name = card_face.name.clone();
     obj.power = power;
+    obj.power_fraction = power_fraction;
     obj.toughness = toughness;
+    obj.toughness_fraction = toughness_fraction;
     // CR 306.5b: `obj.loyalty` here is the face's printed loyalty, stored as
     // base data. The live loyalty-counter map is seeded only when the object
     // enters the battlefield, through the CR 614.1c intrinsic replacement
@@ -183,9 +185,13 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.cleave_variant = card_face.cleave_variant.clone();
     obj.color = color.clone();
     obj.base_power = power;
+    obj.base_power_fraction = power_fraction;
     obj.base_toughness = toughness;
+    obj.base_toughness_fraction = toughness_fraction;
     obj.layer_base_power = power;
+    obj.layer_base_power_fraction = power_fraction;
     obj.layer_base_toughness = toughness;
+    obj.layer_base_toughness_fraction = toughness_fraction;
     obj.base_name = card_face.name.clone();
     obj.base_loyalty = loyalty;
     obj.base_printed_loyalty = printed_loyalty;
@@ -299,8 +305,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
-    let power = printed_pt(&card_face.power, PtSide::Power);
-    let toughness = printed_pt(&card_face.toughness, PtSide::Toughness);
+    let (power, power_fraction) = printed_pt_exact(&card_face.power);
+    let (toughness, toughness_fraction) = printed_pt_exact(&card_face.toughness);
     let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
     let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Back-face printed defense for DFCs that transform into battles.
@@ -312,7 +318,9 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
 
     back_face.name = card_face.name.clone();
     back_face.power = power;
+    back_face.power_fraction = power_fraction;
     back_face.toughness = toughness;
+    back_face.toughness_fraction = toughness_fraction;
     back_face.loyalty = loyalty;
     back_face.printed_loyalty = printed_loyalty;
     back_face.defense = defense;
@@ -342,7 +350,9 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     let carried_live_replacements = obj.replacement_definitions.clone();
     obj.name = back_face.name.clone();
     obj.power = back_face.power;
+    obj.power_fraction = back_face.power_fraction;
     obj.toughness = back_face.toughness;
+    obj.toughness_fraction = back_face.toughness_fraction;
     obj.loyalty = back_face.loyalty;
     obj.printed_loyalty = back_face.printed_loyalty;
     obj.defense = back_face.defense;
@@ -353,9 +363,13 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.static_definitions = back_face.static_definitions.clone();
     obj.color = back_face.color.clone();
     obj.base_power = back_face.power;
+    obj.base_power_fraction = back_face.power_fraction;
     obj.base_toughness = back_face.toughness;
+    obj.base_toughness_fraction = back_face.toughness_fraction;
     obj.layer_base_power = back_face.power;
+    obj.layer_base_power_fraction = back_face.power_fraction;
     obj.layer_base_toughness = back_face.toughness;
+    obj.layer_base_toughness_fraction = back_face.toughness_fraction;
     obj.base_name = back_face.name.clone();
     obj.base_loyalty = back_face.loyalty;
     obj.base_printed_loyalty = back_face.printed_loyalty;
@@ -665,7 +679,9 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         color: obj.base_color.clone(),
         card_types: obj.base_card_types.clone(),
         power: obj.base_power,
+        power_fraction: obj.base_power_fraction,
         toughness: obj.base_toughness,
+        toughness_fraction: obj.base_toughness_fraction,
         loyalty: obj.base_loyalty,
         printed_loyalty: obj.base_printed_loyalty,
         keywords: obj.base_keywords.clone(),
@@ -848,13 +864,17 @@ pub(crate) fn copiable_values_from_face(
     prepare_face: Option<Arc<BackFaceData>>,
 ) -> CopiableValues {
     let printed_ref = printed_ref_from_face(result_face);
+    let (power, power_fraction) = printed_pt_exact(&result_face.power);
+    let (toughness, toughness_fraction) = printed_pt_exact(&result_face.toughness);
     CopiableValues {
         name: result_face.name.clone(),
         mana_cost: result_face.mana_cost.clone(),
         color: printed_colors_from_face(result_face),
         card_types: result_face.card_type.clone(),
-        power: printed_pt(&result_face.power, PtSide::Power),
-        toughness: printed_pt(&result_face.toughness, PtSide::Toughness),
+        power,
+        power_fraction,
+        toughness,
+        toughness_fraction,
         loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref())
             .map(PrintedLoyalty::off_stack_value),
         printed_loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref()),
@@ -926,11 +946,15 @@ pub fn apply_copiable_values(
     obj.color = values.color.clone();
     obj.card_types = values.card_types.clone();
     obj.power = values.power;
+    obj.power_fraction = values.power_fraction;
     obj.toughness = values.toughness;
+    obj.toughness_fraction = values.toughness_fraction;
     // CR 613.1a + CR 613.4b: a copy replaces the copiable baseline seen by
     // subsequent layer-7b/base-power reads until the next layer reset.
     obj.layer_base_power = values.power;
+    obj.layer_base_power_fraction = values.power_fraction;
     obj.layer_base_toughness = values.toughness;
+    obj.layer_base_toughness_fraction = values.toughness_fraction;
     obj.loyalty = values.loyalty;
     obj.printed_loyalty = values.printed_loyalty;
     obj.replace_keywords(values.keywords.clone());
@@ -998,7 +1022,9 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.color = values.color.clone();
     obj.card_types = values.card_types.clone();
     obj.power = values.power;
+    obj.power_fraction = values.power_fraction;
     obj.toughness = values.toughness;
+    obj.toughness_fraction = values.toughness_fraction;
     obj.loyalty = values.loyalty;
     obj.printed_loyalty = values.printed_loyalty;
     obj.replace_keywords(values.keywords.clone());
@@ -1011,9 +1037,13 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.base_color = values.color.clone();
     obj.base_card_types = values.card_types.clone();
     obj.base_power = values.power;
+    obj.base_power_fraction = values.power_fraction;
     obj.base_toughness = values.toughness;
+    obj.base_toughness_fraction = values.toughness_fraction;
     obj.layer_base_power = values.power;
+    obj.layer_base_power_fraction = values.power_fraction;
     obj.layer_base_toughness = values.toughness;
+    obj.layer_base_toughness_fraction = values.toughness_fraction;
     obj.base_loyalty = values.loyalty;
     obj.base_printed_loyalty = values.printed_loyalty;
     obj.base_keywords = values.keywords.clone();
@@ -1089,7 +1119,9 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
     BackFaceData {
         name: obj.name.clone(),
         power: obj.power,
+        power_fraction: obj.power_fraction,
         toughness: obj.toughness,
+        toughness_fraction: obj.toughness_fraction,
         loyalty: obj.loyalty,
         printed_loyalty: obj.printed_loyalty,
         defense: obj.defense,
@@ -1212,7 +1244,9 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
     BackFaceData {
         name: obj.base_name.clone(),
         power: obj.base_power,
+        power_fraction: obj.base_power_fraction,
         toughness: obj.base_toughness,
+        toughness_fraction: obj.base_toughness_fraction,
         loyalty: obj.base_loyalty,
         printed_loyalty: obj.base_printed_loyalty,
         defense: obj.base_defense,
@@ -1605,7 +1639,9 @@ fn back_face_for_card_face_with_printed_ref(
     let mut back = BackFaceData {
         name: String::new(),
         power: None,
+        power_fraction: HalfFraction::Zero,
         toughness: None,
+        toughness_fraction: HalfFraction::Zero,
         loyalty: None,
         printed_loyalty: None,
         defense: None,
@@ -2226,47 +2262,24 @@ fn repair_battlefield_trigger_index_after_face_reapply(
     }
 }
 
-/// Which of the two power/toughness numbers a value is (CR 208.1), so a
-/// half-point value converts to the integer that keeps its combat outcomes
-/// (see [`half_point_pt`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PtSide {
-    Power,
-    Toughness,
-}
-
-/// The integer power or toughness the engine uses for a half-point value
-/// (`PtValue::HalfPoints`, counted in halves — Vile Bile's printed 2½ is 5).
+/// Extract an exact fixed (including Unhinged half-point) power/toughness from
+/// a card face's `PtValue`.
 ///
-/// CR 107.1a: the engine never holds a fractional number, so an Unhinged
-/// half-point value is stored as the integer that decides every damage
-/// outcome the same way the printed value does while damage stays whole:
-/// * toughness `t + ½` rounds up — CR 704.5f: it is 0 or less exactly when
-///   `t + 1` is; CR 120.6 + CR 704.5g: whole damage is lethal exactly when it
-///   reaches `t + 1`;
-/// * power `p + ½` rounds down — `p + ½` damage reaches a whole toughness `T`
-///   exactly when `p` does.
-pub fn half_point_pt(halves: i32, side: PtSide) -> i32 {
-    match side {
-        PtSide::Power => halves.div_euclid(2),
-        PtSide::Toughness => halves.saturating_add(1).div_euclid(2),
+/// CR 107.1a's integer-only rule is explicitly overridden by Unhinged Silver-Bordered
+/// half-point cards (Vile Bile 2½/2½, Little Girl ½/½, Bad Ass 3½/1); exact halves
+/// are preserved via `HalfFraction` through combat, damage, and SBAs (CR 510.1a, CR 704.5g).
+/// Dynamic P/T values (`*`, `X`, quantities) resolve to `Some(0)` before CDAs evaluate.
+pub(crate) fn printed_pt_exact(val: &Option<PtValue>) -> (Option<i32>, HalfFraction) {
+    match val {
+        Some(pt) => match pt.exact_fixed() {
+            Some(exact) => {
+                let (whole, fraction) = exact.into_whole_and_fraction();
+                (Some(whole), fraction)
+            }
+            None => (Some(0), HalfFraction::Zero),
+        },
+        None => (None, HalfFraction::Zero),
     }
-}
-
-/// The integer a printed power or toughness stands for without game state —
-/// `Fixed` as is, a half-point value through [`half_point_pt`] — or `None` for
-/// a value only game state decides (`*`, `X`, a quantity).
-pub fn fixed_pt_value(value: &PtValue, side: PtSide) -> Option<i32> {
-    match value {
-        PtValue::Fixed(n) => Some(*n),
-        PtValue::HalfPoints(halves) => Some(half_point_pt(*halves, side)),
-        PtValue::Variable(_) | PtValue::Quantity(_) => None,
-    }
-}
-
-fn printed_pt(val: &Option<PtValue>, side: PtSide) -> Option<i32> {
-    // No game state at deck-load time; dynamic P/T resolves to 0.
-    val.as_ref().map(|pt| fixed_pt_value(pt, side).unwrap_or(0))
 }
 
 fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
@@ -2352,37 +2365,36 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
 mod tests {
     use super::*;
     use crate::game::game_object::PrototypeFormState;
-    use crate::types::ability::ChooseOneOfKind;
-    use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::ability::{ChooseOneOfKind, HalfSigned, TypeFilter, TypedFilter};
     use crate::types::format::FormatConfig;
 
-    /// CR 107.1a + CR 704.5f + CR 704.5g: a half-point toughness rounds up and a
-    /// half-point power rounds down, including at and below zero.
+    /// Unhinged half-point printed P/T values stay exact (`2½`, `½`, `-½`, ...)
+    /// instead of being rounded to integers.
     #[test]
-    fn half_point_pt_keeps_whole_damage_outcomes() {
-        for (halves, power, toughness) in [
-            (5, 2, 3),   // Vile Bile 2½
-            (1, 0, 1),   // Little Girl ½
-            (7, 3, 4),   // Bad Ass 3½
-            (-1, -1, 0), // -½: toughness 0 or less, still dies to CR 704.5f
-            (-3, -2, -1),
+    fn printed_pt_exact_preserves_half_point_values() {
+        for (halves, whole, fraction) in [
+            (5, 2, HalfFraction::Half),   // Vile Bile 2½
+            (1, 0, HalfFraction::Half),   // Little Girl ½
+            (7, 3, HalfFraction::Half),   // Bad Ass 3½
+            (-1, -1, HalfFraction::Half), // -½ -> -1 + ½
+            (-3, -2, HalfFraction::Half), // -1½ -> -2 + ½
         ] {
-            assert_eq!(half_point_pt(halves, PtSide::Power), power, "{halves}");
+            let pt = Some(PtValue::HalfPoints(halves));
+            assert_eq!(printed_pt_exact(&pt), (Some(whole), fraction), "{halves}");
             assert_eq!(
-                half_point_pt(halves, PtSide::Toughness),
-                toughness,
-                "{halves}"
+                PtValue::HalfPoints(halves).exact_fixed(),
+                Some(HalfSigned::from_halves(halves))
             );
         }
         assert_eq!(
-            fixed_pt_value(&PtValue::HalfPoints(5), PtSide::Toughness),
-            Some(3)
+            printed_pt_exact(&Some(PtValue::Fixed(4))),
+            (Some(4), HalfFraction::Zero)
         );
-        assert_eq!(fixed_pt_value(&PtValue::Fixed(4), PtSide::Power), Some(4));
         assert_eq!(
-            fixed_pt_value(&PtValue::Variable("*".into()), PtSide::Power),
-            None
+            printed_pt_exact(&Some(PtValue::Variable("*".into()))),
+            (Some(0), HalfFraction::Zero)
         );
+        assert_eq!(printed_pt_exact(&None), (None, HalfFraction::Zero));
     }
 
     /// CR 614.1a + CR 400.7 + CR 707.2: the resolution-installed die-exile rider is
@@ -3728,7 +3740,9 @@ mod tests {
             trigger_printed_origins: Vec::new(),
             name: normal_half.name.clone(),
             power: None,
+            power_fraction: HalfFraction::Zero,
             toughness: None,
+            toughness_fraction: HalfFraction::Zero,
             loyalty: None,
             printed_loyalty: None,
             defense: None,

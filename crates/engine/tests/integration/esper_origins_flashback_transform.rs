@@ -77,6 +77,8 @@ fn stage_esper_origins_in_graveyard() -> (engine::game::scenario::GameRunner, Ob
             casting_options: vec![],
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
     }
     // Float {3}{G} to pay the Flashback cost.

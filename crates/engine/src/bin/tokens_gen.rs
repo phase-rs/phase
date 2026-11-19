@@ -210,7 +210,9 @@ fn build_preset(
             .clone()
             .unwrap_or_else(|| token.name.clone()),
         power: parse_pt(token.power.as_deref()),
+        power_fraction: Default::default(),
         toughness: parse_pt(token.toughness.as_deref()),
+        toughness_fraction: Default::default(),
         loyalty: PrintedLoyalty::from_raw(token.loyalty.as_deref())
             .map(PrintedLoyalty::off_stack_value),
         core_types: token

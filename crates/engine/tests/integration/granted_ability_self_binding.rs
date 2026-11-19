@@ -5278,8 +5278,14 @@ mod granter_stamp {
         StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::AddToughness { value: 2 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ])
             .condition(StaticCondition::QuantityComparison {
                 lhs,
@@ -5593,18 +5599,24 @@ mod granter_stamp {
 
         fn tap_gated_board(condition: StaticCondition) -> Board {
             transient_board(StaticDefinition::continuous().modifications(vec![
-                ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(
-                        StaticDefinition::continuous()
-                            .affected(TargetFilter::SelfRef)
-                            .modifications(vec![
-                                ContinuousModification::AddPower { value: 2 },
-                                ContinuousModification::AddToughness { value: 2 },
-                            ])
-                            .condition(condition),
-                    ),
-                },
-            ]))
+                    ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(
+                            StaticDefinition::continuous()
+                                .affected(TargetFilter::SelfRef)
+                                .modifications(vec![
+                                    ContinuousModification::AddPower {
+                                        value: 2,
+                                        fraction: Default::default(),
+                                    },
+                                    ContinuousModification::AddToughness {
+                                        value: 2,
+                                        fraction: Default::default(),
+                                    },
+                                ])
+                                .condition(condition),
+                        ),
+                    },
+                ]))
         }
 
         #[test]

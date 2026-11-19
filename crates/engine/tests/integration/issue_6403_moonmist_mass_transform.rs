@@ -51,6 +51,8 @@ fn attach_transform_back_face(runner: &mut GameRunner, object_id: ObjectId) {
         // transform it rather than applying CR 701.27c's no-op.
         layout_kind: Some(LayoutKind::Transform),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
 }
 

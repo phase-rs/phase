@@ -1057,14 +1057,21 @@ fn tce_matches_pump(
         return false;
     }
     let has_power = power == 0
-        || tce
-            .modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::AddPower { value } if *value == power));
+        || tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddPower { value, fraction }
+                    if *value == power && fraction.is_zero()
+            )
+        });
     let has_toughness = toughness == 0
-        || tce.modifications.iter().any(
-            |m| matches!(m, ContinuousModification::AddToughness { value } if *value == toughness),
-        );
+        || tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddToughness { value, fraction }
+                    if *value == toughness && fraction.is_zero()
+            )
+        });
     has_power && has_toughness
 }
 
@@ -2101,8 +2108,14 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: obj_id },
             vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ],
             None,
         );
@@ -2142,8 +2155,14 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: obj_id },
             vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ],
             None,
         );

@@ -48,7 +48,7 @@ fn veteran_armorsmith_parses_toughness_anthem_static() {
         statics.iter().any(|sd| {
             sd.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 }))
+                .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1, .. }))
         }),
         "Veteran Armorsmith must carry a +0/+1 (AddToughness 1) anthem static, statics={statics:?}"
     );

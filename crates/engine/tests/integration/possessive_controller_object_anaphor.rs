@@ -78,6 +78,9 @@ fn drive_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
                     assignments: vec![(first, *total_damage)],
                     trample_damage: 0,
                     controller_damage: 0,
+                    assignments_fraction: Vec::new(),
+                    trample_damage_fraction: Default::default(),
+                    controller_damage_fraction: Default::default(),
                 }
             }
             other => panic!("unexpected prompt {other:?}"),

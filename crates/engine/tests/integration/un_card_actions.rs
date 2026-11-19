@@ -1749,9 +1749,8 @@ fn infernal_spawn_of_evil_cannot_be_activated_without_the_un_actions_opt_in() {
 
 // --- Touch (Vile Bile) -------------------------------------------------------
 
-/// Vile Bile (Unhinged), verbatim Oracle text. Printed 2½/2½, which the real
-/// card plays as 2/3 (`printed_cards::half_point_pt`; covered by
-/// `half_point_power_toughness`). The touch ability is what these tests
+/// Vile Bile (Unhinged), verbatim Oracle text. Exact 2½/2½ P/T is covered by
+/// `half_point_power_toughness`. The touch ability is what these tests
 /// exercise, so the fixture body is a plain 2/2.
 const VILE_BILE: &str =
     "Whenever a player's skin or fingernail touches this creature, that player loses 2 life.";

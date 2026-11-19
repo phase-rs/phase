@@ -29578,10 +29578,10 @@ mod tests {
                 let mods = &static_abilities[0].modifications;
                 assert!(mods
                     .iter()
-                    .any(|m| matches!(m, ContinuousModification::AddPower { value: 2 })));
+                    .any(|m| matches!(m, ContinuousModification::AddPower { value: 2, .. })));
                 assert!(mods
                     .iter()
-                    .any(|m| matches!(m, ContinuousModification::AddToughness { value: 0 })));
+                    .any(|m| matches!(m, ContinuousModification::AddToughness { value: 0, .. })));
                 assert!(generic_has_keyword(
                     &effect,
                     crate::types::keywords::Keyword::Haste

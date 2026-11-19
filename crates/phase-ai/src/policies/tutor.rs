@@ -182,10 +182,10 @@ fn entry_score(
 }
 
 fn fixed_pt_value(value: &Option<engine::types::ability::PtValue>) -> i32 {
-    match value {
-        Some(engine::types::ability::PtValue::Fixed(value)) => *value,
-        _ => 0,
-    }
+    value
+        .as_ref()
+        .and_then(|v| v.exact_fixed())
+        .map_or(0, |v| v.whole_floor())
 }
 
 fn keyword_score(keywords: &[Keyword]) -> f64 {

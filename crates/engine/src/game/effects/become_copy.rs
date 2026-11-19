@@ -474,11 +474,11 @@ impl<'a> CopyExceptionOperation<'a> {
             ContinuousModification::SetName { name } => {
                 Self::Fold(FoldableCopyException::SetName { name })
             }
-            ContinuousModification::SetPower { value } => {
-                Self::Fold(FoldableCopyException::SetPower { value })
+            ContinuousModification::SetPower { value, fraction } => {
+                Self::Fold(FoldableCopyException::SetPower { value, fraction })
             }
-            ContinuousModification::SetToughness { value } => {
-                Self::Fold(FoldableCopyException::SetToughness { value })
+            ContinuousModification::SetToughness { value, fraction } => {
+                Self::Fold(FoldableCopyException::SetToughness { value, fraction })
             }
             ContinuousModification::AddKeyword { keyword } => {
                 Self::Fold(FoldableCopyException::AddKeyword { keyword })
@@ -585,9 +585,11 @@ enum FoldableCopyException<'a> {
     },
     SetPower {
         value: &'a i32,
+        fraction: &'a crate::types::ability::HalfFraction,
     },
     SetToughness {
         value: &'a i32,
+        fraction: &'a crate::types::ability::HalfFraction,
     },
     AddKeyword {
         keyword: &'a crate::types::keywords::Keyword,
@@ -646,8 +648,14 @@ impl FoldableCopyException<'_> {
                 values.name = name.clone();
                 values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
             }
-            Self::SetPower { value } => values.power = Some(*value),
-            Self::SetToughness { value } => values.toughness = Some(*value),
+            Self::SetPower { value, fraction } => {
+                values.power = Some(*value);
+                values.power_fraction = *fraction;
+            }
+            Self::SetToughness { value, fraction } => {
+                values.toughness = Some(*value);
+                values.toughness_fraction = *fraction;
+            }
             Self::AddKeyword { keyword } => {
                 crate::game::keywords::grant_keyword_instance_into(
                     &mut values.keywords,
@@ -1270,6 +1278,8 @@ mod tests {
             subtypes: vec!["Bear".to_string()],
             keywords: vec![],
             has_abilities: false,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         };
         let token_id = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
         {
@@ -1605,8 +1615,14 @@ mod tests {
             Duration::Permanent,
             TargetFilter::SpecificObject { id: target },
             vec![
-                ContinuousModification::AddPower { value: 3 },
-                ContinuousModification::AddToughness { value: 3 },
+                ContinuousModification::AddPower {
+                    value: 3,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 3,
+                    fraction: Default::default(),
+                },
             ],
             None,
         );
@@ -1658,8 +1674,14 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id },
             vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ],
             None,
         );
@@ -1768,6 +1790,8 @@ mod tests {
                 casting_options: vec![],
                 layout_kind: None,
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
 
@@ -1871,8 +1895,14 @@ mod tests {
                     ContinuousModification::SetName {
                         name: "Superior Spider-Man".to_string(),
                     },
-                    ContinuousModification::SetPower { value: 4 },
-                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::SetPower {
+                        value: 4,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::SetToughness {
+                        value: 4,
+                        fraction: Default::default(),
+                    },
                     ContinuousModification::AddSubtype {
                         subtype: "Spider".to_string(),
                     },

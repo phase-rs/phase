@@ -3577,11 +3577,15 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // names); a Layer-1 copy application overwrites it within the pass.
     obj.layer1_name_origin = obj.base_name_origin;
     obj.power = obj.base_power;
+    obj.power_fraction = obj.base_power_fraction;
     obj.toughness = obj.base_toughness;
+    obj.toughness_fraction = obj.base_toughness_fraction;
     // CR 208.4b + CR 613.4b: layer 7b starts from the printed/copiable base;
     // later 7b setters update this carrier while 7c leaves it unchanged.
     obj.layer_base_power = obj.base_power;
+    obj.layer_base_power_fraction = obj.base_power_fraction;
     obj.layer_base_toughness = obj.base_toughness;
+    obj.layer_base_toughness_fraction = obj.base_toughness_fraction;
     obj.loyalty = obj.base_loyalty;
     obj.card_types = obj.base_card_types.clone();
     obj.mana_cost = obj.base_mana_cost.clone();
@@ -3746,9 +3750,13 @@ fn reset_remote_layer_recipients(state: &mut GameState, recipients: im::HashSet<
         object.card_types = object.base_card_types.clone();
         object.color = object.base_color.clone();
         object.power = object.base_power;
+        object.power_fraction = object.base_power_fraction;
         object.toughness = object.base_toughness;
+        object.toughness_fraction = object.base_toughness_fraction;
         object.layer_base_power = object.base_power;
+        object.layer_base_power_fraction = object.base_power_fraction;
         object.layer_base_toughness = object.base_toughness;
+        object.layer_base_toughness_fraction = object.base_toughness_fraction;
         // After both restores: it re-adds the fused right half's types and colours.
         object.restore_fused_split_characteristics();
         reset_ids.push(id);
@@ -7823,7 +7831,11 @@ pub(crate) fn apply_prototype_characteristics(
         };
         obj.mana_cost = form.mana_cost;
         obj.power = Some(form.power);
+        obj.power_fraction = crate::types::ability::HalfFraction::Zero;
         obj.toughness = Some(form.toughness);
+        obj.toughness_fraction = crate::types::ability::HalfFraction::Zero;
+        obj.layer_base_power_fraction = crate::types::ability::HalfFraction::Zero;
+        obj.layer_base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
         obj.color = form.colors;
     }
 }
@@ -12848,26 +12860,42 @@ fn apply_continuous_effect_filtered(
             }
             // CR 612.1: exhaustiveness only, since the Layer 3 pre-pass applies `SubstituteTextWord` before this loop.
             ContinuousModification::SubstituteTextWord { .. } => {}
-            ContinuousModification::AddPower { value } => {
-                if let Some(ref mut p) = obj.power {
-                    *p = saturating_pt_add(*p, *value);
+            ContinuousModification::AddPower { value, fraction } => {
+                if let Some(p) = obj.exact_power() {
+                    let delta = crate::types::ability::HalfSigned::from_whole_and_fraction(
+                        *value, *fraction,
+                    );
+                    let sum = p.saturating_add(delta);
+                    let (w, f) = sum.into_whole_and_fraction();
+                    obj.power = Some(w);
+                    obj.power_fraction = f;
                 }
             }
-            ContinuousModification::AddToughness { value } => {
-                if let Some(ref mut t) = obj.toughness {
-                    *t = saturating_pt_add(*t, *value);
+            ContinuousModification::AddToughness { value, fraction } => {
+                if let Some(t) = obj.exact_toughness() {
+                    let delta = crate::types::ability::HalfSigned::from_whole_and_fraction(
+                        *value, *fraction,
+                    );
+                    let sum = t.saturating_add(delta);
+                    let (w, f) = sum.into_whole_and_fraction();
+                    obj.toughness = Some(w);
+                    obj.toughness_fraction = f;
                 }
             }
-            ContinuousModification::SetPower { value } => {
+            ContinuousModification::SetPower { value, fraction } => {
                 obj.power = Some(*value);
+                obj.power_fraction = *fraction;
                 // CR 613.4b: a fixed set effect changes current base power,
                 // not only the post-layer live power field.
                 obj.layer_base_power = Some(*value);
+                obj.layer_base_power_fraction = *fraction;
             }
-            ContinuousModification::SetToughness { value } => {
+            ContinuousModification::SetToughness { value, fraction } => {
                 obj.toughness = Some(*value);
+                obj.toughness_fraction = *fraction;
                 // CR 613.4b: a fixed set effect changes current base toughness.
                 obj.layer_base_toughness = Some(*value);
+                obj.layer_base_toughness_fraction = *fraction;
             }
             // CR 702.16g: "Protection from [A] and from [B]" behaves as two
             // separate protection abilities. Parameterized keywords like
@@ -13111,35 +13139,43 @@ fn apply_continuous_effect_filtered(
             ContinuousModification::SetDynamicPower { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.power = Some(val);
+                    obj.power_fraction = crate::types::ability::HalfFraction::Zero;
                     // CR 613.4a: a characteristic-defining power sets the
                     // current base power before layer-7b set effects run.
                     obj.layer_base_power = Some(val);
+                    obj.layer_base_power_fraction = crate::types::ability::HalfFraction::Zero;
                 }
             }
             ContinuousModification::SetDynamicToughness { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.toughness = Some(val);
+                    obj.toughness_fraction = crate::types::ability::HalfFraction::Zero;
                     // CR 613.4a: a dynamic characteristic-defining toughness sets
                     // the current base toughness before layer-7b effects.
                     obj.layer_base_toughness = Some(val);
+                    obj.layer_base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
                 }
             }
             // CR 613.4b: Layer 7b — set base power to dynamic value (e.g., Biomass Mutation).
             ContinuousModification::SetPowerDynamic { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.power = Some(val);
+                    obj.power_fraction = crate::types::ability::HalfFraction::Zero;
                     // CR 613.4b: dynamic layer-7b setters share the same
                     // authoritative current-base carrier as fixed setters.
                     obj.layer_base_power = Some(val);
+                    obj.layer_base_power_fraction = crate::types::ability::HalfFraction::Zero;
                 }
             }
             // CR 613.4b: Layer 7b — set base toughness to dynamic value.
             ContinuousModification::SetToughnessDynamic { .. } => {
                 if let Some(val) = dynamic_pt {
                     obj.toughness = Some(val);
+                    obj.toughness_fraction = crate::types::ability::HalfFraction::Zero;
                     // CR 613.4b: dynamic layer-7b setters update the authoritative
                     // current-base carrier just like fixed setters.
                     obj.layer_base_toughness = Some(val);
+                    obj.layer_base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
                 }
             }
             // CR 613.4c: Additive dynamic P/T modification (layer 7c).
@@ -13306,9 +13342,16 @@ fn apply_continuous_effect_filtered(
             }
             // CR 613.4d: Switch power and toughness values.
             ContinuousModification::SwitchPowerToughness => {
-                let (p, t) = (obj.power, obj.toughness);
+                let (p, pf, t, tf) = (
+                    obj.power,
+                    obj.power_fraction,
+                    obj.toughness,
+                    obj.toughness_fraction,
+                );
                 obj.power = t;
+                obj.power_fraction = tf;
                 obj.toughness = p;
+                obj.toughness_fraction = pf;
             }
             ContinuousModification::AssignDamageFromToughness
             | ContinuousModification::AssignDamageAsThoughUnblocked
@@ -14500,7 +14543,10 @@ mod tests {
                 P1,
                 Duration::Permanent,
                 TargetFilter::Typed(TypedFilter::creature()),
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 Some(you_control_a_creature()),
             )
             .expect("the transient begins");
@@ -15210,7 +15256,10 @@ mod tests {
             let id = make_creature(&mut state, &format!("Selfish{i}"), 2, 2, player);
             let def = StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]);
             let obj = state.objects.get_mut(&id).unwrap();
             obj.static_definitions.push(def.clone());
             obj.base_static_definitions = Arc::new(vec![def]);
@@ -15279,7 +15328,10 @@ mod tests {
         let source = make_creature(&mut state, "Granter", 2, 2, player);
         let def = StaticDefinition::continuous()
             .affected(TargetFilter::SpecificObject { id: target })
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         {
             let obj = state.objects.get_mut(&source).unwrap();
             obj.static_definitions.push(def.clone());
@@ -15397,7 +15449,10 @@ mod tests {
             selfish,
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         install(
             &mut state,
@@ -15411,7 +15466,10 @@ mod tests {
                         },
                     ],
                 })
-                .modifications(vec![ContinuousModification::AddToughness { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         install(
             &mut state,
@@ -17255,8 +17313,14 @@ mod tests {
         let animation = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![
-                ContinuousModification::SetPower { value: 3 },
-                ContinuousModification::SetToughness { value: 3 },
+                ContinuousModification::SetPower {
+                    value: 3,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 3,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
@@ -17325,16 +17389,24 @@ mod tests {
             .modifications(vec![
                 ContinuousModification::AddPower {
                     value: i32::MAX - 2,
+                    fraction: Default::default(),
                 },
                 ContinuousModification::AddToughness {
                     value: i32::MAX - 2,
+                    fraction: Default::default(),
                 },
             ]);
         let boost_b = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![
-                ContinuousModification::AddPower { value: 100 },
-                ContinuousModification::AddToughness { value: 100 },
+                ContinuousModification::AddPower {
+                    value: 100,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 100,
+                    fraction: Default::default(),
+                },
             ]);
         {
             let obj = state.objects.get_mut(&id).unwrap();
@@ -17734,7 +17806,10 @@ mod tests {
             PlayerId(0),
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: target_id },
-            vec![ContinuousModification::AddToughness { value: 1 }],
+            vec![ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            }],
             None,
         );
 
@@ -18126,9 +18201,13 @@ mod tests {
         let def = StaticDefinition::continuous()
             .affected(filter)
             .modifications(vec![
-                ContinuousModification::AddPower { value: add_power },
+                ContinuousModification::AddPower {
+                    value: add_power,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddToughness {
                     value: add_toughness,
+                    fraction: Default::default(),
                 },
             ]);
         state
@@ -18151,8 +18230,14 @@ mod tests {
         let def = StaticDefinition::continuous()
             .affected(creature_you_ctrl())
             .modifications(vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::AddToughness { value: 2 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ])
             .condition(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
@@ -18487,7 +18572,10 @@ mod tests {
                 .affected(creatures_you_ctrl_with_power_ge(5))
                 // One modification: re-filtering after SetPower would drop power
                 // below the threshold before a second clause could run (CR 613.7a).
-                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+                .modifications(vec![ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]);
             state
                 .objects
                 .get_mut(&shrink)
@@ -18504,7 +18592,10 @@ mod tests {
         {
             let def = StaticDefinition::continuous()
                 .affected(creature_you_ctrl())
-                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+                .modifications(vec![ContinuousModification::SetPower {
+                    value: 6,
+                    fraction: Default::default(),
+                }]);
             state
                 .objects
                 .get_mut(&setter)
@@ -18524,14 +18615,14 @@ mod tests {
             e.source_id == shrink
                 && matches!(
                     e.modification,
-                    ContinuousModification::SetPower { value: 1 }
+                    ContinuousModification::SetPower { value: 1, .. }
                 )
         });
         let setter_set_power = ordered.iter().position(|e| {
             e.source_id == setter
                 && matches!(
                     e.modification,
-                    ContinuousModification::SetPower { value: 6 }
+                    ContinuousModification::SetPower { value: 6, .. }
                 )
         });
         assert!(shrink_set_power.is_some() && setter_set_power.is_some());
@@ -18556,7 +18647,10 @@ mod tests {
         {
             let def = StaticDefinition::continuous()
                 .affected(creatures_you_ctrl_with_power_ge(5))
-                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+                .modifications(vec![ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]);
             state
                 .objects
                 .get_mut(&shrink)
@@ -18573,7 +18667,10 @@ mod tests {
         {
             let def = StaticDefinition::continuous()
                 .affected(creature_you_ctrl())
-                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+                .modifications(vec![ContinuousModification::SetPower {
+                    value: 6,
+                    fraction: Default::default(),
+                }]);
             state
                 .objects
                 .get_mut(&setter)
@@ -18681,7 +18778,10 @@ mod tests {
                 StaticDefinition::continuous()
                     .affected(enchanted_creature)
                     .modifications(vec![
-                        ContinuousModification::AddPower { value: 2 },
+                        ContinuousModification::AddPower {
+                            value: 2,
+                            fraction: Default::default(),
+                        },
                         ContinuousModification::AddKeyword {
                             keyword: Keyword::Trample,
                         },
@@ -19151,8 +19251,14 @@ mod tests {
                 }]),
             ))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ]);
         let anthem = create_object(
             &mut state,
@@ -19906,7 +20012,10 @@ mod tests {
                     .affected(TargetFilter::Typed(
                         TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
                     ))
-                    .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+                    .modifications(vec![ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    }])
                     .condition(StaticCondition::QuantityComparison {
                         lhs: QuantityExpr::Ref {
                             qty: QuantityRef::Power {
@@ -20170,8 +20279,14 @@ mod tests {
                             }]),
                     ))
                     .modifications(vec![
-                        ContinuousModification::AddPower { value: 1 },
-                        ContinuousModification::AddToughness { value: 1 },
+                        ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                     ]),
             );
         }
@@ -20224,7 +20339,10 @@ mod tests {
             let def = StaticDefinition::continuous()
                 .affected(creature_you_ctrl())
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddPower {
+                        value: 2,
+                        fraction: Default::default(),
+                    },
                     ContinuousModification::AddKeyword {
                         keyword: Keyword::Trample,
                     },
@@ -20323,7 +20441,10 @@ mod tests {
         {
             let def = StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddPower { value: 3 }]);
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 3,
+                    fraction: Default::default(),
+                }]);
             let bear_obj = state.objects.get_mut(&bear).unwrap();
             bear_obj.static_definitions.push(def.clone());
             Arc::make_mut(&mut bear_obj.base_static_definitions).push(def);
@@ -22114,8 +22235,14 @@ mod tests {
                 ],
             })
             .modifications(vec![
-                ContinuousModification::SetPower { value: 3 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::SetPower {
+                    value: 3,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 4,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
@@ -22189,8 +22316,14 @@ mod tests {
                 ],
             })
             .modifications(vec![
-                ContinuousModification::SetPower { value: 3 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::SetPower {
+                    value: 3,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 4,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
@@ -24838,8 +24971,14 @@ mod tests {
                 properties: vec![],
             }))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ])]
         .into();
 
@@ -26895,8 +27034,14 @@ mod tests {
                         TypedFilter::creature().controller(ControllerRef::You),
                     ))
                     .modifications(vec![
-                        ContinuousModification::AddPower { value: 1 },
-                        ContinuousModification::AddToughness { value: 1 },
+                        ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                     ]),
             );
         }
@@ -27009,8 +27154,14 @@ mod tests {
                     })
                     .affected(TargetFilter::Typed(TypedFilter::creature()))
                     .modifications(vec![
-                        ContinuousModification::AddPower { value: 1 },
-                        ContinuousModification::AddToughness { value: 1 },
+                        ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                     ]),
             );
         }
@@ -27075,7 +27226,10 @@ mod tests {
                         .affected(TargetFilter::Typed(
                             TypedFilter::creature().controller(ControllerRef::You),
                         ))
-                        .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                        .modifications(vec![ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        }]),
                 );
             }
             let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
@@ -27136,8 +27290,14 @@ mod tests {
                             TypedFilter::creature().controller(ControllerRef::You),
                         ))
                         .modifications(vec![
-                            ContinuousModification::AddPower { value: 1 },
-                            ContinuousModification::AddToughness { value: 1 },
+                            ContinuousModification::AddPower {
+                                value: 1,
+                                fraction: Default::default(),
+                            },
+                            ContinuousModification::AddToughness {
+                                value: 1,
+                                fraction: Default::default(),
+                            },
                         ]),
                 );
             }
@@ -28523,8 +28683,11 @@ mod tests {
         // CR 113.6: an empty `active_zones` is the battlefield default, which the
         // zone pipeline already marks on both entry and exit — it must not be
         // swallowed into this arm.
-        let battlefield_default = StaticDefinition::continuous()
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        let battlefield_default =
+            StaticDefinition::continuous().modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         for (from, to) in [
             (Zone::Graveyard, Zone::Battlefield),
             (Zone::Hand, Zone::Battlefield),
@@ -28554,7 +28717,10 @@ mod tests {
         let grist_shaped = || {
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::SetPower { value: 1 }])
+                .modifications(vec![ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }])
                 .active_zones(vec![
                     Zone::Library,
                     Zone::Hand,
@@ -28579,7 +28745,10 @@ mod tests {
         let command_shaped = || {
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddPower { value: 2 }])
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                }])
                 .active_zones(vec![Zone::Command])
         };
         assert!(static_definition_zone_of_function_crosses(
@@ -28754,8 +28923,14 @@ mod tests {
                     TypedFilter::creature().controller(ControllerRef::You),
                 ))
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                 ])
                 .room_door(RoomDoor::Right);
             obj.static_definitions.push(anthem.clone());
@@ -29422,7 +29597,10 @@ mod tests {
             Some(8),
             0,
             8,
-            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            },
         );
         reader.affected_filter = TargetFilter::Typed(TypedFilter::creature());
         let writer = entry(
@@ -29465,7 +29643,10 @@ mod tests {
         let mut state = setup();
         let a = make_creature(&mut state, "A", 1, 1, PlayerId(0));
         let b = make_creature(&mut state, "B", 1, 1, PlayerId(0));
-        let add_power = || ContinuousModification::AddPower { value: 1 };
+        let add_power = || ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        };
         let rename = || ContinuousModification::SetName { name: "N".into() };
 
         // One transient effect with two modifications, then another transient effect.
@@ -30074,8 +30255,14 @@ mod tests {
                     .properties(vec![FilterProp::Another]),
             ))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddKeyword {
                     keyword: Keyword::Undying,
                 },
@@ -30138,8 +30325,14 @@ mod tests {
                     .properties(vec![FilterProp::Another]),
             ))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddKeyword {
                     keyword: Keyword::Undying,
                 },
@@ -31002,7 +31195,10 @@ mod tests {
                 PlayerId(0),
                 Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: target },
-                vec![ContinuousModification::AddPower { value: 3 }],
+                vec![ContinuousModification::AddPower {
+                    value: 3,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("the fixture's duration begins");
@@ -31035,7 +31231,10 @@ mod tests {
                 PlayerId(0),
                 Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: target },
-                vec![ContinuousModification::AddPower { value: 3 }],
+                vec![ContinuousModification::AddPower {
+                    value: 3,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("the fixture's duration begins");
@@ -31088,6 +31287,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
 
@@ -31097,7 +31300,10 @@ mod tests {
                 PlayerId(0),
                 Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: target },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("the fixture's duration begins");
@@ -31123,8 +31329,14 @@ mod tests {
         let anthem = StaticDefinition::continuous()
             .affected(TargetFilter::Typed(TypedFilter::creature()))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ]);
         attach_static(&mut state, lord_a, anthem.clone());
         attach_static(&mut state, lord_b, anthem);
@@ -31344,6 +31556,8 @@ mod tests {
             room_halves: None,
             prepare_face: None,
             name_origin: Default::default(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         };
         let _ = state
             .add_transient_continuous_effect(
@@ -31546,8 +31760,14 @@ mod tests {
         StaticDefinition::continuous()
             .affected(affected)
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ])
     }
 
@@ -31891,7 +32111,10 @@ mod tests {
         {
             let inner = StaticDefinition::continuous()
                 .affected(TargetFilter::SpecificObject { id: recipient })
-                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+                .modifications(vec![ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]);
             let obj = state.objects.get_mut(&host).unwrap();
             obj.timestamp = 10;
             obj.static_definitions.push(
@@ -31919,7 +32142,10 @@ mod tests {
             obj.static_definitions.push(
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SpecificObject { id: recipient })
-                    .modifications(vec![ContinuousModification::SetPower { value: 7 }]),
+                    .modifications(vec![ContinuousModification::SetPower {
+                        value: 7,
+                        fraction: Default::default(),
+                    }]),
             );
         }
 
@@ -32038,8 +32264,14 @@ mod tests {
                     .condition(condition)
                     .affected(TargetFilter::Typed(TypedFilter::creature()))
                     .modifications(vec![
-                        ContinuousModification::AddPower { value: 1 },
-                        ContinuousModification::AddToughness { value: 1 },
+                        ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                     ]),
             );
         }
@@ -32124,8 +32356,14 @@ mod tests {
                         ContinuousModification::SetColor {
                             colors: vec![ManaColor::Blue],
                         },
-                        ContinuousModification::SetPower { value: 1 },
-                        ContinuousModification::SetToughness { value: 1 },
+                        ContinuousModification::SetPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::SetToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                         ContinuousModification::RemoveAllSubtypes {
                             set: SubtypeSet::Creature,
                         },
@@ -32321,8 +32559,14 @@ mod tests {
                     TypedFilter::creature().controller(ControllerRef::You),
                 ))
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                 ]),
         );
         id
@@ -32437,8 +32681,14 @@ mod tests {
                         }],
                     )))
                     .modifications(vec![
-                        ContinuousModification::AddPower { value: 1 },
-                        ContinuousModification::AddToughness { value: 1 },
+                        ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                     ]),
             );
         }
@@ -33563,7 +33813,10 @@ mod tests {
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 30 },
             })
-            .modifications(vec![ContinuousModification::AddPower { value: 2 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 2,
+                fraction: Default::default(),
+            }]);
         make_life_static_source(&mut state, "Serra Ascendant-ish", P0, def);
         assert_full_escalation_on_guard(&mut state);
     }
@@ -33748,7 +34001,10 @@ mod tests {
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
             })
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         make_life_static_source(&mut state, "Ajani's Pridemate-ish", P0, def);
         assert_full_escalation_on_guard(&mut state);
     }
@@ -33765,7 +34021,10 @@ mod tests {
                     player: Box::new(PlayerFilter::OpponentLostLife),
                 }],
             )))
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         make_life_static_source(&mut state, "Lost-Life Anthem", P0, def);
         assert_full_escalation_on_guard(&mut state);
     }
@@ -33894,7 +34153,10 @@ mod tests {
                 .affected(TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::You),
                 ))
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         // Board-wide `affected`, NOT `SpecificObject`: this is the shape that
         // reaches an object which did not exist when the effect was registered.
@@ -33976,7 +34238,10 @@ mod tests {
                 .affected(TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::You),
                 ))
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         // The clone exists BEFORE the flush under test, and the copy effect names
         // it — the shape a resolved clone actually has on a live board.
@@ -34063,8 +34328,10 @@ mod tests {
         );
         let mut anthem_values = plain_values.clone();
         Arc::make_mut(&mut anthem_values.static_definitions).push(
-            StaticDefinition::continuous()
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+            StaticDefinition::continuous().modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]),
         );
         // Same shape, but the payload's static is a LAYER-1 one — the only thing
         // that can extend sublayer 1a's discovery chain.
@@ -34164,7 +34431,10 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 if_type: None,
             },
-            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            },
         ] {
             assert!(
                 !modification.is_copy_layer(),
@@ -34352,7 +34622,10 @@ mod tests {
         let (anthem_gathers, anthem_statics) = probe(Some(
             StaticDefinition::continuous()
                 .affected(board_wide())
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         ));
         // Same shape, but a `Layer::Copy` modification — the only kind that can
         // show up in the next gather.
@@ -34469,6 +34742,8 @@ mod tests {
                     room_halves: None,
                     prepare_face: None,
                     name_origin: Default::default(),
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 }),
                 display: Default::default(),
             },
@@ -34599,16 +34874,16 @@ mod tests {
             ContinuousModification::SetDynamicToughness {
                 value: dynamic.clone(),
             },
-            ContinuousModification::SetPower { value: 1 },
-            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::set_power(1),
+            ContinuousModification::set_toughness(1),
             ContinuousModification::SetPowerDynamic {
                 value: dynamic.clone(),
             },
             ContinuousModification::SetToughnessDynamic {
                 value: dynamic.clone(),
             },
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
             ContinuousModification::AddDynamicPower {
                 value: dynamic.clone(),
             },
@@ -34775,7 +35050,10 @@ mod state_duration_retirement_recording_tests {
                     P0,
                     duration,
                     TargetFilter::SpecificObject { id: recipient },
-                    vec![ContinuousModification::AddPower { value: 1 }],
+                    vec![ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    }],
                     None,
                     TransientContinuousEffectBindings {
                         affected_recipient: Some(affected),
@@ -35955,8 +36233,14 @@ mod declared_zone_self_static_tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SelfRef,
             vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::SetToughness { value: 7 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 7,
+                    fraction: Default::default(),
+                },
             ],
             None,
         );
@@ -36066,8 +36350,14 @@ mod declared_zone_self_static_tests {
         let mut def = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::SetPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
@@ -36574,8 +36864,14 @@ mod declared_zone_self_static_tests {
                         ],
                     })
                     .modifications(vec![
-                        ContinuousModification::SetPower { value: 6 },
-                        ContinuousModification::SetToughness { value: 7 },
+                        ContinuousModification::SetPower {
+                            value: 6,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::SetToughness {
+                            value: 7,
+                            fraction: Default::default(),
+                        },
                     ])],
             );
             for pass in 0..3 {
@@ -36865,7 +37161,10 @@ mod declared_zone_self_static_tests {
         };
         let inner = StaticDefinition::continuous()
             .affected(filter.clone())
-            .modifications(vec![ContinuousModification::SetPower { value: 7 }]);
+            .modifications(vec![ContinuousModification::SetPower {
+                value: 7,
+                fraction: Default::default(),
+            }]);
         install_statics(
             &mut state,
             source,
@@ -36882,7 +37181,7 @@ mod declared_zone_self_static_tests {
                 effect.source_id == host
                     && matches!(
                         effect.modification,
-                        ContinuousModification::SetPower { value: 7 }
+                        ContinuousModification::SetPower { value: 7, .. }
                     )
             })
             .collect();
@@ -36936,7 +37235,10 @@ mod declared_zone_self_static_tests {
             source,
             vec![StaticDefinition::continuous()
                 .affected(filter.clone())
-                .modifications(vec![ContinuousModification::SetPower { value: 6 }])],
+                .modifications(vec![ContinuousModification::SetPower {
+                    value: 6,
+                    fraction: Default::default(),
+                }])],
         );
         full_pass(&mut state);
         assert_eq!(state.objects[&remote].power, Some(6));
@@ -36953,7 +37255,10 @@ mod declared_zone_self_static_tests {
                 P0,
                 Duration::UntilEndOfTurn,
                 filter,
-                vec![ContinuousModification::SetPower { value: 8 }],
+                vec![ContinuousModification::SetPower {
+                    value: 8,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("transient effect is created");
@@ -37001,8 +37306,14 @@ mod declared_zone_self_static_tests {
                     }],
                 )))
                 .modifications(vec![
-                    ContinuousModification::SetPower { value: 3 },
-                    ContinuousModification::SetToughness { value: 3 },
+                    ContinuousModification::SetPower {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::SetToughness {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
                 ])],
         );
         let remote = creature_card(&mut state, "Remote", Zone::Graveyard, 2, 2, ManaColor::Red);

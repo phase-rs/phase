@@ -787,7 +787,10 @@ fn emblem_pumping_created() -> Effect {
     Effect::CreateEmblem {
         statics: vec![StaticDefinition::continuous()
             .affected(TargetFilter::LastCreated)
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }])],
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }])],
         triggers: vec![],
     }
 }
@@ -1160,7 +1163,10 @@ fn fixed_grant() -> StaticDefinition {
         .affected(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ))
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
 }
 
 fn grant_tail(static_def: StaticDefinition, duration: Duration) -> AbilityDefinition {
@@ -1187,7 +1193,10 @@ fn p0_fractal_power_and_grants(cast: &mut UnionCast) -> (Option<i32>, usize) {
         .filter(|effect| {
             effect
                 .modifications
-                .contains(&ContinuousModification::AddPower { value: 1 })
+                .contains(&ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                })
         })
         .count();
     (state.objects[&fractal[0]].power, grants)

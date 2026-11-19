@@ -4,7 +4,7 @@ use crate::game::quantity::{
 };
 use crate::types::ability::{
     quantity_expr_uses_recipient, ContinuousModification, DoublePTMode, Duration, Effect,
-    EffectError, EffectKind, PtValue, QuantityExpr, ResolvedAbility, TargetFilter,
+    EffectError, EffectKind, HalfSigned, PtValue, QuantityExpr, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -326,17 +326,17 @@ fn double_modifications(
         DoublePTMode::Toughness | DoublePTMode::PowerAndToughness
     );
     if add_power {
-        if let Some(p) = obj.power {
-            mods.push(ContinuousModification::AddPower {
-                value: p.saturating_mul(added_copies),
-            });
+        if let Some(p) = obj.exact_power() {
+            mods.push(ContinuousModification::add_power_exact(
+                p.saturating_mul(added_copies),
+            ));
         }
     }
     if add_toughness {
-        if let Some(t) = obj.toughness {
-            mods.push(ContinuousModification::AddToughness {
-                value: t.saturating_mul(added_copies),
-            });
+        if let Some(t) = obj.exact_toughness() {
+            mods.push(ContinuousModification::add_toughness_exact(
+                t.saturating_mul(added_copies),
+            ));
         }
     }
     Ok(mods)
@@ -384,38 +384,48 @@ fn pt_modifications(
     let mut mods = Vec::new();
     match power {
         PtValue::Fixed(n) if *n != 0 => {
-            mods.push(ContinuousModification::AddPower { value: *n });
+            mods.push(ContinuousModification::add_power(*n));
+        }
+        PtValue::HalfPoints(halves) if *halves != 0 => {
+            mods.push(ContinuousModification::add_power_exact(
+                HalfSigned::from_halves(*halves),
+            ));
         }
         PtValue::Variable(value) => {
             if let Some(resolved) = resolve_variable_pt(value, ability) {
                 if resolved != 0 {
-                    mods.push(ContinuousModification::AddPower { value: resolved });
+                    mods.push(ContinuousModification::add_power(resolved));
                 }
             }
         }
         PtValue::Quantity(expr) => {
             let resolved = resolve_pt_quantity(expr, state, ability, recipient);
             if resolved != 0 {
-                mods.push(ContinuousModification::AddPower { value: resolved });
+                mods.push(ContinuousModification::add_power(resolved));
             }
         }
         _ => {}
     }
     match toughness {
         PtValue::Fixed(n) if *n != 0 => {
-            mods.push(ContinuousModification::AddToughness { value: *n });
+            mods.push(ContinuousModification::add_toughness(*n));
+        }
+        PtValue::HalfPoints(halves) if *halves != 0 => {
+            mods.push(ContinuousModification::add_toughness_exact(
+                HalfSigned::from_halves(*halves),
+            ));
         }
         PtValue::Variable(value) => {
             if let Some(resolved) = resolve_variable_pt(value, ability) {
                 if resolved != 0 {
-                    mods.push(ContinuousModification::AddToughness { value: resolved });
+                    mods.push(ContinuousModification::add_toughness(resolved));
                 }
             }
         }
         PtValue::Quantity(expr) => {
             let resolved = resolve_pt_quantity(expr, state, ability, recipient);
             if resolved != 0 {
-                mods.push(ContinuousModification::AddToughness { value: resolved });
+                mods.push(ContinuousModification::add_toughness(resolved));
             }
         }
         _ => {}

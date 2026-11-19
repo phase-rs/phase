@@ -6,10 +6,9 @@
 //!   `crates/phase-ast/src/types/keywords.rs` — the Vehicle payoff and, in
 //!   `power`, the exact total power CR 702.122a requires to crew it.
 //! - `CardFace.keywords: Vec<Keyword>` at `crates/phase-ast/src/types/card.rs`.
-//! - `CardFace.power: Option<PtValue>` at `card.rs:171`, read through the
-//!   engine's `printed_cards::fixed_pt_value` — fixed and half-point powers are
-//!   deck-time-knowable; a `*` power is `PtValue::Variable` and is excluded
-//!   rather than guessed.
+//! - `CardFace.power: Option<PtValue>` at `card.rs:171`, read through
+//!   `PtValue::exact_fixed` — fixed and half-point powers are deck-time-knowable;
+//!   a `*` power is `PtValue::Variable` and is excluded rather than guessed.
 //! - Vehicle subtype via the shared `reanimator::VEHICLE_SUBTYPE` constant,
 //!   promoted rather than redefined so the two features cannot disagree about
 //!   what a Vehicle is. The subtype widens ARCHETYPE membership only — CR 702.122a
@@ -49,7 +48,6 @@
 //! axis is the narrower question of whether those artifacts are crewable bodies
 //! with the creatures to crew them, which artifact density cannot answer.
 
-use engine::game::printed_cards::{fixed_pt_value, PtSide};
 use engine::game::DeckEntry;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -215,7 +213,8 @@ pub(crate) fn crew_capable_power(face: &CardFace) -> Option<u32> {
     }
     face.power
         .as_ref()
-        .and_then(|power| fixed_pt_value(power, PtSide::Power))
+        .and_then(|power| power.exact_fixed())
+        .map(|power| power.whole_floor())
         .filter(|power| *power > 0)
         .and_then(|power| u32::try_from(power).ok())
 }

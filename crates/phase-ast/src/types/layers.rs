@@ -301,7 +301,9 @@ pub enum ProtectionGrantOccurrence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CopiableValues, TextSubstitutionSpec, TextWordDomain};
+    use crate::types::ability::{
+        CopiableValues, HalfFraction, TextSubstitutionSpec, TextWordDomain,
+    };
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
 
@@ -343,7 +345,9 @@ mod tests {
                     color: vec![],
                     card_types: crate::types::card_type::CardType::default(),
                     power: None,
+                    power_fraction: HalfFraction::Zero,
                     toughness: None,
+                    toughness_fraction: HalfFraction::Zero,
                     loyalty: None,
                     printed_loyalty: None,
                     keywords: vec![],
@@ -381,19 +385,16 @@ mod tests {
             Layer::Text
         );
         assert_eq!(
-            ContinuousModification::AddPower { value: 1 }.layer(),
+            ContinuousModification::add_power(1).layer(),
             Layer::ModifyPT
         );
         assert_eq!(
-            ContinuousModification::AddToughness { value: 1 }.layer(),
+            ContinuousModification::add_toughness(1).layer(),
             Layer::ModifyPT
         );
+        assert_eq!(ContinuousModification::set_power(3).layer(), Layer::SetPT);
         assert_eq!(
-            ContinuousModification::SetPower { value: 3 }.layer(),
-            Layer::SetPT
-        );
-        assert_eq!(
-            ContinuousModification::SetToughness { value: 3 }.layer(),
+            ContinuousModification::set_toughness(3).layer(),
             Layer::SetPT
         );
         assert_eq!(

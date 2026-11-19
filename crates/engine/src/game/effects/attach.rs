@@ -6326,7 +6326,10 @@ mod retirement_ownership_tests {
                             },
                         },
                         TargetFilter::SpecificObject { id: subject },
-                        vec![ContinuousModification::AddPower { value: 1 }],
+                        vec![ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        }],
                         None,
                         TransientContinuousEffectBindings {
                             affected_recipient: Some(reference),
@@ -6440,7 +6443,10 @@ mod retirement_ownership_tests {
                     },
                 },
                 TargetFilter::SpecificObject { id: subject },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(reference),

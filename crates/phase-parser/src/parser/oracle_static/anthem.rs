@@ -621,8 +621,8 @@ pub(crate) fn parse_animation_modifications(text: &str) -> Vec<ContinuousModific
 
     // Parse P/T from the beginning: "3/4 ninja creature"
     let remaining = if let Some((p, t)) = parse_pt_mod(type_pt_part) {
-        modifications.push(ContinuousModification::SetPower { value: p });
-        modifications.push(ContinuousModification::SetToughness { value: t });
+        modifications.push(ContinuousModification::set_power(p));
+        modifications.push(ContinuousModification::set_toughness(t));
         // Skip past the P/T value
         let slash = type_pt_part.find('/').unwrap();
         let rest = &type_pt_part[slash + 1..];
@@ -1425,9 +1425,7 @@ pub(crate) fn parse_dynamic_pt_in_text(
             };
             mods.push(ContinuousModification::AddDynamicPower { value });
         }
-        PtAxisMag::Fixed(n) if n != 0 => {
-            mods.push(ContinuousModification::AddPower { value: p_sign * n })
-        }
+        PtAxisMag::Fixed(n) if n != 0 => mods.push(ContinuousModification::add_power(p_sign * n)),
         PtAxisMag::Fixed(_) => {}
     }
     match t_mag {
@@ -1443,7 +1441,7 @@ pub(crate) fn parse_dynamic_pt_in_text(
             mods.push(ContinuousModification::AddDynamicToughness { value });
         }
         PtAxisMag::Fixed(n) if n != 0 => {
-            mods.push(ContinuousModification::AddToughness { value: t_sign * n })
+            mods.push(ContinuousModification::add_toughness(t_sign * n))
         }
         PtAxisMag::Fixed(_) => {}
     }

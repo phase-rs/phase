@@ -1262,6 +1262,8 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
         room_halves: None,
         prepare_face: None,
         name_origin: Default::default(),
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
     state.register_pending_materialization(
         P0,

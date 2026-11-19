@@ -6269,6 +6269,7 @@ pub(crate) mod tests {
             player: PlayerId(0),
             commander: ObjectId(7),
             damage: 3,
+            damage_fraction: Default::default(),
         });
 
         let mut targets = HashMap::new();
@@ -6382,6 +6383,7 @@ pub(crate) mod tests {
             player: PlayerId(0),
             commander: ObjectId(7),
             damage: 3,
+            damage_fraction: Default::default(),
         });
         let mut b = a.clone();
         b.commander_damage[0].damage = 9;

@@ -158,8 +158,11 @@ fn static_is_single_target_buff(sd: &StaticDefinition) -> bool {
 fn is_beneficial_buff_mod(m: &ContinuousModification) -> bool {
     match m {
         ContinuousModification::AddKeyword { .. } => true,
-        ContinuousModification::AddPower { value }
-        | ContinuousModification::AddToughness { value } => *value >= 0,
+        ContinuousModification::AddPower { value, fraction }
+        | ContinuousModification::AddToughness { value, fraction } => {
+            engine::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction)
+                >= engine::types::ability::HalfSigned::ZERO
+        }
         _ => false,
     }
 }

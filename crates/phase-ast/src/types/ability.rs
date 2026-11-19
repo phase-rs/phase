@@ -3663,6 +3663,228 @@ pub enum SpellStackToGraveyardReplacement {
     Hand,
 }
 
+/// Fractional half-point remainder on an Unhinged numeric value (P/T, damage,
+/// or life). Normal Black-border cards always carry [`Self::Zero`], which is
+/// omitted on the wire so non-Unhinged states serialize byte-identically.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum HalfFraction {
+    #[default]
+    Zero,
+    Half,
+}
+
+impl HalfFraction {
+    /// Returns `true` when there is no fractional remainder (`skip_serializing_if` predicate).
+    pub const fn is_zero(&self) -> bool {
+        matches!(self, Self::Zero)
+    }
+
+    pub const fn is_half(&self) -> bool {
+        matches!(self, Self::Half)
+    }
+
+    pub const fn halves_i64(self) -> i64 {
+        match self {
+            Self::Zero => 0,
+            Self::Half => 1,
+        }
+    }
+
+    pub const fn halves_u64(self) -> u64 {
+        match self {
+            Self::Zero => 0,
+            Self::Half => 1,
+        }
+    }
+}
+
+/// Exact signed value in half-point units (`1` unit = `½`, `5` = `2½`).
+///
+/// Uses `i64` internally so every `i32` whole value plus [`HalfFraction`]
+/// composes without overflow or parity corruption.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HalfSigned(pub i64);
+
+impl HalfSigned {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn from_whole(whole: i32) -> Self {
+        Self((whole as i64) * 2)
+    }
+
+    pub const fn from_halves(halves: i32) -> Self {
+        Self(halves as i64)
+    }
+
+    pub const fn from_whole_and_fraction(whole: i32, fraction: HalfFraction) -> Self {
+        Self((whole as i64) * 2 + fraction.halves_i64())
+    }
+
+    /// Split into `(floor(x), remainder)` so `floor(x) + remainder == x` for
+    /// both positive and negative values (`-½` -> `(-1, Half)`).
+    pub fn into_whole_and_fraction(self) -> (i32, HalfFraction) {
+        let whole = self.0.div_euclid(2);
+        if whole > i32::MAX as i64 {
+            (i32::MAX, HalfFraction::Zero)
+        } else if whole < i32::MIN as i64 {
+            (i32::MIN, HalfFraction::Zero)
+        } else {
+            let fraction = if self.0.rem_euclid(2) != 0 {
+                HalfFraction::Half
+            } else {
+                HalfFraction::Zero
+            };
+            (whole as i32, fraction)
+        }
+    }
+
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn has_half(self) -> bool {
+        self.0.rem_euclid(2) != 0
+    }
+
+    pub fn whole_floor(self) -> i32 {
+        self.into_whole_and_fraction().0
+    }
+
+    pub fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
+
+    pub fn saturating_sub(self, rhs: Self) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        let sum = self.0.checked_add(rhs.0)?;
+        let whole = sum.div_euclid(2);
+        if whole < i32::MIN as i64 || whole > i32::MAX as i64 {
+            None
+        } else {
+            Some(Self(sum))
+        }
+    }
+
+    pub fn saturating_mul(self, factor: i32) -> Self {
+        Self(self.0.saturating_mul(factor as i64))
+    }
+
+    pub const fn clamp_non_negative(self) -> HalfMagnitude {
+        if self.0 <= 0 {
+            HalfMagnitude::ZERO
+        } else {
+            HalfMagnitude(self.0 as u64)
+        }
+    }
+
+    pub const fn from_half_magnitude(mag: HalfMagnitude) -> Self {
+        if mag.0 > i64::MAX as u64 {
+            Self(i64::MAX)
+        } else {
+            Self(mag.0 as i64)
+        }
+    }
+
+    pub fn fmt_display(self) -> String {
+        if !self.has_half() {
+            return self.whole_floor().to_string();
+        }
+        let sign = if self.0 < 0 { "-" } else { "" };
+        let whole = self.0.unsigned_abs() / 2;
+        if whole == 0 {
+            format!("{sign}½")
+        } else {
+            format!("{sign}{whole}½")
+        }
+    }
+}
+
+/// Exact unsigned magnitude in half-point units (`1` unit = `½`, `5` = `2½`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HalfMagnitude(pub u64);
+
+impl HalfMagnitude {
+    pub const ZERO: Self = Self(0);
+    pub const HALF: Self = Self(1);
+    pub const ONE: Self = Self(2);
+
+    pub const fn from_whole(whole: u32) -> Self {
+        Self((whole as u64) * 2)
+    }
+
+    pub const fn from_halves(halves: u64) -> Self {
+        Self(halves)
+    }
+
+    pub const fn from_whole_and_fraction(whole: u32, fraction: HalfFraction) -> Self {
+        Self((whole as u64) * 2 + fraction.halves_u64())
+    }
+
+    pub fn into_whole_and_fraction(self) -> (u32, HalfFraction) {
+        let whole = self.0 / 2;
+        if whole > u32::MAX as u64 {
+            (u32::MAX, HalfFraction::Zero)
+        } else {
+            let fraction = if !self.0.is_multiple_of(2) {
+                HalfFraction::Half
+            } else {
+                HalfFraction::Zero
+            };
+            (whole as u32, fraction)
+        }
+    }
+
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn has_half(self) -> bool {
+        !self.0.is_multiple_of(2)
+    }
+
+    pub fn whole_floor(self) -> u32 {
+        self.into_whole_and_fraction().0
+    }
+
+    pub fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
+
+    pub fn saturating_sub(self, rhs: Self) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        let sum = self.0.checked_add(rhs.0)?;
+        if sum / 2 > u32::MAX as u64 {
+            None
+        } else {
+            Some(Self(sum))
+        }
+    }
+
+    pub fn fmt_display(self) -> String {
+        HalfSigned::from_half_magnitude(self).fmt_display()
+    }
+
+    pub fn saturating_mul(self, factor: u64) -> Self {
+        Self(self.0.saturating_mul(factor))
+    }
+
+    pub const fn as_signed(self) -> HalfSigned {
+        if self.0 > i64::MAX as u64 {
+            HalfSigned(i64::MAX)
+        } else {
+            HalfSigned(self.0 as i64)
+        }
+    }
+}
+
 /// Power/toughness value -- either a fixed integer or a variable reference (e.g. "*", "X").
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","value":2}` (new)
@@ -3692,6 +3914,16 @@ impl PtValue {
         match printed_half_points(s) {
             Some(halves) => PtValue::HalfPoints(halves),
             None => PtValue::Variable(s.to_string()),
+        }
+    }
+
+    /// Exact half-point value when known without game state, or `None` for
+    /// variable/dynamic P/T (`*`, `X`, `Quantity`).
+    pub fn exact_fixed(&self) -> Option<HalfSigned> {
+        match self {
+            PtValue::Fixed(n) => Some(HalfSigned::from_whole(*n)),
+            PtValue::HalfPoints(halves) => Some(HalfSigned::from_halves(*halves)),
+            PtValue::Variable(_) | PtValue::Quantity(_) => None,
         }
     }
 }
@@ -17578,6 +17810,17 @@ impl Comparator {
         }
     }
 
+    pub fn evaluate_half_signed(self, lhs: HalfSigned, rhs: HalfSigned) -> bool {
+        match self {
+            Comparator::GT => lhs > rhs,
+            Comparator::LT => lhs < rhs,
+            Comparator::GE => lhs >= rhs,
+            Comparator::LE => lhs <= rhs,
+            Comparator::EQ => lhs == rhs,
+            Comparator::NE => lhs != rhs,
+        }
+    }
+
     /// Return the logical negation of this comparator.
     /// Used when bridging `Not(QuantityComparison)` to `AbilityCondition::QuantityCheck`.
     pub fn negate(self) -> Self {
@@ -22011,6 +22254,8 @@ pub struct DamageContextSnapshot {
     /// so the combined lifelink total is still gained on resume.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub lifelink_bonus: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub lifelink_bonus_fraction: HalfFraction,
 }
 
 /// CR 120.4b + CR 120.4c: a portion of a paused two-phase damage batch that has been through
@@ -22020,6 +22265,8 @@ pub struct ReplacedDamagePortion {
     pub context: DamageContextSnapshot,
     pub target: TargetRef,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
     #[serde(default)]
     pub is_combat: bool,
 }
@@ -22032,6 +22279,8 @@ pub struct RawDamagePortion {
     pub source: ObjectId,
     pub target: TargetRef,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
 }
 
 /// A single conjured card entry: card source + quantity.
@@ -23353,6 +23602,8 @@ pub enum Effect {
         context: DamageContextSnapshot,
         target: TargetRef,
         amount: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        amount_fraction: HalfFraction,
         #[serde(default)]
         is_combat: bool,
     },
@@ -43880,6 +44131,9 @@ pub struct ReplacementDefinition {
     /// See [`ShieldKind`].
     #[serde(default, skip_serializing_if = "ShieldKind::is_none")]
     pub shield_kind: ShieldKind,
+    /// Fractional half-point remainder on `PreventionAmount::Next(n)` shields.
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub shield_fraction: HalfFraction,
     /// CR 614.1a: Quantity modification for token/counter replacements (Double, Plus, Minus).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity_modification: Option<QuantityModification>,
@@ -44200,6 +44454,7 @@ impl ReplacementDefinition {
             target_recipient_incarnation: None,
             combat_scope: None,
             shield_kind: ShieldKind::None,
+            shield_fraction: HalfFraction::Zero,
             quantity_modification: None,
             token_owner_scope: None,
             token_owner_redirect: None,
@@ -44738,7 +44993,11 @@ pub struct CopiableValues {
     pub color: Vec<ManaColor>,
     pub card_types: CardType,
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub power_fraction: HalfFraction,
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub toughness_fraction: HalfFraction,
     pub loyalty: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_loyalty: Option<PrintedLoyalty>,
@@ -44859,15 +45118,23 @@ pub enum ContinuousModification {
     },
     AddPower {
         value: i32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        fraction: HalfFraction,
     },
     AddToughness {
         value: i32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        fraction: HalfFraction,
     },
     SetPower {
         value: i32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        fraction: HalfFraction,
     },
     SetToughness {
         value: i32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        fraction: HalfFraction,
     },
     AddKeyword {
         keyword: Keyword,
@@ -45239,6 +45506,56 @@ pub enum ContinuousModification {
     /// bakes it into the new token's base mana cost, and `become_copy.rs` strips
     /// it from the copied values so the continuous copy carries mana value 0.
     RemoveManaCost,
+}
+
+impl ContinuousModification {
+    pub const fn add_power(value: i32) -> Self {
+        Self::AddPower {
+            value,
+            fraction: HalfFraction::Zero,
+        }
+    }
+
+    pub const fn add_toughness(value: i32) -> Self {
+        Self::AddToughness {
+            value,
+            fraction: HalfFraction::Zero,
+        }
+    }
+
+    pub const fn set_power(value: i32) -> Self {
+        Self::SetPower {
+            value,
+            fraction: HalfFraction::Zero,
+        }
+    }
+
+    pub const fn set_toughness(value: i32) -> Self {
+        Self::SetToughness {
+            value,
+            fraction: HalfFraction::Zero,
+        }
+    }
+
+    pub fn add_power_exact(exact: HalfSigned) -> Self {
+        let (value, fraction) = exact.into_whole_and_fraction();
+        Self::AddPower { value, fraction }
+    }
+
+    pub fn add_toughness_exact(exact: HalfSigned) -> Self {
+        let (value, fraction) = exact.into_whole_and_fraction();
+        Self::AddToughness { value, fraction }
+    }
+
+    pub fn set_power_exact(exact: HalfSigned) -> Self {
+        let (value, fraction) = exact.into_whole_and_fraction();
+        Self::SetPower { value, fraction }
+    }
+
+    pub fn set_toughness_exact(exact: HalfSigned) -> Self {
+        let (value, fraction) = exact.into_whole_and_fraction();
+        Self::SetToughness { value, fraction }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -49775,8 +50092,8 @@ mod tests {
                     .into(),
             ),
             modifications: vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::add_power(1),
+                ContinuousModification::add_toughness(1),
             ],
             condition: None,
             per_player_condition: None,
@@ -50011,9 +50328,10 @@ mod tests {
     #[test]
     fn continuous_modification_roundtrip() {
         let mods = vec![
-            ContinuousModification::AddPower { value: 2 },
-            ContinuousModification::AddToughness { value: 2 },
-            ContinuousModification::SetPower { value: 0 },
+            ContinuousModification::add_power(2),
+            ContinuousModification::add_toughness(2),
+            ContinuousModification::set_power(0),
+            ContinuousModification::add_power_exact(HalfSigned::from_halves(5)),
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             },
@@ -50311,7 +50629,7 @@ mod tests {
             static_abilities: vec![StaticDefinition {
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::SelfRef),
-                modifications: vec![ContinuousModification::AddPower { value: 3 }],
+                modifications: vec![ContinuousModification::add_power(3)],
                 condition: None,
                 per_player_condition: None,
                 affected_zone: None,

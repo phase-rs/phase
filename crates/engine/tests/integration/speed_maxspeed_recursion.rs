@@ -105,9 +105,11 @@ fn build(
         .modifications(vec![
             ContinuousModification::AddPower {
                 value: ANTHEM_BONUS,
+                fraction: Default::default(),
             },
             ContinuousModification::AddToughness {
                 value: ANTHEM_BONUS,
+                fraction: Default::default(),
             },
         ])
         .condition(StaticCondition::HasMaxSpeed);

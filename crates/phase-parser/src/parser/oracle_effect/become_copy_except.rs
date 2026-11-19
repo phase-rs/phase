@@ -781,8 +781,8 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     };
 
     let mut mods = vec![
-        ContinuousModification::SetPower { value: power },
-        ContinuousModification::SetToughness { value: toughness },
+        ContinuousModification::set_power(power),
+        ContinuousModification::set_toughness(toughness),
     ];
 
     append_color_and_type_modifications(type_text.trim(), replace_color, replace_types, &mut mods);
@@ -841,8 +841,8 @@ fn parse_subject_pt_only(input: &str) -> Option<(&str, Vec<ContinuousModificatio
     Some((
         rest,
         vec![
-            ContinuousModification::SetPower { value: power },
-            ContinuousModification::SetToughness { value: toughness },
+            ContinuousModification::set_power(power),
+            ContinuousModification::set_toughness(toughness),
         ],
     ))
 }
@@ -931,8 +931,8 @@ fn parse_theyre_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModific
     };
 
     let mut mods = vec![
-        ContinuousModification::SetPower { value: power },
-        ContinuousModification::SetToughness { value: toughness },
+        ContinuousModification::set_power(power),
+        ContinuousModification::set_toughness(toughness),
     ];
     append_color_and_type_modifications(type_text.trim(), replace_color, replace_types, &mut mods);
 
@@ -981,8 +981,8 @@ fn append_color_and_type_modifications(
         // reaches the subtype classifier below.
         if let Some((rest, (power, toughness))) = parse_pt_pair(word) {
             if rest.is_empty() {
-                mods.push(ContinuousModification::SetPower { value: power });
-                mods.push(ContinuousModification::SetToughness { value: toughness });
+                mods.push(ContinuousModification::set_power(power));
+                mods.push(ContinuousModification::set_toughness(toughness));
                 continue;
             }
         }
@@ -2219,7 +2219,7 @@ mod tests {
         );
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })),
             "trailing copy exception body should still parse after rejecting name override; got {mods:?}"
         );
     }
@@ -2971,12 +2971,12 @@ mod tests {
         .unwrap();
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })),
             "missing SetPower(4); got {mods:?}"
         );
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4, .. })),
             "missing SetToughness(4); got {mods:?}"
         );
         assert!(
@@ -3033,12 +3033,12 @@ mod tests {
         .unwrap();
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })),
             "missing SetPower(4); got {mods:?}"
         );
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4, .. })),
             "missing SetToughness(4); got {mods:?}"
         );
         assert!(
@@ -3139,8 +3139,8 @@ mod tests {
         assert_eq!(
             mods,
             vec![
-                ContinuousModification::SetPower { value: 4 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::set_power(4),
+                ContinuousModification::set_toughness(4),
                 ContinuousModification::AddColor {
                     color: ManaColor::Blue
                 },
@@ -3171,8 +3171,8 @@ mod tests {
         assert_eq!(
             mods,
             vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::set_power(1),
+                ContinuousModification::set_toughness(1),
                 ContinuousModification::AddColor {
                     color: ManaColor::Blue
                 },
@@ -3202,8 +3202,8 @@ mod tests {
         assert_eq!(
             mods,
             vec![
-                ContinuousModification::SetPower { value: 4 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::set_power(4),
+                ContinuousModification::set_toughness(4),
                 ContinuousModification::AddColor {
                     color: ManaColor::Black
                 },
@@ -3257,8 +3257,8 @@ mod tests {
         assert_eq!(
             mods_of(", except it's 7/7.", "Quicksilver Gargantuan"),
             vec![
-                ContinuousModification::SetPower { value: 7 },
-                ContinuousModification::SetToughness { value: 7 },
+                ContinuousModification::set_power(7),
+                ContinuousModification::set_toughness(7),
             ]
         );
     }
@@ -3281,8 +3281,8 @@ mod tests {
         assert_eq!(
             mods,
             vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::set_power(1),
+                ContinuousModification::set_toughness(1),
                 ContinuousModification::AddSubtype {
                     subtype: "Nightmare".to_string()
                 },
@@ -3316,8 +3316,8 @@ mod tests {
                 ContinuousModification::SetName {
                     name: "Hulkling, Young Avenger".to_string()
                 },
-                ContinuousModification::SetPower { value: 4 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::set_power(4),
+                ContinuousModification::set_toughness(4),
                 ContinuousModification::AddKeyword {
                     keyword: Keyword::Flying
                 },
@@ -3336,8 +3336,8 @@ mod tests {
         assert_eq!(
             mods_of(", except it's 4/4", "Card"),
             vec![
-                ContinuousModification::SetPower { value: 4 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::set_power(4),
+                ContinuousModification::set_toughness(4),
             ]
         );
     }
@@ -3359,8 +3359,8 @@ mod tests {
                 ContinuousModification::SetName {
                     name: "Olag, Ludevic's Hubris".to_string()
                 },
-                ContinuousModification::SetPower { value: 4 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::set_power(4),
+                ContinuousModification::set_toughness(4),
                 ContinuousModification::AddColor {
                     color: ManaColor::Blue
                 },
@@ -3463,8 +3463,8 @@ mod tests {
                 ContinuousModification::SetName {
                     name: "Absorbing Man".to_string()
                 },
-                ContinuousModification::SetPower { value: 4 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::set_power(4),
+                ContinuousModification::set_toughness(4),
                 ContinuousModification::AddSupertype {
                     supertype: Supertype::Legendary
                 },
@@ -3553,12 +3553,12 @@ mod tests {
         );
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })),
             "missing SetPower(4); got {mods:?}"
         );
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4, .. })),
             "missing SetToughness(4); got {mods:?}"
         );
         assert!(
@@ -3730,12 +3730,12 @@ mod tests {
         .unwrap();
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetPower { value: 3 })),
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 3, .. })),
             "missing SetPower(3); got {mods:?}"
         );
         assert!(
             mods.iter()
-                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 3 })),
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 3, .. })),
             "missing SetToughness(3); got {mods:?}"
         );
         assert!(
@@ -3775,8 +3775,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            mods.contains(&ContinuousModification::SetPower { value: 3 })
-                && mods.contains(&ContinuousModification::SetToughness { value: 3 }),
+            mods.contains(&ContinuousModification::set_power(3))
+                && mods.contains(&ContinuousModification::set_toughness(3)),
             "CR 707.9b: the copy exception sets base 3/3; got {mods:?}"
         );
         assert!(
@@ -3883,8 +3883,8 @@ mod tests {
         assert_eq!(
             mods_of(", except it's a 1/1.", "Card"),
             vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::set_power(1),
+                ContinuousModification::set_toughness(1),
             ]
         );
     }
@@ -3908,8 +3908,8 @@ mod tests {
                 "Gut, Zealous Fanatic"
             ),
             vec![
-                ContinuousModification::SetPower { value: 2 },
-                ContinuousModification::SetToughness { value: 2 },
+                ContinuousModification::set_power(2),
+                ContinuousModification::set_toughness(2),
                 ContinuousModification::AddKeyword {
                     keyword: Keyword::Haste
                 },
@@ -3934,8 +3934,8 @@ mod tests {
                 "Uugguu, the Omniplasm"
             ),
             vec![
-                ContinuousModification::SetPower { value: 2 },
-                ContinuousModification::SetToughness { value: 2 },
+                ContinuousModification::set_power(2),
+                ContinuousModification::set_toughness(2),
                 ContinuousModification::RemoveSupertype {
                     supertype: Supertype::Legendary,
                 },
@@ -4022,8 +4022,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            mods.contains(&ContinuousModification::SetPower { value: 1 })
-                && mods.contains(&ContinuousModification::SetToughness { value: 1 }),
+            mods.contains(&ContinuousModification::set_power(1))
+                && mods.contains(&ContinuousModification::set_toughness(1)),
             "CR 707.9b: the exception sets the copy's base P/T to 1/1; got {mods:?}"
         );
         assert!(

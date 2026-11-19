@@ -67,6 +67,7 @@ fn damage(source: ObjectId, victim: ObjectId, amount: u32) -> ProposedEvent {
         amount,
         is_combat: false,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     }
 }
 

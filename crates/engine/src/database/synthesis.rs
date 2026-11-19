@@ -1211,8 +1211,8 @@ pub fn synthesize_station(face: &mut CardFace) {
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
-                ContinuousModification::SetPower { value: power },
-                ContinuousModification::SetToughness { value: toughness },
+                ContinuousModification::set_power(power),
+                ContinuousModification::set_toughness(toughness),
             ])
             .description(format!(
                 "CR 721.2b: Spacecraft is an artifact creature at {threshold}+"
@@ -3472,8 +3472,8 @@ fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinit
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
             additional_modifications: vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::set_power(1),
+                ContinuousModification::set_toughness(1),
             ],
         },
     );
@@ -3519,8 +3519,8 @@ fn is_offspring_etb_copy_trigger_for_ordinal(
                     ..
                 } if additional_modifications.as_slice()
                     == [
-                        ContinuousModification::SetPower { value: 1 },
-                        ContinuousModification::SetToughness { value: 1 },
+                        ContinuousModification::set_power(1),
+                        ContinuousModification::set_toughness(1),
                     ]
             )
         })
@@ -3727,8 +3727,8 @@ pub fn synthesize_offspring(face: &mut CardFace) {
             min_count: 1,
             count: QuantityExpr::Fixed { value: 1 },
             additional_modifications: vec![
-                ContinuousModification::SetPower { value: 1 },
-                ContinuousModification::SetToughness { value: 1 },
+                ContinuousModification::set_power(1),
+                ContinuousModification::set_toughness(1),
             ],
             description: "CR 702.175a + CR 702.175b: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
                 .to_string(),
@@ -18099,11 +18099,11 @@ mod station_synthesis_tests {
         assert!(sd
             .modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value: 0 })));
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 0, .. })));
         assert!(sd
             .modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 8 })));
+            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 8, .. })));
     }
 
     #[test]
@@ -19945,11 +19945,11 @@ mod offspring_synthesis_tests {
                 assert_eq!(additional_modifications.len(), 2);
                 assert!(matches!(
                     additional_modifications[0],
-                    ContinuousModification::SetPower { value: 1 }
+                    ContinuousModification::SetPower { value: 1, .. }
                 ));
                 assert!(matches!(
                     additional_modifications[1],
-                    ContinuousModification::SetToughness { value: 1 }
+                    ContinuousModification::SetToughness { value: 1, .. }
                 ));
             }
             other => panic!("expected CopyTokenOf, got {other:?}"),

@@ -639,7 +639,10 @@ fn stale_self_definition_does_not_skip_independent_definition_or_subchain() {
                         }]),
                     StaticDefinition::continuous()
                         .affected(TargetFilter::SpecificObject { id: b })
-                        .modifications(vec![ContinuousModification::AddPower { value: 4 }]),
+                        .modifications(vec![ContinuousModification::AddPower {
+                            value: 4,
+                            fraction: Default::default(),
+                        }]),
                 ],
                 duration: Some(Duration::Permanent),
                 target: None,

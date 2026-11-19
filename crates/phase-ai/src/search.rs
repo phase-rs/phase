@@ -2642,12 +2642,14 @@ pub fn fallback_action(
         // ai_support::candidates AssignBlockerDamage arm.
         WaitingFor::AssignBlockerDamage {
             total_damage,
+            total_damage_fraction,
             attackers,
             ..
         } => attackers
             .first()
             .map(|first| GameAction::AssignBlockerDamage {
                 assignments: vec![(*first, *total_damage)],
+                assignments_fraction: vec![(*first, *total_damage_fraction)],
             }),
 
         // X value: pick max (CR 107.1c + CR 601.2f). The engine has already
@@ -9257,8 +9259,14 @@ mod tests {
     fn temporary_combat_modifier_effect() -> Effect {
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous().modifications(vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::AddToughness { value: 0 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 0,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddKeyword {
                     keyword: engine::types::keywords::Keyword::Haste,
                 },
@@ -15898,6 +15906,7 @@ mod tests {
             blockers: vec![engine::types::game_state::DamageSlot {
                 blocker_id: blocker,
                 lethal_minimum,
+                lethal_minimum_fraction: Default::default(),
             }],
             assignment_modes: vec![engine::types::game_state::CombatDamageAssignmentMode::Normal],
             trample,
@@ -15905,6 +15914,7 @@ mod tests {
             attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
             pw_loyalty: None,
             pw_controller: None,
+            total_damage_fraction: Default::default(),
         };
         let contract = test_contract(&state);
         assert!(contract.candidates.iter().any(|candidate| matches!(
@@ -15947,6 +15957,7 @@ mod tests {
                 assignments,
                 trample_damage,
                 controller_damage,
+                ..
             } => {
                 assert_eq!(
                     mode,
@@ -16185,6 +16196,9 @@ mod tests {
                     assignments: vec![(blocker, if retirement == 0 { 4 } else { 6 })],
                     trample_damage: if retirement == 0 { 2 } else { 0 },
                     controller_damage: 0,
+                    assignments_fraction: Vec::new(),
+                    trample_damage_fraction: Default::default(),
+                    controller_damage_fraction: Default::default(),
                 }
             );
             assert!(contract.contains_action(runner.state(), &action));

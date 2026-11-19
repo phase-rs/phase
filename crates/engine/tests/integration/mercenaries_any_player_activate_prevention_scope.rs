@@ -63,6 +63,7 @@ fn damage_from(source: ObjectId, target: TargetRef, amount: u32) -> ProposedEven
         amount,
         is_combat: false,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     }
 }
 

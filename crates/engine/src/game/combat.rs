@@ -9,8 +9,8 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    AttackerBlockStatus, ContinuousModification, StaticCondition, StaticDefinition, TargetFilter,
-    TargetRef,
+    AttackerBlockStatus, ContinuousModification, HalfFraction, HalfMagnitude, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
@@ -597,6 +597,31 @@ pub(crate) fn combat_attack_authority_is_coherent(state: &GameState) -> bool {
 pub struct DamageAssignment {
     pub target: DamageTarget,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
+}
+
+impl DamageAssignment {
+    pub const fn whole(target: DamageTarget, amount: u32) -> Self {
+        Self {
+            target,
+            amount,
+            amount_fraction: HalfFraction::Zero,
+        }
+    }
+
+    pub fn new(target: DamageTarget, amount: HalfMagnitude) -> Self {
+        let (whole, amount_fraction) = amount.into_whole_and_fraction();
+        Self {
+            target,
+            amount: whole,
+            amount_fraction,
+        }
+    }
+
+    pub fn exact_amount(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(self.amount, self.amount_fraction)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24790,6 +24815,7 @@ mod tests {
             vec![DamageAssignment {
                 target: DamageTarget::Object(blocker),
                 amount: 2,
+                amount_fraction: Default::default(),
             }],
         );
         combat.pending_damage.push((
@@ -24797,6 +24823,7 @@ mod tests {
             DamageAssignment {
                 target: DamageTarget::Object(walker),
                 amount: 1,
+                amount_fraction: Default::default(),
             },
         ));
         combat.damage_step_index = Some(1);

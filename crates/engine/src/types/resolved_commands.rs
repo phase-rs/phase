@@ -13,7 +13,9 @@ use crate::game::game_object::AttachTarget;
 use crate::game::perf_counters;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ChosenAttribute, ContinuousModification, TriggerDefinitionRef};
+use super::ability::{
+    ChosenAttribute, ContinuousModification, HalfFraction, HalfSigned, TriggerDefinitionRef,
+};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -98,13 +100,31 @@ pub struct ResolvedManaSpendCommand {
 pub enum ResolvedPlayerEdit {
     /// CR 119.2 + CR 119.3 + CR 119.4 + CR 119.5: A final gain/loss delta
     /// applied after any replacement.
-    Life { delta: i32 },
+    Life {
+        delta: i32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        fraction: HalfFraction,
+    },
     /// CR 122.1 + CR 107.14: A final energy-counter delta.
     Energy { delta: i32 },
     /// CR 122.1: A final delta for one exact player counter kind.
     Counter { kind: PlayerCounterKind, delta: i32 },
     /// CR 702.179b: An exact speed transition, including no-speed.
     Speed { old: Option<u8>, new: Option<u8> },
+}
+
+impl ResolvedPlayerEdit {
+    pub const fn life(delta: i32) -> Self {
+        Self::Life {
+            delta,
+            fraction: HalfFraction::Zero,
+        }
+    }
+
+    pub fn life_exact(exact: HalfSigned) -> Self {
+        let (delta, fraction) = exact.into_whole_and_fraction();
+        Self::Life { delta, fraction }
+    }
 }
 
 /// One exact player-resource mutation after replacement and quantity resolution.
@@ -3815,9 +3835,12 @@ fn exact_mana_unit_eq(left: &ManaUnit, right: &ManaUnit) -> bool {
 
 fn player_edit_is_empty(edit: &ResolvedPlayerEdit) -> bool {
     match edit {
-        ResolvedPlayerEdit::Life { delta }
-        | ResolvedPlayerEdit::Energy { delta }
-        | ResolvedPlayerEdit::Counter { delta, .. } => *delta == 0,
+        ResolvedPlayerEdit::Life { delta, fraction } => {
+            HalfSigned::from_whole_and_fraction(*delta, *fraction).is_zero()
+        }
+        ResolvedPlayerEdit::Energy { delta } | ResolvedPlayerEdit::Counter { delta, .. } => {
+            *delta == 0
+        }
         ResolvedPlayerEdit::Speed { old, new } => old == new,
     }
 }
@@ -4228,7 +4251,7 @@ mod tests {
         journal
             .record_player_edit(ResolvedPlayerEditCommand {
                 player: PlayerId(0),
-                edit: ResolvedPlayerEdit::Life { delta: -3 },
+                edit: ResolvedPlayerEdit::life(-3),
                 cause,
             })
             .unwrap();

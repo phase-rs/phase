@@ -241,6 +241,9 @@ pub(super) fn assign_trample(
             assignments: assignments.to_vec(),
             trample_damage,
             controller_damage: 0,
+            assignments_fraction: Vec::new(),
+            trample_damage_fraction: Default::default(),
+            controller_damage_fraction: Default::default(),
         })
         .expect("submit the explicit damage split")
         .events
@@ -284,6 +287,9 @@ fn assign_blocked_damage(
             assignments: assignments.to_vec(),
             trample_damage: 0,
             controller_damage: 0,
+            assignments_fraction: Vec::new(),
+            trample_damage_fraction: Default::default(),
+            controller_damage_fraction: Default::default(),
         })
         .expect("submit the multiple-blocker damage split")
         .events

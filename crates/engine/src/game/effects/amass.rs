@@ -206,7 +206,9 @@ fn create_army_token(
         characteristics: TokenCharacteristics {
             display_name: name.clone(),
             power: Some(0),
+            power_fraction: Default::default(),
             toughness: Some(0),
+            toughness_fraction: Default::default(),
             loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Army".to_string(), subtype.to_string()],
@@ -396,6 +398,8 @@ mod tests {
                     supertypes: Vec::new(),
                     colors: vec![ManaColor::Green],
                     keywords: Vec::new(),
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 },
                 script_name: "Squirrel".to_string(),
                 static_abilities: Vec::new(),

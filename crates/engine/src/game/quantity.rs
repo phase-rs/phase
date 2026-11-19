@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating, usize_to_i32_saturating};
+use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
@@ -23,9 +23,9 @@ use crate::types::ability::{
     AbilityDefinition, AggregateFunction, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CastPermissionConstraint, CastingPermission, CombatHistoryScope,
     ContinuousModification, ControllerRef, CountScope, DamageChannel, Duration, Effect, FilterProp,
-    ModalSelectionCondition, ModalSelectionConstraint, NameStickerSet, ObjectProperty, ObjectScope,
-    ObjectScopeRead, ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis, QuantityExpr,
-    QuantityRef, RecipientRead, RepeatContinuation, ResolvedAbility, RoundingMode,
+    HalfSigned, ModalSelectionCondition, ModalSelectionConstraint, NameStickerSet, ObjectProperty,
+    ObjectScope, ObjectScopeRead, ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis,
+    QuantityExpr, QuantityRef, RecipientRead, RepeatContinuation, ResolvedAbility, RoundingMode,
     SpellCastingOption, StaticCondition, StaticDefinition, SubtypeExclusion,
     TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
     TriggerCondition, TriggerDefinition, TurnJournalKind, TurnWindow, TypeFilter, TypedFilter,
@@ -3534,13 +3534,23 @@ pub fn resolve_quantity_with_ctx(
     controller: PlayerId,
     ctx: QuantityContext,
 ) -> i32 {
+    resolve_quantity_with_ctx_exact(state, expr, controller, ctx).whole_floor()
+}
+
+/// Exact half-integer counterpart of [`resolve_quantity_with_ctx`].
+pub fn resolve_quantity_with_ctx_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    ctx: QuantityContext,
+) -> HalfSigned {
     match expr {
-        QuantityExpr::Fixed { value } => *value,
+        QuantityExpr::Fixed { value } => HalfSigned::from_whole(*value),
         QuantityExpr::Ref { qty } => {
-            resolve_ref(state, qty, controller, ctx, &[], None, None, None)
+            resolve_ref_exact(state, qty, controller, ctx, &[], None, None, None)
         }
-        other => fold_compose(other, |inner| {
-            resolve_quantity_with_ctx(state, inner, controller, ctx.clone())
+        other => fold_compose_exact(other, |inner| {
+            resolve_quantity_with_ctx_exact(state, inner, controller, ctx.clone())
         }),
     }
 }
@@ -3554,20 +3564,30 @@ pub fn resolve_quantity_with_ctx(
 ///
 /// Panics if called with a leaf variant — callers must dispatch leaves
 /// before delegating here.
-fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> i32 {
+fn fold_compose_exact(
+    expr: &QuantityExpr,
+    recurse: impl Fn(&QuantityExpr) -> HalfSigned,
+) -> HalfSigned {
     match expr {
         QuantityExpr::DivideRounded {
             inner,
             divisor,
             rounding,
-        } => divide_rounded(recurse(inner), *divisor, *rounding),
-        QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
+        } => divide_rounded_exact(recurse(inner), *divisor, *rounding),
+        QuantityExpr::Offset { inner, offset } => {
+            recurse(inner).saturating_add(HalfSigned::from_whole(*offset))
+        }
         // CR 107.1b: effect-result calculations that would be negative use zero
         // instead. The lower bound is parameterized for non-zero floors, but
         // current Oracle users are the zero-floor "beyond the first" class.
-        QuantityExpr::ClampMin { inner, minimum } => recurse(inner).max(*minimum),
-        QuantityExpr::Multiply { factor, inner } => factor.saturating_mul(recurse(inner)),
-        QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
+        QuantityExpr::ClampMin { inner, minimum } => {
+            recurse(inner).max(HalfSigned::from_whole(*minimum))
+        }
+        QuantityExpr::Multiply { factor, inner } => recurse(inner).saturating_mul(*factor),
+        QuantityExpr::Sum { exprs } => exprs
+            .iter()
+            .map(&recurse)
+            .fold(HalfSigned::ZERO, HalfSigned::saturating_add),
         // CR 107.3: `base ^ exponent` with the exponent resolved from a
         // QuantityExpr (typically the X variable on a cost). The exponent is
         // clamped to a non-negative u32 because `i32::saturating_pow` requires
@@ -3577,16 +3597,16 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // is purely defensive. `saturating_pow` handles overflow by returning
         // `i32::MAX` rather than panicking.
         QuantityExpr::Power { base, exponent } => {
-            let exp = u32::try_from(recurse(exponent)).unwrap_or(0);
-            base.saturating_pow(exp)
+            let exp = u32::try_from(recurse(exponent).whole_floor()).unwrap_or(0);
+            HalfSigned::from_whole(base.saturating_pow(exp))
         }
         // CR 107.1c + CR 608.2d: Generic resolvers see UpTo transparently as
         // its upper bound. Extracting the "may pick fewer" permission is the
         // caller's job, via `QuantityExpr::peel_up_to`, BEFORE the count reaches
-        // arithmetic — this fold returns an `i32` and structurally cannot carry
-        // the flag. Enumerating the resolvers that do so here has already gone
-        // stale once (the pre-#8543 list named `Draw`, which did not peel, and
-        // omitted several that did), so grep for the callers instead:
+        // arithmetic — this fold returns an exact value and structurally cannot
+        // carry the flag. Enumerating the resolvers that do so here has already
+        // gone stale once (the pre-#8543 list named `Draw`, which did not peel,
+        // and omitted several that did), so grep for the callers instead:
         //
         //     grep -rn "\.peel_up_to()" crates/engine/src/
         //
@@ -3602,15 +3622,19 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // distinct — it clamps a negative *result* to zero, which is not the
         // same operation as an absolute value; it confirms only that the
         // resulting amount is non-negative.)
-        QuantityExpr::Difference { left, right } => (recurse(left) - recurse(right)).abs(),
-        // CR 107.1: the maximum of the computed integer operands. CR 120.4a /
+        QuantityExpr::Difference { left, right } => {
+            HalfSigned((recurse(left).0.saturating_sub(recurse(right).0)).saturating_abs())
+        }
+        // CR 107.1: the maximum of the computed operands. CR 120.4a /
         // CR 120.10 establish the in-rules "the greatest of the calculated
         // amounts" precedent for taking a maximum over multiple computed
         // values; "whichever is greater" itself has no dedicated CR number.
         // CR 107.2: an empty operand list (undeterminable) resolves to 0.
-        QuantityExpr::Max { exprs } => exprs.iter().map(&recurse).max().unwrap_or(0),
+        QuantityExpr::Max { exprs } => exprs.iter().map(&recurse).max().unwrap_or(HalfSigned::ZERO),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
-            unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
+            unreachable!(
+                "fold_compose_exact called on leaf variant — caller must dispatch leaves first"
+            )
         }
     }
 }
@@ -4125,10 +4149,19 @@ pub fn resolve_quantity_with_targets(
     expr: &QuantityExpr,
     ability: &ResolvedAbility,
 ) -> i32 {
+    resolve_quantity_with_targets_exact(state, expr, ability).whole_floor()
+}
+
+/// Exact half-integer counterpart of [`resolve_quantity_with_targets`].
+pub fn resolve_quantity_with_targets_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> HalfSigned {
     let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
-        QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(
+        QuantityExpr::Fixed { value } => HalfSigned::from_whole(*value),
+        QuantityExpr::Ref { qty } => resolve_ref_exact(
             state,
             qty,
             controller,
@@ -4138,8 +4171,8 @@ pub fn resolve_quantity_with_targets(
             Some(ability),
             None,
         ),
-        other => fold_compose(other, |inner| {
-            resolve_quantity_with_targets(state, inner, ability)
+        other => fold_compose_exact(other, |inner| {
+            resolve_quantity_with_targets_exact(state, inner, ability)
         }),
     }
 }
@@ -4205,10 +4238,21 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
     ability: &ResolvedAbility,
     recipient_id: ObjectId,
 ) -> i32 {
+    resolve_quantity_with_targets_and_recipient_exact(state, expr, ability, recipient_id)
+        .whole_floor()
+}
+
+/// Exact half-integer counterpart of [`resolve_quantity_with_targets_and_recipient`].
+pub(crate) fn resolve_quantity_with_targets_and_recipient_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    recipient_id: ObjectId,
+) -> HalfSigned {
     let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
-        QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(
+        QuantityExpr::Fixed { value } => HalfSigned::from_whole(*value),
+        QuantityExpr::Ref { qty } => resolve_ref_exact(
             state,
             qty,
             controller,
@@ -4223,8 +4267,8 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
             Some(ability),
             None,
         ),
-        other => fold_compose(other, |inner| {
-            resolve_quantity_with_targets_and_recipient(state, inner, ability, recipient_id)
+        other => fold_compose_exact(other, |inner| {
+            resolve_quantity_with_targets_and_recipient_exact(state, inner, ability, recipient_id)
         }),
     }
 }
@@ -4235,16 +4279,28 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
 /// "twice its power" / "its power plus its toughness" read the same batch
 /// member. Matches the source against its live object, falling back to LKI
 /// (CR 608.2h) at each characteristic read.
+#[cfg(test)]
 pub(crate) fn resolve_quantity_with_targets_and_damage_source(
     state: &GameState,
     expr: &QuantityExpr,
     ability: &ResolvedAbility,
     damage_source: ObjectId,
 ) -> i32 {
+    resolve_quantity_with_targets_and_damage_source_exact(state, expr, ability, damage_source)
+        .whole_floor()
+}
+
+/// Exact half-integer counterpart of [`resolve_quantity_with_targets_and_damage_source`].
+pub(crate) fn resolve_quantity_with_targets_and_damage_source_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    damage_source: ObjectId,
+) -> HalfSigned {
     let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
-        QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(
+        QuantityExpr::Fixed { value } => HalfSigned::from_whole(*value),
+        QuantityExpr::Ref { qty } => resolve_ref_exact(
             state,
             qty,
             controller,
@@ -4259,8 +4315,13 @@ pub(crate) fn resolve_quantity_with_targets_and_damage_source(
             Some(ability),
             None,
         ),
-        other => fold_compose(other, |inner| {
-            resolve_quantity_with_targets_and_damage_source(state, inner, ability, damage_source)
+        other => fold_compose_exact(other, |inner| {
+            resolve_quantity_with_targets_and_damage_source_exact(
+                state,
+                inner,
+                ability,
+                damage_source,
+            )
         }),
     }
 }
@@ -4277,9 +4338,21 @@ pub fn resolve_quantity_with_targets_slice(
     source_id: ObjectId,
     targets: &[TargetRef],
 ) -> i32 {
+    resolve_quantity_with_targets_slice_exact(state, expr, controller, source_id, targets)
+        .whole_floor()
+}
+
+/// Exact half-integer counterpart of [`resolve_quantity_with_targets_slice`].
+pub fn resolve_quantity_with_targets_slice_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    targets: &[TargetRef],
+) -> HalfSigned {
     match expr {
-        QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(
+        QuantityExpr::Fixed { value } => HalfSigned::from_whole(*value),
+        QuantityExpr::Ref { qty } => resolve_ref_exact(
             state,
             qty,
             controller,
@@ -4289,8 +4362,8 @@ pub fn resolve_quantity_with_targets_slice(
             None,
             None,
         ),
-        other => fold_compose(other, |inner| {
-            resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets)
+        other => fold_compose_exact(other, |inner| {
+            resolve_quantity_with_targets_slice_exact(state, inner, controller, source_id, targets)
         }),
     }
 }
@@ -4320,9 +4393,21 @@ pub fn resolve_quantity_with_parked_targets(
     source_id: ObjectId,
     parked: ParkedTargets<'_>,
 ) -> i32 {
+    resolve_quantity_with_parked_targets_exact(state, expr, controller, source_id, parked)
+        .whole_floor()
+}
+
+/// Exact half-integer counterpart of [`resolve_quantity_with_parked_targets`].
+pub fn resolve_quantity_with_parked_targets_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    parked: ParkedTargets<'_>,
+) -> HalfSigned {
     match expr {
-        QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(
+        QuantityExpr::Fixed { value } => HalfSigned::from_whole(*value),
+        QuantityExpr::Ref { qty } => resolve_ref_exact(
             state,
             qty,
             controller,
@@ -4342,8 +4427,8 @@ pub fn resolve_quantity_with_parked_targets(
             None,
             Some(parked),
         ),
-        other => fold_compose(other, |inner| {
-            resolve_quantity_with_parked_targets(state, inner, controller, source_id, parked)
+        other => fold_compose_exact(other, |inner| {
+            resolve_quantity_with_parked_targets_exact(state, inner, controller, source_id, parked)
         }),
     }
 }
@@ -4400,7 +4485,19 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
     scope_player: PlayerId,
     targets: &[TargetRef],
 ) -> i32 {
-    resolve_quantity_scoped_in(state, expr, source_id, scope_player, targets, None)
+    resolve_quantity_scoped_with_targets_exact(state, expr, source_id, scope_player, targets)
+        .whole_floor()
+}
+
+/// Exact half-integer counterpart of [`resolve_quantity_scoped_with_targets`].
+pub(crate) fn resolve_quantity_scoped_with_targets_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    source_id: ObjectId,
+    scope_player: PlayerId,
+    targets: &[TargetRef],
+) -> HalfSigned {
+    resolve_quantity_scoped_in_exact(state, expr, source_id, scope_player, targets, None)
 }
 
 fn resolve_quantity_scoped_in(
@@ -4411,6 +4508,25 @@ fn resolve_quantity_scoped_in(
     targets: &[TargetRef],
     granting_object: Option<ObjectIncarnationRef>,
 ) -> i32 {
+    resolve_quantity_scoped_in_exact(
+        state,
+        expr,
+        source_id,
+        scope_player,
+        targets,
+        granting_object,
+    )
+    .whole_floor()
+}
+
+fn resolve_quantity_scoped_in_exact(
+    state: &GameState,
+    expr: &QuantityExpr,
+    source_id: ObjectId,
+    scope_player: PlayerId,
+    targets: &[TargetRef],
+    granting_object: Option<ObjectIncarnationRef>,
+) -> HalfSigned {
     // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
     // controller, not to the current DamageEachPlayer recipient.
     let ability_controller = state
@@ -4420,8 +4536,8 @@ fn resolve_quantity_scoped_in(
         .unwrap_or(scope_player);
 
     match expr {
-        QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(
+        QuantityExpr::Fixed { value } => HalfSigned::from_whole(*value),
+        QuantityExpr::Ref { qty } => resolve_ref_exact(
             state,
             qty,
             ability_controller,
@@ -4437,8 +4553,8 @@ fn resolve_quantity_scoped_in(
         ),
         // Recurse into SELF so `targets` reach a `Target`-scoped leaf nested
         // inside a composite (e.g. the `right` operand of `Difference`).
-        other => fold_compose(other, |inner| {
-            resolve_quantity_scoped_in(
+        other => fold_compose_exact(other, |inner| {
+            resolve_quantity_scoped_in_exact(
                 state,
                 inner,
                 source_id,
@@ -4451,23 +4567,22 @@ fn resolve_quantity_scoped_in(
 }
 
 /// CR 107.1a: "If a spell or ability could generate a fractional number, the
-/// spell or ability will tell you whether to round up or down.
-fn divide_rounded(value: i32, divisor: u32, rounding: RoundingMode) -> i32 {
+/// spell or ability will tell you whether to round up or down."
+fn divide_rounded_exact(value: HalfSigned, divisor: u32, rounding: RoundingMode) -> HalfSigned {
     debug_assert!(divisor > 0, "fractional quantity divisor must be nonzero");
-    let divisor = i64::from(divisor.max(1));
-    let value = i64::from(value);
+    let denom = i64::from(divisor.max(1)).saturating_mul(2);
     let rounded = match rounding {
         RoundingMode::Up => {
-            let quotient = value.div_euclid(divisor);
-            if value.rem_euclid(divisor) == 0 {
+            let quotient = value.0.div_euclid(denom);
+            if value.0.rem_euclid(denom) == 0 {
                 quotient
             } else {
                 quotient + 1
             }
         }
-        RoundingMode::Down => value.div_euclid(divisor),
+        RoundingMode::Down => value.0.div_euclid(denom),
     };
-    rounded as i32
+    HalfSigned::from_whole(rounded as i32)
 }
 
 /// CR 400.1: The object IDs an `ObjectCount { filter }` matches — resolved in
@@ -4993,8 +5108,33 @@ fn current_cast_occurrence_matches(
         .is_some_and(|record| record.spell_object_id == Some(ability.source_id))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_ref(
+    state: &GameState,
+    qty: &QuantityRef,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    chosen_x: Option<u32>,
+    ability: Option<&ResolvedAbility>,
+    ability_targets: Option<ParkedTargets<'_>>,
+) -> i32 {
+    resolve_ref_exact(
+        state,
+        qty,
+        controller,
+        ctx,
+        targets,
+        chosen_x,
+        ability,
+        ability_targets,
+    )
+    .whole_floor()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_ref_exact(
     state: &GameState,
     qty: &QuantityRef,
     controller: PlayerId,
@@ -5008,7 +5148,7 @@ fn resolve_ref(
     // `None` in every other context — in particular the combat-tax slice
     // entry keeps its own meaning for `targets` and never feeds this.
     ability_targets: Option<ParkedTargets<'_>>,
-) -> i32 {
+) -> HalfSigned {
     // CR 614.12 + CR 614.1c: a quantity read for an ENTERING object's replacement
     // counts the pre-entry rules view, in which a permanent entering in the same
     // simultaneous event has no static effect yet (a co-entering March of the
@@ -5021,7 +5161,7 @@ fn resolve_ref(
                 crate::game::engine_replacement::pre_entry_rules_view(state, snapshot)
             })
         {
-            return resolve_ref(
+            return resolve_ref_exact(
                 &view,
                 qty,
                 controller,
@@ -5033,6 +5173,103 @@ fn resolve_ref(
             );
         }
     }
+    match qty {
+        QuantityRef::LifeTotal { player: scope } => {
+            match resolve_single_player_scope(
+                state,
+                scope,
+                controller,
+                ctx.clone(),
+                targets,
+                ability,
+            ) {
+                Some(pid) => crate::game::players::exact_team_life_total(state, pid),
+                None => {
+                    resolve_per_team_life_exact(state, scope, controller, ctx, targets, ability)
+                }
+            }
+        }
+        QuantityRef::LifeLost { player, window } => resolve_per_player_history_scalar_with(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            HalfSigned::ZERO,
+            HalfSigned::saturating_add,
+            |p| {
+                HalfSigned::from_half_magnitude(match window {
+                    TurnWindow::ThisTurn => p.exact_life_lost_this_turn(),
+                    TurnWindow::LastTurn => p.exact_life_lost_last_turn(),
+                })
+            },
+        ),
+        QuantityRef::LifeGainedThisTurn { player } => resolve_per_player_history_scalar_with(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            HalfSigned::ZERO,
+            HalfSigned::saturating_add,
+            |p| HalfSigned::from_half_magnitude(p.exact_life_gained_this_turn()),
+        ),
+        QuantityRef::Power { scope } => resolve_object_pt_exact(
+            state,
+            *scope,
+            ctx,
+            targets,
+            ability,
+            |obj| obj.exact_power(),
+            |lki| lki.exact_power(),
+        ),
+        QuantityRef::BasePower { scope } => resolve_object_pt_exact(
+            state,
+            *scope,
+            ctx,
+            targets,
+            ability,
+            |obj| {
+                obj.exact_layer_base_power()
+                    .or_else(|| obj.exact_base_power())
+            },
+            |lki| lki.exact_base_power(),
+        ),
+        QuantityRef::Toughness { scope } => resolve_object_pt_exact(
+            state,
+            *scope,
+            ctx,
+            targets,
+            ability,
+            |obj| obj.exact_toughness(),
+            |lki| lki.exact_toughness(),
+        ),
+        _ => HalfSigned::from_whole(resolve_ref_int(
+            state,
+            qty,
+            controller,
+            ctx,
+            targets,
+            chosen_x,
+            ability,
+            ability_targets,
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_ref_int(
+    state: &GameState,
+    qty: &QuantityRef,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    chosen_x: Option<u32>,
+    ability: Option<&ResolvedAbility>,
+    ability_targets: Option<ParkedTargets<'_>>,
+) -> i32 {
     let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
@@ -5111,23 +5348,8 @@ fn resolve_ref(
                 )
             })
         }
-        // CR 119 + CR 810.9a: a single player's life total reads the team's
-        // shared total in a team format; aggregate scopes fold over team
-        // totals (deduped). Off-team this is byte-identical (singleton teams,
-        // team_life_total == p.life). CR 810.9d confirms the per-team extremum.
-        QuantityRef::LifeTotal { player: scope } => {
-            match resolve_single_player_scope(
-                state,
-                scope,
-                controller,
-                ctx.clone(),
-                targets,
-                ability,
-            ) {
-                Some(pid) => crate::game::players::team_life_total(state, pid),
-                None => resolve_per_team_life(state, scope, controller, ctx, targets, ability),
-            }
-        }
+        // CR 119 + CR 810.9a + CR 102.3: handled in `resolve_ref_exact`.
+        QuantityRef::LifeTotal { .. } => unreachable!("handled in resolve_ref_exact"),
         // CR 106.4: floating mana of `color` (or any color) in the controller's
         // mana pool. Controller-scoped — `player` is the controller. Omnath,
         // Locus of Mana ("+1/+1 for each unspent green mana you have").
@@ -5259,25 +5481,8 @@ fn resolve_ref(
             })
             .map(u32_to_i32_saturating)
             .unwrap_or(0),
-        // CR 119.3 + CR 800.4i: Life lost this turn, including departed players,
-        // scoped via PlayerScope (Π-3).
-        //
-        // CR 500: `window` picks the live this-turn counter or the snapshot
-        // latched at the turn boundary (`life_lost_last_turn`).
-        QuantityRef::LifeLost { player, window } => resolve_per_player_history_scalar(
-            state,
-            player,
-            controller,
-            ctx,
-            targets,
-            ability,
-            |p| {
-                u32_to_i32_saturating(match window {
-                    TurnWindow::ThisTurn => p.life_lost_this_turn,
-                    TurnWindow::LastTurn => p.life_lost_last_turn,
-                })
-            },
-        ),
+        // CR 119.3 + CR 800.4i: handled in `resolve_ref_exact`.
+        QuantityRef::LifeLost { .. } => unreachable!("handled in resolve_ref_exact"),
         // CR 700.8: Number of creatures in `player`'s party. The maximum
         // assignment of creatures to the four party slots (Cleric/Rogue/
         // Warrior/Wizard) is computed per CR 700.8b for creatures with
@@ -5505,29 +5710,10 @@ fn resolve_ref(
                 _ => None,
             })
             .unwrap_or(0),
-        // CR 208.3 + CR 113.6: A creature's power/toughness from current state,
-        // falling back to Last Known Information if the source has left the
-        // battlefield. Scoped via ObjectScope (Π-6).
-        QuantityRef::Power { scope } => resolve_object_pt(
-            state,
-            *scope,
-            ctx,
-            targets,
-            ability,
-            |obj| obj.power,
-            |lki| lki.power,
-        ),
-        // CR 208.4b + CR 613.4a-b: base power is the current layer-7a/7b
-        // value, before counters and other power-modifying effects in layer 7c.
-        QuantityRef::BasePower { scope } => resolve_object_pt(
-            state,
-            *scope,
-            ctx,
-            targets,
-            ability,
-            |obj| obj.layer_base_power.or(obj.base_power),
-            |lki| lki.base_power,
-        ),
+        // CR 208.3 + CR 113.6 + CR 208.4b: handled in `resolve_ref_exact`.
+        QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Toughness { .. } => unreachable!("handled in resolve_ref_exact"),
         QuantityRef::Intensity {
             scope: ObjectScope::Source,
         } => i32::try_from(source_intensity(state, &ctx, ability)).unwrap_or(i32::MAX),
@@ -5540,15 +5726,6 @@ fn resolve_ref(
             |obj| Some(i32::try_from(obj.intensity).unwrap_or(i32::MAX)),
             // CR 608.2h: a referent that has left reads its last known intensity.
             |lki| Some(i32::try_from(lki.intensity).unwrap_or(i32::MAX)),
-        ),
-        QuantityRef::Toughness { scope } => resolve_object_pt(
-            state,
-            *scope,
-            ctx,
-            targets,
-            ability,
-            |obj| obj.toughness,
-            |lki| lki.toughness,
         ),
         QuantityRef::ObjectManaValue { scope } => {
             resolve_object_mana_value(state, *scope, ctx, targets, ability)
@@ -6662,17 +6839,8 @@ fn resolve_ref(
         QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
             usize_to_i32_saturating(p.bending_types_this_turn.len())
         }),
-        // CR 119.3 + CR 800.4i: Life gained this turn, including departed players,
-        // scoped via PlayerScope (Π-4).
-        QuantityRef::LifeGainedThisTurn { player } => resolve_per_player_history_scalar(
-            state,
-            player,
-            controller,
-            ctx,
-            targets,
-            ability,
-            |p| u32_to_i32_saturating(p.life_gained_this_turn),
-        ),
+        // CR 119.3 + CR 800.4i: handled in `resolve_ref_exact`.
+        QuantityRef::LifeGainedThisTurn { .. } => unreachable!("handled in resolve_ref_exact"),
         // CR 121.1 + CR 800.4i + CR 102.3: draw history keeps departed opponents,
         // but a teammate's draws are not an opponent's.
         QuantityRef::CardsDrawnThisTurn { player } => resolve_per_player_history_scalar(
@@ -8759,15 +8927,15 @@ fn resolve_mana_symbols_in_mana_cost(
 /// battlefield LKI snapshot (e.g. Scavenge reading a card in the graveyard).
 /// Identical guard ordering to the `ObjectScope::Target` arm of
 /// `resolve_object_pt`.
-fn read_object_pt_by_id<F, G>(
+fn read_object_pt_by_id<T, F, G>(
     state: &GameState,
     id: ObjectId,
     obj_extract: &F,
     lki_extract: &G,
-) -> Option<i32>
+) -> Option<T>
 where
-    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
-    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+    F: Fn(&crate::game::game_object::GameObject) -> Option<T>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<T>,
 {
     read_object_pt_by_id_for_incarnation(state, id, None, obj_extract, lki_extract)
 }
@@ -8873,15 +9041,15 @@ fn trigger_event_source_identity(
 /// information, which is exact after the step's `lki_cache` is cleared and
 /// after a same-id object has returned; other events use the guarded
 /// identity read.
-fn read_trigger_event_source_pt<F, G>(
+fn read_trigger_event_source_pt<T, F, G>(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
     obj_extract: &F,
     lki_extract: &G,
-) -> Option<i32>
+) -> Option<T>
 where
-    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
-    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+    F: Fn(&crate::game::game_object::GameObject) -> Option<T>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<T>,
 {
     match departure_lookback(state, ability) {
         DepartureLookback::Present(context) => return lki_extract(&context.lki),
@@ -8912,6 +9080,56 @@ where
     F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
+    resolve_object_pt_opt(
+        state,
+        scope,
+        ctx,
+        targets,
+        ability,
+        &obj_extract,
+        &lki_extract,
+    )
+    .unwrap_or(0)
+}
+
+fn resolve_object_pt_exact<F, G>(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    obj_extract: F,
+    lki_extract: G,
+) -> HalfSigned
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<HalfSigned>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<HalfSigned>,
+{
+    resolve_object_pt_opt(
+        state,
+        scope,
+        ctx,
+        targets,
+        ability,
+        &obj_extract,
+        &lki_extract,
+    )
+    .unwrap_or(HalfSigned::ZERO)
+}
+
+fn resolve_object_pt_opt<T, F, G>(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    obj_extract: &F,
+    lki_extract: &G,
+) -> Option<T>
+where
+    F: Fn(&crate::game::game_object::GameObject) -> Option<T>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<T>,
+{
     match scope {
         // CR 608.2h: a source's P/T is read from the zone the ability EXPECTS it
         // in. The expected zone differs by how the ability reached the stack:
@@ -8940,13 +9158,11 @@ where
         // direct unit reads) defaults to the look-back read.
         ObjectScope::Source => {
             if ctx.trigger_source.is_some() {
-                return source_lki_for_context(state, &ctx)
-                    .and_then(|lki| lki_extract(&lki))
-                    .unwrap_or(0);
+                return source_lki_for_context(state, &ctx).and_then(|lki| lki_extract(&lki));
             }
             let expects_battlefield = ability.is_none_or(|a| a.trigger_source.is_some());
             if expects_battlefield {
-                read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
+                read_object_pt_by_id(state, ctx.source, obj_extract, lki_extract)
             } else if let Some(incarnation) = ability
                 .and_then(|a| a.source_incarnation)
                 // CR 400.7 + CR 602.2a: a snapshot at the captured incarnation
@@ -8972,17 +9188,15 @@ where
                     state,
                     ctx.source,
                     Some(incarnation),
-                    &obj_extract,
-                    &lki_extract,
+                    obj_extract,
+                    lki_extract,
                 )
-                .unwrap_or(0)
             } else {
                 state
                     .objects
                     .get(&ctx.source)
-                    .and_then(&obj_extract)
-                    .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
-                    .unwrap_or(0)
+                    .and_then(obj_extract)
+                    .or_else(|| state.lki_cache.get(&ctx.source).and_then(lki_extract))
             }
         }
         // CR 608.2h: once a targeted object has left the battlefield, its power
@@ -9002,12 +9216,12 @@ where
         // no information at all: "If part of the effect requires information
         // about an illegal target, it fails to determine any such information."
         ObjectScope::Target => match ability.and_then(|a| a.context.target_damage_source) {
-            Some(TargetDamageSourceBinding::Illegal) => 0,
+            Some(TargetDamageSourceBinding::Illegal) => None,
             Some(TargetDamageSourceBinding::Bound) => match targets.first() {
                 Some(TargetRef::Object(id)) => {
-                    read_object_pt_by_id(state, *id, &obj_extract, &lki_extract).unwrap_or(0)
+                    read_object_pt_by_id(state, *id, obj_extract, lki_extract)
                 }
-                _ => 0,
+                _ => None,
             },
             None => targets
                 .iter()
@@ -9015,32 +9229,26 @@ where
                     TargetRef::Object(id) => Some(*id),
                     _ => None,
                 })
-                .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
-                .unwrap_or(0),
+                .and_then(|id| read_object_pt_by_id(state, id, obj_extract, lki_extract)),
         },
         // CR 608.2h: the recipient ("that creature") may have left the
         // battlefield before resolution; prefer its buffed LKI over a base-only
         // live read via the shared guarded read.
         ObjectScope::Recipient => object_id_for_scope(state, ObjectScope::Recipient, ctx, targets)
-            .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
-            .unwrap_or(0),
+            .and_then(|id| read_object_pt_by_id(state, id, obj_extract, lki_extract)),
         // CR 608.2h + CR 603.10a: the triggering-event source ("this creature
         // dies, ... its power"). When the source has left the battlefield, prefer
         // its buffed LKI over a base-only live read via the shared guarded read.
         ObjectScope::EventSource => {
-            read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract).unwrap_or(0)
+            read_trigger_event_source_pt(state, ability, obj_extract, lki_extract)
         }
         // CR 603.2 + CR 208.1: the power/toughness of the object that received
         // the triggering damage ("that creature's toughness"). Same guarded
         // live-then-LKI resolution as `EventSource`, keyed on the recipient
         // object (CR 608.2h).
         ObjectScope::EventTarget => {
-            let Some(object_id) =
-                object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)
-            else {
-                return 0;
-            };
-            read_object_pt_by_id(state, object_id, &obj_extract, &lki_extract).unwrap_or(0)
+            let object_id = object_id_for_scope(state, ObjectScope::EventTarget, ctx, targets)?;
+            read_object_pt_by_id(state, object_id, obj_extract, lki_extract)
         }
         // CR 608.2k: An ability's effect referring to a specific untargeted
         // object previously referred to by that ability's cost OR trigger
@@ -9085,9 +9293,8 @@ where
                 // record's incarnation prevents a blinked object from reading
                 // the re-entered permanent's live P/T instead of original LKI.
                 // Slots 1 and 2 (snapshot-only) are unchanged.
-                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
-            })
-            .unwrap_or(0),
+                read_trigger_event_source_pt(state, ability, obj_extract, lki_extract)
+            }),
         // CR 608.2c: A demonstrative noun phrase ("that creature's toughness")
         // binds to the object introduced by the most recent earlier *effect
         // instruction* in the same ability (slot 1: `effect_context_object`).
@@ -9106,20 +9313,19 @@ where
             .and_then(|a| a.effect_context_object.as_ref())
             .and_then(|snapshot| {
                 lki_extract(&snapshot.lki).or_else(|| {
-                    read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
+                    read_object_pt_by_id(state, snapshot.object_id, obj_extract, lki_extract)
                 })
             })
             .or_else(|| {
                 // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
                 // ETB incarnation identity. Slots 1 and 3 are unchanged.
-                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
+                read_trigger_event_source_pt(state, ability, obj_extract, lki_extract)
             })
             .or_else(|| {
                 ability
                     .and_then(|a| a.cost_paid_object.as_ref())
                     .and_then(|snapshot| lki_extract(&snapshot.lki))
-            })
-            .unwrap_or(0),
+            }),
         // CR 701.47c + CR 608.2h: "the amassed Army's power/toughness" reads
         // the Army chosen by the current amass instruction. The ability carrier
         // provides identity plus a final snapshot fallback; the live/LKI helper
@@ -9140,12 +9346,11 @@ where
                     state,
                     snapshot.object_id,
                     Some(snapshot.incarnation),
-                    &obj_extract,
-                    &lki_extract,
+                    obj_extract,
+                    lki_extract,
                 )
                 .or_else(|| lki_extract(&snapshot.lki))
-            })
-            .unwrap_or(0),
+            }),
         // CR 608.2c: An anaphoric pronoun ("its power"). Shares the
         // `Demonstrative` referent chain (earlier instruction → trigger-event
         // source → cost referent), plus one extra final fallback for the
@@ -9160,7 +9365,7 @@ where
                 // `CostPaidObject` / `Demonstrative` slots, so a phase-delayed
                 // payload reads its creation departure (CR 603.7 + CR 603.10a).
                 // Slots 1 and 3 (snapshot-only) are unchanged.
-                read_trigger_event_source_pt(state, ability, &obj_extract, &lki_extract)
+                read_trigger_event_source_pt(state, ability, obj_extract, lki_extract)
             })
             .or_else(|| {
                 ability
@@ -9194,19 +9399,18 @@ where
                     // CR 608.2h: guarded live-then-LKI read so a fight source
                     // that has left the battlefield still reports its P/T.
                     TargetRef::Object(id) => {
-                        read_object_pt_by_id(state, *id, &obj_extract, &lki_extract)
+                        read_object_pt_by_id(state, *id, obj_extract, lki_extract)
                     }
                     _ => None,
                 })
-            })
-            .unwrap_or(0),
+            }),
         // CR 608.2c: MV-only class today ({Parker Luck, Keen Duelist} reference
         // only the OTHER revealed card's mana value). No card reads its power or
         // toughness, so this is a fail-closed placeholder. Extend by mirroring the
         // `last_revealed_ids` by-exclusion read in `resolve_object_mana_value`.
-        ObjectScope::OtherRevealedCard => 0,
+        ObjectScope::OtherRevealedCard => None,
         // MV-only referent; no P/T semantics.
-        ObjectScope::OwnedLinkedExileCard => 0,
+        ObjectScope::OwnedLinkedExileCard => None,
         // CR 601.2c: `ChainRootTarget` is produced only for
         // `QuantityRef::CountersOn` today (Dismantle / Rite of the Serpent). No
         // card reads the chain-root target's P/T, so this is a fail-closed
@@ -9214,10 +9418,10 @@ where
         // `resolve_counters_on_scope` arm against
         // `ability.context.chain_root_targets`; `game/coverage.rs` reports these
         // characteristic readers as `Unhandled` until then.
-        ObjectScope::ChainRootTarget => 0,
+        ObjectScope::ChainRootTarget => None,
         // CR 201.5a: the stamped granter's P/T; unbound, no referent.
-        ObjectScope::GrantingObject => granter_scope(ability, &ctx).map_or(0, |scope| {
-            resolve_object_pt(
+        ObjectScope::GrantingObject => granter_scope(ability, &ctx).and_then(|scope| {
+            resolve_object_pt_opt(
                 state,
                 scope,
                 ctx,
@@ -9229,7 +9433,7 @@ where
         }),
         // CR 400.7 + CR 608.2h: the bound incarnation's P/T, LKI only while resolving.
         ObjectScope::SpecificObject { object } => {
-            read_specific_object(state, object, ability, &obj_extract, &lki_extract).unwrap_or(0)
+            read_specific_object(state, object, ability, obj_extract, lki_extract)
         }
         // CR 120.1 + CR 208.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN characteristic ("deals
@@ -9238,8 +9442,7 @@ where
         // pre-leave power), mirroring the `Recipient` arm.
         ObjectScope::BatchSource => {
             object_id_for_scope(state, ObjectScope::BatchSource, ctx, targets)
-                .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
-                .unwrap_or(0)
+                .and_then(|id| read_object_pt_by_id(state, id, obj_extract, lki_extract))
         }
     }
 }
@@ -9706,14 +9909,20 @@ fn resolve_per_player_scalar<F>(
 where
     F: FnMut(&crate::types::player::Player) -> i32,
 {
-    resolve_per_zone_scalar(
-        state, None, scope, controller, ctx, targets, ability, extract,
+    resolve_per_zone_scalar_with(
+        state,
+        None,
+        scope,
+        controller,
+        ctx,
+        targets,
+        ability,
+        0,
+        i32::saturating_add,
+        extract,
     )
 }
 
-/// `resolve_per_player_scalar` for a scalar read from a zone container: with `Some(zone)`,
-/// the `Opponent` / `AllPlayers` population counts seats that read one shared container once
-/// (CR 400.1 as modified by the format's shared-zone axis).
 #[allow(clippy::too_many_arguments)]
 fn resolve_per_zone_scalar<F>(
     state: &GameState,
@@ -9723,29 +9932,64 @@ fn resolve_per_zone_scalar<F>(
     ctx: QuantityContext,
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
-    mut extract: F,
+    extract: F,
 ) -> i32
 where
     F: FnMut(&crate::types::player::Player) -> i32,
+{
+    resolve_per_zone_scalar_with(
+        state,
+        zone,
+        scope,
+        controller,
+        ctx,
+        targets,
+        ability,
+        0,
+        i32::saturating_add,
+        extract,
+    )
+}
+
+/// `resolve_per_player_scalar` for a scalar read from a zone container: with `Some(zone)`,
+/// the `Opponent` / `AllPlayers` population counts seats that read one shared container once
+/// (CR 400.1 as modified by the format's shared-zone axis).
+#[allow(clippy::too_many_arguments)]
+fn resolve_per_zone_scalar_with<T, F, A>(
+    state: &GameState,
+    zone: Option<Zone>,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    zero: T,
+    add: A,
+    mut extract: F,
+) -> T
+where
+    T: Copy + Ord,
+    F: FnMut(&crate::types::player::Player) -> T,
+    A: FnMut(T, T) -> T,
 {
     match scope {
         PlayerScope::Controller => state
             .players
             .iter()
             .find(|p| p.id == controller)
-            .map_or(0, &mut extract),
+            .map_or(zero, &mut extract),
         PlayerScope::ScopedPlayer => state
             .players
             .iter()
             .find(|p| p.id == ctx.scoped_player.unwrap_or(controller))
-            .map_or(0, &mut extract),
+            .map_or(zero, &mut extract),
         PlayerScope::Target => targets
             .iter()
             .find_map(|t| match t {
                 TargetRef::Player(pid) => state.players.iter().find(|p| p.id == *pid),
                 _ => None,
             })
-            .map_or(0, &mut extract),
+            .map_or(zero, &mut extract),
         PlayerScope::RecipientController => {
             let object_id = ctx.recipient.or_else(|| {
                 targets.iter().find_map(|target| match target {
@@ -9758,30 +10002,30 @@ where
                 .or_else(|| source_controller_for_context(state, &ctx));
             recipient_controller
                 .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-                .map_or(0, &mut extract)
+                .map_or(zero, &mut extract)
         }
         PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-            .map_or(0, &mut extract),
+            .map_or(zero, &mut extract),
         // CR 109.4 + CR 608.2c: controller of the parent object target.
         PlayerScope::ParentObjectTarget {
             possession: PossessionAxis::Controller,
         } => ability
             .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-            .map_or(0, &mut extract),
+            .map_or(zero, &mut extract),
         // CR 108.3 + CR 608.2c: owner of the parent object target.
         PlayerScope::ParentObjectTarget {
             possession: PossessionAxis::Owner,
         } => ability
             .and_then(|a| crate::game::ability_utils::parent_target_owner(a, state))
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-            .map_or(0, &mut extract),
+            .map_or(zero, &mut extract),
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
         PlayerScope::SourceChosenPlayer => source_chosen_player_for_context(state, &ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-            .map_or(0, &mut extract),
+            .map_or(zero, &mut extract),
         // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
         // excluded from the aggregate population, same as
         // `resolve_player_count`'s candidate loop (outside its life-history
@@ -9790,7 +10034,7 @@ where
         // remaining, still-in-the-game players (Sokenzan Renegade: an
         // eliminated player's larger hand must not out-rank the live
         // leader).
-        PlayerScope::Opponent { aggregate } => aggregate_over_players(
+        PlayerScope::Opponent { aggregate } => aggregate_over_players_with(
             distinct_zone_holders(
                 state,
                 zone,
@@ -9800,6 +10044,8 @@ where
                     .filter(|p| p.id != controller && !p.is_eliminated),
             ),
             *aggregate,
+            zero,
+            add,
             &mut extract,
         ),
         // CR 102.1 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
@@ -9809,7 +10055,7 @@ where
             let excluded_id = exclude.as_deref().and_then(|ex| {
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
-            aggregate_over_players(
+            aggregate_over_players_with(
                 distinct_zone_holders(
                     state,
                     zone,
@@ -9819,6 +10065,8 @@ where
                         .filter(|p| Some(p.id) != excluded_id && !p.is_eliminated),
                 ),
                 *aggregate,
+                zero,
+                add,
                 &mut extract,
             )
         }
@@ -9850,34 +10098,68 @@ fn resolve_per_player_history_scalar<F>(
     ctx: QuantityContext,
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
-    mut extract: F,
+    extract: F,
 ) -> i32
 where
     F: FnMut(&crate::types::player::Player) -> i32,
 {
+    resolve_per_player_history_scalar_with(
+        state,
+        scope,
+        controller,
+        ctx,
+        targets,
+        ability,
+        0,
+        i32::saturating_add,
+        extract,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_per_player_history_scalar_with<T, F, A>(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    zero: T,
+    add: A,
+    mut extract: F,
+) -> T
+where
+    T: Copy + Ord,
+    F: FnMut(&crate::types::player::Player) -> T,
+    A: FnMut(T, T) -> T,
+{
     match scope {
         // CR 102.3: opponents are the players not on the controller's team, so
         // a Two-Headed Giant teammate's action tally never counts.
-        PlayerScope::Opponent { aggregate } => aggregate_over_players(
+        PlayerScope::Opponent { aggregate } => aggregate_over_players_with(
             state
                 .players
                 .iter()
                 .filter(|p| crate::game::players::is_opponent(state, controller, p.id)),
             *aggregate,
+            zero,
+            add,
             &mut extract,
         ),
         PlayerScope::AllPlayers { aggregate, exclude } => {
             let excluded_id = exclude.as_deref().and_then(|ex| {
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
-            aggregate_over_players(
+            aggregate_over_players_with(
                 state.players.iter().filter(|p| Some(p.id) != excluded_id),
                 *aggregate,
+                zero,
+                add,
                 &mut extract,
             )
         }
         // Single-player scopes name one player; whether that player is still
-        // in the game is `resolve_per_player_scalar`'s question.
+        // in the game is `resolve_per_zone_scalar_with`'s question.
         PlayerScope::Controller
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
@@ -9886,9 +10168,9 @@ where
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
         | PlayerScope::AnyTurn
-        | PlayerScope::SpecificPlayer { .. } => {
-            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, extract)
-        }
+        | PlayerScope::SpecificPlayer { .. } => resolve_per_zone_scalar_with(
+            state, None, scope, controller, ctx, targets, ability, zero, add, extract,
+        ),
     }
 }
 
@@ -10045,21 +10327,21 @@ pub(crate) fn defending_player_for_quantity_context_for_test(
 /// handled by the `Some(pid)` branch of the LifeTotal arm). A non-aggregate
 /// scope that failed to resolve a single player returns 0, preserving the
 /// pre-fix `map_or(0)` fallback.
-fn resolve_per_team_life(
+fn resolve_per_team_life_exact(
     state: &GameState,
     scope: &PlayerScope,
     controller: PlayerId,
     ctx: QuantityContext,
     targets: &[TargetRef],
     ability: Option<&ResolvedAbility>,
-) -> i32 {
+) -> HalfSigned {
     match scope {
         // CR 102.2 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
         // opponents' teams still in the game. An eliminated player's
         // `team_life_total` reads 0 (`shared_life_members` returns empty
         // for a departed player off-2HG), so leaving them in this fold lets
         // 0 win a `Min` read below every live player's actual life.
-        PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
+        PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams_exact(
             state,
             state
                 .players
@@ -10075,7 +10357,7 @@ fn resolve_per_team_life(
             let excluded_id = exclude.as_deref().and_then(|ex| {
                 resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
             });
-            crate::game::players::aggregate_over_teams(
+            crate::game::players::aggregate_over_teams_exact(
                 state,
                 state
                     .players
@@ -10085,25 +10367,47 @@ fn resolve_per_team_life(
                 *aggregate,
             )
         }
-        _ => 0,
+        _ => HalfSigned::ZERO,
     }
 }
 
-/// CR 107.3e: Reduce a player iterator to a single i32 by aggregate function.
-/// Returns 0 for an empty iterator (mirrors the prior `OpponentLifeTotal`
+/// CR 107.3e: Reduce a player iterator to a single scalar by aggregate function.
+/// Returns `zero` for an empty iterator (mirrors the prior `OpponentLifeTotal`
 /// `.unwrap_or(0)` semantics — there is always at least one opponent in a
 /// real game, but a 1-player test harness should not panic).
-fn aggregate_over_players<'a, I, F>(players: I, aggregate: AggregateFunction, mut extract: F) -> i32
+fn aggregate_over_players<'a, I, F>(players: I, aggregate: AggregateFunction, extract: F) -> i32
 where
     I: IntoIterator<Item = &'a crate::types::player::Player>,
     F: FnMut(&crate::types::player::Player) -> i32,
 {
+    aggregate_over_players_with(
+        players,
+        aggregate,
+        0,
+        |acc, x| acc.saturating_add(x),
+        extract,
+    )
+}
+
+fn aggregate_over_players_with<'a, T, I, F, A>(
+    players: I,
+    aggregate: AggregateFunction,
+    zero: T,
+    mut add: A,
+    mut extract: F,
+) -> T
+where
+    T: Copy + Ord,
+    I: IntoIterator<Item = &'a crate::types::player::Player>,
+    F: FnMut(&crate::types::player::Player) -> T,
+    A: FnMut(T, T) -> T,
+{
     let values = players.into_iter().map(&mut extract);
     match aggregate {
-        AggregateFunction::Max => values.max().unwrap_or(0),
-        AggregateFunction::Min => values.min().unwrap_or(0),
+        AggregateFunction::Max => values.max().unwrap_or(zero),
+        AggregateFunction::Min => values.min().unwrap_or(zero),
         // CR 107.1: Individually representable tallies can overflow when summed.
-        AggregateFunction::Sum => sum_saturating_i32(values),
+        AggregateFunction::Sum => values.fold(zero, &mut add),
     }
 }
 
@@ -11700,6 +12004,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -14941,6 +15249,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         let expr = QuantityExpr::Ref {
@@ -18520,24 +18830,32 @@ mod tests {
                 source_amounts: vec![(ObjectId(11), 4)],
                 total_damage: 4,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(2),
                 source_amounts: vec![(ObjectId(12), 9)],
                 total_damage: 9,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(13), 2)],
                 total_damage: 2,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(0),
                 source_amounts: vec![(ObjectId(14), 7)],
                 total_damage: 7,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
         ];
 
@@ -22246,6 +22564,10 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         state
             .lki_by_incarnation
@@ -24937,6 +25259,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -25022,6 +25346,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -25044,6 +25370,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -25079,6 +25407,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -25102,6 +25432,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -25126,6 +25458,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -25231,6 +25565,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         state.last_effect_count = Some(5);
         let expr = QuantityExpr::Ref {
@@ -25360,6 +25696,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::Power {
@@ -25402,6 +25740,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
         state.current_trigger_event = Some(crate::types::events::GameEvent::CreatureDestroyed {
@@ -25470,6 +25812,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         });
@@ -25583,6 +25929,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         let mut ability = ResolvedAbility::new(
@@ -25623,6 +25971,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         });
@@ -25672,6 +26024,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         let mut ability = ResolvedAbility::new(
@@ -25707,6 +26061,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         });
@@ -25789,6 +26147,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         });
@@ -25857,6 +26219,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         };
@@ -25922,6 +26288,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         });
@@ -25980,6 +26350,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         };
@@ -26061,6 +26435,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         };
@@ -26772,6 +27150,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -27602,6 +27984,10 @@ mod tests {
                     was_prepared: false,
                     attachments: Vec::new(),
                     intensity: 0,
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
+                    base_power_fraction: Default::default(),
+                    base_toughness_fraction: Default::default(),
                 },
             );
             state.exile_links.push(ExileLink {
@@ -29280,6 +29666,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         // No targets: an untargeted damage trigger, which is exactly the shape

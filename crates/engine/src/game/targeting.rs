@@ -4859,6 +4859,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: Some(3),
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
         ];
         for event in &events {
@@ -5221,6 +5223,8 @@ mod tests {
             source_amounts: vec![(ObjectId(1), 7)],
             total_damage: 7,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
     }
@@ -5233,6 +5237,8 @@ mod tests {
             source_amounts: vec![(ObjectId(1), 3)],
             total_damage: 3,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
@@ -7695,6 +7701,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let result = extract_player_from_event(&event, &state);
         // Should return the damaged player (PlayerId(1)), not the source's controller.
@@ -7719,6 +7727,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));

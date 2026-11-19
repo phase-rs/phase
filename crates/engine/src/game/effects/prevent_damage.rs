@@ -1715,6 +1715,7 @@ mod tests {
             amount: 3,
             is_combat: true,
             applied: std::collections::HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut pass =
             crate::game::replacement::CombatDamageReplacementPass::new(&state, [proposed]);
@@ -1735,7 +1736,7 @@ mod tests {
             "all 3 combat damage prevented"
         );
         // CR 615.7: the shield aggregated 3 prevented damage.
-        let total: i32 = tally.values().sum();
+        let total: i32 = tally.values().map(|m| m.whole_floor() as i32).sum();
         assert_eq!(total, 3);
 
         // CR 615.5: fire the rider once against the aggregate prevented amount.
@@ -1745,7 +1746,7 @@ mod tests {
             .cloned()
             .map(Box::new)
             .unwrap();
-        state.last_effect_count = Some(prevented);
+        state.last_effect_count = Some(prevented.whole_floor() as i32);
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(runtime),
         );

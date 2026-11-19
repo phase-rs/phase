@@ -5376,8 +5376,14 @@ mod tests {
                         .properties(vec![FilterProp::EnchantedBy]),
                 ))
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 2 },
-                    ContinuousModification::AddToughness { value: 0 },
+                    ContinuousModification::AddPower {
+                        value: 2,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 0,
+                        fraction: Default::default(),
+                    },
                     ContinuousModification::AddKeyword {
                         keyword: Keyword::Trample,
                     },

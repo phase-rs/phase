@@ -2686,6 +2686,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: Some(state.objects[&dealer].incarnation),
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         let stale = damage(&state);
@@ -2738,6 +2740,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: Some(dealer_epoch),
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let ability = ResolvedAbility::new(
             Effect::BecomePrepared {
@@ -2985,6 +2989,8 @@ mod tests {
                 casting_options: Vec::new(),
                 layout_kind: Some(LayoutKind::Prepare),
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             }
         }
 
