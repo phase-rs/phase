@@ -26,6 +26,7 @@ fn setup_board(
         scenario.add_real_card(P0, "Birds of Paradise", Zone::Battlefield, db);
         scenario.add_real_card(P0, "Abattoir Ghoul", Zone::Hand, db);
     } else if opponent_has_first_strike {
+        scenario.add_real_card(P0, "Birds of Paradise", Zone::Battlefield, db);
         scenario.add_real_card(P1, "Abattoir Ghoul", Zone::Hand, db);
     }
     for _ in 0..8 {
@@ -66,7 +67,7 @@ fn sproutwatch_dryad_does_not_read_opponents_hand() {
     resolve_begin_combat(&mut runner);
 
     let object = &runner.state().objects[&dryad];
-    assert!(!object.has_keyword(&Keyword::Flying));
+    assert!(object.has_keyword(&Keyword::Flying));
     assert!(!object.has_keyword(&Keyword::FirstStrike));
 }
 

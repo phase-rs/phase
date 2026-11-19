@@ -104846,28 +104846,54 @@ fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
     assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
     assert_eq!(static_abilities.len(), 12);
 
-    for static_ability in static_abilities {
-        let keyword = static_ability
-            .modifications
-            .iter()
-            .find_map(|modification| match modification {
-                ContinuousModification::AddKeyword { keyword } => Some(keyword),
-                _ => None,
+    let expected_keywords = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Haste,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Lifelink,
+        Keyword::Menace,
+        Keyword::Reach,
+        Keyword::Trample,
+        Keyword::Vigilance,
+    ];
+    for (static_ability, expected_keyword) in static_abilities.iter().zip(expected_keywords.iter())
+    {
+        assert_eq!(
+            static_ability.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: expected_keyword.clone(),
+            }]
+        );
+        assert_eq!(
+            static_ability.condition.as_ref(),
+            Some(&StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::WithKeyword {
+                                    value: expected_keyword.clone(),
+                                }]),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::card()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone { zone: Zone::Hand },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                    ],
+                }),
             })
-            .expect("every grant must add its keyword");
-        let Some(StaticCondition::IsPresent {
-            filter: Some(TargetFilter::Or { filters }),
-        }) = static_ability.condition.as_ref()
-        else {
-            panic!("grant lacks the typed shared-predicate condition: {static_ability:?}");
-        };
-        assert_eq!(filters.len(), 2);
-        assert!(filters.iter().all(|filter| match filter {
-            TargetFilter::Typed(typed) => typed.properties.iter().any(
-                |property| matches!(property, FilterProp::WithKeyword { value } if value == keyword),
-            ),
-            _ => false,
-        }));
+        );
         assert!(static_ability
             .description
             .as_deref()
