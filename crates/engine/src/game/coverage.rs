@@ -10695,6 +10695,7 @@ fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> 
             target,
         } => picks_a_target(target) || effect_offers_choice(effect),
         Effect::Token {
+            enters_blocking: _,
             name: _,
             power: _,
             toughness: _,
@@ -10890,6 +10891,7 @@ fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> 
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }

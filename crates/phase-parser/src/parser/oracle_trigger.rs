@@ -14398,27 +14398,24 @@ pub fn parse_trigger_condition(
     } else {
         GraveyardHeadOrigins::SingleBattlefieldExclusion
     };
-    if let Some((mode, mut def)) =
-        try_parse_event(
-            &subject,
-            subject_text,
-            event_rest,
-            &lower,
-            graveyard_origins,
-            ctx,
-        )
-            // CR 509.3e + CR 603.2c: a blocker-count tail consumes its own "one or
-            // more" (Hedron Blade's "by one or more colorless creatures"), so
-            // batching is read from the subject alone. A batched SUBJECT with a
-            // count tail fires per attacker under CR 509.3e, not per batch, and
-            // has no printed card: leave it unparsed.
-            .filter(|(_, def)| {
-                def.blocker_count.is_none() || !scan_contains(subject_text, "one or more ")
-            })
-            // CR 508.1b: an attacked-player subject is read only by the
-            // becomes-blocked matcher (through `attack_target_filter`); every
-            // other event would ignore half of it, so it stays unparsed.
-            .filter(|(mode, _)| !attacking_player_subject || *mode == TriggerMode::BecomesBlocked)
+    if let Some((mode, mut def)) = try_parse_event(
+        &subject,
+        subject_text,
+        event_rest,
+        &lower,
+        graveyard_origins,
+        ctx,
+    )
+    // CR 509.3e + CR 603.2c: a blocker-count tail consumes its own "one or
+    // more" (Hedron Blade's "by one or more colorless creatures"), so
+    // batching is read from the subject alone. A batched SUBJECT with a
+    // count tail fires per attacker under CR 509.3e, not per batch, and
+    // has no printed card: leave it unparsed.
+    .filter(|(_, def)| def.blocker_count.is_none() || !scan_contains(subject_text, "one or more "))
+    // CR 508.1b: an attacked-player subject is read only by the
+    // becomes-blocked matcher (through `attack_target_filter`); every
+    // other event would ignore half of it, so it stays unparsed.
+    .filter(|(mode, _)| !attacking_player_subject || *mode == TriggerMode::BecomesBlocked)
     {
         if attacking_player_subject {
             // CR 508.1b: "attacking you / one of your opponents" names a PLAYER

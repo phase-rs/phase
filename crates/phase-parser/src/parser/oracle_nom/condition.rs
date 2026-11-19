@@ -5083,6 +5083,8 @@ pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreT
         TypeFilter::Battle => Some(CoreType::Battle),
         // CR 308.1: Kindred maps to its core type.
         TypeFilter::Kindred => Some(CoreType::Kindred),
+        // CR 314.1: scheme is a card type.
+        TypeFilter::Scheme => Some(CoreType::Scheme),
         TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any

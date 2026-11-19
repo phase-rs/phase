@@ -42581,6 +42581,7 @@ fn premonition_of_your_demise_full_oracle_parses_reveal_damage_reflexive() {
             QuantityRef::FilteredTrackedSetSize {
                 filter,
                 caused_by: None,
+                destination: None,
             },
     } = guard.0
     else {

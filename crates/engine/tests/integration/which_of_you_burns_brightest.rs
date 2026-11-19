@@ -198,7 +198,9 @@ fn resolve_burns(runner: &mut GameRunner, target: TargetRef, pay: bool, x: u32) 
             WaitingFor::OptionalCostChoice { .. } => {
                 prompts.pay_offers += 1;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
                     .expect("pay decision must be accepted");
             }
             WaitingFor::ChooseXValue { .. } => {

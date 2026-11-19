@@ -1953,6 +1953,7 @@ fn reveal_top_gate_condition(filter: TargetFilter) -> AbilityCondition {
             qty: QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(filter),
                 caused_by: None,
+                destination: None,
             },
         },
         comparator: Comparator::GE,
@@ -55854,6 +55855,7 @@ fn parse_effect_chain_ir_body(
                         selection: crate::types::ability::CardSelectionMode::Chosen,
                         choice_optional: *choice_optional,
                         reveal: false,
+                        cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                     };
                     followup_continuation = None;
                 }

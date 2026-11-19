@@ -6981,6 +6981,7 @@ impl MovedObjectsSource {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -7467,6 +7468,7 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -7772,6 +7774,7 @@ fn node_with_entry_modifications(
         // `entry_observation_deferred`) is `GenericEffect`, `Animate`, `ReturnAsAura` and
         // `ApplyPerpetual`. Exhaustive, so a new `Effect` variant must be classified here.
         Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::Adapt { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }
@@ -26094,6 +26097,7 @@ fn resolve_chain_body(
                     TrackedSetPublicationInput::ResolvedEvents {
                         ability: &per_target,
                         events: &[],
+                        selection: &[],
                     },
                 );
                 if let Some(after_fanout) = after_fanout {
@@ -26178,6 +26182,7 @@ fn resolve_chain_body(
                         TrackedSetPublicationInput::ResolvedEvents {
                             ability: &narrowed,
                             events: &events[seat_events_start..],
+                            selection: &[],
                         },
                     );
                 }
@@ -65533,6 +65538,7 @@ mod tests {
 
         let token = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Myr".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -67527,6 +67533,7 @@ mod tests {
         );
 
         let make_cat = || Effect::Token {
+            enters_blocking: None,
             name: "Cat".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -72261,6 +72268,7 @@ mod resolution_progress_contract_tests {
             );
             let effect = if token {
                 Effect::Token {
+                    enters_blocking: None,
                     attack_destination:
                         crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".into(),

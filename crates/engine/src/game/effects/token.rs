@@ -1976,7 +1976,7 @@ fn apply_create_token_batch(
         // blocker. The attacker resolved once at propose time; every created
         // token blocks it (the Mirror Match shared path).
         if let Some(attacker) = spec.blocking_attacker {
-            crate::game::combat::place_blocking(state, obj_id, attacker);
+            crate::game::combat::place_blocking(state, obj_id, attacker, events);
         }
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
@@ -8330,6 +8330,7 @@ mod tests {
             "the Gingerbrute preset must carry its {{1}} cost reminder"
         );
         let spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Gingerbrute".to_string(),
                 power: Some(1),
@@ -10068,6 +10069,7 @@ mod tests {
         host: TokenHostRequest,
     ) -> ProposedEvent {
         let spec = TokenSpec {
+            blocking_attacker: None,
             characteristics: TokenCharacteristics {
                 display_name: "Probe Curse".to_string(),
                 power: Some(0),

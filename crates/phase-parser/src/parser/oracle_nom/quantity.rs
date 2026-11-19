@@ -898,6 +898,7 @@ fn parse_number_of_cards_that_player_discarded(input: &str) -> OracleResult<'_, 
                 }],
             })),
             caused_by: Some(ThisWayCause::Discarded),
+            destination: None,
         },
     ))
 }
