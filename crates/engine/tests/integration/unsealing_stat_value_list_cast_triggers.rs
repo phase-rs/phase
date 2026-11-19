@@ -147,6 +147,33 @@ fn mana_units(ty: ManaType, count: u32) -> impl Iterator<Item = ManaUnit> {
     (0..count).map(move |_| ManaUnit::new(ty, ObjectId(0), false, Vec::new()))
 }
 
+/// Where a cast finished: the prompt the game waits on and the stack entries
+/// left, kept whole so a failure shows the actual prompt and stack.
+#[derive(Debug)]
+struct Settled {
+    waiting_for: WaitingFor,
+    stack: Vec<ObjectId>,
+}
+
+impl Settled {
+    fn of(state: &GameState) -> Self {
+        Settled {
+            waiting_for: state.waiting_for.clone(),
+            stack: state.stack.iter().map(|entry| entry.id).collect(),
+        }
+    }
+
+    /// The cast and every trigger it caused resolved: an empty stack and a
+    /// priority window.
+    fn assert_at_priority(&self, observation: &impl std::fmt::Debug) {
+        assert!(
+            matches!(self.waiting_for, WaitingFor::Priority { .. }),
+            "{observation:?}"
+        );
+        assert!(self.stack.is_empty(), "{observation:?}");
+    }
+}
+
 #[derive(Debug)]
 struct SarkhanObservation {
     triggers_on_stack: usize,
@@ -157,7 +184,7 @@ struct SarkhanObservation {
     p1_life_delta: i32,
     filler_zone: Zone,
     cast_zone: Zone,
-    stack_empty_at_priority: bool,
+    settled: Settled,
 }
 
 /// Cast a vanilla P0 creature of the given power (cost {R}) with Sarkhan's
@@ -218,8 +245,7 @@ fn cast_into_sarkhan(power: i32) -> SarkhanObservation {
         p1_life_delta: outcome.life_delta(P1),
         filler_zone: outcome.zone_of(filler),
         cast_zone: outcome.zone_of(spell),
-        stack_empty_at_priority: outcome.state().stack.is_empty()
-            && matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        settled: Settled::of(outcome.state()),
     }
 }
 
@@ -254,7 +280,7 @@ fn assert_four_five_six_fired_alone(observation: &SarkhanObservation, power: i32
         "power {power}: the 7+ ability must not also fire, got {observation:?}"
     );
     assert_eq!(observation.cast_zone, Zone::Battlefield);
-    assert!(observation.stack_empty_at_priority, "{observation:?}");
+    observation.settled.assert_at_priority(&observation);
 }
 
 #[test]
@@ -279,7 +305,7 @@ fn sarkhans_unsealing_power_3_below_list_does_not_trigger() {
     assert_eq!(three.p1_life_delta, 0, "{three:?}");
     assert_eq!(three.filler_zone, Zone::Battlefield, "{three:?}");
     assert_eq!(three.cast_zone, Zone::Battlefield, "{three:?}");
-    assert!(three.stack_empty_at_priority, "{three:?}");
+    three.settled.assert_at_priority(&three);
 }
 
 #[test]
@@ -299,7 +325,7 @@ fn sarkhans_unsealing_power_7_takes_only_the_seven_or_greater_ability() {
     // CR 120.3 + CR 704.5g: the 7+ ability dealt 4 to the 1/4 filler.
     assert_eq!(seven.filler_zone, Zone::Graveyard, "{seven:?}");
     assert_eq!(seven.cast_zone, Zone::Battlefield, "{seven:?}");
-    assert!(seven.stack_empty_at_priority, "{seven:?}");
+    seven.settled.assert_at_priority(&seven);
 }
 
 #[derive(Debug)]
@@ -307,7 +333,7 @@ struct KozilekObservation {
     triggers_on_stack: usize,
     spawn: usize,
     drawn: i64,
-    stack_empty_at_priority: bool,
+    settled: Settled,
 }
 
 /// Build P0's board: Kozilek's Unsealing (Devoid through the keyword path) and
@@ -353,8 +379,7 @@ fn cast_into_kozilek(mana_value: u32) -> KozilekObservation {
         triggers_on_stack,
         spawn: count_named_on_battlefield(outcome.state(), P0, "Eldrazi Spawn"),
         drawn: outcome.hand_drawn(P0),
-        stack_empty_at_priority: outcome.state().stack.is_empty()
-            && matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        settled: Settled::of(outcome.state()),
     }
 }
 
@@ -373,7 +398,7 @@ fn assert_two_spawn_alone(observation: &KozilekObservation, mana_value: u32) {
         observation.drawn, 0,
         "MV {mana_value}: the 7+ ability must not also fire, got {observation:?}"
     );
-    assert!(observation.stack_empty_at_priority, "{observation:?}");
+    observation.settled.assert_at_priority(&observation);
 }
 
 #[test]
@@ -392,14 +417,14 @@ fn kozileks_unsealing_mana_value_3_and_7_boundaries() {
     assert_eq!(three.triggers_on_stack, 0, "{three:?}");
     assert_eq!(three.spawn, 0, "{three:?}");
     assert_eq!(three.drawn, 0, "{three:?}");
-    assert!(three.stack_empty_at_priority, "{three:?}");
+    three.settled.assert_at_priority(&three);
 
     let seven = cast_into_kozilek(7);
     assert_eq!(seven.triggers_on_stack, 1, "{seven:?}");
     assert_eq!(seven.spawn, 0, "{seven:?}");
     // CR 121.1: the 7+ ability draws three cards.
     assert_eq!(seven.drawn, 3, "{seven:?}");
-    assert!(seven.stack_empty_at_priority, "{seven:?}");
+    seven.settled.assert_at_priority(&seven);
 }
 
 #[derive(Debug)]
@@ -408,7 +433,7 @@ struct XCastObservation {
     triggers_on_stack: usize,
     spawn: usize,
     drawn: usize,
-    stack_empty_at_priority: bool,
+    settled: Settled,
 }
 
 /// Cast one textless creature body costing {X}{G} with X announced as `x`,
@@ -490,8 +515,7 @@ fn cast_x_body_into_kozilek(x: u32) -> XCastObservation {
         triggers_on_stack,
         spawn: count_named_on_battlefield(state, P0, "Eldrazi Spawn"),
         drawn: state.players[0].hand.len() - hand_at_commit,
-        stack_empty_at_priority: state.stack.is_empty()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        settled: Settled::of(state),
     }
 }
 
@@ -506,7 +530,7 @@ fn kozileks_unsealing_counts_announced_x_in_mana_value() {
     assert_eq!(five.triggers_on_stack, 1, "{five:?}");
     assert_eq!(five.spawn, 2, "{five:?}");
     assert_eq!(five.drawn, 0, "{five:?}");
-    assert!(five.stack_empty_at_priority, "{five:?}");
+    five.settled.assert_at_priority(&five);
 
     // X = 2 → MV 3: no ability.
     let three = cast_x_body_into_kozilek(2);
@@ -514,7 +538,7 @@ fn kozileks_unsealing_counts_announced_x_in_mana_value() {
     assert_eq!(three.triggers_on_stack, 0, "{three:?}");
     assert_eq!(three.spawn, 0, "{three:?}");
     assert_eq!(three.drawn, 0, "{three:?}");
-    assert!(three.stack_empty_at_priority, "{three:?}");
+    three.settled.assert_at_priority(&three);
 
     // X = 6 → MV 7: the 7+ ability.
     let seven = cast_x_body_into_kozilek(6);
@@ -522,5 +546,5 @@ fn kozileks_unsealing_counts_announced_x_in_mana_value() {
     assert_eq!(seven.triggers_on_stack, 1, "{seven:?}");
     assert_eq!(seven.spawn, 0, "{seven:?}");
     assert_eq!(seven.drawn, 3, "{seven:?}");
-    assert!(seven.stack_empty_at_priority, "{seven:?}");
+    seven.settled.assert_at_priority(&seven);
 }
