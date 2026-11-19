@@ -394,7 +394,7 @@ fn assert_game_over(state: &GameState, label: &str) {
     assert_eq!(lives, vec![143, -2, 0, -2], "{label}");
 }
 
-fn accept_suggested(state: &GameState) -> GameState {
+pub(crate) fn accept_suggested(state: &GameState) -> GameState {
     let mut state = state.clone();
     let dialog = dialog(&mut state);
     let action = submit(
