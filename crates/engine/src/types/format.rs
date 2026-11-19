@@ -5161,12 +5161,15 @@ impl FormatConfig {
     }
 
     /// CR 904.1-904.11: Default Archenemy, not Supervillain Rumble (CR 904.12)
-    /// and not Archenemy Commander (CR 904.13).
+    /// and not Archenemy Commander (CR 904.13). Minimum three seats, as in
+    /// Archenemy Commander: the default setup is the Team vs. Team multiplayer
+    /// variant (CR 904.2), and a multiplayer game begins with more than two
+    /// players (CR 800.1).
     pub fn archenemy() -> Self {
         FormatConfig {
             format: GameFormat::Archenemy,
             starting_life: 20,
-            min_players: 2,
+            min_players: 3,
             max_players: 6,
             deck_size: DeckSizeRule::Minimum(60),
             singleton: false,
@@ -7110,7 +7113,10 @@ mod tests {
         assert_eq!(entry.group, FormatGroup::Multiplayer);
         assert_eq!(entry.short_label, "ARC");
         assert_eq!(entry.default_config, FormatConfig::archenemy());
-        assert_eq!(entry.default_config.min_players, 2);
+        // CR 904.2 + CR 800.1: one archenemy plus at least two heroes.
+        assert_eq!(entry.default_config.min_players, 3);
+        assert!(entry.default_config.validate_for_player_count(2).is_err());
+        assert!(entry.default_config.validate_for_player_count(3).is_ok());
         assert_eq!(entry.default_config.max_players, 6);
         assert_eq!(entry.default_config.deck_size, DeckSizeRule::Minimum(60));
         assert!(entry.default_config.command_zone);

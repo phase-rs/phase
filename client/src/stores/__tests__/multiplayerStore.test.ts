@@ -888,12 +888,12 @@ describe("multiplayerStore", () => {
   it("clamps a stranded remembered archenemy seat to the resolved table", () => {
     const normalized = normalizeRememberedHostConfig({
       format: "Archenemy",
-      formatConfig: { format: "Archenemy", archenemy_player: 3 },
-      playerCount: 2,
+      formatConfig: { format: "Archenemy", archenemy_player: 5 },
+      playerCount: 3,
     });
 
-    expect(normalized?.playerCount).toBe(2);
-    expect(normalized?.formatConfig.archenemy_player).toBe(1);
+    expect(normalized?.playerCount).toBe(3);
+    expect(normalized?.formatConfig.archenemy_player).toBe(2);
   });
 
   it("ignores a remembered archenemy seat outside the Archenemy family", () => {

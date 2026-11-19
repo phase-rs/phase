@@ -152,22 +152,22 @@ describe("GameSetupPage — archenemy seat", () => {
     const user = userEvent.setup();
     renderSetup("/game-setup?format=Archenemy");
 
-    // Grow to four seats and hand the role to the last AI seat.
+    // Grow to five seats and hand the role to the last AI seat.
     const playerSlider = () =>
       screen.getByRole("slider", { name: /players/i }) as HTMLInputElement;
     fireEvent.change(await screen.findByRole("slider", { name: /players/i }), {
-      target: { value: "4" },
+      target: { value: "5" },
     });
-    await user.click(await screen.findByRole("button", { name: "Opponent 3" }));
+    await user.click(await screen.findByRole("button", { name: "Opponent 4" }));
 
     // Shrink below the pick: the role follows to the last remaining AI
     // seat rather than silently returning to the player.
-    fireEvent.change(playerSlider(), { target: { value: "2" } });
-    expect(await screen.findByRole("button", { name: "Opponent 1" })).toHaveClass("bg-indigo-600");
-    expect(screen.queryByRole("button", { name: "Opponent 3" })).not.toBeInTheDocument();
+    fireEvent.change(playerSlider(), { target: { value: "3" } });
+    expect(await screen.findByRole("button", { name: "Opponent 2" })).toHaveClass("bg-indigo-600");
+    expect(screen.queryByRole("button", { name: "Opponent 4" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Start Match/i }));
     const navState = JSON.parse(screen.getByTestId("nav-state").textContent!);
-    expect(navState.formatConfig.archenemy_player).toBe(1);
+    expect(navState.formatConfig.archenemy_player).toBe(2);
   });
 });
