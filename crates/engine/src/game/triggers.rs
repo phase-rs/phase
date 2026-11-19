@@ -51794,6 +51794,7 @@ pub mod tests {
                 scope: ConsumedTriggerEventScope::AllCollectors,
             }];
 
+            let events_before_helper = events.len();
             if settled {
                 collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
             } else {
@@ -51805,15 +51806,51 @@ pub mod tests {
                 collected, 1,
                 "settled={settled}: exactly the unclaimed second occurrence is collected"
             );
-            // The settled helper borrows the journal. The paused exit claims
-            // exactly the occurrence it collected, so no later collector over
-            // the same buffer repeats it.
+            // Neither exit takes the journal: the prior claim stays first. The
+            // paused exit claims exactly the occurrence it collected, so no later
+            // collector over the same buffer repeats it. The settled exit queues
+            // the trigger and drains the queue on this (action) buffer; the
+            // drain's dispatch window already ran the ordinary collection over
+            // what it appended (`collect_target_lock_side_effects`), so CR 603.2c
+            // (an event triggers an ability once) + CR 603.3b (what triggers
+            // while the queue is placed waits for the next placement, not a
+            // second scan) require that range to be claimed for ordinary
+            // collectors: the post-action pipelines that rescan this buffer later
+            // in the same action (`run_post_action_pipeline_from_settled_priority`,
+            // `run_boundary_convergence_pipeline`) must not collect it again.
             let mut expected = vec![ConsumedTriggerEventOccurrence {
                 event: repeated.clone(),
                 occurrence: trigger_event_occurrence(&events, 0),
                 scope: ConsumedTriggerEventScope::AllCollectors,
             }];
-            if !settled {
+            if settled {
+                assert!(
+                    events.len() > events_before_helper,
+                    "reach guard: the settled drain placed the trigger and appended its events"
+                );
+                expected.extend((events_before_helper..events.len()).map(|index| {
+                    ConsumedTriggerEventOccurrence {
+                        event: events[index].clone(),
+                        occurrence: trigger_event_occurrence(&events, index),
+                        scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+                    }
+                }));
+                // A later ordinary rescan of the whole buffer sees nothing the
+                // drain appended, so it cannot collect those events a second time.
+                let rescan = unclaimed_trigger_events_from(
+                    &events,
+                    0,
+                    TriggerCollectionRequester::Ordinary,
+                    &state.consumed_before_priority_trigger_events,
+                );
+                assert!(
+                    rescan
+                        .events
+                        .iter()
+                        .all(|event| !events[events_before_helper..].contains(event)),
+                    "settled: a later ordinary scan of the action buffer skips the drained range"
+                );
+            } else {
                 expected.push(ConsumedTriggerEventOccurrence {
                     event: repeated.clone(),
                     occurrence: trigger_event_occurrence(&events, events.len() - 1),
@@ -51822,7 +51859,7 @@ pub mod tests {
             }
             assert_eq!(
                 state.consumed_before_priority_trigger_events, expected,
-                "settled={settled}: the journal holds the prior claim and only what this exit collected"
+                "settled={settled}: the journal holds the prior claim and only what this exit claimed"
             );
         }
     }

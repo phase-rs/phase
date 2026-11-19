@@ -41,7 +41,7 @@ pub(super) fn finalize_trigger_target_selection(
     // CR 603.2e: match the finisher's own span now, before any drain.
     let held = triggers::hold_construction_span(state, events, span_start, span_owner);
     let produced = match placement {
-        FinalizedPlacement::Returned(waiting_for) => waiting_for,
+        FinalizedPlacement::Returned(waiting_for) => *waiting_for,
         FinalizedPlacement::OnStack { controller } => {
             priority::clear_priority_passes(state);
             debug_assert!(
@@ -79,8 +79,9 @@ pub(super) fn finalize_trigger_target_selection(
 /// Private control flow of the finisher, not a rules or wire enum.
 enum FinalizedPlacement {
     /// Construction ended without a drain: the division prompt (CR 601.2d) or a
-    /// dangling-cursor recovery (CR 608.1).
-    Returned(WaitingFor),
+    /// dangling-cursor recovery (CR 608.1). Boxed so the common `OnStack`
+    /// return does not carry a `WaitingFor`-sized frame.
+    Returned(Box<WaitingFor>),
     /// The entry is finalized on the stack and the crime committed (CR 700.13).
     OnStack { controller: PlayerId },
 }
@@ -140,19 +141,19 @@ fn place_trigger_targets(
                         // (CR 117.3b would give the active player).
                         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
                         priority::clear_priority_passes(state);
-                        return FinalizedPlacement::Returned(WaitingFor::Priority {
+                        return FinalizedPlacement::Returned(Box::new(WaitingFor::Priority {
                             player: controller,
-                        });
+                        }));
                     }
                     state.pending_trigger = Some(trigger);
                     priority::clear_priority_passes(state);
-                    return FinalizedPlacement::Returned(WaitingFor::DistributeAmong {
+                    return FinalizedPlacement::Returned(Box::new(WaitingFor::DistributeAmong {
                         player: controller,
                         total,
                         targets: dist_targets,
                         unit,
                         scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
-                    });
+                    }));
                 }
             }
         }
@@ -172,7 +173,7 @@ fn place_trigger_targets(
         // re-normalizes (CR 117.3b would give active player).
         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
         priority::clear_priority_passes(state);
-        return FinalizedPlacement::Returned(WaitingFor::Priority { player: controller });
+        return FinalizedPlacement::Returned(Box::new(WaitingFor::Priority { player: controller }));
     }
 
     casting::commit_crime_after_stack_placement(state, crime_candidate, controller, events);
