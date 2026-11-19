@@ -3144,8 +3144,7 @@ fn chimera_retarget_of_a_two_mode_grift_offers_every_modes_targets() {
 /// P0 casts a two-mode Shifting Grift (creatures + artifacts), then copies it
 /// with Twincast. The copy's "you may choose new targets" walk must expose
 /// FOUR positions — the creature pair at the root, the artifact pair at the
-/// sub — and a submission that moves only the artifact pair must land on the
-/// sub node.
+/// sub — and a submission that moves both pairs must land each pair on its own node.
 ///
 /// This is the "copied" half of issue #8355's concrete report (the V12 row
 /// above pins the "stolen" half through Perplexing Chimera), and it is the
@@ -3153,12 +3152,13 @@ fn chimera_retarget_of_a_two_mode_grift_offers_every_modes_targets() {
 /// spell with spree is copied, the effect that creates the copy may allow
 /// you to choose new targets".
 ///
-/// REVERT-FAILING (two directions):
+/// REVERT-FAILING (three directions):
 /// 1. With a retarget pool built from the root's `ability.targets` (the shape
 ///    issue #8355 reports), the first copy prompt exposes 2 positions and the
 ///    `target_slots.len() == 4` guard below fails.
 /// 2. With a root-only write, the artifact picks never reach the sub node:
 ///    the copy re-exchanges (a1, a2) and (a3, a4) never move.
+/// 3. With the active slot-2 prompt omitting A3 (raw pool and submission validator unchanged), the slot-2 offer assertion fails.
 #[test]
 fn twincast_retarget_of_a_two_mode_grift_writes_the_later_modes_sub_node() {
     let mut scenario = GameScenario::new();
@@ -3264,24 +3264,47 @@ fn twincast_retarget_of_a_two_mode_grift_writes_the_later_modes_sub_node() {
     assert_eq!(target_slots[2].current, Some(TargetRef::Object(a1)));
     assert_eq!(target_slots[3].current, Some(TargetRef::Object(a2)));
 
-    // Assertion 2: the later mode's pool is genuinely offered (not merely
-    // addressed) — A3 is a legal artifact alternative for that position.
-    assert!(
-        target_slots[2]
-            .legal_alternatives
-            .contains(&TargetRef::Object(a3)),
-        "the artifact-mode position must offer A3, got {:?}",
-        target_slots[2].legal_alternatives
-    );
-
-    // Assertion 3: submit a full reassignment — each mode moves to its own
-    // distinct pair.
-    for target in [c3, c4, a3, a4] {
+    // Assertion 2: submit the creature pair.
+    for target in [c3, c4] {
         runner
             .act(GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target)),
             })
-            .expect("choosing the copy's target for this position must be accepted");
+            .expect("choosing the copy's creature target must be accepted");
+    }
+
+    // Assertion 3: A3 is offered by the active slot-2 prompt, not merely present in its raw pool.
+    let WaitingFor::CopyRetarget {
+        copy_id,
+        target_slots: active_slots,
+        current_slot,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "REACH GUARD: the copy walk must prompt for the artifact pair, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(copy_id, copy);
+    assert_eq!(
+        current_slot, 2,
+        "the walk must be at the artifact mode's first position"
+    );
+    assert!(
+        active_slots[2]
+            .legal_alternatives
+            .contains(&TargetRef::Object(a3)),
+        "the active slot-2 prompt must offer A3, got {:?}",
+        active_slots[2].legal_alternatives
+    );
+
+    for target in [a3, a4] {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("choosing the copy's artifact target must be accepted");
     }
 
     // Assertion 4 (the write): the copy's ROOT holds the creature pair and
