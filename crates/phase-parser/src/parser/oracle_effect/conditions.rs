@@ -16257,14 +16257,39 @@ mod tests {
         else {
             panic!("expected an object-count lhs, got {lhs:?}");
         };
-        let rendered = format!("{filter:?}");
+        fn typed_leaves<'f>(
+            filter: &'f TargetFilter,
+            out: &mut Vec<&'f crate::types::ability::TypedFilter>,
+        ) {
+            match filter {
+                TargetFilter::Typed(typed) => out.push(typed),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    for inner in filters {
+                        typed_leaves(inner, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut leaves = Vec::new();
+        typed_leaves(filter, &mut leaves);
+        assert!(!leaves.is_empty(), "expected typed leaves, got: {filter:?}");
         assert!(
-            rendered.contains("Opponent"),
-            "the count must be opponent-scoped, got: {rendered}"
+            leaves
+                .iter()
+                .all(|typed| typed.controller
+                    == Some(crate::types::ability::ControllerRef::Opponent)),
+            "the count must be opponent-scoped, got: {filter:?}"
         );
+        let names = |wanted: crate::types::ability::TypeFilter| {
+            leaves
+                .iter()
+                .any(|typed| typed.type_filters.contains(&wanted))
+        };
         assert!(
-            rendered.contains("Artifact") && rendered.contains("Enchantment"),
-            "the count must cover both types, got: {rendered}"
+            names(crate::types::ability::TypeFilter::Artifact)
+                && names(crate::types::ability::TypeFilter::Enchantment),
+            "the count must cover both types, got: {filter:?}"
         );
     }
 

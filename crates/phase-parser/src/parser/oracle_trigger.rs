@@ -1,12 +1,12 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, digit1, multispace0, one_of, space1};
+use nom::character::complete::{alpha1, anychar, digit1, multispace0, one_of, space1};
 use nom::combinator::{
     all_consuming, consumed, eof, fail, map, map_opt, not, opt, peek, recognize, rest, value,
     verify,
 };
-use nom::multi::{many0, many1, separated_list1};
+use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
@@ -20517,18 +20517,24 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
         // Strip optional target suffixes before checking for "attack". "attack
         // you" names the controller defender (Nature Shields Its Own); "attack
         // a player" narrows the attacked type only.
-        let (subject_text, attacks_player, attacks_you) =
-            if let Some(before) = rest.strip_suffix(" attack a player") {
-                (before, true, false)
-            } else if let Some(before) = rest.strip_suffix(" attack you") {
-                (before, false, true)
-            } else if let Some(before) = rest.strip_suffix(" attack") {
-                (before, false, false)
-            } else if let Some(before) = rest.strip_suffix(" attacks") {
-                (before, false, false)
-            } else {
-                continue;
-            };
+        // (attacks_player, attacks_you) for the end-anchored attack tail.
+        fn attack_tail(input: &str) -> OracleResult<'_, (bool, bool)> {
+            alt((
+                value((true, false), (tag(" attack a player"), eof)),
+                value((false, true), (tag(" attack you"), eof)),
+                value((false, false), (tag(" attack"), eof)),
+                value((false, false), (tag(" attacks"), eof)),
+            ))
+            .parse(input)
+        }
+        let Ok((_, (subject_text, (attacks_player, attacks_you)))) = (
+            recognize(many_till(anychar, peek(attack_tail))),
+            attack_tail,
+        )
+            .parse(rest)
+        else {
+            continue;
+        };
 
         // CR 303.4: Strip optional "that are enchanted/equipped by an <X> you control"
         // relative clause and capture it as a non-source-relative attachment filter.

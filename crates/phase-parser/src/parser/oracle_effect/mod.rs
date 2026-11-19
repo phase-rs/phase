@@ -13362,13 +13362,18 @@ fn parse_effect_clause_inner_with_damage_context(
     // ParentTarget via `parse_target`. "For each one, [imperative]" is the
     // same distributor with a singular anaphor (Your Own Face Mocks You —
     // the only corpus member, so the arm has no other callers).
-    if let Some(rest) = tp
-        .strip_prefix("for each of them, ")
-        .or_else(|| tp.strip_prefix("for each of them "))
-        .or_else(|| tp.strip_prefix("for each one, "))
-        .or_else(|| tp.strip_prefix("for each one "))
-    {
-        return parse_effect_clause_with_damage_context(rest.original, ctx, damage_context);
+    if let Some(((), rest)) = nom_on_lower(tp.original, tp.lower, |input| {
+        value(
+            (),
+            (
+                tag("for each "),
+                alt((tag("of them"), tag("one"))),
+                alt((tag(", "), tag(" "))),
+            ),
+        )
+        .parse(input)
+    }) {
+        return parse_effect_clause_with_damage_context(rest, ctx, damage_context);
     }
 
     // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>" —
@@ -27402,30 +27407,24 @@ fn try_synthesize_target_sweep_damage_leg(
     if !effect_has_stack_target_declaration(primary) {
         return None;
     }
-    let tail = sub_text.trim().trim_end_matches('.').trim_end();
-    let tail_lower = tail.to_lowercase();
-    let rest = tail_lower.strip_prefix("each ")?.trim();
-    let head = rest.strip_suffix(" controls")?.trim();
-    let disj = head.strip_suffix("'s controller")?.trim();
-    let (bare, middle) = disj.split_once(" that player or that ")?;
+    // "each <bare> that player or that <type>'s controller controls[.]". The
+    // middle term is ONE type word ("planeswalker"): a nested disjunction or
+    // anaphor in it leaves text before "'s controller", so the closing tag
+    // fails and the grammar declines.
+    let tail_lower = sub_text.trim().to_lowercase();
+    let (_, bare) = all_consuming(|input| {
+        let (input, _) = tag("each ").parse(input)?;
+        let (input, bare) = take_until(" that player or that ").parse(input)?;
+        let (input, _) = tag(" that player or that ").parse(input)?;
+        let (input, _) = crate::parser::oracle_nom::target::parse_type_filter_word(input)?;
+        let (input, _) = tag("'s controller controls").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        Ok((input, bare))
+    })
+    .parse(tail_lower.as_str())
+    .ok()?;
     let bare = bare.trim();
-    let middle = middle.trim();
-    if bare.is_empty() || middle.is_empty() {
-        return None;
-    }
-    // No nested disjunction or nested anaphor inside the middle term.
-    if middle.contains(" or ") || middle.contains(" that ") {
-        return None;
-    }
-    // The middle term is consumed, not swallowed: it must name a type phrase
-    // ("planeswalker"), fully consumed by the type-list grammar.
-    let (mid_rest, mid_filters) =
-        crate::parser::oracle_nom::quantity::parse_type_filter_list(middle).ok()?;
-    if mid_filters.is_empty()
-        || !mid_rest
-            .chars()
-            .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
-    {
+    if bare.is_empty() {
         return None;
     }
     // Classify the object phrase with the same building block as the
@@ -46430,16 +46429,18 @@ enum ConsumerBinding {
 /// way" follows an unscoped reveal).
 fn union_revealed_choice_claims(text: &str) -> bool {
     let lower = text.to_lowercase();
-    let rest = lower
-        .strip_prefix("you may choose ")
-        .or_else(|| lower.strip_prefix("you choose "));
-    let Some(rest) = rest else {
-        return false;
-    };
-    rest.strip_suffix('.')
-        .unwrap_or(rest)
-        .trim_end()
-        .ends_with("revealed this way")
+    let claims = (
+        tag::<_, _, OracleError<'_>>("you "),
+        opt(tag("may ")),
+        tag("choose "),
+        many_till(
+            anychar,
+            (tag("revealed this way"), opt(tag(".")), space0, eof),
+        ),
+    )
+        .parse(lower.as_str())
+        .is_ok();
+    claims
 }
 
 /// CR 608.2c: bind a controller-instructed "<verb> a <type> card [they] revealed
