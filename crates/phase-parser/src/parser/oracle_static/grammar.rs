@@ -15,6 +15,18 @@ use nom::character::complete::{alphanumeric1, char, digit1, one_of};
 use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair, terminated};
 
+/// CR 509.1b: "can't block X" is the whitelist "can block only attackers that
+/// are not X" — the single inversion authority for every "can't block
+/// <object>" reading (rule statics here; granted restrictions in
+/// `parse_restriction_modes`).
+pub(crate) fn cant_block_object_mode(object: TargetFilter) -> StaticMode {
+    StaticMode::BlockRestriction {
+        filter: TargetFilter::Not {
+            filter: Box::new(object),
+        },
+    }
+}
+
 /// Lower a parsed rule-static predicate into the runtime static mode.
 ///
 /// `block_object` is the CR 509.1b OBJECT axis of a blocking prohibition —
@@ -34,13 +46,9 @@ pub(crate) fn lower_rule_static(
     // only things that are NOT X" — the same construction the compound
     // "can't attack you or block <object>" template already lowers to.
     if let (RuleStaticPredicate::CantBlock, Some(object)) = (predicate, block_object) {
-        return StaticDefinition::new(StaticMode::BlockRestriction {
-            filter: TargetFilter::Not {
-                filter: Box::new(object),
-            },
-        })
-        .affected(affected)
-        .description(description.to_string());
+        return StaticDefinition::new(cant_block_object_mode(object))
+            .affected(affected)
+            .description(description.to_string());
     }
     match predicate {
         RuleStaticPredicate::CantUntap => StaticDefinition::new(StaticMode::CantUntap)

@@ -43557,3 +43557,87 @@ fn edgar_exile_permission_tapped_rider_declines() {
         parsed.statics
     );
 }
+
+/// Burden of Proof, verbatim Oracle text (MTGJSON).
+const BURDEN_OF_PROOF_ORACLE: &str = "Flash\nEnchant creature\nEnchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.";
+
+/// CR 509.1b + CR 613.4b + CR 109.5: Burden of Proof's Otherwise branch sets the
+/// enchanted creature's base P/T to 1/1 (layer 7b) and grants the "can't block
+/// Detectives" whitelist, carried by `AddStaticMode` onto the enchanted creature.
+/// Before the fix "can't block Detectives" was dropped with no parse warning.
+#[test]
+fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        BURDEN_OF_PROOF_ORACLE,
+        "Burden of Proof",
+        &["Enchant".to_string(), "Flash".to_string()],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let enchanted_creature =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+    // CR 109.5: "you" in "a Detective you control" is the Aura's controller.
+    let detective_you_control = StaticCondition::RecipientMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::default()
+                .subtype("Detective".to_string())
+                .controller(ControllerRef::You),
+        ),
+    };
+    assert_eq!(
+        parsed.statics.len(),
+        2,
+        "expected the +2/+2 def and the Otherwise def, got {:?}",
+        parsed.statics
+    );
+    for def in &parsed.statics {
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(enchanted_creature.clone()));
+    }
+
+    // Reach guard: the "as long as" def is the condition's other outcome.
+    let detective_def = parsed
+        .statics
+        .iter()
+        .find(|def| def.condition.as_ref() == Some(&detective_you_control))
+        .expect("the +2/+2 def gated on a Detective you control");
+    assert_eq!(
+        detective_def.modifications,
+        vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ]
+    );
+
+    let otherwise = StaticCondition::Not {
+        condition: Box::new(detective_you_control),
+    };
+    let otherwise_def = parsed
+        .statics
+        .iter()
+        .find(|def| def.condition.as_ref() == Some(&otherwise))
+        .expect("the Otherwise def gated on the negated condition");
+    // CR 509.1b: "can't block Detectives" is the whitelist "can block only
+    // non-Detectives"; "Detectives" names no controller.
+    assert_eq!(
+        otherwise_def.modifications,
+        vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::BlockRestriction {
+                    filter: TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::default().subtype("Detective".to_string())
+                        )),
+                    },
+                },
+            },
+        ]
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause may be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
+}

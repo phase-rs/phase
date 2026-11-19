@@ -174,6 +174,7 @@ mod brigid_mana_ability;
 mod bring_the_ending_corrupted_instead_branch_5683;
 mod bring_to_light_converge_mana_value;
 mod broken_bond_land_prompt;
+mod burden_of_proof;
 mod burning_eye_zubera_damage_threshold;
 mod burning_rune_demon_exact_count_search;
 mod cait_sith_fortune_teller;
