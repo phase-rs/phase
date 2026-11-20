@@ -43,6 +43,7 @@ use crate::types::ability::{
 use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
+use crate::types::confirmed_misparse::{ConfirmedMisparses, MisparseClass};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::ActivatedAbilityKind;
 use crate::types::keywords::{Keyword, ProtectionTarget};
@@ -368,7 +369,8 @@ pub struct GapDetail {
     pub diagnoses: Vec<GapDiagnosis>,
 }
 
-/// Why a coverage gap exists, typed by layer: a parser verdict or an unhandled resolver feature.
+/// Why a coverage gap exists, typed by layer: a parser verdict, an unhandled resolver
+/// feature, or a census-confirmed misparse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "layer", rename_all = "snake_case")]
 pub enum GapDiagnosis {
@@ -377,15 +379,24 @@ pub enum GapDiagnosis {
         family: ResolverFeatureFamily,
         feature: String,
     },
+    /// The parser accepted this clause, so it holds no rejection verdict; the census
+    /// found the parse wrong. `class` is the kind of defect, `clause` the census-cited
+    /// text.
+    Misparse {
+        class: MisparseClass,
+        clause: String,
+    },
 }
 
 impl GapDiagnosis {
-    /// The Oracle phrase a parser verdict rejected. A resolver gap has no rejected phrase:
-    /// its feature is already in its handler.
+    /// The Oracle phrase this diagnosis names: the phrase a parser verdict rejected, or
+    /// the clause a census verdict found misparsed. A resolver gap has no phrase: its
+    /// feature is already in its handler.
     pub fn phrase(&self) -> Option<&str> {
         match self {
             Self::Parser(gap) => Some(gap.phrase()),
             Self::Resolver { .. } => None,
+            Self::Misparse { clause, .. } => Some(clause),
         }
     }
 }
@@ -7650,7 +7661,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             &valid_subtypes,
         );
         let supported = coverage.is_supported();
-        let gap_details = public_gap_details(&coverage.gaps);
+        let mut gap_details = public_gap_details(&coverage.gaps);
+        explain_blank_gaps(key, face, &coverage.parse_details, &mut gap_details);
         let gap_count = gap_details.len();
 
         for gap in &coverage.gaps {
@@ -8268,6 +8280,174 @@ fn check_unrun_card_type(face: &CardFace, missing: &mut Vec<String>) {
 fn check_confirmed_misparse(face: &CardFace, missing: &mut Vec<String>) {
     if let Some(class) = face.metadata.confirmed_misparse {
         missing.push(class.handler().to_string());
+    }
+}
+
+/// No published gap leaves `source_text` blank: the report always says WHAT is
+/// unsupported. Confirmed misparses carry their census clauses; every other gap
+/// without text is explained from the most specific source it has
+/// ([`blank_gap_text`]).
+fn explain_blank_gaps(
+    key: &str,
+    face: &CardFace,
+    parse_details: &[ParsedItem],
+    gap_details: &mut [GapDetail],
+) {
+    attach_misparse_clauses(key, face, gap_details);
+    refine_swallow_text(face, gap_details);
+    if !gap_details.iter().any(gap_text_is_blank) {
+        return;
+    }
+    let lines = face
+        .oracle_text
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .map(|text| effective_oracle_lines_for_card(text, &face.name))
+        .unwrap_or_default();
+    let dropped = if gap_details
+        .iter()
+        .any(|gap| gap_text_is_blank(gap) && gap.handler.starts_with("SilentDrop:"))
+    {
+        dropped_oracle_lines(&lines, &face.name, parse_details).1
+    } else {
+        Vec::new()
+    };
+    for gap in gap_details.iter_mut().filter(|gap| gap_text_is_blank(gap)) {
+        gap.source_text = Some(blank_gap_text(gap, &lines, &dropped));
+    }
+}
+
+/// A gap whose text is absent or empty: some producers record `Some("")` for an
+/// item with no fragment, which reads as blank in the report.
+fn gap_text_is_blank(gap: &GapDetail) -> bool {
+    gap.source_text
+        .as_deref()
+        .is_none_or(|text| text.trim().is_empty())
+}
+
+/// A swallow gap's recorded text is the warning's display form
+/// (`[warning:swallowed-clause] Detector — <unit text cut at 140 bytes>`): the
+/// unit often opens with a reminder-text line and ends mid-sentence, so the
+/// clause the detector flagged is hidden or cut off. Replace it with the full
+/// printed clause ([`swallow_clause_text`]). The detector stays named by the
+/// gap's handler.
+fn refine_swallow_text(face: &CardFace, gap_details: &mut [GapDetail]) {
+    let Some(oracle) = face.oracle_text.as_deref() else {
+        return;
+    };
+    for gap in gap_details.iter_mut() {
+        let Some(detector) = gap.handler.strip_prefix("Swallow:") else {
+            continue;
+        };
+        let description = face
+            .parse_warnings
+            .iter()
+            .find_map(|warning| match warning {
+                OracleDiagnostic::SwallowedClause {
+                    detector: warned,
+                    description,
+                    ..
+                } if warned == detector => Some(description.as_str()),
+                _ => None,
+            });
+        if let Some(clause) = description.and_then(|text| swallow_clause_text(text, oracle)) {
+            gap.source_text = Some(clause);
+        }
+    }
+}
+
+/// The printed clause behind a swallow detector's unit text. Each line of the
+/// unit is completed to the full Oracle line it begins (only the last can be cut
+/// short), reminder text is dropped, and a line that was only reminder text
+/// disappears. `None` when nothing but reminder text is left.
+fn swallow_clause_text(description: &str, oracle: &str) -> Option<String> {
+    let clause: Vec<String> = description
+        .lines()
+        .map(str::trim)
+        .filter(|fragment| !fragment.is_empty())
+        .filter_map(|fragment| {
+            let line = oracle
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with(fragment))
+                .unwrap_or(fragment);
+            let stripped = crate::parser::oracle_util::strip_reminder_text(line);
+            (!stripped.is_empty()).then_some(stripped)
+        })
+        .collect();
+    (!clause.is_empty()).then(|| clause.join(" "))
+}
+
+/// The text that says what a gap with no recorded source fragment concerns, most
+/// specific first: the printed lines a silent drop left uncovered; the phrase or
+/// feature its own diagnosis names; the printed line holding the text in its
+/// handler's argument (`Static:Unrecognized(...)`) or its label (`Keyword:X`);
+/// and last the handler itself, so the text is never empty.
+fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String {
+    if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
+        return dropped.join(" / ");
+    }
+    if let Some(phrase) = gap.diagnoses.iter().find_map(GapDiagnosis::phrase) {
+        return phrase.to_string();
+    }
+    if let Some((family, feature)) = gap.diagnoses.iter().find_map(|diagnosis| match diagnosis {
+        GapDiagnosis::Resolver { family, feature } => Some((family, feature)),
+        GapDiagnosis::Parser(_) | GapDiagnosis::Misparse { .. } => None,
+    }) {
+        return format!("Not handled by the engine ({}): {feature}", family.tag());
+    }
+    let label = gap
+        .handler
+        .split_once(':')
+        .map_or(gap.handler.as_str(), |(_, label)| label);
+    let argument = label
+        .split_once('(')
+        .map(|(_, rest)| rest.strip_suffix(')').unwrap_or(rest));
+    for needle in argument.into_iter().chain(std::iter::once(label)) {
+        let needle = needle.to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(line) = lines
+            .iter()
+            .find(|line| line.to_lowercase().contains(&needle))
+        {
+            return line.clone();
+        }
+    }
+    match argument {
+        Some(argument) => format!("{argument} (no engine handler)"),
+        None => format!("No engine handler for {}", gap.handler),
+    }
+}
+
+/// Show WHAT a confirmed misparse got wrong, in the standard gap shape: the
+/// census-cited clauses become the gap's `source_text` and one typed
+/// `GapDiagnosis::Misparse` each. The runtime gap label stays prose-free
+/// (`MisparseClass::handler`); only the published report carries the clauses,
+/// looked up by the exact export key.
+fn attach_misparse_clauses(key: &str, face: &CardFace, gap_details: &mut [GapDetail]) {
+    let Some(class) = face.metadata.confirmed_misparse else {
+        return;
+    };
+    let Some(entry) = ConfirmedMisparses::committed().get(key) else {
+        return;
+    };
+    if entry.clauses.is_empty() {
+        return;
+    }
+    let handler = class.handler();
+    if let Some(detail) = gap_details
+        .iter_mut()
+        .find(|detail| detail.handler == handler && detail.source_text.is_none())
+    {
+        detail.source_text = Some(entry.clauses.join(" / "));
+        detail
+            .diagnoses
+            .extend(entry.clauses.iter().map(|clause| GapDiagnosis::Misparse {
+                class,
+                clause: clause.clone(),
+            }));
     }
 }
 
@@ -29201,6 +29381,263 @@ mod unpublished_event_source_tests {
                 .any(|gap| gap == GIVE_CONTROL_UNBOUND_RECIPIENT_GAP),
             "{:?}",
             card_face_gaps(&kain)
+        );
+    }
+}
+
+#[cfg(test)]
+mod misparse_gap_diagnosis_tests {
+    use super::*;
+
+    /// A confirmed misparse reports its census clauses in the standard gap shape:
+    /// `source_text` plus one typed diagnosis per clause, keyed by the exact export key.
+    #[test]
+    fn marked_face_gap_names_its_clauses() {
+        let key = "a girl and her dogs";
+        let entry = ConfirmedMisparses::committed()
+            .get(key)
+            .expect("the committed list carries this face");
+        let mut face = CardFace::default();
+        face.metadata.confirmed_misparse = Some(entry.class);
+        let mut details = public_gap_details(&card_face_coverage(&face).gaps);
+        attach_misparse_clauses(key, &face, &mut details);
+        let gap = details
+            .iter()
+            .find(|gap| gap.handler == entry.class.handler())
+            .expect("the marked face reports its misparse gap");
+        assert_eq!(
+            gap.source_text.as_deref(),
+            Some(entry.clauses.join(" / ").as_str())
+        );
+        let expected: Vec<GapDiagnosis> = entry
+            .clauses
+            .iter()
+            .map(|clause| GapDiagnosis::Misparse {
+                class: entry.class,
+                clause: clause.clone(),
+            })
+            .collect();
+        assert_eq!(gap.diagnoses, expected);
+    }
+
+    /// A face without the census marker gets no clause text, even when a gap of
+    /// the same shape is present and the export key is on the committed list.
+    #[test]
+    fn unmarked_face_gets_no_misparse_text() {
+        let key = "a girl and her dogs";
+        let class = ConfirmedMisparses::committed()
+            .get(key)
+            .expect("the committed list carries this face")
+            .class;
+        let face = CardFace::default();
+        let mut details = vec![GapDetail {
+            handler: class.handler().to_string(),
+            source_text: None,
+            diagnoses: vec![],
+        }];
+        attach_misparse_clauses(key, &face, &mut details);
+        assert_eq!(details[0].source_text, None);
+        assert!(details[0].diagnoses.is_empty());
+    }
+
+    /// Several census clauses join into one `source_text` and keep one typed
+    /// diagnosis each, in list order.
+    #[test]
+    fn multi_clause_misparse_keeps_every_clause() {
+        let key = "agent of acquisitions";
+        let entry = ConfirmedMisparses::committed()
+            .get(key)
+            .expect("the committed list carries this face");
+        assert!(
+            entry.clauses.len() >= 2,
+            "the face must carry several clauses"
+        );
+        let mut face = CardFace::default();
+        face.metadata.confirmed_misparse = Some(entry.class);
+        let mut details = vec![GapDetail {
+            handler: entry.class.handler().to_string(),
+            source_text: None,
+            diagnoses: vec![],
+        }];
+        attach_misparse_clauses(key, &face, &mut details);
+        assert_eq!(
+            details[0].source_text.as_deref(),
+            Some(entry.clauses.join(" / ").as_str())
+        );
+        let clauses: Vec<&str> = details[0]
+            .diagnoses
+            .iter()
+            .filter_map(GapDiagnosis::phrase)
+            .collect();
+        assert_eq!(
+            clauses,
+            entry.clauses.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    /// The new variant's wire shape: `layer` tag, snake_case class, clause text.
+    #[test]
+    fn misparse_diagnosis_wire_shape_round_trips() {
+        let diagnosis = GapDiagnosis::Misparse {
+            class: MisparseClass::DroppedQualifier,
+            clause: "choose a land card name".to_string(),
+        };
+        let json = serde_json::to_value(&diagnosis).expect("serializes");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "layer": "misparse",
+                "class": "dropped_qualifier",
+                "clause": "choose a land card name",
+            })
+        );
+        let back: GapDiagnosis = serde_json::from_value(json).expect("deserializes");
+        assert_eq!(back, diagnosis);
+    }
+}
+
+#[cfg(test)]
+mod blank_gap_text_tests {
+    use super::*;
+
+    fn gap(handler: &str, diagnoses: Vec<GapDiagnosis>) -> GapDetail {
+        GapDetail {
+            handler: handler.to_string(),
+            source_text: None,
+            diagnoses,
+        }
+    }
+
+    fn lines() -> Vec<String> {
+        vec![
+            "Flying".to_string(),
+            "Cumulative upkeep {1}".to_string(),
+            "As long as defending player controls two or more nonland permanents, draw a card."
+                .to_string(),
+        ]
+    }
+
+    #[test]
+    fn silent_drop_names_the_uncovered_lines() {
+        let text = blank_gap_text(&gap("SilentDrop:1_of_2", vec![]), &lines(), &["Flying"]);
+        assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn resolver_gap_names_its_family_and_feature() {
+        let diagnosis = GapDiagnosis::Resolver {
+            family: ResolverFeatureFamily::StaticCondition,
+            feature: "OpponentPoisonAtLeast".to_string(),
+        };
+        let text = blank_gap_text(&gap("ResolverFeature:x", vec![diagnosis]), &lines(), &[]);
+        assert!(text.contains("static_condition") && text.contains("OpponentPoisonAtLeast"));
+    }
+
+    #[test]
+    fn handler_argument_finds_its_printed_line() {
+        let text = blank_gap_text(
+            &gap(
+                "Static:Unrecognized(as long as defending player controls two or more nonland)",
+                vec![],
+            ),
+            &lines(),
+            &[],
+        );
+        assert!(text.starts_with("As long as defending player"));
+    }
+
+    #[test]
+    fn handler_label_is_matched_case_insensitively_against_lines() {
+        let text = blank_gap_text(&gap("Keyword:flying", vec![]), &lines(), &[]);
+        assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn a_gap_with_nothing_to_match_still_reads_non_empty() {
+        let text = blank_gap_text(&gap("Effect:empty", vec![]), &[], &[]);
+        assert_eq!(text, "No engine handler for Effect:empty");
+        let text = blank_gap_text(
+            &gap("ParserMisfire:InvalidSubtype(Blood)", vec![]),
+            &[],
+            &[],
+        );
+        assert_eq!(text, "Blood (no engine handler)");
+    }
+
+    #[test]
+    fn an_empty_recorded_text_counts_as_blank() {
+        let face = CardFace::default();
+        let mut details = vec![GapDetail {
+            handler: "Effect:departure_attachment_relation".to_string(),
+            source_text: Some(String::new()),
+            diagnoses: vec![],
+        }];
+        explain_blank_gaps("k", &face, &[], &mut details);
+        assert_eq!(
+            details[0].source_text.as_deref(),
+            Some("No engine handler for Effect:departure_attachment_relation")
+        );
+    }
+
+    #[test]
+    fn explain_blank_gaps_leaves_recorded_text_alone() {
+        let face = CardFace::default();
+        let mut details = vec![GapDetail {
+            handler: "Effect:Foo".to_string(),
+            source_text: Some("recorded".to_string()),
+            diagnoses: vec![],
+        }];
+        explain_blank_gaps("k", &face, &[], &mut details);
+        assert_eq!(details[0].source_text.as_deref(), Some("recorded"));
+    }
+}
+
+#[cfg(test)]
+mod swallow_clause_text_tests {
+    use super::*;
+
+    const SANCTUM: &str = "({T}: Add {U}.)
+As this land enters, you may behold a Jace. If you don't, this land enters tapped. (To behold a Jace, choose a Jace you control or reveal a Jace card from your hand.)
+{2}{U}, {T}: Empower Jace 2.";
+
+    /// The unit text the detector records opens with a reminder line and is cut at 140
+    /// bytes, so it ends mid-reminder.
+    #[test]
+    fn reminder_lines_drop_and_cut_lines_complete() {
+        let description = "({T}: Add {U}.)
+As this land enters, you may behold a Jace. If you don't, this land enters tapped. (To behold a Jace, choose a Jace you cont";
+        assert_eq!(
+            swallow_clause_text(description, SANCTUM).as_deref(),
+            Some("As this land enters, you may behold a Jace. If you don't, this land enters tapped.")
+        );
+    }
+
+    #[test]
+    fn a_unit_of_only_reminder_text_yields_nothing() {
+        assert_eq!(swallow_clause_text("({T}: Add {U}.)", SANCTUM), None);
+    }
+
+    #[test]
+    fn swallow_gap_text_replaces_the_warning_display_form() {
+        let face = CardFace {
+            oracle_text: Some(SANCTUM.to_string()),
+            parse_warnings: vec![OracleDiagnostic::swallowed_clause(
+                "Condition_If",
+                "({T}: Add {U}.)
+As this land enters, you may behold a Jace. If you don't, this land enters tapped. (To behold a Jace, choose a Jace you cont",
+                None,
+            )],
+            ..CardFace::default()
+        };
+        let mut details = vec![GapDetail {
+            handler: "Swallow:Condition_If".to_string(),
+            source_text: Some("[warning:swallowed-clause] Condition_If".to_string()),
+            diagnoses: vec![],
+        }];
+        refine_swallow_text(&face, &mut details);
+        assert_eq!(
+            details[0].source_text.as_deref(),
+            Some("As this land enters, you may behold a Jace. If you don't, this land enters tapped.")
         );
     }
 }
