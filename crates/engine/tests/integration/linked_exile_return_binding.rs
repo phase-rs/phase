@@ -1136,7 +1136,7 @@ fn r25_p2_f_v2_binds_d8() {
 }
 
 /// R26 — keep (face `p2:f v4`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: the return's own `WhenYouDo`. "When you do" is a reflexive trigger (CR 603.12), not the admitted gate takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it modeled the reflexive gate as an outcome gate); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: the return's own `WhenYouDo`. "When you do" is a reflexive trigger (CR 603.12), not the admitted gate. No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1365,7 +1365,7 @@ fn r49_r3_u9_ifyoudo_pump_keeps_the_payload_return_bare() {
 }
 
 /// R50 — keep (face `r3:o2 suffix if otherwise return`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the else from the gate's false path); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1393,7 +1393,7 @@ fn r52_r3_o12_reloc_fallback_otherwise_binds_d8() {
 }
 
 /// R53 — keep (face `r3:o13 suffix instead then`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: an "instead" condition (`ConditionInstead` / `TargetHasKeywordInstead`), which replaces an earlier instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the instead override); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: an "instead" condition (`ConditionInstead` / `TargetHasKeywordInstead`), which replaces an earlier instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1403,7 +1403,7 @@ fn r53_r3_o13_suffix_instead_then_binds_bare() {
 }
 
 /// R54 — keep (face `r3:o16 suffix cond otherwise then`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the else from the gate's false path); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1413,7 +1413,7 @@ fn r54_r3_o16_suffix_cond_otherwise_then_binds_bare() {
 }
 
 /// R55 — keep (face `r3:o21 sacrifice cond reloc otherwise`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the else from the gate's false path); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1441,7 +1441,7 @@ fn r57_r3_o24_outside_opponentmay_reloc_noonedoes_binds_bare() {
 }
 
 /// R58 — keep (face `r3:o26 suffix keywordoverride`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: an "instead" condition (`ConditionInstead` / `TargetHasKeywordInstead`), which replaces an earlier instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the instead override); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: an "instead" condition (`ConditionInstead` / `TargetHasKeywordInstead`), which replaces an earlier instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1523,7 +1523,7 @@ fn r66_r4_q2b_reloc_dd_suffix_dd2_instead_keeps_the_payload_return_bare() {
 }
 
 /// R67 — keep (face `r4:q1c eta outside otherwise earlierreloccond`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the else from the gate's false path); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1533,7 +1533,7 @@ fn r67_r4_q1c_eta_outside_otherwise_earlierreloccond_binds_bare() {
 }
 
 /// R68 — keep (face `r4:u1a reloc counter repeat otherwise`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the else from the gate's false path); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1658,7 +1658,7 @@ fn r77_e_e1_draw_if_otherwise_binds_bare() {
 }
 
 /// R78 — keep (face `e:e4 sac exile if otherwise`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it walked the else from the gate's false path); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: a conditional instruction (`QuantityCheck`) whose `else_ability` holds the return. "Otherwise" resolves in place of that instruction (CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1677,7 +1677,7 @@ fn r80_e_i3_exile_instead_sentence_binds_bare() {
 }
 
 /// R83 — keep (face `v:v6 sac opp may exile no one does`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: "Any opponent may" (`optional` + `optional_for`) is a decision (CR 118.12) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it modeled the decision's outcome); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: "Any opponent may" (`optional` + `optional_for`) is a decision (CR 118.12). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1696,7 +1696,7 @@ fn r84_v_v5_opp_may_draw_no_one_does_binds_bare() {
 }
 
 /// R85 — keep (face `v:v1 sac may exile if you dont`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: an instruction's own "may" (`optional`) is a decision (CR 118.12) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it modeled the decision's outcome); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: an instruction's own "may" (`optional`) is a decision (CR 118.12). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1706,7 +1706,7 @@ fn r85_v_v1_sac_may_exile_if_you_dont_binds_bare() {
 }
 
 /// R86 — keep (face `v:v11 sac may exile if do draw otherwise`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: an instruction's own "may" (`optional`) is a decision (CR 118.12) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it modeled the decision's outcome); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: an instruction's own "may" (`optional`) is a decision (CR 118.12). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1768,7 +1768,7 @@ fn r93_w_w26_draw_unless_pays_they_do_return_sorcery_binds_bare() {
 }
 
 /// R94 — keep (face `w:w27 draw unless pays they dont return sorcery`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: the head's unless cost (`unless_pay`; CR 118.12a) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it swapped the unless gate); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: the head's unless cost (`unless_pay`; CR 118.12a). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1795,7 +1795,7 @@ fn r95_w_w25_sac_each_opp_may_exile_dont_return_binds_bare() {
 }
 
 /// R96 — keep (face `w:w6 sac opp may exile player does draw no one return`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: "Any opponent may" (`optional` + `optional_for`) is a decision (CR 118.12) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it modeled the decision's outcome); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: "Any opponent may" (`optional` + `optional_for`) is a decision (CR 118.12). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1840,7 +1840,7 @@ fn r99_y_y1_binds_bare() {
 }
 
 /// R100 — keep (face `y:y2`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: the head's "may", and then the rider's own "may" (CR 118.12) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it modeled the rider's own decision); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: the head's "may", and then the rider's own "may" (CR 118.12). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1876,7 +1876,7 @@ fn r102_y_y4_binds_bare() {
 }
 
 /// R103 — keep (face `y:y5`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: a "may" offered per player (`optional` + `player_scope`) is a decision made on each pass (CR 118.12) takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it modeled the per-player decision); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: a "may" offered per player (`optional` + `player_scope`) is a decision made on each pass (CR 118.12). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1920,7 +1920,7 @@ fn r106_y_y8_binds_bare() {
 }
 
 /// R107 — keep (face `w:w13`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: the return's own "If you can't" (`Not(ZoneChangedThisWay)`), which is not the admitted gate (CR 118.12's "can't") takes the return off the resolution line (`stays_on_resolution_line`). r8's walk derived D8 (it selected the "If you can't" source); §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: the return's own "If you can't" (`Not(ZoneChangedThisWay)`), which is not the admitted gate (CR 118.12's "can't"). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1968,7 +1968,7 @@ fn r112_u_u9_binds_d8() {
 }
 
 /// R113 — keep (face `e2:e9 flip win return`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: the `FlipCoins` win branch, a branch edge (CR 705.1) takes the return off the resolution line (`stays_on_resolution_line`). d493ee33f6 and r8's walk bound D8 here; §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: the `FlipCoins` win branch, a branch edge (CR 705.1). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1978,7 +1978,7 @@ fn r113_e2_e9_flip_win_return_binds_bare() {
 }
 
 /// R114 — keep (face `p2:q9 third chunk leading if single`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: the return's own condition, "If you control a Dragon" (`QuantityCheck`; CR 608.2c) takes the return off the resolution line (`stays_on_resolution_line`). d493ee33f6 and r8's walk bound D8 here; §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: the return's own condition, "If you control a Dragon" (`QuantityCheck`; CR 608.2c). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1996,7 +1996,7 @@ fn r114_p2_q9_third_chunk_leading_if_single_binds_bare() {
 }
 
 /// R115 — keep (face `w:w7`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: an instruction's own "may" (`optional`) is a decision (CR 118.12) takes the return off the resolution line (`stays_on_resolution_line`). d493ee33f6 and r8's walk bound D8 here; §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: an instruction's own "may" (`optional`) is a decision (CR 118.12). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -2014,7 +2014,7 @@ fn r115_w_w7_binds_bare() {
 }
 
 /// R116 — keep (face `p2:x5 modal in prefix`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: the return is in a mode (`mode_abilities`) takes the return off the resolution line (`stays_on_resolution_line`). d493ee33f6 and r8's walk bound D8 here; §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: the return is in a mode (`mode_abilities`). No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -2024,7 +2024,7 @@ fn r116_p2_x5_modal_in_prefix_binds_bare() {
 }
 
 /// R117 — keep (face `r3:b14 top foreach pump`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: "For each opponent, ..." (`repeat_for` on the `Pump`) repeats the instruction takes the return off the resolution line (`stays_on_resolution_line`). d493ee33f6 and r8's walk bound D8 here; §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: "For each opponent, ..." (`repeat_for` on the `Pump`) repeats the instruction. No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -2042,7 +2042,7 @@ fn r117_r3_b14_top_foreach_pump_binds_bare() {
 }
 
 /// R118 — keep (face `e:h19 then each opp loses`): START's bare sentinel is the binding.
-/// A′ keeps START's binding here: "Each opponent loses 2 life" (`player_scope` on the `LoseLife`) is an instruction applied per player takes the return off the resolution line (`stays_on_resolution_line`). d493ee33f6 and r8's walk bound D8 here; §11 records the limit.
+/// A′ keeps START's binding here: the return is off the resolution line (`stays_on_resolution_line`). Why: "Each opponent loses 2 life" (`player_scope` on the `LoseLife`) is an instruction applied per player. No printed card has this shape, and the unfiltered binding is the safe fallback.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
