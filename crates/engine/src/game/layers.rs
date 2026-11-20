@@ -9752,8 +9752,8 @@ fn gather_transient_continuous_effects_with(
             // clear it.
             // CR 611.2c + CR 101.2: CantBeCountered is likewise a live rule
             // prohibition, not an ability that can be removed from its recipient.
-            // CR 611.2c + CR 613.11: Combat reads creator-relative restrictions
-            // after characteristic and ability changes.
+            // CR 611.2c + CR 613.11: Combat reads admitted opponent-relative
+            // restrictions after characteristic and ability changes.
             if transient_relative_blocker_filter(modification).is_some()
                 || matches!(
                     modification,
@@ -11505,8 +11505,10 @@ fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode
     matches!(mode, StaticMode::MustAttackDefender { .. })
 }
 
-/// CR 611.2c: Resolution-created block restrictions with creator-relative filters
-/// are evaluated directly in combat.
+/// CR 611.2c: Combat evaluates admitted opponent-relative block restrictions
+/// directly. The tree must contain an opponent leaf, and every typed leaf must
+/// have empty properties and either no controller or an opponent controller.
+/// Filters containing a `You` leaf use the existing static projection.
 pub(crate) fn transient_relative_blocker_filter(
     modification: &ContinuousModification,
 ) -> Option<&TargetFilter> {
@@ -11516,7 +11518,7 @@ pub(crate) fn transient_relative_blocker_filter(
         match filter {
             TargetFilter::Typed(typed) if typed.properties.is_empty() => match &typed.controller {
                 None => Some(false),
-                Some(ControllerRef::You | ControllerRef::Opponent) => Some(true),
+                Some(ControllerRef::Opponent) => Some(true),
                 _ => None,
             },
             TargetFilter::And { filters } | TargetFilter::Or { filters } => filters

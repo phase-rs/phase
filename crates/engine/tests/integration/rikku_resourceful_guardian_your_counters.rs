@@ -9,7 +9,7 @@ use engine::game::combat::{
 };
 use engine::game::functioning_abilities::static_kind_present;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{ChoiceType, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -34,6 +34,7 @@ const VINES: &str = "Kicker {G} (You may pay an additional {G} as you cast this 
 const BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 const RAY: &str = "Untap target creature an opponent controls and gain control of it until end of turn. That creature gains haste until end of turn. When you lose control of the creature, tap it.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
+const BLACK_GATE: &str = "As The Black Gate enters, you may pay 3 life. If you don't, it enters tapped.\n{T}: Add {B}.\n{1}{B}, {T}: Choose a player with the most life or tied for most life. Target creature can't be blocked by creatures that player controls this turn.";
 
 struct Board {
     runner: GameRunner,
@@ -280,6 +281,17 @@ fn combat_fork(
     runner
         .declare_attackers(&[(featured, target), (board.alternative, target)])
         .unwrap();
+    check_block_declaration(runner, board, featured, defender, accepts, at_prompt)
+}
+
+fn check_block_declaration(
+    mut runner: GameRunner,
+    board: &Board,
+    featured: ObjectId,
+    defender: PlayerId,
+    accepts: bool,
+    at_prompt: impl FnOnce(&GameRunner),
+) -> GameRunner {
     for _ in 0..12 {
         match runner.state().waiting_for {
             WaitingFor::DeclareBlockers { player, .. } if player == defender => break,
@@ -371,6 +383,76 @@ fn split(candidate: &Board, control: &Board) {
         check(control, defender, true);
         check(candidate, defender, defender == P0);
     }
+}
+
+#[test]
+fn black_gate_choice_preserves_the_activators_blocker() {
+    let (board, (gate, swamps)) = board(
+        GameScenario::new_n_player(3, 42),
+        P1,
+        P1,
+        false,
+        |scenario, _| {
+            for player in [P0, P1, P2] {
+                scenario.with_life(player, 20);
+            }
+            let gate = scenario
+                .add_land_from_oracle(P0, "The Black Gate", BLACK_GATE)
+                .as_legendary()
+                .with_subtypes(vec!["Gate"])
+                .id();
+            let swamps = [(); 2].map(|_| scenario.add_basic_land(P0, ManaColor::Black));
+            (gate, swamps)
+        },
+    );
+    let mut runner = GameRunner::from_state(board.runner.state().clone());
+    at_attack_declaration(&mut runner);
+    let target = AttackTarget::Player(P0);
+    runner
+        .declare_attackers(&[(board.featured, target), (board.alternative, target)])
+        .unwrap();
+    priority_of(&mut runner, P0);
+    for swamp in swamps {
+        runner.activate(swamp, 0).resolve();
+    }
+
+    // The entry replacement is separate from the two activated abilities.
+    runner
+        .activate(gate, 1)
+        .target_object(board.featured)
+        .resolve();
+    assert!(runner.state().objects[&gate].tapped);
+    let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected The Black Gate's player choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*choice_type, ChoiceType::player());
+    assert_eq!(options, &["0", "1", "2"]);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: P2.0.to_string(),
+        })
+        .unwrap();
+    complete(&mut runner);
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.source_id == gate
+                && effect.affected == (TargetFilter::SpecificObject { id: board.featured })
+        }));
+
+    check_block_declaration(runner, &board, board.featured, P0, true, |_| {});
 }
 
 #[test]

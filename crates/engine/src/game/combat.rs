@@ -2307,7 +2307,7 @@ pub fn collect_block_restriction_statics(state: &GameState) -> BlockRestrictions
     }
 }
 
-/// CR 509.1b: Resolution-created blocker restrictions read directly at declaration.
+/// CR 509.1b: Admitted opponent-relative blocker restrictions read directly at declaration.
 pub(crate) fn live_transient_block_restrictions(
     state: &GameState,
 ) -> impl Iterator<Item = &TransientContinuousEffect> {
@@ -2467,7 +2467,7 @@ impl BlockRestrictions<'static> {
 }
 
 /// CR 102.3 + CR 109.5: Evaluate the admitted tree against the live blocker,
-/// using the creator's team and controller at each leaf.
+/// testing opponent leaves relative to the creating ability's controller.
 fn matches_relative_blocker(
     state: &GameState,
     blocker: &GameObject,
@@ -2478,11 +2478,27 @@ fn matches_relative_blocker(
         TargetFilter::Typed(typed) => {
             let controller_matches = match &typed.controller {
                 None => true,
-                Some(ControllerRef::You) => blocker.controller == creator,
                 Some(ControllerRef::Opponent) => {
                     players::is_opponent(state, creator, blocker.controller)
                 }
-                _ => {
+                Some(
+                    ControllerRef::You
+                    | ControllerRef::ScopedPlayer
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::ParentTargetController
+                    | ControllerRef::EventTargetController
+                    | ControllerRef::ParentTargetOwner
+                    | ControllerRef::DefendingPlayer
+                    | ControllerRef::ChosenPlayer { .. }
+                    | ControllerRef::DeclaredPlayer { .. }
+                    | ControllerRef::SourceChosenPlayer
+                    | ControllerRef::TriggeringPlayer
+                    | ControllerRef::EnchantedPlayer
+                    | ControllerRef::ActivePlayer
+                    | ControllerRef::SpecificPlayer { .. },
+                ) => {
+                    // Admission checks every leaf for an absent or Opponent controller.
                     unreachable!("blocker filter was admitted by transient_relative_blocker_filter")
                 }
             };
@@ -2498,6 +2514,7 @@ fn matches_relative_blocker(
             .iter()
             .any(|filter| matches_relative_blocker(state, blocker, creator, filter)),
         TargetFilter::Not { filter } => !matches_relative_blocker(state, blocker, creator, filter),
+        // Admission rejects every other filter shape, including nested ones.
         _ => unreachable!("blocker filter was admitted by transient_relative_blocker_filter"),
     }
 }
@@ -2533,8 +2550,8 @@ fn pair_block_restriction(
         }
     }
 
-    // CR 611.2c + CR 113.8: A resolved restriction uses the creating ability's
-    // controller and applies after the blocker's characteristics are determined.
+    // CR 611.2c + CR 113.8: An admitted opponent-relative restriction uses the
+    // creating ability's controller and the blocker's current characteristics.
     restrictions
         .transients
         .iter()
