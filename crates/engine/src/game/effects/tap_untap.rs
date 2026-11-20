@@ -731,8 +731,9 @@ mod tests {
     }
 
     /// CR 608.2b + CR 608.2k: class fence. A `SelfRef`-head → `TriggeringSource`
-    /// sub-effect (Blistercoil Weird: SpellCast trigger `Pump{SelfRef}` →
-    /// `SetTapState{TriggeringSource, "untap it"}`) with an EMPTY slot resolves
+    /// sub-effect (synthetic shape: after the CR 608.2c named-source rebinding,
+    /// Blistercoil Weird's "Untap it." parses to `SetTapState{SelfRef}`) with an
+    /// EMPTY slot resolves
     /// the anaphor from the published trigger event. Here no event is published,
     /// so the anaphor names no object
     /// and per CR 608.2b it must stay an inert no-op — it must NOT untap the

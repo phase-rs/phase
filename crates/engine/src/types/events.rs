@@ -928,6 +928,7 @@ impl EventObjectSnapshot {
             // follow-up (option a): snapshot prepared onto EventObjectSnapshot.
             | FilterProp::Prepared
             | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
             // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
             // a nontoken object is a copy, so card representation cannot be reconstructed.
             | FilterProp::RepresentedByCard

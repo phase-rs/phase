@@ -6984,9 +6984,10 @@ mod tests {
     /// put X +1/+1 counters on it, where X is its power." End-to-end through the
     /// real parser: an entering creature receives +1/+1 counters equal to ITS
     /// OWN power, not Railway Brawler's. The source and entering creature have
-    /// DIFFERENT power so the referent is observable. Reverting the enters lift
-    /// leaves the count `scope: Source`, reading Railway Brawler's power (the
-    /// #5253 bug) — this assertion goes red.
+    /// DIFFERENT power so the referent is observable. The where-X
+    /// characteristic rung binds the count to the entering creature
+    /// (`EventSource`); a count read off the source would read Railway
+    /// Brawler's power (the #5253 bug), and this assertion goes red.
     #[test]
     fn railway_brawler_counters_entering_creature_by_its_own_power() {
         use crate::game::stack::resolve_top;

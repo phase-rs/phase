@@ -6227,6 +6227,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -8578,6 +8579,20 @@ pub(crate) fn parse_mana_value_suffix(
     // `parse_quantity_expr_number`, which emits `QuantityRef::Variable { "X" }`
     // resolved at effect time against the resolving ability's `chosen_x`.
     // CR 107.3a + CR 601.2b: X announced at cast, read at resolution.
+    //
+    // CR 202.3: "mana value 4, 5, or 6" / "mana value 4 or 5" — an exact-value
+    // disjunction, one EQ comparison per listed value. Tried before the single
+    // number so the list is read whole; it stops before any clause comma.
+    if let Ok((after, values)) = nom_quantity::parse_number_disjunction(rest) {
+        let props = values
+            .into_iter()
+            .map(|value| FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value,
+            })
+            .collect();
+        return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
+    }
     let (after_num_raw, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
     let after_num = after_num_raw.trim_start();
 
@@ -8598,24 +8613,14 @@ pub(crate) fn parse_mana_value_suffix(
                 },
                 a,
             )
-        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or ").parse(after_num) {
-            let (after, second_value) = nom_quantity::parse_quantity_expr_number(a).ok()?;
-            (
-                FilterProp::AnyOf {
-                    props: vec![
-                        FilterProp::Cmc {
-                            comparator: Comparator::EQ,
-                            value,
-                        },
-                        FilterProp::Cmc {
-                            comparator: Comparator::EQ,
-                            value: second_value,
-                        },
-                    ],
-                },
-                after,
-            )
         } else {
+            // An "or" tail that neither the comparator arms above nor the
+            // exact-value list read ("mana value 4 or blue") is not an exact
+            // reading: decline the whole suffix rather than keep EQ N and strand
+            // the "or" clause.
+            not(tag::<_, _, OracleError<'_>>("or "))
+                .parse(after_num)
+                .ok()?;
             // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
             (
                 FilterProp::Cmc {
@@ -11327,37 +11332,21 @@ pub(crate) fn parse_relative_subtype_list(input: &str) -> Option<(Vec<String>, u
 /// leg, a two-leg "X or Y", or an Oxford-comma list "X, Y, ..., or Z". Returns
 /// the legs and the bytes consumed.
 ///
-/// A list is closed only by an "or" leg, so a comma run that never
-/// closes ("a Demon, Zombies you control ...") is not read as a list: the result
-/// rolls back to the legs up to the last closing conjunction, or to the first leg.
+/// Adapter over the shared [`nom_primitives::parse_or_closed_list`] grammar: a
+/// list is closed only by an "or" leg, so a comma run that never closes ("a
+/// Demon, Zombies you control ...") rolls back to the legs up to the last
+/// closing conjunction, or to the first leg.
 fn parse_relative_list<T>(
     input: &str,
     parse_leg: impl Fn(&str) -> Option<(T, &str)>,
 ) -> Option<(Vec<T>, usize)> {
-    let (first, mut rest) = parse_leg(input)?;
-    let mut legs = vec![first];
-    let mut closed = (1usize, rest);
-    while let Ok((after_separator, closes)) = alt((
-        value(
-            true,
-            alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or "))),
-        ),
-        value(false, tag(", ")),
-    ))
-    .parse(rest)
-    {
-        let Some((next, after_leg)) = parse_leg(after_separator) else {
-            break;
-        };
-        legs.push(next);
-        rest = after_leg;
-        if closes {
-            closed = (legs.len(), rest);
-        }
-    }
-    let (count, end) = closed;
-    legs.truncate(count);
-    Some((legs, input.len() - end.len()))
+    let (rest, legs) = nom_primitives::parse_or_closed_list(|i| {
+        parse_leg(i)
+            .map(|(leg, after)| (after, leg))
+            .ok_or_else(|| oracle_err(i))
+    })(input)
+    .ok()?;
+    Some((legs, input.len() - rest.len()))
 }
 
 fn is_relative_core_type_filter(type_filter: &TypeFilter) -> bool {
@@ -15926,6 +15915,48 @@ mod tests {
                     ],
                 },
             ]))
+        );
+    }
+
+    /// CR 202.3: Kozilek's Unsealing — "with mana value 4, 5, or 6" is an
+    /// exact-value list, one EQ comparison per value, consumed up to (not
+    /// including) the clause comma.
+    #[test]
+    fn creature_spell_with_mana_value_4_5_or_6() {
+        let mut ctx = ParseContext::default();
+        let input =
+            "with mana value 4, 5, or 6, create two 0/1 colorless eldrazi spawn creature tokens";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("mana value list parses");
+        assert_eq!(
+            &input[consumed..],
+            ", create two 0/1 colorless eldrazi spawn creature tokens"
+        );
+        let mv_eq = |value| FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            prop,
+            FilterProp::AnyOf {
+                props: vec![mv_eq(4), mv_eq(5), mv_eq(6)],
+            }
+        );
+
+        // Firemind's Foresight: a single number before a clause comma stays an
+        // exact EQ reading and leaves the comma.
+        let input = "with mana value 3, reveal it, and put it into your hand";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("single mana value parses");
+        assert_eq!(&input[consumed..], ", reveal it, and put it into your hand");
+        assert_eq!(prop, mv_eq(3));
+
+        // An "or" tail that is neither a comparator nor a number leg declines
+        // the whole suffix (the pre-list behaviour), instead of keeping EQ 4 and
+        // leaving "or blue" behind. The two positives above are the reach-guard.
+        assert_eq!(
+            parse_mana_value_suffix("with mana value 4 or blue", &mut ctx),
+            None
         );
     }
 
