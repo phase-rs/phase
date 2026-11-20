@@ -78,10 +78,13 @@ use super::oracle_effect::imperative::{
 };
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
-    ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
-    parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
+    ability_chain_grants_chosen_color_keyword, append_to_deepest_sub_ability,
+    contains_mass_population_anaphor, lower_ability_ir, mass_population_filter,
+    parse_ability_ir_standalone, parse_ability_ir_with_context,
+    parse_additional_cost_instead_condition_fragment,
     parse_effect_chain_with_context_and_provenance, parse_phase_name_set,
-    parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
+    parse_windowed_replacement_install_ir, rewrite_condition_keyword,
+    rewrite_grant_parent_to_filter, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -1813,6 +1816,7 @@ fn finalize_relation_syntheses(doc: &mut OracleDocIr, relations: &[DocumentRelat
 
 fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
     let mut relations = Vec::new();
+    detect_cross_item_mass_population_anaphors(items, &mut relations);
     detect_linked_choice_etb_counter(items, &mut relations);
     detect_linked_choice_constrained_card_type_static(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);
@@ -1822,6 +1826,77 @@ fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<Do
     detect_etb_exile_ltb_return(items, &mut relations);
     detect_active_player_punisher(items, &mut relations);
     relations
+}
+
+/// CR 608.2c + CR 611.2c: Pair an adjacent mass-population producer with a
+/// conditional paragraph whose plural noun phrase names that same population.
+/// This is deliberately discovered from source-ordered item ids, not from the
+/// final ability vector, because lowering groups items by category and would
+/// otherwise lose the printed paragraph boundary.
+fn detect_cross_item_mass_population_anaphors(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    for pair in items.windows(2) {
+        let [producer, consumer] = pair else {
+            continue;
+        };
+        if !matches!(producer.node, OracleNodeIr::Spell(_))
+            || !matches!(consumer.node, OracleNodeIr::Spell(_))
+        {
+            continue;
+        }
+        let Some(producer_def) = item_ability(producer) else {
+            continue;
+        };
+        if mass_population_filter(&producer_def.effect).is_none() {
+            continue;
+        }
+        let Some(consumer_def) = item_ability(consumer) else {
+            continue;
+        };
+        if !ability_is_conditional_mass_population_grant(&consumer_def) {
+            continue;
+        }
+        let Some(fragment) = consumer.source.fragment() else {
+            continue;
+        };
+        if !contains_mass_population_anaphor(&fragment.to_lowercase()) {
+            continue;
+        }
+        relations.push(DocumentRelationIr::CrossItemMassPopulationAnaphor {
+            producer: producer.id,
+            consumer: consumer.id,
+        });
+    }
+}
+
+/// The consumer-side proof shared by document-relation discovery and
+/// application. A condition may be carried on the ability or on the one static
+/// grant after the normal GenericEffect condition lowering.
+fn ability_is_conditional_mass_population_grant(def: &AbilityDefinition) -> bool {
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = def.effect.as_ref()
+    else {
+        return false;
+    };
+    let has_parent_target = target
+        .as_ref()
+        .is_some_and(|target| matches!(target, TargetFilter::ParentTarget))
+        || static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+        });
+    let has_condition = def.condition.is_some()
+        || static_abilities
+            .iter()
+            .any(|static_def| static_def.condition.is_some());
+    has_parent_target && has_condition
 }
 
 /// Position of the lowered definition produced by `id` within its category track.
@@ -1905,6 +1980,50 @@ fn apply_self_replacement_override(
         override_def.else_ability = base.sub_ability.take();
         base.sub_ability = Some(Box::new(override_def));
 
+        for (slot, def) in result.abilities.iter_mut().enumerate() {
+            stamp_printed_ability_slot(def, slot);
+        }
+    }
+}
+
+/// CR 608.2c + CR 611.2c: fold a cross-item plural mass-population rider into
+/// its producer. The producer filter is copied at parse time, while the engine
+/// still locks the actual affected objects when the mass effect resolves.
+fn apply_cross_item_mass_population_anaphor(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &mut Vec<OracleItemId>,
+) {
+    for relation in relations {
+        let DocumentRelationIr::CrossItemMassPopulationAnaphor { producer, consumer } = relation
+        else {
+            continue;
+        };
+        let Some(producer_pos) = position_of(ability_ids, *producer) else {
+            continue;
+        };
+        let Some(consumer_pos) = position_of(ability_ids, *consumer) else {
+            continue;
+        };
+        if consumer_pos <= producer_pos {
+            continue;
+        }
+        let Some(population) =
+            mass_population_filter(&result.abilities[producer_pos].effect).cloned()
+        else {
+            continue;
+        };
+        if !ability_is_conditional_mass_population_grant(&result.abilities[consumer_pos]) {
+            continue;
+        }
+
+        let mut consumer_def = result.abilities.remove(consumer_pos);
+        ability_ids.remove(consumer_pos);
+        rewrite_grant_parent_to_filter(&mut consumer_def.effect, &population);
+        append_to_deepest_sub_ability(
+            &mut result.abilities[producer_pos],
+            Some(Box::new(consumer_def)),
+        );
         for (slot, def) in result.abilities.iter_mut().enumerate() {
             stamp_printed_ability_slot(def, slot);
         }
@@ -4860,6 +4979,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         },
     );
     apply_self_replacement_override(&mut result, &ir.relations, &mut ability_ids);
+    apply_cross_item_mass_population_anaphor(&mut result, &ir.relations, &mut ability_ids);
     apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
     apply_linked_choice_constrained_card_type_static(
         &mut result,
@@ -4917,12 +5037,14 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         .items
         .iter()
         .filter(|item| {
-            !ir.relations.iter().any(|relation| {
-                let DocumentRelationIr::SelfReplacementOverride { override_item, .. } = relation
-                else {
-                    return false;
-                };
-                *override_item == item.id
+            !ir.relations.iter().any(|relation| match relation {
+                DocumentRelationIr::SelfReplacementOverride { override_item, .. } => {
+                    *override_item == item.id
+                }
+                DocumentRelationIr::CrossItemMassPopulationAnaphor { consumer, .. } => {
+                    *consumer == item.id
+                }
+                _ => false,
             })
         })
         .cloned()
