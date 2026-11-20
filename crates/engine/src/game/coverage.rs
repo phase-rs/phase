@@ -1626,7 +1626,7 @@ fn fmt_player_is_poisoned(player: &PlayerScope) -> String {
         PlayerScope::Opponent {
             aggregate: AggregateFunction::Max,
         } => "an opponent is poisoned".into(),
-        // RecipientController reaches this condition only by rebinding a printed "that player".
+        // RecipientController reaches this condition only by rebinding the "that player" anaphor (ScopedPlayer).
         PlayerScope::ScopedPlayer | PlayerScope::RecipientController => {
             "that player is poisoned".into()
         }
