@@ -363,6 +363,7 @@ mod merged_component_departure_owner;
 mod merieke_ri_berit_cant_regenerate;
 mod metalworker_reveal_mana;
 mod metamorphic_alteration;
+mod midnight_reaper_sacrifice;
 mod militant_angel_attacked_opponents;
 mod mill_double_redirect_choice_continuation;
 mod mill_rest_in_peace_redirect;
