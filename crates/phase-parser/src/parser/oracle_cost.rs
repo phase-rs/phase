@@ -1494,14 +1494,23 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
         };
     }
 
-    // "Reveal this card from your hand" / "Reveal this card in your hand" — reveal self cost
+    // CR 701.20a + CR 113.6j: "Reveal this card / ~ from your hand" — the source reveals itself.
     if nom_on_lower(text, &lower, |i| {
         value(
             (),
-            alt((
-                tag("reveal this card from your hand"),
-                tag("reveal this card in your hand"),
-            )),
+            (
+                tag("reveal "),
+                alt((
+                    value((), tag("this card")),
+                    value(
+                        (),
+                        verify(parse_cost_self_reference, |f| {
+                            matches!(f, TargetFilter::SelfRef)
+                        }),
+                    ),
+                )),
+                alt((tag(" from your hand"), tag(" in your hand"))),
+            ),
         )
         .parse(i)
     })
@@ -1524,8 +1533,7 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
     }
 
     // "Reveal a [Type] card from your hand" — fallback for reveal shapes the
-    // strict `parse_reveal_from_hand_cost_body` grammar declines (self-name
-    // reveals).
+    // strict `parse_reveal_from_hand_cost_body` grammar declines.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
@@ -5329,14 +5337,28 @@ mod tests {
 
     #[test]
     fn cost_reveal_self_from_hand() {
-        assert_eq!(
-            parse_oracle_cost("Reveal this card from your hand"),
+        for text in [
+            "Reveal this card from your hand",
+            "Reveal this card in your hand",
+            "Reveal ~ from your hand",
+        ] {
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Reveal {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    shared_quality: None,
+                },
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            parse_oracle_cost("Reveal a Dragon card from your hand"),
             AbilityCost::Reveal {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                shared_quality: None,
+                filter: Some(_),
+                ..
             }
-        );
+        ));
     }
 
     /// CR 701.20a + CR 107.3a: the Martyr cycle's "Reveal X <color> cards
