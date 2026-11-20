@@ -1147,6 +1147,30 @@ describe("owner authority invalidation", () => {
     await waitFor(() => expect(hook.result.current.src).toBe("/exact.jpg"));
   });
 
+  it("shows the CardImage placeholder after one error on shared automatic and viewer art", async () => {
+    const env = await setup({ offline: true });
+    vi.stubGlobal("caches", { match: vi.fn(async (url: string) =>
+      json(url.includes("printings") ? env.data.catalog : env.data.main)) });
+    env.preferences.setState({
+      artOverrides: { [A]: { scryfallId: O1, setCode: "own", collectorNumber: "01" } },
+    });
+    env.installPrinting(O1, "/shared.jpg");
+    const { CardImage } = await import("../../components/card/CardImage.tsx");
+    const props = { cardName: "Alpha", oracleId: A, oracleText: "" };
+    const surface = render(<CardImage {...props} />);
+    await waitFor(() => expect(surface.container.querySelector("img")).toHaveAttribute("src", "/shared.jpg"));
+
+    surface.rerender(<CardImage {...props} ownerPrinting={{ ...owner, automatic_art_catalog_version: 1 }} />);
+    await waitFor(() => expect(env.ownerCalls()).toHaveLength(1));
+    await settle();
+    const image = surface.getByAltText("Alpha");
+    expect(image).toHaveAttribute("src", "/shared.jpg");
+    fireEvent.error(image);
+
+    expect(await surface.findByTestId("card-art-fallback")).toBeInTheDocument();
+    expect(image).not.toBeInTheDocument();
+  });
+
   it("discards an old callback when only provenance changes", async () => {
     const env = await setup();
     env.installPrinting(P, "/viewer.jpg");
