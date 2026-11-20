@@ -11,21 +11,23 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
-    rebind_chosen_parity_to_source, retarget_chosen_card_type_to_creature_type, AbilityCondition,
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    ActivationRestriction, AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric,
-    CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
-    ContinuousModification, ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    filter_contains, filter_contains_filter_prop, graveyard_destination_rider,
+    is_graveyard_exile_rider_subability, rebind_chosen_parity_to_source,
+    retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
+    AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric, CastTimingPermission,
+    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
+    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
     DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
     ManaProduction, ModalChoice, ParitySource, ParsedCondition, PermissionGrantee, PlayerFilter,
     QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolutionCastWindow,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
-    VoteSubject,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
-    granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
+    granter_symbols, visit_ability_def_scoped, visit_direct_effect_ability_payloads,
+    DefinitionNode, ResolutionScope,
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
@@ -78,10 +80,13 @@ use super::oracle_effect::imperative::{
 };
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
-    ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
+    ability_chain_grants_chosen_color_keyword, append_to_deepest_sub_ability,
+    contains_mass_population_anaphor, continuous_grant_population, each_target_filter_mut,
+    lower_ability_ir, mass_population_filter, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
     parse_effect_chain_with_context_and_provenance, parse_phase_name_set,
-    parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
+    parse_windowed_replacement_install_ir, rewrite_condition_keyword,
+    rewrite_conditional_grant_parent_to_filter, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
@@ -1815,6 +1820,7 @@ fn finalize_relation_syntheses(doc: &mut OracleDocIr, relations: &[DocumentRelat
 
 fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
     let mut relations = Vec::new();
+    detect_cross_item_mass_population_anaphors(items, &mut relations);
     detect_linked_choice_etb_counter(items, &mut relations);
     detect_linked_choice_constrained_card_type_static(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);
@@ -1824,6 +1830,138 @@ fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<Do
     detect_etb_exile_ltb_return(items, &mut relations);
     detect_active_player_punisher(items, &mut relations);
     relations
+}
+
+/// CR 608.2c + CR 611.2c: Pair an adjacent mass-population producer with a
+/// conditional paragraph whose plural noun phrase names that same population.
+/// This is deliberately discovered from source-ordered item ids, not from the
+/// final ability vector, because lowering groups items by category and would
+/// otherwise lose the printed paragraph boundary.
+fn detect_cross_item_mass_population_anaphors(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    for (consumer_index, consumer) in items.iter().enumerate() {
+        if consumer.node.spell_payload().is_none() {
+            continue;
+        }
+        let Some(producer) = items[..consumer_index]
+            .iter()
+            .rev()
+            .find(|candidate| candidate.node.spell_payload().is_some())
+        else {
+            continue;
+        };
+        // Source spans are the provenance boundary. Metadata or other
+        // non-spell items may be emitted between two printed spell paragraphs,
+        // but a same-line item is not a separate cross-line relation.
+        if producer.source.span().last_line >= consumer.source.span().first_line {
+            continue;
+        }
+        let Some(producer_def) = item_ability(producer) else {
+            continue;
+        };
+        if producer_population(&producer_def).is_none() {
+            continue;
+        }
+        let Some(consumer_def) = item_ability(consumer) else {
+            continue;
+        };
+        if !ability_is_conditional_mass_population_grant(&consumer_def) {
+            continue;
+        }
+        let Some(fragment) = consumer.source.fragment() else {
+            continue;
+        };
+        if !contains_mass_population_anaphor(&fragment.to_lowercase()) {
+            continue;
+        }
+        relations.push(DocumentRelationIr::CrossItemMassPopulationAnaphor {
+            producer: producer.id,
+            consumer: consumer.id,
+        });
+    }
+}
+
+/// The consumer-side proof shared by document-relation discovery and
+/// application. A condition may be carried on the ability or on the same static
+/// grant after normal condition lowering, and the grant may be a nested
+/// continuation of a tracked-set-producing effect such as `PutCounterAll`.
+fn ability_is_conditional_mass_population_grant(def: &AbilityDefinition) -> bool {
+    ability_has_conditional_mass_population_grant(def, false)
+}
+
+/// Keep the grant and its guard on one definition path. A condition on an
+/// ability definition is inherited by its own continuation and direct effect
+/// payloads, but a condition on one sibling branch must not prove a grant in a
+/// different sibling branch. This is the scoped counterpart to a tree-wide
+/// `any(grant) && any(condition)` test.
+fn ability_has_conditional_mass_population_grant(
+    def: &AbilityDefinition,
+    inherited_condition: bool,
+) -> bool {
+    let condition_in_scope = inherited_condition || def.condition.is_some();
+    if effect_has_conditional_mass_population_grant(&def.effect, condition_in_scope) {
+        return true;
+    }
+
+    if let Some(child) = def.sub_ability.as_deref() {
+        let child_condition = match child.sub_link {
+            SubAbilityLink::ContinuationStep => condition_in_scope,
+            SubAbilityLink::SequentialSibling => false,
+        };
+        if ability_has_conditional_mass_population_grant(child, child_condition) {
+            return true;
+        }
+    }
+    if let Some(child) = def.else_ability.as_deref() {
+        if ability_has_conditional_mass_population_grant(child, false) {
+            return true;
+        }
+    }
+    if def
+        .mode_abilities
+        .iter()
+        .any(|child| ability_has_conditional_mass_population_grant(child, condition_in_scope))
+    {
+        return true;
+    }
+
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |_, child| {
+        found |= ability_has_conditional_mass_population_grant(child, condition_in_scope);
+    });
+    found
+}
+
+fn effect_has_conditional_mass_population_grant(effect: &Effect, condition_in_scope: bool) -> bool {
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+
+    target
+        .as_ref()
+        .is_some_and(|target| condition_in_scope && matches!(target, TargetFilter::ParentTarget))
+        || static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+                && (condition_in_scope || static_def.condition.is_some())
+        })
+}
+
+/// CR 608.2c + CR 611.2c: The printed producer may establish its population
+/// either through a mass effect (`*All`) or through a continuous static grant
+/// over a broadcast filter. Keep both forms on the same relation axis so a
+/// cross-line rider cannot depend on the producer's effect enum shape.
+fn producer_population(def: &AbilityDefinition) -> Option<&TargetFilter> {
+    mass_population_filter(&def.effect).or_else(|| continuous_grant_population(&def.effect))
 }
 
 /// Position of the lowered definition produced by `id` within its category track.
@@ -1911,6 +2049,169 @@ fn apply_self_replacement_override(
             stamp_printed_ability_slot(def, slot);
         }
     }
+}
+
+/// CR 608.2c + CR 611.2c: fold a cross-item plural mass-population rider into
+/// its producer. The producer filter is copied at parse time, while the engine
+/// still locks the actual affected objects when the mass effect resolves.
+fn apply_cross_item_mass_population_anaphor(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    ability_ids: &mut Vec<OracleItemId>,
+) {
+    for relation in relations {
+        let DocumentRelationIr::CrossItemMassPopulationAnaphor { producer, consumer } = relation
+        else {
+            continue;
+        };
+        let Some(producer_pos) = position_of(ability_ids, *producer) else {
+            continue;
+        };
+        let Some(consumer_pos) = position_of(ability_ids, *consumer) else {
+            continue;
+        };
+        if consumer_pos <= producer_pos {
+            continue;
+        }
+        let Some(population) = producer_population(&result.abilities[producer_pos]).cloned() else {
+            continue;
+        };
+        if !ability_is_conditional_mass_population_grant(&result.abilities[consumer_pos]) {
+            continue;
+        }
+
+        let mut consumer_def = result.abilities.remove(consumer_pos);
+        ability_ids.remove(consumer_pos);
+        rewrite_ability_grant_parent_to_tracked_set(&mut consumer_def, &population);
+        append_to_deepest_sub_ability(
+            &mut result.abilities[producer_pos],
+            Some(Box::new(consumer_def)),
+        );
+        for (slot, def) in result.abilities.iter_mut().enumerate() {
+            stamp_printed_ability_slot(def, slot);
+        }
+    }
+}
+
+/// Re-anchor grants in a consumer ability tree. A direct cross-item grant reads
+/// the producer's frozen tracked set. Once a consumer definition already reads
+/// that set (for example, Unbreakable Formation's counter instruction), its
+/// later same-item continuation is kept on the concrete population filter so
+/// the engine's existing chain publisher remains the sole antecedent; that
+/// continuation is not the cross-item binding itself.
+fn rewrite_ability_grant_parent_to_tracked_set(
+    def: &mut AbilityDefinition,
+    population: &TargetFilter,
+) {
+    rewrite_ability_grant_parent_to_tracked_set_in_scope(def, false, false, population);
+}
+
+fn rewrite_ability_grant_parent_to_tracked_set_in_scope(
+    def: &mut AbilityDefinition,
+    inherited_condition: bool,
+    ancestor_uses_tracked_set: bool,
+    population: &TargetFilter,
+) {
+    let condition_in_scope = inherited_condition || def.condition.is_some();
+    let effect_uses_tracked_set = effect_uses_tracked_set(&def.effect);
+    if ancestor_uses_tracked_set {
+        rewrite_conditional_grant_parent_to_filter(&mut def.effect, population, condition_in_scope);
+    } else if !effect_uses_tracked_set {
+        rewrite_conditional_grant_parent_to_filter(
+            &mut def.effect,
+            &TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+            condition_in_scope,
+        );
+    }
+    let descendant_uses_tracked_set = ancestor_uses_tracked_set || effect_uses_tracked_set;
+
+    if let Some(child) = def.sub_ability.as_deref_mut() {
+        let child_condition = match child.sub_link {
+            SubAbilityLink::ContinuationStep => condition_in_scope,
+            SubAbilityLink::SequentialSibling => false,
+        };
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            child_condition,
+            descendant_uses_tracked_set,
+            population,
+        );
+    }
+    if let Some(child) = def.else_ability.as_deref_mut() {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            false,
+            descendant_uses_tracked_set,
+            population,
+        );
+    }
+    for child in &mut def.mode_abilities {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            condition_in_scope,
+            descendant_uses_tracked_set,
+            population,
+        );
+    }
+
+    def.effect.for_each_nested_definition_mut(&mut |_, child| {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            condition_in_scope,
+            descendant_uses_tracked_set,
+            population,
+        );
+    });
+
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = def.effect.as_mut()
+    {
+        for static_def in static_abilities {
+            for modification in &mut static_def.modifications {
+                if let ContinuousModification::GrantAbility { definition } = modification {
+                    rewrite_ability_grant_parent_to_tracked_set_in_scope(
+                        definition,
+                        condition_in_scope,
+                        descendant_uses_tracked_set,
+                        population,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn effect_uses_tracked_set(effect: &Effect) -> bool {
+    let mut effect = effect.clone();
+    let mut uses_tracked_set = false;
+    each_target_filter_mut(&mut effect, &mut |filter| {
+        uses_tracked_set |= target_filter_uses_tracked_set(filter);
+    });
+    uses_tracked_set |= mass_population_filter(&effect).is_some_and(target_filter_uses_tracked_set);
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &effect
+    {
+        uses_tracked_set |= static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(target_filter_uses_tracked_set)
+        });
+    }
+    uses_tracked_set
+}
+
+fn target_filter_uses_tracked_set(filter: &TargetFilter) -> bool {
+    filter_contains(filter, &|filter| {
+        matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+    })
 }
 
 // --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------
@@ -4862,6 +5163,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         },
     );
     apply_self_replacement_override(&mut result, &ir.relations, &mut ability_ids);
+    apply_cross_item_mass_population_anaphor(&mut result, &ir.relations, &mut ability_ids);
     apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
     apply_linked_choice_constrained_card_type_static(
         &mut result,
@@ -4919,12 +5221,16 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         .items
         .iter()
         .filter(|item| {
-            !ir.relations.iter().any(|relation| {
-                let DocumentRelationIr::SelfReplacementOverride { override_item, .. } = relation
-                else {
-                    return false;
-                };
-                *override_item == item.id
+            !ir.relations.iter().any(|relation| match relation {
+                DocumentRelationIr::SelfReplacementOverride { override_item, .. } => {
+                    *override_item == item.id
+                }
+                DocumentRelationIr::CrossItemMassPopulationAnaphor { consumer, .. } => {
+                    *consumer == item.id
+                }
+                DocumentRelationIr::EtbExileLtbReturn { .. }
+                | DocumentRelationIr::ActivePlayerPunisher { .. }
+                | DocumentRelationIr::LinkedChoice(_) => false,
             })
         })
         .cloned()
