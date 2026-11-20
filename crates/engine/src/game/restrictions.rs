@@ -820,8 +820,13 @@ pub fn check_casting_restrictions(
     source_id: ObjectId,
     restrictions: &[CastingRestriction],
 ) -> Result<(), EngineError> {
+    let anchor = if restrictions.contains(&CastingRestriction::DuringCombat) {
+        CombatWindowAnchor::CombatInProgress
+    } else {
+        CombatWindowAnchor::FirstCombatOfTurn
+    };
     for restriction in restrictions {
-        if !casting_restriction_applies(state, player, source_id, restriction) {
+        if !casting_restriction_applies(state, player, source_id, restriction, anchor) {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Casting restriction not satisfied: {restriction:?}"
             )));
@@ -858,6 +863,11 @@ pub fn check_activation_restrictions_with_static_gates(
     restrictions: &[ActivationRestriction],
     gates: &ActivationRestrictionStaticGates,
 ) -> Result<(), EngineError> {
+    let anchor = if restrictions.contains(&ActivationRestriction::DuringCombat) {
+        CombatWindowAnchor::CombatInProgress
+    } else {
+        CombatWindowAnchor::FirstCombatOfTurn
+    };
     for restriction in restrictions {
         if !activation_restriction_applies(
             state,
@@ -866,6 +876,7 @@ pub fn check_activation_restrictions_with_static_gates(
             ability_index,
             restriction,
             gates,
+            anchor,
         ) {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Activation restriction not satisfied: {restriction:?}"
@@ -1433,6 +1444,7 @@ fn activation_restriction_applies(
     ability_index: usize,
     restriction: &ActivationRestriction,
     gates: &ActivationRestrictionStaticGates,
+    anchor: CombatWindowAnchor,
 ) -> bool {
     // CR 602.5c: the usage budget is per acquisition, not per index. A slot
     // that no longer resolves reads a missing entry as count 0.
@@ -1479,10 +1491,14 @@ fn activation_restriction_applies(
         ActivationRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep
         }
-        // CR 508.1c / CR 509.1b: Combat-phase restrictions on activation timing.
+        // CR 500.1 + CR 506.1: combat-phase activation windows.
         ActivationRestriction::DuringCombat => state.phase.is_combat(),
-        ActivationRestriction::BeforeAttackersDeclared => is_before_attackers_declared(state),
-        ActivationRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
+        ActivationRestriction::BeforeAttackersDeclared => {
+            before_combat_step(state, Phase::DeclareAttackers, anchor)
+        }
+        ActivationRestriction::BeforeCombatDamage => {
+            before_combat_step(state, Phase::CombatDamage, anchor)
+        }
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
         // CR 702.142b: ModifyActivationLimit statics may raise the limit for tagged abilities.
         ActivationRestriction::OnlyOnceEachTurn => {
@@ -1588,6 +1604,7 @@ fn casting_restriction_applies(
     player: PlayerId,
     source_id: ObjectId,
     restriction: &CastingRestriction,
+    anchor: CombatWindowAnchor,
 ) -> bool {
     match restriction {
         // CR 307.1: A player may cast a sorcery during a main phase of their turn when the stack is empty.
@@ -1617,9 +1634,11 @@ fn casting_restriction_applies(
         CastingRestriction::DeclareAttackersStep => state.phase == Phase::DeclareAttackers,
         // CR 509.1: Declare blockers step.
         CastingRestriction::DeclareBlockersStep => state.phase == Phase::DeclareBlockers,
-        CastingRestriction::BeforeAttackersDeclared => is_before_attackers_declared(state),
+        CastingRestriction::BeforeAttackersDeclared => {
+            before_combat_step(state, Phase::DeclareAttackers, anchor)
+        }
         CastingRestriction::BeforeBlockersDeclared => {
-            matches!(state.phase, Phase::BeginCombat | Phase::DeclareAttackers)
+            before_combat_step(state, Phase::DeclareBlockers, anchor)
         }
         // CR 509.1 + CR 510.1 + CR 511.1: "after blockers are declared" opens
         // once the declare-blockers turn-based action has placed blockers and
@@ -1631,7 +1650,9 @@ fn casting_restriction_applies(
             state.phase,
             Phase::DeclareBlockers | Phase::CombatDamage | Phase::EndCombat
         ),
-        CastingRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
+        CastingRestriction::BeforeCombatDamage => {
+            before_combat_step(state, Phase::CombatDamage, anchor)
+        }
         CastingRestriction::AfterCombat => matches!(
             state.phase,
             Phase::EndCombat | Phase::PostCombatMain | Phase::End | Phase::Cleanup
@@ -2633,25 +2654,46 @@ pub(crate) fn is_sorcery_speed_window(
             || super::players::teammates(state, state.active_player).contains(&player))
 }
 
-fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
-    // CR 508.1 + CR 508.2: attackers are declared as the first turn-based action
-    // of the declare-attackers step, BEFORE any player receives priority. So
-    // "before attackers are declared" is a pure PHASE property — we are strictly
-    // before that step — independent of which player currently holds priority.
-    // This is deliberately not priority-gated: a non-active player casting an
-    // instant during the active player's pre-combat (Siren's Call, Master
-    // Warcraft) is correctly inside the window, and turn-control (CR 723) can't
-    // affect a check that never reads priority. Turn-qualified cards (the
-    // `DuringYourTurn` activations) remain pinned to the active player by their
-    // own restriction, which is AND-composed with this one.
-    matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
+/// CR 506.1: the combat phase a "before <combat step>" window is measured in.
+#[derive(Clone, Copy)]
+enum CombatWindowAnchor {
+    /// Bare "before blockers are declared": a point in the turn, so the turn's first combat phase.
+    FirstCombatOfTurn,
+    /// "During combat before blockers are declared": each combat phase.
+    CombatInProgress,
 }
 
-fn is_before_combat_damage(phase: Phase) -> bool {
-    matches!(
-        phase,
-        Phase::BeginCombat | Phase::DeclareAttackers | Phase::DeclareBlockers
-    )
+/// CR 500.1 + CR 506.1: whether `step` of the combat phase `anchor` names has not begun yet.
+/// A turn property, not priority-gated (CR 508.1 + CR 508.2: attackers are declared before priority).
+fn before_combat_step(
+    state: &crate::types::game_state::GameState,
+    step: Phase,
+    anchor: CombatWindowAnchor,
+) -> bool {
+    use crate::types::phase::{PhaseGroup, TurnSegment};
+    // `Phase` orders steps in turn order.
+    match anchor {
+        // Chosen only alongside `DuringCombat`, which confines the phase to a combat step.
+        CombatWindowAnchor::CombatInProgress => state.phase < step,
+        CombatWindowAnchor::FirstCombatOfTurn => {
+            // CR 500.11 + CR 505.1a: outside combat, open while a combat phase is ahead — the turn's
+            // own combat (an added main phase is labelled postcombat) or a queued added one.
+            let ahead = if state.phase.is_combat() {
+                state.phase < step
+            } else {
+                state
+                    .extra_phase_resume
+                    .first()
+                    .map_or(state.phase, |unit| unit.anchor)
+                    < Phase::BeginCombat
+                    || state
+                        .extra_phases
+                        .iter()
+                        .any(|ep| ep.segment == TurnSegment::Phase(PhaseGroup::Combat))
+            };
+            ahead && !super::turns::first_phase_of_turn_has_ended(state, PhaseGroup::Combat)
+        }
+    }
 }
 
 fn you_control_creature_with_keyword(

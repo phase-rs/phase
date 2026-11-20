@@ -13176,10 +13176,9 @@ fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRest
 /// gate. Each phrasing maps to an EXISTING enforced variant, so no new variant is
 /// introduced:
 /// - "before the combat damage step" / "before combat damage [has been dealt]"
-///   → `BeforeCombatDamage` (CR 510; enforced = `BeginCombat | DeclareAttackers
-///   | DeclareBlockers`) — Angus Mackenzie, Save Point.
+///   → `BeforeCombatDamage` (CR 510) — Angus Mackenzie, Save Point.
 /// - "before attackers are declared" / "before combat" → `BeforeAttackersDeclared`
-///   (CR 508.1; enforced = `PreCombatMain | BeginCombat`) — Arcum's Whistle.
+///   (CR 508.1) — Arcum's Whistle.
 ///
 /// The combat-damage arm is tried BEFORE the `before combat` arm, which is a
 /// prefix of "before combat damage" and would otherwise shadow it; within that
