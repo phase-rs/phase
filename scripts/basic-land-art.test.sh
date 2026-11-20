@@ -40,12 +40,13 @@ jq --arg oracle "$oracle" --arg alias_id "$alias_id" --arg alias_art "$alias_art
   def printing($oracle; $id; $art; $set; $number):
     {oracle_id: $oracle, id: $id, illustration_id: $art, set: $set, collector_number: $number,
       lang: "en", games: ["paper"], layout: "normal", released_at: "2024-01-01",
+      set_name: "Fixture Set", border_color: "black",
       image_uris: {normal: "https://img.example/normal.jpg", art_crop: "https://img.example/art.jpg"}};
   [.lands | to_entries[] | .key as $key
     | (.value.choices[] | printing($key; .scryfall_id; .illustration_id; .set; .collector_number)),
       (.value.aliases | to_entries[] | select(.key != "mh3/439")
         | (.key | split("/")) as [$set, $number]
-        | printing($key; null; .value; $set; $number))]
+        | printing($key; .key; .value; $set; $number))]
   + [printing($oracle; $alias_id; $alias_art; "mh3"; "439")]
 ' "$catalog" > "$dir/bulk.json"
 
@@ -84,6 +85,12 @@ mutate_catalog() {
 
 source_check "$fixture_catalog"
 expect_failure "Scryfall bulk SHA-256 mismatch" source_check "$catalog"
+mutate_catalog 'del(.source.scryfall_bulk_sha256)'
+expect_failure "Expected a 64-hex Scryfall bulk SHA-256" source_check "$dir/mutated-catalog.json"
+mutate_catalog '.source.scryfall_bulk_sha256 = "a"'
+expect_failure "Expected a 64-hex Scryfall bulk SHA-256" source_check "$dir/mutated-catalog.json"
+mutate_catalog '.source.scryfall_bulk_sha256 += "\n"'
+expect_failure "Expected a 64-hex Scryfall bulk SHA-256" source_check "$dir/mutated-catalog.json"
 mutate_catalog 'del(.lands[$oracle])'
 expect_failure "catalog launch membership mismatch" source_check "$dir/mutated-catalog.json"
 mutate_catalog '.lands[$barry] = .lands[$oracle] | del(.lands[$oracle])'
@@ -92,6 +99,28 @@ mutate_catalog '.lands[$oracle].choices[0].scryfall_id = $alias_id'
 expect_failure "$oracle mh3/229: choice printing ID mismatch" source_check "$dir/mutated-catalog.json"
 mutate_catalog '.lands[$oracle] |= (.aliases["mh3/439"] = .choices[1].illustration_id)'
 expect_failure "$oracle mh3/439: alias illustration mismatch" source_check "$dir/mutated-catalog.json"
+
+reject_bulk() {
+  local sha
+  sha=$(sha256sum < "$dir/mutated-bulk.json")
+  jq --arg sha "${sha%% *}" '.source.scryfall_bulk_sha256 = $sha' \
+    "$fixture_catalog" > "$dir/mutated-catalog.json"
+  expect_failure "$1" "$validator" source "$dir/mutated-catalog.json" "$dir/atomic.json" "$dir/mutated-bulk.json"
+}
+cat "$dir/bulk.json" "$dir/bulk.json" > "$dir/mutated-bulk.json"
+reject_bulk "expected one Scryfall bulk JSON array"
+for mutation in '.collector_number = 229' '.set = "MH3"' '.games = "paper"'; do
+  jq 'map(if .set == "mh3" and .collector_number == "229" then '"$mutation"' else . end)' \
+    "$dir/bulk.json" > "$dir/mutated-bulk.json"
+  case "$mutation" in
+    .collector_number*) reject_bulk "$oracle mh3/229: choice expected one source row, found 0" ;;
+    .set*) reject_bulk "$oracle mh3/229: choice expected lowercase set code" ;;
+    .games*) reject_bulk "$oracle mh3/229: choice expected English paper normal single-face printing" ;;
+  esac
+done
+jq '.data.Plains |= {"0": .[0]}' "$dir/atomic.json" > "$dir/mutated-atomic.json"
+expect_failure "expected AtomicCards array for Plains" \
+  "$validator" source "$fixture_catalog" "$dir/mutated-atomic.json" "$dir/bulk.json"
 
 index="$dir/index.json"
 generate "$dir/bulk.json" "$index"
@@ -131,6 +160,10 @@ edit_index 'map(if selected then del(.faces[0].art_crop) else . end)'
 reject_index "unusable faces[0].art_crop URL"
 edit_index 'map(if selected then .faces[0].normal = "https://errors.scryfall.com/soon.jpg" else . end)'
 reject_index "unusable faces[0].normal URL"
+edit_index 'map(if selected then .faces[0].normal = "https://errors.scryfall.com/a/../soon.jpg" else . end)'
+reject_index "unusable faces[0].normal URL"
+edit_index 'map(if selected then .set = "MH3" else . end)'
+reject_index "expected one renderer row, found 0"
 edit_index 'map(if selected then .faces |= ([{}] + .) else . end)'
 reject_index "unusable faces[0].normal URL"
 edit_index 'map(if selected then .faces[0].normal = "https:///no-host.jpg" else . end)'
@@ -171,10 +204,24 @@ PATH="$dir/bin:$PATH" generate "$dir/absent-bulk.json" "$index"
 [[ ! -e $CURL_MARKER && ! -e $dir/absent-bulk.json ]]
 cmp "$index" "$dir/original-index.json"
 
-cp "$dir/mutated-index.json" "$dir/corrupt-before.json"
-expect_failure "$oracle mh3/229: unusable faces[0].normal URL" \
-  generate "$dir/unreadable-bulk.json" "$dir/mutated-index.json"
-cmp "$dir/mutated-index.json" "$dir/corrupt-before.json"
+reject_cached_index() {
+  cp "$dir/mutated-index.json" "$dir/corrupt-before.json"
+  expect_failure "$1" generate "$dir/unreadable-bulk.json" "$dir/mutated-index.json"
+  cmp "$dir/mutated-index.json" "$dir/corrupt-before.json"
+}
+reject_cached_index "$oracle mh3/229: unusable faces[0].normal URL"
+edit_index 'to_entries | map({key: (.key | tostring), value}) | from_entries'
+reject_cached_index "renderer $oracle: expected a nonempty printing array"
+cat "$index" "$index" > "$dir/mutated-index.json"
+reject_cached_index "renderer index must contain exactly one JSON document"
+jq '.unrelated = []' "$index" > "$dir/mutated-index.json"
+reject_cached_index "renderer unrelated: expected a nonempty printing array"
+for mutation in 'del(.set_name)' 'del(.border_color)' '.frame_effects = [false]' \
+  '.full_art = "false"' '.faces = []' '.faces += [{orientation: null}]' '.faces[0].small = 42'; do
+  jq --arg oracle "$oracle" '.unrelated = [.[$oracle][0] | '"$mutation"']' \
+    "$index" > "$dir/mutated-index.json"
+  reject_cached_index "renderer unrelated: invalid printing entry at row 0"
+done
 cmp "$catalog" "$dir/original-catalog.json"
 
 echo "Basic-land art self-test passed."

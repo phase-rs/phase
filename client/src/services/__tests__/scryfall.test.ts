@@ -1065,9 +1065,11 @@ function basicLandPrintingFixtures() {
       id: scryfall_id,
       oracle_id,
       set,
+      set_name: "Fixture Set",
       collector_number,
       layout: "normal",
       released_at: "2024-01-01",
+      border_color: "black",
       image_uris: {
         normal: `https://img.example/${scryfall_id}-normal.jpg`,
         art_crop: `https://img.example/${scryfall_id}-art.jpg`,
