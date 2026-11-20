@@ -75,6 +75,25 @@ pub fn record_spell_cast(
     })
 }
 
+/// CR 601.2i: True iff `occurrence` names `object_id`'s cast in this turn's
+/// spell-cast journal. Coordinates left over from an earlier turn, or naming
+/// another object, do not match.
+pub(crate) fn cast_occurrence_is_current(
+    state: &GameState,
+    occurrence: CastOccurrence,
+    object_id: ObjectId,
+) -> bool {
+    usize::try_from(occurrence.turn_journal_index)
+        .ok()
+        .and_then(|index| {
+            state
+                .spells_cast_this_turn_by_player
+                .get(&occurrence.caster)
+                .and_then(|records| records.get(index))
+        })
+        .is_some_and(|record| record.spell_object_id == Some(object_id))
+}
+
 /// Validate every fallible spell-cast ledger precondition without mutation.
 ///
 /// CR 601.2g provides the mana-ability window before payment, CR 601.2h pays
