@@ -25,7 +25,8 @@ use crate::types::ability::{
     VoteSubject,
 };
 use crate::types::ability_visit::{
-    granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
+    ability_tree_any, granter_symbols, nodes_mut, visit_ability_def_scoped, DefinitionNode,
+    DefinitionNodeMut, ResolutionScope,
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
@@ -1837,13 +1838,21 @@ fn detect_cross_item_mass_population_anaphors(
     items: &[OracleItemIr],
     relations: &mut Vec<DocumentRelationIr>,
 ) {
-    for pair in items.windows(2) {
-        let [producer, consumer] = pair else {
+    for (consumer_index, consumer) in items.iter().enumerate() {
+        if consumer.node.spell_payload().is_none() {
+            continue;
+        }
+        let Some(producer) = items[..consumer_index]
+            .iter()
+            .rev()
+            .find(|candidate| candidate.node.spell_payload().is_some())
+        else {
             continue;
         };
-        if !matches!(producer.node, OracleNodeIr::Spell(_))
-            || !matches!(consumer.node, OracleNodeIr::Spell(_))
-        {
+        // Source spans are the provenance boundary. Metadata or other
+        // non-spell items may be emitted between two printed spell paragraphs,
+        // but a same-line item is not a separate cross-line relation.
+        if producer.source.span().last_line >= consumer.source.span().first_line {
             continue;
         }
         let Some(producer_def) = item_ability(producer) else {
@@ -1876,45 +1885,41 @@ fn detect_cross_item_mass_population_anaphors(
 /// after normal condition lowering, and the grant may be a nested continuation
 /// of a tracked-set-producing effect such as `PutCounterAll`.
 fn ability_is_conditional_mass_population_grant(def: &AbilityDefinition) -> bool {
-    fn visit(def: &AbilityDefinition, inherited_condition: bool) -> bool {
-        let condition_applies = inherited_condition || def.condition.is_some();
-        if let Effect::GenericEffect {
+    let has_parent_target_grant = ability_tree_any(def, &|candidate| {
+        let Effect::GenericEffect {
             target,
             static_abilities,
             ..
-        } = def.effect.as_ref()
-        {
-            let has_parent_target = target
-                .as_ref()
-                .is_some_and(|target| matches!(target, TargetFilter::ParentTarget))
-                || static_abilities.iter().any(|static_def| {
-                    static_def
-                        .affected
-                        .as_ref()
-                        .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
-                });
-            let has_condition = condition_applies
-                || static_abilities
-                    .iter()
-                    .any(|static_def| static_def.condition.is_some());
-            if has_parent_target && has_condition {
-                return true;
-            }
-        }
-        def.sub_ability
-            .as_deref()
-            .is_some_and(|child| visit(child, condition_applies))
-            || def
-                .else_ability
-                .as_deref()
-                .is_some_and(|child| visit(child, condition_applies))
-            || def
-                .mode_abilities
-                .iter()
-                .any(|child| visit(child, condition_applies))
+        } = candidate.effect.as_ref()
+        else {
+            return false;
+        };
+        target
+            .as_ref()
+            .is_some_and(|target| matches!(target, TargetFilter::ParentTarget))
+            || static_abilities.iter().any(|static_def| {
+                static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+            })
+    });
+    if !has_parent_target_grant {
+        return false;
     }
 
-    visit(def, false)
+    // A condition on the consumer root gates every nested continuation (the
+    // Addendum shape), while a condition on a nested static/ability is already
+    // attached to the grant itself (the Fateful hour/Spell mastery shape).
+    def.condition.is_some()
+        || ability_tree_any(def, &|candidate| {
+            candidate.condition.is_some()
+                || matches!(
+                    candidate.effect.as_ref(),
+                    Effect::GenericEffect { static_abilities, .. }
+                        if static_abilities.iter().any(|static_def| static_def.condition.is_some())
+                )
+        })
 }
 
 /// CR 608.2c + CR 611.2c: The printed producer may establish its population
@@ -2058,16 +2063,12 @@ fn apply_cross_item_mass_population_anaphor(
 /// put the anaphoric grant behind a `sub_ability`, so rewriting only the root
 /// effect would leave its `ParentTarget` unresolved.
 fn rewrite_ability_grant_parent_to_filter(def: &mut AbilityDefinition, replacement: &TargetFilter) {
-    rewrite_grant_parent_to_filter(&mut def.effect, replacement);
-    if let Some(sub_ability) = def.sub_ability.as_mut() {
-        rewrite_ability_grant_parent_to_filter(sub_ability, replacement);
-    }
-    if let Some(else_ability) = def.else_ability.as_mut() {
-        rewrite_ability_grant_parent_to_filter(else_ability, replacement);
-    }
-    for mode in &mut def.mode_abilities {
-        rewrite_ability_grant_parent_to_filter(mode, replacement);
-    }
+    let _ = nodes_mut::visit_ability_def(def, &mut |node| {
+        if let DefinitionNodeMut::Ability(ability) = node {
+            rewrite_grant_parent_to_filter(&mut ability.effect, replacement);
+        }
+        ControlFlow::Continue(())
+    });
 }
 
 // --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------

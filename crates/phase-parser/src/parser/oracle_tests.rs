@@ -37143,7 +37143,32 @@ fn kytheons_tactics_spell_mastery_folds_onto_mass_population() {
     );
     assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
     assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
-    assert!(parsed.abilities[0].sub_ability.is_some(), "{parsed:#?}");
+    let rider = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("spell-mastery rider must be chained to the pump");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = rider.effect.as_ref()
+    else {
+        panic!("expected a vigilance rider, got {rider:#?}");
+    };
+    let [static_def] = static_abilities.as_slice() else {
+        panic!("expected one vigilance static, got {static_abilities:#?}");
+    };
+    let Some(TargetFilter::Typed(affected)) = static_def.affected.as_ref() else {
+        panic!("rider must be bound to the producer population: {static_def:#?}");
+    };
+    assert_eq!(affected.controller, Some(ControllerRef::You));
+    assert!(affected.type_filters.contains(&TypeFilter::Creature));
+    assert!(
+        static_def.condition.is_some(),
+        "spell-mastery guard was dropped"
+    );
+    assert!(static_def.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword { keyword } if keyword == &Keyword::Vigilance
+    )));
 }
 
 /// A continuous static grant can also establish the population named by a
@@ -37164,6 +37189,11 @@ fn unbreakable_formation_addendum_folds_onto_continuous_population() {
 
 /// A singular anaphor is not the cross-item mass-population class and must
 /// remain independent rather than being widened to the preceding mass filter.
+/// This is a parser-shape negative control: the verified card census for this
+/// class contains plural "those creatures" riders (Break of Day and Kytheon's
+/// Tactics), while the nearest printed singular riders are target-bound rather
+/// than cross-line population consumers. Keeping the synthetic phrase isolates
+/// the singular/plural boundary without claiming a real card has this shape.
 #[test]
 fn singular_cross_line_anaphor_does_not_fold_onto_mass_population() {
     let parsed = parse(
