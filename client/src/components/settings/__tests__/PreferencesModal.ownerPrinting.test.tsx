@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -44,10 +44,13 @@ describe("PreferencesModal owner printing preference", () => {
     expect(usePreferencesStore.getState()).toMatchObject(siblings);
     const modal = render(<PreferencesModal onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Visual" }));
-    expect(screen.getByText("In-game card art")).toBeInTheDocument();
-    expect(screen.getByText(
-      "Use the card owner’s chosen printing and varied basic-land art when available. Turn off to use your own card art preferences.",
-    )).toBeInTheDocument();
+    // The modal shell starts at opacity 0 while its entrance animation runs.
+    await waitFor(() => {
+      expect(screen.getByText("In-game card art")).toBeVisible();
+      expect(screen.getByText(
+        "Use the card owner’s chosen printing and varied basic-land art when available. Turn off to use your own card art preferences.",
+      )).toBeVisible();
+    });
     const checkbox = screen.getByRole("checkbox", {
       name: "Show chosen and varied card art",
     });
