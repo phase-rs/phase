@@ -2290,10 +2290,17 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::ZoneChangeRecord> {
-    let mut record = state
-        .objects
-        .get(&object_id)
-        .map(|obj| obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield))?;
+    // CR 614.6 + CR 111.1: the object was created in the zone it enters — the
+    // battlefield for every ordinary entry, or the zone an applied replacement
+    // sent a token to instead (Hallowed Moonlight's exile). Nothing here is a
+    // battlefield entry unless that zone is the battlefield, and
+    // `record_zone_change` keys its battlefield-entry bookkeeping on the record's
+    // destination.
+    let mut record = state.objects.get(&object_id).map(|obj| {
+        let to = obj.zone;
+        obj.snapshot_for_zone_change(object_id, None, to)
+    })?;
+    let to = record.to_zone;
     // CR 400.7: entries from no zone are created in place — no `move_to_zone`
     // call fills the entered incarnation — so the authority fills it here from
     // the birth incarnation, mirroring the battlefield arm there. Without it,
@@ -2304,7 +2311,7 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: None,
-        to: Zone::Battlefield,
+        to,
         record: Box::new(record.clone()),
     });
     Some(record)

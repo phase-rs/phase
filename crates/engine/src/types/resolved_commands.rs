@@ -873,6 +873,12 @@ pub struct ResolvedTokenCreationCommand {
     /// The `next_object_id` high-water after this token's id was drawn, so a
     /// replay resuming from a shorter prefix cannot hand the same id out twice.
     pub resulting_next_object_id: u64,
+    /// CR 614.6: the zone the token was created in when a replacement sent its
+    /// entry elsewhere (Hallowed Moonlight's exile); `None` is the ordinary
+    /// battlefield birth. `default` keeps pre-change journals parsing and
+    /// `skip_serializing_if` keeps the ordinary case byte-identical on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_zone: Option<Zone>,
     pub cause: RulesExecutionNodeRef,
 }
 
