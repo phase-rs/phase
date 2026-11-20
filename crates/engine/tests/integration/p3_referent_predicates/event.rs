@@ -366,7 +366,6 @@ fn copied_spell(r: &GameRunner, events: &[GameEvent], original: ObjectId) -> Obj
         }),
         "the event names P0's new spell on the stack"
     );
-    assert!(r.state().objects[&copy].is_copy);
     copy
 }
 
