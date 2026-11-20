@@ -1943,12 +1943,13 @@ fn s3_old_save_unprovable_history_is_refused() {
     assert_ambiguous_refusal(try_restore(json, &db), ruric);
 }
 
-/// S3-control - the refusal is scoped to objects whose statics read the
-/// per-kind history: a creature with no such static and an unprovable earlier
-/// history restores, its latch left empty (nothing invented), and the Any-set
-/// entry survives for `DamageKindFilter::Any` readers.
+/// S3-control - the refusal does not depend on the statics an object has at
+/// restore time. A vanilla creature (the Mirage Mirror / copy-effect shape:
+/// CR 707.2a + CR 611.3a let it gain a kind-reading ability later) with
+/// unprovable earlier-turn combat history is refused too; admitting it with an
+/// empty latch would later read as "has not dealt combat damage".
 #[test]
-fn s3_control_ambiguous_history_without_a_kind_reader_restores() {
+fn s3_control_ambiguous_history_without_a_kind_reader_is_refused() {
     let db = ruric_face_db();
     let mut scenario = base_scenario();
     let bear = scenario.add_creature(P0, "Old Bear", 2, 2).id();
@@ -1961,9 +1962,7 @@ fn s3_control_ambiguous_history_without_a_kind_reader_restores() {
     assert!(records_of(&pre, bear).is_empty());
     let (json, stripped) = old_format_save(&pre);
     assert_eq!(stripped, 1);
-    let restored = restore(json, &db);
-    assert_restore_ran(&pre, &restored, bear);
-    assert_eq!(kinds(&restored, bear), (false, false), "nothing invented");
+    assert_ambiguous_refusal(try_restore(json, &db), bear);
 }
 
 /// S4 - a current-format save restores unchanged (the recovery's trigger is an
@@ -2084,6 +2083,19 @@ fn s5_any_kind_siblings_unaffected_by_restore() {
         .collect();
     let opp_bolt = scenario.add_bolt_to_hand(P1);
     let mut runner = scenario.build();
+    {
+        // The dealers entered this turn, so their stripped history is provable
+        // (complete) and the restore recovers it instead of refusing.
+        let state = runner.state_mut();
+        let turn = state.turn_number;
+        for (_, dealer, _) in &pairs {
+            state
+                .objects
+                .get_mut(dealer)
+                .unwrap()
+                .entered_battlefield_turn = Some(turn);
+        }
+    }
     for ((_, dealer, _), bite) in pairs.iter().zip(&bites) {
         runner
             .cast(*bite)

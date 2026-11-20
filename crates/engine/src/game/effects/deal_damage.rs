@@ -1640,23 +1640,15 @@ pub(crate) fn recover_legacy_dealt_damage_kinds(
         let complete = obj.entered_battlefield_turn == Some(state.turn_number) && matched > 0;
         if !recovered.has(DamageKindFilter::CombatOnly) && !complete {
             // CR 120.2a + CR 120.2b: earlier-turn history is unprovable. Never
-            // attribute it to a kind; refuse when a static reads the kind.
-            let reads_kind = obj
-                .static_definitions
-                .iter_all()
-                .chain(obj.base_static_definitions.iter())
-                .any(|def| {
-                    def.condition
-                        .as_ref()
-                        .is_some_and(|condition| condition.reads_damage_kind())
-                });
-            if reads_kind {
-                return Err(
-                    crate::types::game_state::PersistedRestoreError::AmbiguousLegacyDamageHistory {
-                        object_id: id,
-                    },
-                );
-            }
+            // attribute it to a kind, and refuse regardless of the statics the
+            // object has NOW: CR 611.3a + CR 707.2a let it gain a kind-reading
+            // ability later (a copy effect, an Aura), which would read the
+            // empty latch as "has not dealt combat damage".
+            return Err(
+                crate::types::game_state::PersistedRestoreError::AmbiguousLegacyDamageHistory {
+                    object_id: id,
+                },
+            );
         }
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.dealt_damage_kinds = recovered;
