@@ -502,13 +502,26 @@ pub fn record_card_discarded(state: &mut crate::types::game_state::GameState, ob
 }
 
 pub fn record_token_created(state: &mut crate::types::game_state::GameState, object_id: ObjectId) {
+    record_token_created_into(state, object_id, Zone::Battlefield);
+}
+
+/// CR 111.1 + CR 614.6: the token-creation ledger rows for a token created in
+/// `to`. A creation whose entry a replacement sent elsewhere (Hallowed
+/// Moonlight) is still a creation: the first-creation set and the turn's
+/// created-token ledger record it, with the zone the token was actually
+/// created in.
+pub fn record_token_created_into(
+    state: &mut crate::types::game_state::GameState,
+    object_id: ObjectId,
+    to: Zone,
+) {
     if let Some(obj) = state.objects.get(&object_id) {
         state
             .players_who_created_token_this_turn
             .insert(obj.controller);
         state
             .created_tokens_this_turn
-            .push_back(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
+            .push_back(obj.snapshot_for_zone_change(object_id, None, to));
     }
 }
 
