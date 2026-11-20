@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::layers::evaluate_condition;
+use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
 use crate::game::quantity::{
     resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
 };
@@ -268,7 +268,13 @@ fn evaluate_static_condition_for_ability(
         StaticCondition::Not { condition } => {
             !evaluate_static_condition_for_ability(state, condition, ability)
         }
-        _ => evaluate_condition(state, condition, ability.controller, ability.source_id),
+        _ => evaluate_condition_with_context(
+            state,
+            condition,
+            ability.controller,
+            ability.source_id,
+            ConditionContext::ability_holder(ability.controller),
+        ),
     }
 }
 
@@ -320,12 +326,16 @@ fn install_transient(
                 .map(|occurrence| occurrence.caster),
         );
     }
-    // CR 400.7 + CR 611.2c: a targeted prohibition applies to
+    // CR 400.7 + CR 611.2c: a rule effect on a specific object applies to
     // the recipient as it was when the effect resolved; a blinked or otherwise
     // re-created object is a new object it no longer reaches.
     let affected_recipient = match &affected {
         TargetFilter::SpecificObject { id }
-            if modifications.iter().any(is_live_prohibition_rule_effect) =>
+            if modifications.iter().any(|modification| {
+                is_live_prohibition_rule_effect(modification)
+                    || crate::game::layers::transient_relative_blocker_filter(modification)
+                        .is_some()
+            }) =>
         {
             state
                 .objects
