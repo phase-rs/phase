@@ -10,11 +10,11 @@ use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
-    CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator,
-    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
-    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationRestriction, AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode,
+    CardTypeSetSource, CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope,
+    Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CountScope, CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
     ObjectProperty, ObjectScope, PerPlayerScope, PerpetualGrantModification, PerpetualModification,
@@ -8640,6 +8640,225 @@ fn trigger_you_gain_life_pridemate_scopes_to_controller() {
     );
     assert_eq!(def.mode, TriggerMode::LifeGained);
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+}
+
+/// SHAPE: the full card lowers its counter, loyalty costs, token, and emblem.
+#[test]
+fn walker_short_counter_ajani_resolute() {
+    let parsed = parse_oracle_text(
+        "Whenever you gain life, put a loyalty counter on Ajani.\n[0]: You gain 1 life.\n[−4]: Create a 2/2 white Cat Soldier creature token named Ajani's Pridemate with \"Whenever you gain life, put a +1/+1 counter on this token.\"\n[−10]: You get an emblem with \"Creatures you control get +2/+2.\"",
+        "Ajani Resolute",
+        &[],
+        &["Legendary".into(), "Planeswalker".into()],
+        &["Ajani".into()],
+    );
+    let [life_gain] = parsed.triggers.as_slice() else {
+        panic!("expected one printed trigger, got {:?}", parsed.triggers);
+    };
+    // CR 109.5 + CR 119.9: one mandatory trigger for each controller life gain.
+    assert_eq!(life_gain.mode, TriggerMode::LifeGained);
+    assert_eq!(life_gain.valid_target, Some(TargetFilter::Controller));
+    assert!(!life_gain.optional);
+    assert_eq!(life_gain.condition, None);
+    assert_eq!(life_gain.constraint, None);
+    assert_eq!(life_gain.life_amount, None);
+    let execute = life_gain.execute.as_deref().expect("life-gain effect");
+    // CR 201.5c: the bare shortened name refers to Ajani Resolute itself.
+    assert_eq!(
+        *execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Loyalty,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(execute));
+
+    let [zero, minus_four, minus_ten] = parsed.abilities.as_slice() else {
+        panic!(
+            "expected three loyalty abilities, got {:?}",
+            parsed.abilities
+        );
+    };
+    // CR 606.4: all three loyalty costs retain their printed amounts.
+    for (ability, amount) in [(zero, 0), (minus_four, -4), (minus_ten, -10)] {
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.cost, Some(AbilityCost::Loyalty { amount }));
+        assert!(!has_unimplemented(ability));
+    }
+    assert_eq!(
+        *zero.effect,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }
+    );
+    let Effect::Token {
+        name,
+        power: PtValue::Fixed(2),
+        toughness: PtValue::Fixed(2),
+        types,
+        colors,
+        count: QuantityExpr::Fixed { value: 1 },
+        static_abilities,
+        ..
+    } = minus_four.effect.as_ref()
+    else {
+        panic!("expected one 2/2 Pridemate, got {:?}", minus_four.effect);
+    };
+    // CR 111.3: the creation effect defines the token's name and ability.
+    assert_eq!(name, "Ajani's Pridemate");
+    assert_eq!(types, &["Creature", "Cat", "Soldier"]);
+    assert_eq!(colors, &[ManaColor::White]);
+    let [token_static] = static_abilities.as_slice() else {
+        panic!("expected one token ability, got {static_abilities:?}");
+    };
+    assert_eq!(token_static.affected, Some(TargetFilter::SelfRef));
+    let [ContinuousModification::GrantTrigger { trigger }] = token_static.modifications.as_slice()
+    else {
+        panic!("expected the token's life-gain trigger, got {token_static:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::LifeGained);
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+    let token_execute = trigger.execute.as_deref().expect("token trigger effect");
+    assert_eq!(
+        *token_execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(token_execute));
+
+    let Effect::CreateEmblem { statics, triggers } = minus_ten.effect.as_ref() else {
+        panic!("expected an emblem, got {:?}", minus_ten.effect);
+    };
+    assert!(triggers.is_empty());
+    let [buff] = statics.as_slice() else {
+        panic!("expected one emblem static, got {statics:?}");
+    };
+    // CR 114.4: the creature buff functions from the command zone.
+    assert_eq!(buff.active_zones, [Zone::Command]);
+    assert_eq!(buff.mode, StaticMode::Continuous);
+    assert_eq!(
+        buff.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Creature)
+                .controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(
+        buff.modifications,
+        [
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ]
+    );
+}
+
+/// SHAPE: the selected graveyard card and the counter's source stay distinct.
+#[test]
+fn walker_short_counter_liliana_the_repentant() {
+    let parsed = parse_oracle_text(
+        "Whenever another creature or planeswalker you control enters, mill two cards.\nExhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)",
+        "Liliana the Repentant",
+        &[],
+        &["Legendary".into(), "Creature".into()],
+        &["Human".into(), "Warlock".into()],
+    );
+    let [mill] = parsed.triggers.as_slice() else {
+        panic!("expected one printed trigger, got {:?}", parsed.triggers);
+    };
+    // CR 603.6a + CR 701.17a: the entering permanent triggers two cards milled.
+    assert_eq!(mill.mode, TriggerMode::ChangesZone);
+    assert_eq!(mill.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        mill.valid_card,
+        Some(TargetFilter::Or {
+            filters: [TypeFilter::Creature, TypeFilter::Planeswalker]
+                .into_iter()
+                .map(|ty| {
+                    TargetFilter::Typed(
+                        TypedFilter::new(ty)
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another]),
+                    )
+                })
+                .collect(),
+        })
+    );
+    let mill_execute = mill.execute.as_deref().expect("mill trigger effect");
+    assert!(matches!(
+        *mill_execute.effect,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+            ..
+        }
+    ));
+    assert!(!has_unimplemented(mill_execute));
+
+    let [exhaust] = parsed.abilities.as_slice() else {
+        panic!("expected one exhaust ability, got {:?}", parsed.abilities);
+    };
+    // CR 702.177a: the exhaust ability retains its once-only restriction and cost.
+    assert_eq!(exhaust.kind, AbilityKind::Activated);
+    assert_eq!(exhaust.ability_tag, Some(AbilityTag::Exhaust));
+    assert_eq!(
+        exhaust.cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Black],
+            },
+        })
+    );
+    assert_eq!(
+        exhaust.activation_restrictions,
+        [
+            ActivationRestriction::AsSorcery,
+            ActivationRestriction::OnlyOnce
+        ]
+    );
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: TargetFilter::Or { filters },
+        ..
+    } = exhaust.effect.as_ref()
+    else {
+        panic!(
+            "expected a chosen return from the graveyard, got {:?}",
+            exhaust.effect
+        );
+    };
+    assert_eq!(
+        *filters,
+        [TypeFilter::Creature, TypeFilter::Planeswalker].map(|ty| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![ty],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            })
+        })
+    );
+    // CR 608.2c + CR 201.5c: the next instruction places the counter on Liliana.
+    let counter = exhaust.sub_ability.as_deref().expect("counter instruction");
+    assert_eq!(counter.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(
+        *counter.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(exhaust));
 }
 
 // Negative test: "an opponent gains life" must remain opponent-scoped, not
