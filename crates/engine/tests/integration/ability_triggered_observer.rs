@@ -35,8 +35,9 @@
 //! earlier in the same resolution, without an order choice. That is the
 //! engine's existing placement of a reflexive ability (`effects/mod.rs`), not a
 //! CR 603.3b requirement: CR 603.3b lets its controller order it among their
-//! other first-part abilities. Those rows assert the reflexive-first order only
-//! as today's behavior; their CR 603.3b claim is what goes on after the process.
+//! other first-part abilities. Those rows assert the reflexive ability and the
+//! other abilities of its resolution as one group, in any order; their CR 603.3b
+//! claim is what goes on after the process.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -3913,8 +3914,8 @@ fn bolg_board(
 }
 
 /// CR 603.3b + CR 603.12 + CR 603.3d: Bolg's ETB sacrifices Doomed Dissenter;
-/// Bolg's reflexive ability goes on below the Dissenter's dies trigger (the
-/// engine's existing reflexive placement; see the module note), and
+/// Bolg's reflexive ability and the Dissenter's dies trigger go on in either
+/// order (see the module note), and
 /// Tar Pit Warrior's trigger, which triggered as the reflexive ability was put
 /// on the stack targeting it, goes on after both, with no order to choose.
 #[test]
@@ -4140,9 +4141,9 @@ fn choose_draw_and_damage(runner: &mut GameRunner) {
 }
 
 /// CR 603.3b + CR 603.12 + CR 700.2b + CR 700.13: Caesar's reflexive ability
-/// (modes chosen as it is put on the stack, its damage mode targeting P1) goes
-/// on below Doomed Dissenter's dies trigger (the engine's existing reflexive
-/// placement; see the module note); Deepmuck Desperado's crime
+/// (modes chosen as it is put on the stack, its damage mode targeting P1) and
+/// Doomed Dissenter's dies trigger go on in either order (see the module note);
+/// Deepmuck Desperado's crime
 /// trigger goes on after both, with no order to choose.
 #[test]
 fn modal_reflexive_ability_is_placed_with_an_earlier_trigger_of_its_resolution() {
@@ -4324,8 +4325,9 @@ fn spell_resolution_room_instance_is_ordered_with_an_earlier_trigger_of_the_spel
 
 /// CR 603.3b + CR 603.12 + CR 608.2n: while Back for More (an instant) resolves,
 /// returning the graveyard Grizzly Bears triggers Desecrated Tomb, and Planar
-/// Void triggers on the instant's own move to the graveyard; the two are
-/// ordered together above the reflexive fight ability.
+/// Void triggers on the instant's own move to the graveyard; the reflexive
+/// fight ability, Desecrated Tomb and Planar Void go on as one group, in any
+/// order, with the Tomb below the Void.
 #[test]
 fn spell_resolution_reflexive_batch_orders_an_earlier_and_a_later_trigger_together() {
     let mut scenario = GameScenario::new();
