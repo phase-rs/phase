@@ -17435,6 +17435,19 @@ impl AutoTapSourceCache {
     }
 }
 
+/// CR 605.3a: The distinct permanents whose mana abilities the automatic
+/// planner may activate for `player`, in the planner's preference order.
+pub(super) fn auto_tap_source_ids(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = Vec::new();
+    for option in collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None)
+    {
+        if !ids.contains(&option.object_id) {
+            ids.push(option.object_id);
+        }
+    }
+    ids
+}
+
 pub(super) fn build_auto_tap_source_cache(
     state: &GameState,
     player: PlayerId,

@@ -11,6 +11,7 @@
 //! token."
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::process_triggers;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::TargetRef;
@@ -23,6 +24,7 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
+use crate::support::shared_card_db;
 
 const CONSPIRACY_THEORIST: &str = "Whenever this creature attacks, you may pay {1} and discard a card. If you do, draw a card.\nWhenever you discard one or more nonland cards, you may exile one of them from your graveyard. If you do, you may cast it this turn.";
 
@@ -468,4 +470,217 @@ fn conspiracy_theorist_empty_hand_with_only_life_gaining_funding_is_still_not_of
         "the {{1}} is not paid alone"
     );
     assert_eq!(runner.life(P0), life_before, "no funding happened");
+}
+
+/// The land beside Pristine Talisman on [`talisman_board`].
+#[derive(Clone, Copy)]
+enum OtherSource {
+    /// A basic Forest, which the automatic planner ranks after the Talisman
+    /// for a generic {1}.
+    Forest,
+    /// Wastes ("{T}: Add {C}."), a free colorless land the automatic planner
+    /// prefers to the Talisman for a generic {1}.
+    Wastes,
+}
+
+/// Builds the review witness board: Conspiracy Theorist, Pristine Talisman
+/// and `other`, optionally Nefarious Lich, an empty hand, and a land (drawn
+/// first) on a spell. Returns the runner and (Theorist, Talisman, `other`,
+/// land drawn first, spell drawn second).
+fn talisman_board(with_lich: bool, other: OtherSource) -> (GameRunner, [ObjectId; 5]) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theorist = scenario
+        .add_creature(P0, "Conspiracy Theorist", 2, 2)
+        .from_oracle_text(CONSPIRACY_THEORIST)
+        .id();
+    let talisman = scenario
+        .add_artifact_from_oracle(P0, "Pristine Talisman", PRISTINE_TALISMAN)
+        .id();
+    if with_lich {
+        scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    }
+    let land = match other {
+        OtherSource::Forest => scenario.add_basic_land(P0, ManaColor::Green),
+        OtherSource::Wastes => scenario.add_real_card(
+            P0,
+            "Wastes",
+            Zone::Battlefield,
+            shared_card_db().expect("the checked-in fixture contains Wastes"),
+        ),
+    };
+    let second_draw = scenario
+        .add_spell_to_library_top(P0, "Library Card", false)
+        .id();
+    let first_draw = scenario.add_land_to_library_top(P0, "Forest").id();
+    let runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].hand.is_empty(),
+        "reach: the hand is empty"
+    );
+    (runner, [theorist, talisman, land, first_draw, second_draw])
+}
+
+/// Declares the Theorist's attack and stops at P0's priority with the attack
+/// trigger still on the stack.
+fn attack_and_hold_priority(runner: &mut GameRunner, theorist: ObjectId) {
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(theorist, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare the attack");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "reach: P0 holds priority; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the attack trigger waits on the stack"
+    );
+}
+
+/// Floats `land`'s mana through the public mana action.
+fn float_land(runner: &mut GameRunner, land: ObjectId) {
+    let selection =
+        engine::game::mana_sources::activatable_mana_actions_for_player(runner.state(), P0)
+            .into_iter()
+            .find_map(|action| match action {
+                GameAction::TapLandForMana { selection } if selection.source.object_id == land => {
+                    Some(selection)
+                }
+                _ => None,
+            })
+            .expect("the land exposes a mana action");
+    runner
+        .act(GameAction::TapLandForMana { selection })
+        .expect("float the land's mana");
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        1,
+        "reach: one mana floats while the trigger waits"
+    );
+}
+
+fn assert_talisman_lich_conjunction_completed(
+    runner: &GameRunner,
+    [_, talisman, _, first_draw, second_draw]: [ObjectId; 5],
+    life_before: i32,
+) {
+    assert!(
+        runner.state().objects[&talisman].tapped,
+        "the Talisman was activated before the payment"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "the gain was replaced by the draw"
+    );
+    assert_eq!(
+        runner.state().objects[&first_draw].zone,
+        Zone::Graveyard,
+        "the card the Talisman drew was discarded"
+    );
+    assert_eq!(
+        runner.state().objects[&second_draw].zone,
+        Zone::Hand,
+        "the \"If you do\" draw happened"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Review F1 (CR 608.2g + CR 605.3b + CR 614.6): {G} already floats when the
+/// trigger resolves, so the automatic planner needs no source for the {1}.
+/// CR 608.2g still lets the payer activate Pristine Talisman before paying;
+/// Nefarious Lich turns its life gain into a draw, which the conjoined discard
+/// then takes. The option is offered and completes.
+#[test]
+fn conspiracy_theorist_with_floating_mana_still_offers_the_talisman_draw() {
+    let (mut runner, ids) = talisman_board(true, OtherSource::Forest);
+    let [theorist, _, forest, ..] = ids;
+    let life_before = runner.life(P0);
+
+    attack_and_hold_priority(&mut runner, theorist);
+    float_land(&mut runner, forest);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the conjunction a Talisman activation completes is offered; got {:?}",
+        runner.state().waiting_for
+    );
+    accept_and_finish(&mut runner);
+
+    assert_talisman_lich_conjunction_completed(&runner, ids, life_before);
+}
+
+/// The sibling of review F1: with an empty pool and an untapped Wastes, the
+/// automatic planner prefers the Wastes to the Talisman for the {1}, so its
+/// own plan draws nothing. Another legal funding — the Talisman — does, so the
+/// option is offered, and the payment funds through the Talisman, leaving the
+/// Wastes untapped.
+#[test]
+fn conspiracy_theorist_funds_through_the_talisman_over_a_preferred_land() {
+    let (mut runner, ids) = talisman_board(true, OtherSource::Wastes);
+    let [theorist, _, wastes, ..] = ids;
+    let life_before = runner.life(P0);
+
+    attack_with(&mut runner, theorist, None);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the conjunction a Talisman activation completes is offered; got {:?}",
+        runner.state().waiting_for
+    );
+    accept_and_finish(&mut runner);
+
+    assert_talisman_lich_conjunction_completed(&runner, ids, life_before);
+    assert!(
+        !runner.state().objects[&wastes].tapped,
+        "the Talisman's {{C}} paid the {{1}}; the Wastes was not needed"
+    );
+}
+
+/// Control for both fundings: without Nefarious Lich no funding can grow the
+/// empty hand, so with one mana floating and an untapped Talisman the option is
+/// still impossible — beside a Forest the planner ranks after the Talisman and
+/// beside a Wastes it ranks before it. It auto-declines, the Talisman stays
+/// untapped, the floating mana is not spent and no card is drawn.
+#[test]
+fn conspiracy_theorist_with_floating_mana_and_no_lich_is_not_offered() {
+    for other in [OtherSource::Forest, OtherSource::Wastes] {
+        let (mut runner, ids) = talisman_board(false, other);
+        let [theorist, talisman, land, first_draw, second_draw] = ids;
+        let life_before = runner.life(P0);
+
+        attack_and_hold_priority(&mut runner, theorist);
+        float_land(&mut runner, land);
+        runner.act(GameAction::PassPriority).expect("pass priority");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+
+        assert_resolved_as_declined(&runner);
+        assert!(
+            !runner.state().objects[&talisman].tapped,
+            "the Talisman is not activated"
+        );
+        assert_eq!(
+            runner.state().players[P0.0 as usize].mana_pool.total(),
+            1,
+            "the floating mana is not spent"
+        );
+        assert_eq!(runner.life(P0), life_before, "no funding happened");
+        assert_eq!(runner.state().objects[&first_draw].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&second_draw].zone, Zone::Library);
+    }
 }

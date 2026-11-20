@@ -25400,35 +25400,152 @@ fn effect_payment_permissions(
     super::static_abilities::build_cost_permission_context(simulated, player, mana_spend_permission)
 }
 
+/// CR 608.2g: One way the payer may fund a resolution-time effect mana
+/// payment. "If an effect gives a player the option to pay mana, they may
+/// activate mana abilities before taking that action" — a permission that does
+/// not depend on a shortfall, so the automatic planner's own choice of sources
+/// is one legal funding among several, never the whole funding space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EffectManaFunding {
+    /// The automatic planner funds the payment from the pool and the sources
+    /// it prefers.
+    Planned,
+    /// The payer first activates this permanent's mana ability — even when the
+    /// pool already covers the payment or the planner would prefer another
+    /// source — and the planner funds what is left.
+    ActivatingFirst(ObjectId),
+}
+
+/// CR 608.2g + CR 605.3a: The fundings a resolution-time effect mana payment
+/// is judged under: the planner's own, then one per permanent whose mana
+/// ability the payer may activate first. The modeled space is at most one
+/// activation beyond the planner's choice.
+pub(super) fn effect_mana_funding_candidates(
+    state: &GameState,
+    payer: PlayerId,
+) -> Vec<EffectManaFunding> {
+    std::iter::once(EffectManaFunding::Planned)
+        .chain(
+            super::casting_costs::auto_tap_source_ids(state, payer)
+                .into_iter()
+                .map(EffectManaFunding::ActivatingFirst),
+        )
+        .collect()
+}
+
+/// What one [`EffectManaFunding`] of a resolution-time effect mana payment
+/// leaves, as [`effect_mana_funding_probe`] simulates it.
+pub(crate) enum EffectManaFundingProbe {
+    /// The funding pays the cost; the state the effect's later instructions
+    /// then resolve in.
+    Funded(GameState),
+    /// CR 118.3: the funding leaves the cost unpaid.
+    Unpayable,
+    /// CR 605.3b + CR 616.1: a mana ability the funding activates paused for
+    /// a choice, so what the funding leaves is not decided.
+    Undecided,
+}
+
 /// CR 608.2g + CR 605.3a + CR 605.3b + CR 614.6: The state a resolution-time
 /// effect's later instructions resolve in once its `PayCost { Mana }` head's
-/// cost has been funded, judged by the live payment's own funding pipeline —
-/// the effect-context auto-tap pass with every activated mana ability resolved
-/// immediately (CR 605.3b). Mana abilities activated to pay for an effect
-/// resolve inline, so events their own resolution produces (Pristine
-/// Talisman's "You gain 1 life") meet the standing replacement pipeline and a
-/// replacement can rewrite what the outer effect's later instructions read
-/// (Nefarious Lich: "If you would gain life, draw that many cards instead."
-/// adds the drawn cards to the hand during the outer resolution —
-/// Conspiracy Theorist's conjoined "discard a card" is then payable from that
-/// draw). Cost feasibility itself is not judged here; callers that need it use
-/// [`can_pay_effect_mana_cost_after_auto_tap`].
-///
-/// `None` when the simulated funding paused for a choice (a mana-source cost
-/// move or a payment-replacement choice — CR 605.3b + CR 616.1), in which case
-/// the caller cannot decide and must offer the option.
+/// cost has been funded by `funding`, judged by the live payment's own funding
+/// pipeline: [`activate_mana_source_first`] for an
+/// [`EffectManaFunding::ActivatingFirst`] activation, then the effect-context
+/// auto-tap pass, with every activated mana ability resolved immediately
+/// (CR 605.3b). Mana abilities activated to pay for an effect resolve inline,
+/// so events their own resolution produces (Pristine Talisman's "You gain 1
+/// life") meet the standing replacement pipeline and a replacement can rewrite
+/// what the outer effect's later instructions read (Nefarious Lich: "If you
+/// would gain life, draw that many cards instead." adds the drawn cards to the
+/// hand during the outer resolution — Conspiracy Theorist's conjoined "discard
+/// a card" is then payable from that draw). The cost itself is judged by
+/// [`can_pay_effect_mana_cost_after_auto_tap`] in the state the
+/// first activation leaves.
 pub(super) fn effect_mana_funding_probe(
     state: &GameState,
     payer: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
-) -> Option<GameState> {
+    funding: EffectManaFunding,
+) -> EffectManaFundingProbe {
     let mut simulated = effect_payment_probe_state(state);
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
-    if run_effect_auto_tap_pass(&mut simulated, payer, source_id, cost, &mut tap_events) {
-        return None;
+    if let EffectManaFunding::ActivatingFirst(mana_source) = funding {
+        if !activate_mana_source_first(
+            &mut simulated,
+            payer,
+            source_id,
+            mana_source,
+            &mut tap_events,
+        ) {
+            return EffectManaFundingProbe::Undecided;
+        }
     }
-    Some(simulated)
+    // CR 118.12: the head of a resolving effect pays through the
+    // `EffectPayCost` root, which can surface a paused source's choice.
+    if !can_pay_effect_mana_cost_after_auto_tap(
+        &simulated,
+        payer,
+        source_id,
+        cost,
+        PausedManaPayment::Resumable,
+    ) {
+        return EffectManaFundingProbe::Unpayable;
+    }
+    if run_effect_auto_tap_pass(&mut simulated, payer, source_id, cost, &mut tap_events) {
+        return EffectManaFundingProbe::Undecided;
+    }
+    EffectManaFundingProbe::Funded(simulated)
+}
+
+/// CR 608.2g + CR 605.3a + CR 605.3b + CR 605.4a: The payer activates
+/// `mana_source`'s mana ability before a resolution-time effect payment, the
+/// [`EffectManaFunding::ActivatingFirst`] step shared by the probe
+/// ([`effect_mana_funding_probe`]) and the live payment, so both fund the same
+/// way. The effect-context planner is restricted to `mana_source` and asked
+/// for one generic unit beyond what the pool floats, so its already-funded
+/// fast path (CR 106.4) cannot skip the activation the payer chose. The
+/// activation resolves immediately (CR 605.3b), along with its coupled
+/// triggered mana abilities (CR 605.4a).
+///
+/// Returns `false` when the activation paused for a choice (CR 605.3b + CR
+/// 616.1) or left the waiting state changed; probes treat that funding as
+/// undecided, and the live payment never selects such a funding.
+pub(super) fn activate_mana_source_first(
+    state: &mut GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    mana_source: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    super::layers::flush_layers(state);
+    let waiting_before = state.waiting_for.clone();
+    let events_before = events.len();
+    let others: HashSet<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| *id != mana_source)
+        .collect();
+    let demand = crate::types::mana::ManaCost::Cost {
+        shards: Vec::new(),
+        generic: effect_payment_pool_total(state, payer).saturating_add(1),
+    };
+    let effect_ctx = PaymentContext::Effect;
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
+        state,
+        payer,
+        &demand,
+        events,
+        Some(source_id),
+        Some(&effect_ctx),
+        &others,
+    );
+    if mana_ability_cost_payment_is_paused(state) {
+        return false;
+    }
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
+    state.waiting_for == waiting_before
 }
 
 /// CR 118.1 + CR 605.3a + CR 605.4a + CR 106.12b: The mana a resolution-time
