@@ -3320,14 +3320,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ..
         } => {
             let mut desc = String::new();
-            match count {
-                QuantityExpr::Fixed { value: n } if *n != 1 => {
-                    desc.push_str(&format!("{n}× "));
-                }
-                QuantityExpr::Ref { qty } => {
-                    desc.push_str(&format!("{}× ", fmt_quantity_ref(qty)));
-                }
-                _ => {}
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                desc.push_str(&format!("{}× ", fmt_quantity(count)));
             }
             // CR 208.1: only creature tokens have power/toughness; suppress the
             // P/T display for noncreature tokens (Treasure, Clue, Vibranium, …)
@@ -4584,9 +4578,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             enters_attacking,
             attack_destination,
+            count,
             ..
         } => {
             d.push(("copies".into(), fmt_target(target)));
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
             if *enters_attacking {
                 d.push(("attacking".into(), "yes".into()));
             }
