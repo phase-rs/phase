@@ -12,11 +12,13 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::Effect;
+use engine::types::counter::CounterType;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 
 const BREAK_OF_DAY: &str = "Creatures you control get +1/+1 until end of turn.\nFateful hour — If you have 5 or less life, those creatures gain indestructible until end of turn.";
+const UNBREAKABLE_FORMATION: &str = "Creatures you control gain indestructible until end of turn.\nAddendum — If you cast this spell during your main phase, put a +1/+1 counter on each of those creatures and they gain vigilance until end of turn.";
 
 fn cast_break_of_day(
     life: i32,
@@ -86,4 +88,49 @@ fn break_of_day_omits_rider_above_fateful_hour_threshold() {
     assert_eq!(runner.state().objects[&creature].toughness, Some(3));
     assert!(!runner.state().objects[&creature].has_keyword(&Keyword::Indestructible));
     assert!(!runner.state().objects[&opponent].has_keyword(&Keyword::Indestructible));
+}
+
+/// CR 608.2c + CR 611.2c: a later addendum rider keeps the population locked
+/// by the first continuous grant, including both the counter and keyword
+/// modifications, while leaving the opponent's creature untouched.
+#[test]
+fn unbreakable_formation_addendum_uses_first_grant_population() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P0, "First creature", 2, 2).id();
+    let second = scenario.add_creature(P0, "Second creature", 3, 1).id();
+    let opponent = scenario.add_creature(P1, "Opponent creature", 4, 4).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unbreakable Formation", false, UNBREAKABLE_FORMATION)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    assert!(
+        !runner.state().objects[&spell]
+            .abilities
+            .iter()
+            .any(ability_contains_unimplemented),
+        "Unbreakable Formation must parse without Effect::Unimplemented residue: {:?}",
+        runner.state().objects[&spell].abilities
+    );
+
+    runner.cast(spell).resolve();
+    for creature in [first, second] {
+        let object = &runner.state().objects[&creature];
+        assert_eq!(object.counters[&CounterType::Plus1Plus1], 1);
+        assert!(object.has_keyword(&Keyword::Indestructible));
+        assert!(object.has_keyword(&Keyword::Vigilance));
+    }
+    let opponent = &runner.state().objects[&opponent];
+    assert_eq!(
+        opponent
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or_default(),
+        0
+    );
+    assert!(!opponent.has_keyword(&Keyword::Indestructible));
+    assert!(!opponent.has_keyword(&Keyword::Vigilance));
 }

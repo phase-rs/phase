@@ -79,8 +79,8 @@ use super::oracle_effect::imperative::{
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, append_to_deepest_sub_ability,
-    contains_mass_population_anaphor, lower_ability_ir, mass_population_filter,
-    parse_ability_ir_standalone, parse_ability_ir_with_context,
+    contains_mass_population_anaphor, continuous_grant_population, lower_ability_ir,
+    mass_population_filter, parse_ability_ir_standalone, parse_ability_ir_with_context,
     parse_additional_cost_instead_condition_fragment,
     parse_effect_chain_with_context_and_provenance, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword,
@@ -1849,7 +1849,7 @@ fn detect_cross_item_mass_population_anaphors(
         let Some(producer_def) = item_ability(producer) else {
             continue;
         };
-        if mass_population_filter(&producer_def.effect).is_none() {
+        if producer_population(&producer_def).is_none() {
             continue;
         }
         let Some(consumer_def) = item_ability(consumer) else {
@@ -1872,31 +1872,57 @@ fn detect_cross_item_mass_population_anaphors(
 }
 
 /// The consumer-side proof shared by document-relation discovery and
-/// application. A condition may be carried on the ability or on the one static
-/// grant after the normal GenericEffect condition lowering.
+/// application. A condition may be carried on the ability or on a static grant
+/// after normal condition lowering, and the grant may be a nested continuation
+/// of a tracked-set-producing effect such as `PutCounterAll`.
 fn ability_is_conditional_mass_population_grant(def: &AbilityDefinition) -> bool {
-    let Effect::GenericEffect {
-        target,
-        static_abilities,
-        ..
-    } = def.effect.as_ref()
-    else {
-        return false;
-    };
-    let has_parent_target = target
-        .as_ref()
-        .is_some_and(|target| matches!(target, TargetFilter::ParentTarget))
-        || static_abilities.iter().any(|static_def| {
-            static_def
-                .affected
+    fn visit(def: &AbilityDefinition, inherited_condition: bool) -> bool {
+        let condition_applies = inherited_condition || def.condition.is_some();
+        if let Effect::GenericEffect {
+            target,
+            static_abilities,
+            ..
+        } = def.effect.as_ref()
+        {
+            let has_parent_target = target
                 .as_ref()
-                .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
-        });
-    let has_condition = def.condition.is_some()
-        || static_abilities
-            .iter()
-            .any(|static_def| static_def.condition.is_some());
-    has_parent_target && has_condition
+                .is_some_and(|target| matches!(target, TargetFilter::ParentTarget))
+                || static_abilities.iter().any(|static_def| {
+                    static_def
+                        .affected
+                        .as_ref()
+                        .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+                });
+            let has_condition = condition_applies
+                || static_abilities
+                    .iter()
+                    .any(|static_def| static_def.condition.is_some());
+            if has_parent_target && has_condition {
+                return true;
+            }
+        }
+        def.sub_ability
+            .as_deref()
+            .is_some_and(|child| visit(child, condition_applies))
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(|child| visit(child, condition_applies))
+            || def
+                .mode_abilities
+                .iter()
+                .any(|child| visit(child, condition_applies))
+    }
+
+    visit(def, false)
+}
+
+/// CR 608.2c + CR 611.2c: The printed producer may establish its population
+/// either through a mass effect (`*All`) or through a continuous static grant
+/// over a broadcast filter. Keep both forms on the same relation axis so a
+/// cross-line rider cannot depend on the producer's effect enum shape.
+fn producer_population(def: &AbilityDefinition) -> Option<&TargetFilter> {
+    mass_population_filter(&def.effect).or_else(|| continuous_grant_population(&def.effect))
 }
 
 /// Position of the lowered definition produced by `id` within its category track.
@@ -2008,9 +2034,7 @@ fn apply_cross_item_mass_population_anaphor(
         if consumer_pos <= producer_pos {
             continue;
         }
-        let Some(population) =
-            mass_population_filter(&result.abilities[producer_pos].effect).cloned()
-        else {
+        let Some(population) = producer_population(&result.abilities[producer_pos]).cloned() else {
             continue;
         };
         if !ability_is_conditional_mass_population_grant(&result.abilities[consumer_pos]) {
@@ -2019,7 +2043,7 @@ fn apply_cross_item_mass_population_anaphor(
 
         let mut consumer_def = result.abilities.remove(consumer_pos);
         ability_ids.remove(consumer_pos);
-        rewrite_grant_parent_to_filter(&mut consumer_def.effect, &population);
+        rewrite_ability_grant_parent_to_filter(&mut consumer_def, &population);
         append_to_deepest_sub_ability(
             &mut result.abilities[producer_pos],
             Some(Box::new(consumer_def)),
@@ -2027,6 +2051,22 @@ fn apply_cross_item_mass_population_anaphor(
         for (slot, def) in result.abilities.iter_mut().enumerate() {
             stamp_printed_ability_slot(def, slot);
         }
+    }
+}
+
+/// Re-anchor every grant in a consumer ability tree. A tracked-set producer can
+/// put the anaphoric grant behind a `sub_ability`, so rewriting only the root
+/// effect would leave its `ParentTarget` unresolved.
+fn rewrite_ability_grant_parent_to_filter(def: &mut AbilityDefinition, replacement: &TargetFilter) {
+    rewrite_grant_parent_to_filter(&mut def.effect, replacement);
+    if let Some(sub_ability) = def.sub_ability.as_mut() {
+        rewrite_ability_grant_parent_to_filter(sub_ability, replacement);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        rewrite_ability_grant_parent_to_filter(else_ability, replacement);
+    }
+    for mode in &mut def.mode_abilities {
+        rewrite_ability_grant_parent_to_filter(mode, replacement);
     }
 }
 
