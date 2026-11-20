@@ -70191,7 +70191,31 @@ mod tests {
         }
         .reads_performed_action_this_way());
         assert!(AbilityCondition::And {
-            conditions: vec![AbilityCondition::SourceIsTapped, gate]
+            conditions: vec![AbilityCondition::SourceIsTapped, gate.clone()]
+        }
+        .reads_performed_action_this_way());
+        // The evaluator recurses through `AnyOf` / `AllExcept`, so the stamp predicate must too.
+        let performed_filter = PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::Controller,
+            action: PlayerActionKind::SearchedLibrary,
+        };
+        assert!(AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Opponent, performed_filter.clone()]
+            }
+        }
+        .reads_performed_action_this_way());
+        assert!(AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::AllExcept {
+                exclude: Box::new(performed_filter),
+                relation: PlayerRelation::All
+            }
+        }
+        .reads_performed_action_this_way());
+        assert!(!AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Opponent, PlayerFilter::Controller]
+            }
         }
         .reads_performed_action_this_way());
 

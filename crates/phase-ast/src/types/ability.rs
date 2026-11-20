@@ -40153,13 +40153,20 @@ impl AbilityCondition {
             }
             AbilityCondition::Not { condition } => condition.reads_performed_action_this_way(),
             AbilityCondition::ConditionInstead { inner } => inner.reads_performed_action_this_way(),
-            AbilityCondition::ScopedPlayerMatches { filter } => matches!(
-                filter,
-                PlayerFilter::PerformedActionThisWay {
-                    relation: _,
-                    action: _
-                }
-            ),
+            // The evaluator recurses through `AnyOf` / `AllExcept`, so the gate is found through
+            // the shared player-filter walker rather than a one-variant test (it may also see a
+            // nested one the evaluator never reads, which only stamps more often).
+            AbilityCondition::ScopedPlayerMatches { filter } => {
+                player_filter_grammar_any(filter, &|node| {
+                    matches!(
+                        node,
+                        FilterGrammarNode::Player(PlayerFilter::PerformedActionThisWay {
+                            relation: _,
+                            action: _
+                        })
+                    )
+                })
+            }
             // Exhaustive, no wildcard: a new `AbilityCondition` variant that nests a condition
             // must be classified here deliberately, or the stamp would silently never be taken.
             AbilityCondition::WhenYouDo
