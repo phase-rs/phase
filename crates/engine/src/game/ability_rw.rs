@@ -7449,6 +7449,10 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             let mut p = if *use_lki {
                 frozen_source_read()
             } else if matches!(subject, ObjectScope::EventSource)
+                && crate::types::ability::filter_contains_filter_prop(
+                    filter,
+                    &filter_prop_is_mana_value,
+                )
                 && !crate::types::ability::filter_contains_filter_prop(
                     filter,
                     &|prop| !filter_prop_is_mana_value(prop),
@@ -10588,6 +10592,38 @@ mod tests {
         assert!(
             ability_rw_profile(&face_down).reads_board.object_pt && conflicts(&face_down, &se()),
             "a non-mana-value event-bound property keeps the board P/T read"
+        );
+        // GUARD 2c: one mana-value property next to a power property in the same event-bound
+        // filter is not "only mana value" (the allow-list is all-of, not any-of).
+        let mixed = gated(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: qfix(5),
+                },
+                FilterProp::PtComparison {
+                    stat: crate::types::ability::PtStat::Power,
+                    scope: Default::default(),
+                    comparator: Comparator::GE,
+                    value: qfix(3),
+                },
+            ])),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&mixed).reads_board.object_pt && conflicts(&mixed, &se()),
+            "a mixed mana-value and power filter keeps the board P/T read"
+        );
+        // GUARD 2d: a filter with no mana-value property at all is not narrowed.
+        let prop_free = gated(
+            TargetFilter::Typed(TypedFilter::creature()),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&prop_free).reads_board.object_pt,
+            "an event-bound filter without a mana-value property keeps the board P/T read"
         );
         // GUARD 3: a sibling that writes the EVENT object under the mana-value read feeds it.
         let event_writer = gated(
