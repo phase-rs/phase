@@ -1197,6 +1197,83 @@ pub(crate) enum ImperativeFamilyAst {
     },
 }
 
+impl ImperativeAst {
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    /// Only a targeted return carries one; every other family classifies to `None`.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Targeted(targeted) => targeted.linked_exile_return(),
+            Self::Numeric(_)
+            | Self::SearchCreation(_)
+            | Self::HandReveal(_)
+            | Self::Choose(_)
+            | Self::Utility(_) => None,
+        }
+    }
+}
+
+impl ImperativeFamilyAst {
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    /// Only a structured targeted return carries one; every other imperative family
+    /// classifies to `None`.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Structured(ast) => ast.linked_exile_return(),
+            Self::CostResource(..)
+            | Self::ZoneCounter(..)
+            | Self::Explore
+            | Self::Connive
+            | Self::Recruit
+            | Self::Assimilate { .. }
+            | Self::ForceBlock { .. }
+            | Self::ForceAttack { .. }
+            | Self::Goad
+            | Self::ExchangeControl { .. }
+            | Self::ExchangeLifeWithStat { .. }
+            | Self::ExchangeLifeTotals { .. }
+            | Self::RedistributeLifeTotals
+            | Self::MustBeBlocked
+            | Self::Investigate
+            | Self::Populate
+            | Self::Clash
+            | Self::Behold(..)
+            | Self::Learn
+            | Self::NoteManaSpent
+            | Self::NoteNumber { .. }
+            | Self::Manifest { .. }
+            | Self::ManifestDread
+            | Self::Cloak { .. }
+            | Self::TurnFaceUp { .. }
+            | Self::TurnFaceDown { .. }
+            | Self::BecomeMonarch
+            | Self::VentureIntoDungeon
+            | Self::VentureIntoUndercity
+            | Self::TakeTheInitiative
+            | Self::Planeswalk
+            | Self::AbandonScheme
+            | Self::OpenAttractions { .. }
+            | Self::RollToVisitAttractions
+            | Self::AssembleContraptions { .. }
+            | Self::AssembleContraptionsFromRollDifference
+            | Self::ReassembleContraption { .. }
+            | Self::Proliferate
+            | Self::TimeTravel
+            | Self::GainKeyword(..)
+            | Self::LoseKeyword(..)
+            | Self::LoseTheGame
+            | Self::WinTheGame
+            | Self::RollDie { .. }
+            | Self::FlipCoins { .. }
+            | Self::RemoveFromCombat(..)
+            | Self::Shuffle(..)
+            | Self::Put(..)
+            | Self::YouMay { .. }
+            | Self::GivePlayerCounter { .. }
+            | Self::Support { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum NumericImperativeAst {
     Draw {

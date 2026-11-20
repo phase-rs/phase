@@ -476,13 +476,13 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
 /// an intended prompt the legacy engine wrongly auto-ordered — not an over-prompt.
 const BATCH_GENUINE_ROWS: &[&str] = &[
     // LTB: Sacrifice{Dragons-you-control, count: ObjectCount{same}} → sub
-    // ChangeZoneAll{origin: Exile, TrackedSetFiltered(0, Exiled) → Battlefield,
+    // ChangeZoneAll{origin: Exile, ExiledBySource → Battlefield,
     // enters_under: You} (AST measured).
-    // Each co-departing member returns ITS OWN tracked exile set, and returned
+    // Each co-departing member returns ITS OWN linked exile (the cards its ETB exiled), and returned
     // creatures can be Dragons the OTHER member's re-sacrifice then consumes —
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
     // b2_dotd_member_bound_pin on the pre-change ChangeZone{TrackedSet} twin; this
-    // shape sets the same flag via member_bound_target_filter's TrackedSetFiltered arm.
+    // shape sets the same flag via member_bound_target_filter's ExiledBySource arm.
     "day of the dragons",
     // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
     // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST

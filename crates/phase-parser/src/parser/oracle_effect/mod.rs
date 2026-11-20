@@ -52960,7 +52960,9 @@ fn parse_effect_chain_ir_body(
             // exiled card" anaphor keeps its same-chain binding instead of
             // falling back to the durable `ExiledBySource` cross-resolution
             // binding; over non-exile publishers only, a return binds the
-            // `Exiled`-caused members (`chain_exiled_cause_binding`). Unlike
+            // cards the linked exile put into exile (`linked_exile_return_binding`:
+            // `ExiledBySource` printed on the source, the `Exiled`-caused chain
+            // members when an effect creates it). Unlike
             // `any_prior_publishes`, this scan deliberately does NOT skip
             // absorbed (`ClauseDisposition::Continue`) clauses — see
             // `clause_ir_is_exile_producer` for why (Hideaway).

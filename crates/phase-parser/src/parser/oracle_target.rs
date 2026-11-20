@@ -391,18 +391,59 @@ pub(crate) fn linked_exile_return_mark(
     })
 }
 
+/// Where the ability holding a marked "the exiled card(s)" return is written: the
+/// axis that decides which linked exile the phrase names.
+///
+/// CR 607.1 / CR 607.1a / CR 607.1d. A CR 607.5 pair (both abilities acquired
+/// from one effect) would bind the grantee's own linked exile; no printed card in
+/// the class reaches it, so it fails closed with the other created-by-effect
+/// returns, as `AbilityProvenance` treats CR 607.1a self-grants conservatively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkedExileReturnHost {
+    /// CR 607.1 + CR 607.2a: printed on the source (a trigger, replacement or
+    /// spell ability the card prints). The linked exile instruction is another
+    /// ability printed on the same object, so the phrase names the cards that
+    /// object's linked exile put into exile.
+    PrintedOnSource,
+    /// CR 607.1d: written inside an ability an effect creates (a granted trigger
+    /// or ability, a granted static's definition, a draw-replacement substitute).
+    /// The phrase names the cards exiled by the resolution that created it
+    /// (Timothar's ruling, 2021-11-19), which only a creation-time binding can
+    /// fix; until the filed Timothar granted-binding issue lands, it narrows the
+    /// resolving chain's set to its `Exiled`-caused members.
+    CreatedByEffect,
+}
+
 /// CR 607.2a + CR 406.6 + CR 608.2c: the binding of a marked "the exiled card(s)"
-/// return, from the prior publishers of its OWN resolution chain. Over only
-/// non-exile departures (Day of the Dragons' sacrifice, Timothar's granted
-/// sacrifice, The Spot's library put) the phrase names only the cards the linked
-/// exile instruction put into exile, never the chain's own members, so the
-/// sentinel is narrowed to the `Exiled`-caused subset. `None` keeps the sentinel:
-/// with no prior publisher (the O-ring LTB shape `detect_etb_exile_ltb_return`
-/// pairs) or over a same-chain exile producer.
-pub(crate) fn chain_exiled_cause_binding(chain: ChainPriorPublishers) -> Option<TargetFilter> {
-    match chain {
-        ChainPriorPublishers::NonExileOnly => Some(exiled_caused_tracked_set()),
-        ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile => None,
+/// return, from the prior publishers of its OWN resolution chain and the host
+/// that holds it. Over only non-exile departures (Day of the Dragons' sacrifice,
+/// Timothar's granted sacrifice, The Spot's library put) the phrase names only
+/// the cards the linked exile instruction put into exile, never the chain's own
+/// members:
+/// - printed on the source (CR 607.1, CR 607.2a): the source's linked exile,
+///   `ExiledBySource`, the binding the O-ring class and Tidehollow Sculler use;
+/// - created by an effect (CR 607.1d; Timothar's ruling 2021-11-19, "Timothar's
+///   last ability is linked to the ability it grants the Bat token"): the
+///   creating resolution's `Exiled`-caused members, pending creation-time
+///   binding (the filed Timothar granted-binding issue).
+///
+/// `None` keeps the sentinel: with no prior publisher (the O-ring LTB shape
+/// `detect_etb_exile_ltb_return` pairs) or over a same-chain exile producer.
+pub(crate) fn linked_exile_return_binding(
+    chain: ChainPriorPublishers,
+    host: LinkedExileReturnHost,
+) -> Option<TargetFilter> {
+    match (chain, host) {
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::PrintedOnSource) => {
+            Some(TargetFilter::ExiledBySource)
+        }
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::CreatedByEffect) => {
+            Some(exiled_caused_tracked_set())
+        }
+        (
+            ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile,
+            LinkedExileReturnHost::PrintedOnSource | LinkedExileReturnHost::CreatedByEffect,
+        ) => None,
     }
 }
 
@@ -12664,17 +12705,23 @@ mod tests {
                 );
             }
         }
-        let exiled_caused = TargetFilter::TrackedSetFiltered {
-            id: TrackedSetId(0),
-            filter: Box::new(TargetFilter::Any),
-            caused_by: Some(ThisWayCause::Exiled),
-        };
         for chain in CHAIN_STATES {
-            assert_eq!(
-                chain_exiled_cause_binding(chain),
-                (chain == ChainPriorPublishers::NonExileOnly).then(|| exiled_caused.clone()),
-                "{chain:?}"
-            );
+            for (host, bound) in [
+                (
+                    LinkedExileReturnHost::PrintedOnSource,
+                    TargetFilter::ExiledBySource,
+                ),
+                (
+                    LinkedExileReturnHost::CreatedByEffect,
+                    exiled_caused_tracked_set(),
+                ),
+            ] {
+                assert_eq!(
+                    linked_exile_return_binding(chain, host),
+                    (chain == ChainPriorPublishers::NonExileOnly).then_some(bound),
+                    "{chain:?} × {host:?}"
+                );
+            }
         }
     }
 

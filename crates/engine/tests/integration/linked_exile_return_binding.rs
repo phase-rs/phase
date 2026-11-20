@@ -2,10 +2,13 @@
 //! whose own resolution chain has prior tracked-set publishers, none of them an
 //! exile instruction, refers only to cards put into exile by the linked exile
 //! instruction — never to the chain's own sacrificed or library-put members.
-//! The parser binds the bare chain sentinel, deciding it once on the finished tree, to the `Exiled`-caused subset
-//! (`TrackedSetFiltered { id: 0, filter: Any, caused_by: Some(Exiled) }`).
+//! The parser binds the bare chain sentinel, deciding it once on the finished tree, by where the
+//! holding ability is written (CR 607.1). A return printed on the source binds the source's
+//! linked exile (`ExiledBySource`, CR 607.2a) and moves set-wide out of exile. A return in an
+//! ability an effect creates (Timothar's Bat trigger, CR 607.1d) binds the `Exiled`-caused
+//! subset (`TrackedSetFiltered { id: 0, filter: Any, caused_by: Some(Exiled) }`, D8).
 //!
-//! Runtime rows (R1, R9) drive the real cast pipeline through `GameScenario`
+//! Runtime rows (R1, DR1-DR4, R9 as DR3, S1) drive the real cast pipeline through `GameScenario`
 //! with cards built from live-parsed Oracle text (never the committed fixture),
 //! so a START run measures START's parser. START is the parser before this change,
 //! which binds the bare sentinel `TrackedSet(0)` everywhere; D8 is the `Exiled`-caused
@@ -41,6 +44,10 @@ const INDOMITABLE_CREATIVITY: &str = "Destroy X target artifacts and/or creature
 const DRAGON_HATCHLING: &str = "Flying\n{R}: This creature gets +1/+0 until end of turn.";
 const DISENCHANT: &str = "Destroy target artifact or enchantment.";
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const CHILD_OF_NIGHT: &str = "Lifelink";
+// Vanilla (textless) filler body: there is no Oracle text to quote.
+const GRIZZLY_BEARS: &str = "";
+const MURDER: &str = "Destroy target creature.";
 
 /// The bare chain sentinel rebound to the members the linked exile instruction
 /// put into exile (CR 607.2a).
@@ -100,22 +107,59 @@ fn sacrificed_then_zone(events: &[GameEvent], object: ObjectId, to: Zone) -> boo
     matches!((moved, sacrificed), (Some(m), Some(s)) if m < s)
 }
 
-/// Builds R1's board (optionally with Rest in Peace under P1), casts Day of
-/// the Dragons with no creatures, then Dragon Hatchling, then Disenchant on
-/// Day. Returns `(day, hatchling, events of the Disenchant drain, runner)`.
-fn day_of_the_dragons_with_hatchling(
-    rest_in_peace: bool,
-) -> (
-    ObjectId,
-    ObjectId,
-    Vec<GameEvent>,
-    engine::game::scenario::GameRunner,
-) {
+/// What `day_of_the_dragons_with_hatchling` returns.
+struct DayBoard {
+    day: ObjectId,
+    hatchling: ObjectId,
+    /// Child of Night, which Day's ETB exiles (only when the board has one).
+    child: Option<ObjectId>,
+    /// The events of the Disenchant drain.
+    events: Vec<GameEvent>,
+    runner: engine::game::scenario::GameRunner,
+}
+
+/// The stack drained and the game is back at a priority prompt (no stray prompt).
+fn assert_settled(runner: &engine::game::scenario::GameRunner, what: &str) {
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "{what}: the stack drained");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "{what}: fully resolved, no stray prompt: {:?}",
+        state.waiting_for
+    );
+}
+
+fn battlefield_tokens(runner: &engine::game::scenario::GameRunner, name: &str) -> Vec<ObjectId> {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.is_token && obj.name == name)
+        })
+        .collect()
+}
+
+/// Builds R1's board (optionally with Rest in Peace under P1 and Child of Night on
+/// P0's battlefield), casts Day of the Dragons, then Dragon Hatchling, then Disenchant
+/// on Day. With the child, Day's ETB exiles it and creates one 5/5 Dragon token.
+fn day_of_the_dragons_with_hatchling(rest_in_peace: bool, with_child: bool) -> DayBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     if rest_in_peace {
         scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
     }
+    let child = with_child.then(|| {
+        scenario
+            .add_creature_from_oracle(P0, "Child of Night", 2, 1, CHILD_OF_NIGHT)
+            .with_subtypes(vec!["Vampire"])
+            .id()
+    });
     let day = scenario
         .add_enchantment_to_hand_from_oracle(P0, "Day of the Dragons", DAY_OF_THE_DRAGONS)
         .id();
@@ -129,8 +173,8 @@ fn day_of_the_dragons_with_hatchling(
     let mut runner = scenario.build();
 
     let etb = runner.cast(day).resolve();
-    // Reach guard (1): Day's ETB resolved over an empty board — nothing exiled,
-    // zero Dragon tokens.
+    // Reach guard (1): Day's ETB resolved. Over an empty board it exiled nothing and
+    // created 0 tokens; with the child it exiled it and created one Dragon token.
     assert_eq!(
         etb.zone_of(day),
         Zone::Battlefield,
@@ -143,9 +187,17 @@ fn day_of_the_dragons_with_hatchling(
         .filter(|obj| obj.is_token && obj.zone == Zone::Battlefield)
         .count();
     assert_eq!(
-        dragon_tokens, 0,
-        "Day's ETB exiled nothing, so it creates 0 tokens"
+        dragon_tokens,
+        usize::from(with_child),
+        "Day's ETB creates one token per exiled creature"
     );
+    if let Some(child) = child {
+        assert_eq!(
+            etb.zone_of(child),
+            Zone::Exile,
+            "Day's ETB exiled Child of Night"
+        );
+    }
 
     let hatch = runner.cast(hatchling).resolve();
     // Reach guard (2): the nontoken Dragon card is on the battlefield before
@@ -158,7 +210,13 @@ fn day_of_the_dragons_with_hatchling(
 
     let removal = runner.cast(disenchant).target_object(day).resolve();
     let events = removal.events().to_vec();
-    (day, hatchling, events, runner)
+    DayBoard {
+        day,
+        hatchling,
+        child,
+        events,
+        runner,
+    }
 }
 
 /// R1 — CR 607.2a + CR 406.6 + CR 701.21a: Day of the Dragons' LTB sacrifices
@@ -168,7 +226,13 @@ fn day_of_the_dragons_with_hatchling(
 /// graveyard. (This row asserts nothing about an ETB-exiled card; there is none.)
 #[test]
 fn day_of_the_dragons_ltb_does_not_return_a_sacrificed_dragon_card() {
-    let (day, hatchling, events, runner) = day_of_the_dragons_with_hatchling(false);
+    let DayBoard {
+        day,
+        hatchling,
+        events,
+        runner,
+        ..
+    } = day_of_the_dragons_with_hatchling(false, false);
     let state = runner.state();
 
     // Reach guard (3): the LTB fired and fully resolved, and its `Sacrifice`
@@ -197,14 +261,23 @@ fn day_of_the_dragons_ltb_does_not_return_a_sacrificed_dragon_card() {
     assert_eq!(state.objects[&hatchling].zone, Zone::Graveyard);
 }
 
-/// R9 — CR 607.2a + CR 614.6 + CR 701.21a: under Rest in Peace the sacrifice
+/// R9 / DR3 — CR 607.2a + CR 614.6 + CR 701.21a: under Rest in Peace the sacrifice
 /// puts Dragon Hatchling into exile instead of the graveyard, but the card was
 /// still sacrificed — never put into exile by Day's ETB instruction — so the
-/// return leaves it in exile. Only the `caused_by: Exiled` binding decides this
-/// row: the return scans exile and reaches the card.
+/// return leaves it in exile. `ExiledBySource` decides this row: the return scans
+/// exile and reaches the card, but Rest in Peace's redirect of the sacrifice is not an
+/// exile by Day's linked ETB (CR 607.2a + CR 614.6), so the card is not linked to Day and
+/// stays. Child of Night, which Day's ETB did exile, returns.
 #[test]
 fn day_of_the_dragons_ltb_does_not_return_a_sacrificed_card_redirected_to_exile() {
-    let (day, hatchling, events, runner) = day_of_the_dragons_with_hatchling(true);
+    let DayBoard {
+        day,
+        hatchling,
+        child,
+        events,
+        runner,
+    } = day_of_the_dragons_with_hatchling(true, true);
+    let child = child.expect("the board has Child of Night");
     let state = runner.state();
 
     // Reach guard (1), read from the drain's events (never the final zone):
@@ -221,12 +294,7 @@ fn day_of_the_dragons_ltb_does_not_return_a_sacrificed_card_redirected_to_exile(
         "Rest in Peace exiled Day"
     );
     // Reach guard (3).
-    assert!(state.stack.is_empty(), "the stack drained");
-    assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "fully resolved, no stray prompt: {:?}",
-        state.waiting_for
-    );
+    assert_settled(&runner, "DR3");
 
     assert_ne!(
         state.objects[&hatchling].zone,
@@ -234,13 +302,199 @@ fn day_of_the_dragons_ltb_does_not_return_a_sacrificed_card_redirected_to_exile(
         "a sacrificed card redirected to exile is not one of 'the exiled cards' (CR 607.2a)"
     );
     assert_eq!(state.objects[&hatchling].zone, Zone::Exile);
+    assert_eq!(
+        state.objects[&child].zone,
+        Zone::Battlefield,
+        "CR 607.2a: the card Day's ETB exiled returns"
+    );
+    assert_eq!(state.objects[&child].controller, P0);
 }
 
-/// R2 — Day of the Dragons' plural return lowers to a set-wide
-/// `ChangeZoneAll { origin: Exile }` over the `Exiled`-caused sentinel, never the
-/// single-pick `ChangeZone` route.
+/// DR1 — CR 607.2a + CR 607.3: Day's LTB returns the card its ETB exiled (Child of Night)
+/// under its controller's control, and the sacrificed nontoken Dragon (Dragon Hatchling)
+/// stays in the graveyard.
 #[test]
-fn day_of_the_dragons_return_binds_exiled_caused_set_wide() {
+fn day_of_the_dragons_ltb_returns_the_card_its_etb_exiled() {
+    let DayBoard {
+        hatchling,
+        child,
+        events,
+        runner,
+        ..
+    } = day_of_the_dragons_with_hatchling(false, true);
+    let child = child.expect("the board has Child of Night");
+    let state = runner.state();
+
+    // Reach guards: the LTB sacrificed Hatchling into the graveyard (every Dragon token went
+    // with it) and the chain fully resolved.
+    assert!(
+        sacrificed_then_zone(&events, hatchling, Zone::Graveyard),
+        "Day's LTB sacrificed Dragon Hatchling: {events:#?}"
+    );
+    assert!(
+        battlefield_tokens(&runner, "Dragon").is_empty(),
+        "the sacrifice took every Dragon token"
+    );
+    assert_settled(&runner, "DR1");
+
+    assert_eq!(
+        state.objects[&child].zone,
+        Zone::Battlefield,
+        "CR 607.2a: the card Day's ETB exiled returns"
+    );
+    assert_eq!(state.objects[&child].controller, P0, "under your control");
+    assert_eq!(
+        state.objects[&hatchling].zone,
+        Zone::Graveyard,
+        "the sacrificed Dragon card is not one of 'the exiled cards'"
+    );
+}
+
+/// DR2 — ruling 2017-11-17: the exiled creature returns even when no Dragon token is left
+/// when Day leaves the battlefield.
+#[test]
+fn day_of_the_dragons_ltb_returns_the_exiled_card_with_no_dragon_left() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let day = scenario
+        .add_enchantment_to_hand_from_oracle(P0, "Day of the Dragons", DAY_OF_THE_DRAGONS)
+        .id();
+    let child = scenario
+        .add_creature_from_oracle(P0, "Child of Night", 2, 1, CHILD_OF_NIGHT)
+        .with_subtypes(vec!["Vampire"])
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let disenchant = scenario
+        .add_spell_to_hand_from_oracle(P0, "Disenchant", true, DISENCHANT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(day).resolve();
+    // Reach guards: the ETB exiled Child of Night and made exactly one Dragon token.
+    assert_eq!(runner.state().objects[&child].zone, Zone::Exile);
+    let dragons = battlefield_tokens(&runner, "Dragon");
+    assert_eq!(dragons.len(), 1, "Day's ETB made one Dragon token");
+    runner.cast(murder).target_object(dragons[0]).resolve();
+    assert!(
+        battlefield_tokens(&runner, "Dragon").is_empty(),
+        "reach guard: no Dragon is left before Day leaves"
+    );
+    runner.cast(disenchant).target_object(day).resolve();
+
+    assert_settled(&runner, "DR2");
+    assert_eq!(runner.state().objects[&day].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&child].zone,
+        Zone::Battlefield,
+        "ruling 2017-11-17: the exiled creature returns with no Dragon left"
+    );
+}
+
+/// DR4 — CR 607.2a: another source's exile is not one of "the exiled cards". P0's Oblivion
+/// Ring holds P1's Grizzly Bears in exile; Day's LTB returns Child of Night (Day's own ETB
+/// exile) and leaves the Bears there.
+#[test]
+fn day_of_the_dragons_ltb_does_not_return_another_sources_exile() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oring = scenario
+        .add_enchantment_to_hand_from_oracle(P0, "Oblivion Ring", OBLIVION_RING)
+        .id();
+    let bears = scenario
+        .add_creature_from_oracle(P1, "Grizzly Bears", 2, 2, GRIZZLY_BEARS)
+        .id();
+    let day = scenario
+        .add_enchantment_to_hand_from_oracle(P0, "Day of the Dragons", DAY_OF_THE_DRAGONS)
+        .id();
+    let child = scenario
+        .add_creature_from_oracle(P0, "Child of Night", 2, 1, CHILD_OF_NIGHT)
+        .with_subtypes(vec!["Vampire"])
+        .id();
+    let disenchant = scenario
+        .add_spell_to_hand_from_oracle(P0, "Disenchant", true, DISENCHANT)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(oring).target_objects(&[bears]).resolve();
+    runner.cast(day).resolve();
+    // Reach guards: Oblivion Ring holds the Bears, Day's ETB holds Child of Night.
+    assert_eq!(runner.state().objects[&oring].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&child].zone, Zone::Exile);
+    runner.cast(disenchant).target_object(day).resolve();
+
+    assert_settled(&runner, "DR4");
+    assert_eq!(
+        runner.state().objects[&child].zone,
+        Zone::Battlefield,
+        "CR 607.2a: the card Day's ETB exiled returns"
+    );
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Exile,
+        "CR 607.2a: Oblivion Ring's exile is not linked to Day"
+    );
+    assert_eq!(runner.state().objects[&bears].owner, P1);
+    assert_eq!(
+        runner.state().objects[&oring].zone,
+        Zone::Battlefield,
+        "Oblivion Ring is still on the battlefield"
+    );
+}
+
+/// S1 — CR 607.2a + CR 400.3: The Spot's dies trigger returns both cards its ETB exiled to
+/// their owners' hands (P1's permanent to P1's hand, P0's graveyard card to P0's hand). A
+/// `Bounce` cannot take a card out of exile, so the return is a set-wide move out of exile.
+#[test]
+fn the_spot_dies_returns_the_exiled_cards_to_their_owners_hands() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spot = scenario
+        .add_creature_to_hand_from_oracle(P0, "The Spot, Living Portal", 4, 4, THE_SPOT)
+        .id();
+    let bears = scenario
+        .add_creature_from_oracle(P1, "Grizzly Bears", 2, 2, GRIZZLY_BEARS)
+        .id();
+    let child = scenario
+        .add_creature_to_graveyard(P0, "Child of Night", 2, 1)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(spot).target_objects(&[bears, child]).resolve();
+    // Reach guard: the ETB exiled both targets.
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&child].zone, Zone::Exile);
+    runner.cast(murder).target_object(spot).resolve();
+
+    assert_settled(&runner, "S1");
+    let state = runner.state();
+    assert_eq!(
+        state.players[0].library.last(),
+        Some(&spot),
+        "The Spot is on the bottom of its owner's library"
+    );
+    assert_eq!(state.objects[&bears].zone, Zone::Hand);
+    assert!(
+        state.players[1].hand.contains(&bears),
+        "the Bears go to their owner's hand (CR 400.3)"
+    );
+    assert_eq!(state.objects[&child].zone, Zone::Hand);
+    assert!(
+        state.players[0].hand.contains(&child),
+        "Child of Night goes to its owner's hand"
+    );
+}
+
+/// R2 — Day of the Dragons' plural return, printed on the card, lowers to a set-wide
+/// `ChangeZoneAll { origin: Exile }` over the source's linked exile (`ExiledBySource`,
+/// CR 607.2a), never the single-pick `ChangeZone` route.
+#[test]
+fn day_of_the_dragons_return_binds_exiled_by_source_set_wide() {
     let parsed = parse(DAY_OF_THE_DRAGONS, "Day of the Dragons", &["Enchantment"]);
 
     let etb = trigger_execute(&parsed, "Day of the Dragons", 0);
@@ -273,7 +527,7 @@ fn day_of_the_dragons_return_binds_exiled_caused_set_wide() {
         } => {
             assert_eq!(*origin, Some(Zone::Exile));
             assert_eq!(*destination, Zone::Battlefield);
-            assert_eq!(*target, exiled_caused_sentinel());
+            assert_eq!(*target, TargetFilter::ExiledBySource);
             assert_eq!(*enters_under, Some(ControllerRef::You));
         }
         other => panic!("Day's return is a set-wide ChangeZoneAll, not {other:?}"),
@@ -282,7 +536,9 @@ fn day_of_the_dragons_return_binds_exiled_caused_set_wide() {
 
 /// R3 — the quoted granted trigger is parsed with a fresh context: the parent's
 /// "exile it" cannot reach it, so the granted chain's only prior clause is its
-/// own sacrifice and "the exiled card" binds the `Exiled`-caused sentinel.
+/// own sacrifice and "the exiled card" binds the `Exiled`-caused sentinel. The return is
+/// written in an ability an effect creates (CR 607.1d), so it keeps D8's binding: this row
+/// is the created-by-effect guard.
 #[test]
 fn timothar_granted_return_binds_exiled_caused_sentinel() {
     let parsed = parse(TIMOTHAR, "Timothar, Baron of Bats", &["Creature"]);
@@ -352,10 +608,12 @@ fn timothar_granted_return_binds_exiled_caused_sentinel() {
     }
 }
 
-/// R4 — The Spot's plural hand return stays a `Bounce` (no set-wide promotion
-/// for a hand return with no origin) and binds the `Exiled`-caused sentinel.
+/// R4 — The Spot's plural hand return, printed on the card, lowers to a set-wide
+/// `ChangeZoneAll` from exile to the owners' hands over the source's linked exile
+/// (`ExiledBySource`): a `Bounce` cannot move a card out of exile (CR 607.2a + CR 400.3).
+/// The "If you do" gate stays.
 #[test]
-fn the_spot_dies_return_binds_exiled_caused_sentinel() {
+fn the_spot_dies_return_binds_exiled_by_source_set_wide() {
     let parsed = parse(THE_SPOT, "The Spot, Living Portal", &["Creature"]);
     let dies = trigger_execute(&parsed, "The Spot", 1);
     assert!(
@@ -372,15 +630,17 @@ fn the_spot_dies_return_binds_exiled_caused_sentinel() {
         "the return keeps its 'If you do' gate"
     );
     match &*ret.effect {
-        Effect::Bounce {
-            target,
+        Effect::ChangeZoneAll {
+            origin,
             destination,
+            target,
             ..
         } => {
-            assert_eq!(*target, exiled_caused_sentinel());
-            assert_eq!(*destination, None);
+            assert_eq!(*origin, Some(Zone::Exile));
+            assert_eq!(*destination, Zone::Hand);
+            assert_eq!(*target, TargetFilter::ExiledBySource);
         }
-        other => panic!("The Spot's return is a Bounce, not {other:?}"),
+        other => panic!("The Spot's return is a set-wide ChangeZoneAll, not {other:?}"),
     }
 }
 
@@ -577,8 +837,9 @@ fn delayed_return_under_non_exile_creating_chain_keeps_bare_sentinel() {
 // conditions and flags the row names on its path.
 //
 // Notation: `?Cond` is the node's condition type, `else:(...)` its
-// `else_ability`, `modeN:(...)` its modes, `TSF{0,Any,Exiled}` the D8-bound
-// sentinel (`exiled_caused_sentinel()`), `TrackedSet(0)` the bare sentinel.
+// `else_ability`, `modeN:(...)` its modes, `TSF{0,Any,Exiled}` the created-by-effect (D8)
+// binding (`exiled_caused_sentinel()`), `ExiledBySource` the printed-host binding,
+// `TrackedSet(0)` the bare sentinel.
 // Every `E` face also carries `T0: ChangeZoneAll{None,Exile,Typed}`, the ETB
 // exile whose cards the return names.
 // ---------------------------------------------------------------------------
@@ -586,9 +847,10 @@ fn delayed_return_under_non_exile_creating_chain_keeps_bare_sentinel() {
 /// Counters the renderer fills while it walks.
 #[derive(Default)]
 struct PayloadCounts {
-    /// `Exiled`-caused targets on a creation-bound payload edge (D8 inside a
-    /// payload must never happen, CR 603.7c).
-    d8_in_payload: usize,
+    /// A linked-exile return binding (D8's `TrackedSetFiltered { caused_by: Exiled }` or the
+    /// printed-host `ExiledBySource`) on a creation-bound payload edge must never happen
+    /// (CR 603.7c).
+    linked_binding_in_payload: usize,
     /// Battlefield returns on a creation-bound payload edge.
     returns_in_payload: usize,
 }
@@ -643,8 +905,9 @@ fn effect_shape(effect: &Value, in_payload: bool, counts: &mut PayloadCounts) ->
                     .and_then(|t| t.get("caused_by"))
                     .and_then(Value::as_str)
                     == Some("Exiled")
+                    || json_type(target) == "ExiledBySource"
                 {
-                    counts.d8_in_payload += 1;
+                    counts.linked_binding_in_payload += 1;
                 }
                 if kind != "Bounce"
                     && effect.get("destination").and_then(Value::as_str) == Some("Battlefield")
@@ -823,7 +1086,7 @@ fn unimplemented_nodes(parsed: &Value) -> usize {
 }
 
 /// A fence row: the return sits inside a `CreateDelayedTrigger` payload and
-/// keeps START's payload shape (CR 603.7c); no payload edge gains D8.
+/// keeps START's payload shape (CR 603.7c); no payload edge gains a linked-exile binding.
 fn assert_fence_row(id: &str, text: &str, types: &[&str], shape: &str, unimplemented: usize) {
     let parsed = parse_row(id, text, types);
     let mut counts = PayloadCounts::default();
@@ -833,7 +1096,10 @@ fn assert_fence_row(id: &str, text: &str, types: &[&str], shape: &str, unimpleme
         unimplemented,
         "{id}: unimplemented nodes"
     );
-    assert_eq!(counts.d8_in_payload, 0, "{id}: D8 inside a payload");
+    assert_eq!(
+        counts.linked_binding_in_payload, 0,
+        "{id}: a linked-exile binding inside a payload"
+    );
     // Reach guard: the return really is inside a payload.
     assert!(
         counts.returns_in_payload >= 1,
@@ -842,8 +1108,9 @@ fn assert_fence_row(id: &str, text: &str, types: &[&str], shape: &str, unimpleme
 }
 
 /// A keep row: the return sits outside every payload. `shape` names the node
-/// that holds it and its binding (D8 on the line, START's bare sentinel off
-/// it); `flags` is the decision-bearing field list on its path.
+/// that holds it and its binding (the linked-exile binding on the line: `ExiledBySource` for a
+/// printed return, D8's `TrackedSetFiltered { caused_by: Exiled }` for a created-by-effect
+/// return; START's bare sentinel off it); `flags` is the decision-bearing field list on its path.
 fn assert_keep_row(
     id: &str,
     text: &str,
@@ -866,7 +1133,10 @@ fn assert_keep_row(
         flags,
         "{id}: decision flags on the path"
     );
-    assert_eq!(counts.d8_in_payload, 0, "{id}: D8 inside a payload");
+    assert_eq!(
+        counts.linked_binding_in_payload, 0,
+        "{id}: a linked-exile binding inside a payload"
+    );
     assert_eq!(counts.returns_in_payload, 0, "{id}: payload returns");
     if cant_gate {
         assert!(
@@ -1128,13 +1398,13 @@ fn r24_p2_f_v10_keeps_the_payload_return_bare() {
     assert_fence_row("R24", R24_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, CDT{AtNextPhase}[Draw, ChangeZone{None,Battlefield,TrackedSet(0)}?EffectOutcome]", 0);
 }
 
-/// R25 — keep (face `p2:f v2`): the return binds D8 on the resolution line. The sacrifice and the `CreateDelayedTrigger` definition precede the return on the line, and the payload is not an instruction of this chain (CR 603.7a), so the return binds D8 (CR 607.2a).
+/// R25 — keep (face `p2:f v2`): the return binds the source's linked exile (`ExiledBySource`, the printed-host binding) on the resolution line. The sacrifice and the `CreateDelayedTrigger` definition precede the return on the line, and the payload is not an instruction of this chain (CR 603.7a), so the return binds the source's linked exile (`ExiledBySource`, the printed-host binding) (CR 607.2a).
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
 #[test]
-fn r25_p2_f_v2_binds_d8() {
-    assert_keep_row("R25", R25_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, CDT{AtNextPhase}[GainLife], ChangeZoneAll{Exile,Battlefield,TSF{0,Any,Exiled}}", 0, "", false);
+fn r25_p2_f_v2_binds_exiled_by_source() {
+    assert_keep_row("R25", R25_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, CDT{AtNextPhase}[GainLife], ChangeZoneAll{Exile,Battlefield,ExiledBySource}", 0, "", false);
 }
 
 /// R26 — keep (face `p2:f v4`): START's bare sentinel is the binding.
@@ -1385,13 +1655,13 @@ fn r51_r3_o10_earlier_cond_reloc_otherwise_binds_bare() {
     assert_keep_row("R51", R51_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: GainLife?QuantityCheck, else:(ChangeZone{None,Battlefield,TrackedSet(0)}, CDT{AtNextPhase}[Token, Draw]), CDT{AtNextPhase}[Token, Draw]", 0, "", false);
 }
 
-/// R52 — keep (face `r3:o12 reloc fallback otherwise`): the return binds D8 on the resolution line. `Fallback` (`Unimpl=1`): the return follows the sacrifice on the tree as parsed and binds D8. The face stays unsupported.
+/// R52 — keep (face `r3:o12 reloc fallback otherwise`): the return binds the source's linked exile (`ExiledBySource`, the printed-host binding) on the resolution line. `Fallback` (`Unimpl=1`): the return follows the sacrifice on the tree as parsed and binds the source's linked exile (`ExiledBySource`, the printed-host binding). The face stays unsupported.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
 #[test]
-fn r52_r3_o12_reloc_fallback_otherwise_binds_d8() {
-    assert_keep_row("R52", R52_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, CDT{AtNextPhase}[Token, Draw], Unimpl(otherwise), ChangeZoneAll{Exile,Battlefield,TSF{0,Any,Exiled}}", 1, "", false);
+fn r52_r3_o12_reloc_fallback_otherwise_binds_exiled_by_source() {
+    assert_keep_row("R52", R52_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, CDT{AtNextPhase}[Token, Draw], Unimpl(otherwise), ChangeZoneAll{Exile,Battlefield,ExiledBySource}", 1, "", false);
 }
 
 /// R53 — keep (face `r3:o13 suffix instead then`): START's bare sentinel is the binding.
@@ -1633,13 +1903,13 @@ fn r75_p2_q6_top_instead_single_binds_bare() {
     );
 }
 
-/// R76 — keep (face `c:c5 tap target and return singular`): the return binds D8 on the resolution line. A straight line: "Tap target creature and return the exiled card" follows the non-exile sacrifice, so the one-card return swaps to the `Exiled`-caused set (CR 607.2a).
+/// R76 — keep (face `c:c5 tap target and return singular`): the return binds the source's linked exile (`ExiledBySource`, the printed-host binding) on the resolution line. A straight line: "Tap target creature and return the exiled card" follows the non-exile sacrifice, so the one-card return becomes a set-wide `ChangeZoneAll` from exile over `ExiledBySource` (CR 607.2a + CR 607.3).
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
 #[test]
-fn r76_c_c5_tap_target_and_return_singular_binds_d8() {
-    assert_keep_row("R76", R76_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, SetTapState, ChangeZone{None,Battlefield,TSF{0,Any,Exiled}}", 0, "", false);
+fn r76_c_c5_tap_target_and_return_singular_binds_exiled_by_source() {
+    assert_keep_row("R76", R76_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, SetTapState, ChangeZoneAll{Exile,Battlefield,ExiledBySource}", 0, "", false);
 }
 
 /// R77 — keep (face `e:e1 draw if otherwise`): START's bare sentinel is the binding. Why: a conditional instruction whose `else_ability` holds the return, with nothing before the conditional head (CR 608.2c).
@@ -1957,7 +2227,7 @@ fn r110_u_u11_binds_bare() {
     );
 }
 
-/// R112 — keep (face `u:u9`): the return binds D8 on the resolution line. The admitted gate (CR 118.12, CR 608.2c): the return resolves only after the mandatory sacrifice resolved, and the sacrifice is not an exile, so the return binds D8. It is red when the gate is not admitted.
+/// R112 — keep (face `u:u9`): the return binds the source's linked exile (`ExiledBySource`, the printed-host binding) on the resolution line. The admitted gate (CR 118.12, CR 608.2c): the return resolves only after the mandatory sacrifice resolved, and the sacrifice is not an exile, so the return binds the source's linked exile (`ExiledBySource`, the printed-host binding). It is red when the gate is not admitted.
 ///
 /// No printed card exhibits this shape. The nearest printed card is Day of the Dragons, whose own-chain return follows a non-exile sacrifice (R1):
 /// "When this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control."
@@ -1965,8 +2235,8 @@ fn r110_u_u11_binds_bare() {
 /// The admitted gate's printed card is The Spot, Living Portal:
 /// "When The Spot dies, put him on the bottom of his owner's library. If you do, return the exiled cards to their owners' hands."
 #[test]
-fn r112_u_u9_binds_d8() {
-    assert_keep_row("R112", R112_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, ChangeZoneAll{Exile,Battlefield,TSF{0,Any,Exiled}}?EffectOutcome", 0, "", false);
+fn r112_u_u9_binds_exiled_by_source() {
+    assert_keep_row("R112", R112_FACE, &["Enchantment"], "T0: ChangeZoneAll{None,Exile,Typed} | T1: Sacrifice, ChangeZoneAll{Exile,Battlefield,ExiledBySource}?EffectOutcome", 0, "", false);
 }
 
 /// R113 — keep (face `e2:e9 flip win return`): START's bare sentinel is the binding.

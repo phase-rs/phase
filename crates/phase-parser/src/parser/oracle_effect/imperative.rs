@@ -2876,10 +2876,74 @@ pub(crate) fn return_all_to_zone_effect(
     let origin = match &target {
         TargetFilter::ExiledBySource => Some(Zone::Exile),
         TargetFilter::TrackedSetFiltered {
-            caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+            caused_by: Some(ThisWayCause::Exiled),
             ..
         } => Some(Zone::Exile),
-        _ => origin,
+        TargetFilter::TrackedSetFiltered {
+            caused_by: None | Some(ThisWayCause::OwnerLibraryShuffleSubject | ThisWayCause::Sacrificed | ThisWayCause::Destroyed | ThisWayCause::Milled | ThisWayCause::Discarded | ThisWayCause::Tapped | ThisWayCause::Returned | ThisWayCause::Bounced | ThisWayCause::PutIntoGraveyard | ThisWayCause::ControlGained),
+            ..
+        }
+        // Every other shape names a population the text's own origin governs.
+        | TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(..)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => origin,
     };
     Effect::ChangeZoneAll {
         actor: crate::types::ability::LibraryInstructionActor::Controller,
@@ -10205,7 +10269,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             {
                 let origin = match target {
                     TargetFilter::TrackedSetFiltered {
-                        caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                        caused_by: Some(ThisWayCause::Exiled),
                         ..
                     } => origin.or(Some(Zone::Exile)),
                     TargetFilter::TrackedSetFiltered { .. } => origin,
@@ -17673,12 +17737,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
     // CR 607.2a: a return's "the exiled card(s)" mark rides the AST variant, which
     // `lower_targeted_action_ast` turns into a bare `Effect`; lift it onto the clause
     // here, the one seam every imperative-family lowering passes through.
-    let linked_exile_return = match &ast {
-        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(targeted)) => {
-            targeted.linked_exile_return()
-        }
-        _ => None,
-    };
+    let linked_exile_return = ast.linked_exile_return();
     let mut clause = lower_imperative_family_clause(ast);
     clause.linked_exile_return = linked_exile_return;
     clause

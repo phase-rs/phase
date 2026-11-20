@@ -152,6 +152,7 @@ use super::oracle_static::{
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
     try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
 };
+use super::oracle_target::LinkedExileReturnHost;
 use super::oracle_trigger::{
     lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
     parse_trigger_lines_at_index_ir,
@@ -10066,39 +10067,6 @@ pub fn parse_oracle_text(
     .0
 }
 
-/// CR-neutral hygiene: `unlowered_guard` is parser scratch, so a finished parse must hold
-/// none. Asked of the SERIALIZED tree rather than by re-walking it, because a re-walk would
-/// use the same recursion set it is meant to police: a mark left under an unrecursed key is
-/// invisible to the walk that would assert its absence. This is the same predicate the
-/// corpus gate applies to `card-data.json`, so the in-process guard and the corpus guard are
-/// one claim measured at two scales rather than two claims that can drift apart.
-///
-/// `Map::contains_key` here is a map-key lookup over a `serde_json::Value` inside a
-/// debug-build assertion, not parsing dispatch — no text is scanned. The `match` is
-/// wildcard-free so a future `Value` variant breaks the build instead of silently
-/// answering `false`.
-///
-/// Cost, measured rather than assumed, because "this serializes on every parse in every
-/// debug build" reads alarming: on Torrential Gearhulk's verbatim text, debug profile,
-/// n = 300, one `serde_json::to_value` of the finished `ParsedAbilities` is **37.6 µs**
-/// against **61.3 ms** for the parse that produced it. The pipeline runs this resolver at
-/// most twice per parse, so the assertion is ~0.12 % of the work it guards — and it never
-/// runs at all in the `tool`-profile builds that generate `card-data.json`. Both figures
-/// scale with tree size together, so the ratio is the stable quantity. Keep it.
-#[cfg(debug_assertions)]
-fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(map) => {
-            map.contains_key("unlowered_guard") || map.values().any(holds_unlowered_guard)
-        }
-        serde_json::Value::Array(items) => items.iter().any(holds_unlowered_guard),
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => false,
-    }
-}
-
 /// CR 607.2a + CR 608.2c + CR 603.7c: decide the binding of every "the exiled card(s)"
 /// return (`AbilityDefinition::linked_exile_return`) on the finished tree, and clear every
 /// mark.
@@ -10119,11 +10087,53 @@ fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
 /// it keeps the sentinel. The sweep that follows the root walks visits every remaining
 /// definition node and clears any mark a root walk did not reach (payload interiors), so
 /// the payload exclusion holds by construction rather than by a list of payload routes.
+///
+/// Each root also carries its host (`LinkedExileReturnHost`): the printed roots (each
+/// ability, each top-level trigger's `execute`, each top-level replacement's `execute` and
+/// decline) are written on the source (CR 607.1), and are walked first as
+/// `PrintedOnSource`, which consumes their marks. The sweep then reaches every `Trigger`,
+/// `Replacement` and `Static`/`GrantAbility` node as `CreatedByEffect` (CR 607.1a / CR
+/// 607.1d): a printed root's second visit is a no-op, so only granted or created nodes
+/// settle there. A CR 607.1a self-grant is conservatively treated as created by an effect.
 fn bind_linked_exile_returns(out: &mut ParsedAbilities) {
     use crate::types::ability::{ContinuousModification, ReplacementMode};
     use crate::types::ability_visit::{nodes_mut, DefinitionNodeMut};
     for def in &mut out.abilities {
-        bind_linked_exile_returns_on_line(def, Some(ChainPriorPublishers::Absent));
+        bind_linked_exile_returns_on_line(
+            def,
+            Some(ChainPriorPublishers::Absent),
+            LinkedExileReturnHost::PrintedOnSource,
+        );
+    }
+    for trigger in &mut out.triggers {
+        if let Some(execute) = trigger.execute.as_deref_mut() {
+            bind_linked_exile_returns_on_line(
+                execute,
+                Some(ChainPriorPublishers::Absent),
+                LinkedExileReturnHost::PrintedOnSource,
+            );
+        }
+    }
+    for replacement in &mut out.replacements {
+        if let Some(execute) = replacement.execute.as_deref_mut() {
+            bind_linked_exile_returns_on_line(
+                execute,
+                Some(ChainPriorPublishers::Absent),
+                LinkedExileReturnHost::PrintedOnSource,
+            );
+        }
+        match &mut replacement.mode {
+            ReplacementMode::MayCost { decline, .. } | ReplacementMode::Optional { decline } => {
+                if let Some(decline) = decline.as_deref_mut() {
+                    bind_linked_exile_returns_on_line(
+                        decline,
+                        Some(ChainPriorPublishers::Absent),
+                        LinkedExileReturnHost::PrintedOnSource,
+                    );
+                }
+            }
+            ReplacementMode::Mandatory => {}
+        }
     }
     let mut on_node = |node: DefinitionNodeMut<'_>| {
         match node {
@@ -10133,12 +10143,20 @@ fn bind_linked_exile_returns(out: &mut ParsedAbilities) {
             DefinitionNodeMut::Ability(def) => def.linked_exile_return = None,
             DefinitionNodeMut::Trigger(trigger) => {
                 if let Some(execute) = trigger.execute.as_deref_mut() {
-                    bind_linked_exile_returns_on_line(execute, Some(ChainPriorPublishers::Absent));
+                    bind_linked_exile_returns_on_line(
+                        execute,
+                        Some(ChainPriorPublishers::Absent),
+                        LinkedExileReturnHost::CreatedByEffect,
+                    );
                 }
             }
             DefinitionNodeMut::Replacement(replacement) => {
                 if let Some(execute) = replacement.execute.as_deref_mut() {
-                    bind_linked_exile_returns_on_line(execute, Some(ChainPriorPublishers::Absent));
+                    bind_linked_exile_returns_on_line(
+                        execute,
+                        Some(ChainPriorPublishers::Absent),
+                        LinkedExileReturnHost::CreatedByEffect,
+                    );
                 }
                 match &mut replacement.mode {
                     ReplacementMode::MayCost { decline, .. }
@@ -10147,6 +10165,7 @@ fn bind_linked_exile_returns(out: &mut ParsedAbilities) {
                             bind_linked_exile_returns_on_line(
                                 decline,
                                 Some(ChainPriorPublishers::Absent),
+                                LinkedExileReturnHost::CreatedByEffect,
                             );
                         }
                     }
@@ -10161,6 +10180,7 @@ fn bind_linked_exile_returns(out: &mut ParsedAbilities) {
                         bind_linked_exile_returns_on_line(
                             definition,
                             Some(ChainPriorPublishers::Absent),
+                            LinkedExileReturnHost::CreatedByEffect,
                         );
                     }
                 }
@@ -10293,14 +10313,19 @@ fn stays_on_resolution_line(def: &AbilityDefinition) -> bool {
 /// is created (CR 603.7c), and the sweep clears its marks. A boon's trigger is not
 /// entered from here either: it is a `Trigger` node, which the sweep walks as its own
 /// root. A draw-replacement substitute resolves later as a chain of its own, so it starts a
-/// fresh line.
+/// fresh line, and an effect creates it, so it is a `CreatedByEffect` host (CR 607.1d).
+///
+/// `host` is where the ability holding `def` is written (CR 607.1). A same-resolution
+/// branch, a mode, an `else_ability` and the next instruction are the same printed ability,
+/// so they keep the host.
 fn bind_linked_exile_returns_on_line(
     def: &mut AbilityDefinition,
     line: Option<ChainPriorPublishers>,
+    host: LinkedExileReturnHost,
 ) {
     use crate::types::ability::NestedDefinitionEdge;
     let here = line.filter(|_| stays_on_resolution_line(def));
-    settle_linked_exile_return(def, here.unwrap_or(ChainPriorPublishers::Absent));
+    settle_linked_exile_return(def, here.unwrap_or(ChainPriorPublishers::Absent), host);
     let own = if crate::parser::oracle_effect::chain_clause_is_exile_producer(&def.effect) {
         ChainPriorPublishers::IncludesExile
     } else {
@@ -10315,8 +10340,14 @@ fn bind_linked_exile_returns_on_line(
             // A boon's trigger is a `Trigger` node; the sweep walks it as its own root (no
             // creation binding; digital-only, no CR entry).
             NestedDefinitionEdge::CreateBoonTrigger => {}
+            // CR 607.1d: an effect creates the substitute; no printed card reaches this edge,
+            // so it fails closed with the other created-by-effect returns.
             NestedDefinitionEdge::CreateDrawReplacementEffect => {
-                bind_linked_exile_returns_on_line(nested, Some(ChainPriorPublishers::Absent));
+                bind_linked_exile_returns_on_line(
+                    nested,
+                    Some(ChainPriorPublishers::Absent),
+                    LinkedExileReturnHost::CreatedByEffect,
+                );
             }
             NestedDefinitionEdge::RevealFromHandOnDecline
             | NestedDefinitionEdge::VotePerChoice
@@ -10329,33 +10360,42 @@ fn bind_linked_exile_returns_on_line(
             | NestedDefinitionEdge::FlipCoinsLose
             | NestedDefinitionEdge::ChooseOneOfBranch => {
                 after = None;
-                bind_linked_exile_returns_on_line(nested, None);
+                bind_linked_exile_returns_on_line(nested, None, host);
             }
         });
     for mode in &mut def.mode_abilities {
-        bind_linked_exile_returns_on_line(mode, None);
+        bind_linked_exile_returns_on_line(mode, None, host);
     }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
-        bind_linked_exile_returns_on_line(else_def, None);
+        bind_linked_exile_returns_on_line(else_def, None, host);
     }
     if let Some(sub) = def.sub_ability.as_deref_mut() {
-        bind_linked_exile_returns_on_line(sub, after);
+        bind_linked_exile_returns_on_line(sub, after, host);
     }
 }
 
-/// CR 607.2a: settle one definition's mark against its chain's prior publishers. The
-/// rewrite applies only while the return still has the shape the clause lowered to (the
-/// sentinel on a `Bounce`, `ChangeZone` or `ChangeZoneAll`); a return a later pass
-/// rebuilt keeps its binding.
+/// CR 607.2a: settle one definition's mark against its chain's prior publishers and the
+/// host that holds it. The rewrite applies only while the return still has the shape the
+/// clause lowered to (the sentinel on a `Bounce`, `ChangeZone` or `ChangeZoneAll`); a
+/// return a later pass rebuilt keeps its binding.
+///
+/// Printed on the source (`PrintedOnSource`, CR 607.1 + CR 607.2a): the return names the
+/// source's linked exile (`ExiledBySource`), and every sentinel shape lowers set-wide
+/// through `return_all_to_zone_effect`, which forces `origin: Exile`. A `Bounce` cannot
+/// move a card out of exile (CR 607.2a + CR 400.3), and a singular linked anaphor acts on
+/// each exiled card (CR 607.3), as the set-wide promotion `ltb_return_of_exiled_by_source`
+/// makes for the O-ring class. Created by an effect (`CreatedByEffect`, CR 607.1d): the
+/// move keeps its shape and names the narrowed chain set.
 fn settle_linked_exile_return(
     def: &mut AbilityDefinition,
     prior: crate::parser::oracle_ir::context::ChainPriorPublishers,
+    host: LinkedExileReturnHost,
 ) {
     use crate::types::ability::LinkedExileReturn;
     let Some(mark) = def.linked_exile_return.take() else {
         return;
     };
-    let Some(bound) = crate::parser::oracle_target::chain_exiled_cause_binding(prior) else {
+    let Some(bound) = crate::parser::oracle_target::linked_exile_return_binding(prior, host) else {
         return;
     };
     let is_sentinel = |target: &TargetFilter| {
@@ -10366,38 +10406,60 @@ fn settle_linked_exile_return(
             }
         )
     };
-    let set_wide = match &mut *def.effect {
-        // CR 607.2a: one card, or the whole set moved to a hand: the move keeps its
-        // shape and names the narrowed set.
-        Effect::Bounce { target, .. } if is_sentinel(target) => {
+    let set_wide = match (host, &mut *def.effect) {
+        // CR 607.2a + CR 400.3: the printed linked exile's cards go to their owners'
+        // hands as a set: the Tidehollow Sculler shape.
+        (
+            LinkedExileReturnHost::PrintedOnSource,
+            Effect::Bounce {
+                target,
+                destination,
+                ..
+            },
+        ) if is_sentinel(target) => super::oracle_effect::imperative::return_all_to_zone_effect(
+            None,
+            destination.unwrap_or(Zone::Hand),
+            bound,
+            None,
+            crate::types::zones::EtbTapState::Unspecified,
+            Vec::new(),
+        ),
+        // CR 607.1d + CR 607.2a: one card, or the whole set moved to a hand: the move
+        // keeps its shape and names the narrowed set.
+        (LinkedExileReturnHost::CreatedByEffect, Effect::Bounce { target, .. })
+            if is_sentinel(target) =>
+        {
             *target = bound;
             return;
         }
-        Effect::ChangeZone { target, .. }
+        (LinkedExileReturnHost::CreatedByEffect, Effect::ChangeZone { target, .. })
             if is_sentinel(target) && mark == LinkedExileReturn::OneCard =>
         {
             *target = bound;
             return;
         }
-        // CR 607.2a + CR 400.7: the whole linked set moves together.
-        Effect::ChangeZone {
-            target,
-            destination,
-            enters_under,
-            enter_tapped,
-            enter_with_counters,
-            origin,
-            ..
-        }
-        | Effect::ChangeZoneAll {
-            target,
-            destination,
-            enters_under,
-            enter_tapped,
-            enter_with_counters,
-            origin,
-            ..
-        } if is_sentinel(target) => super::oracle_effect::imperative::return_all_to_zone_effect(
+        // CR 607.2a + CR 607.3 + CR 400.7: the whole linked set moves together.
+        (
+            _,
+            Effect::ChangeZone {
+                target,
+                destination,
+                enters_under,
+                enter_tapped,
+                enter_with_counters,
+                origin,
+                ..
+            }
+            | Effect::ChangeZoneAll {
+                target,
+                destination,
+                enters_under,
+                enter_tapped,
+                enter_with_counters,
+                origin,
+                ..
+            },
+        ) if is_sentinel(target) => super::oracle_effect::imperative::return_all_to_zone_effect(
             *origin,
             *destination,
             bound,
@@ -10410,7 +10472,27 @@ fn settle_linked_exile_return(
     *def.effect = set_wide;
 }
 
-/// Debug hygiene for parser-scratch marks: does any object in `value` carry `key`?
+/// CR-neutral hygiene for parser-scratch marks (`unlowered_guard`, `linked_exile_return`):
+/// does any object in `value` carry `key`? A finished parse must hold none. Asked of the
+/// SERIALIZED tree rather than by re-walking it, because a re-walk would use the same
+/// recursion set it is meant to police: a mark left under an unrecursed key is invisible to
+/// the walk that would assert its absence. This is the same predicate the corpus gate
+/// applies to `card-data.json`, so the in-process guard and the corpus guard are one claim
+/// measured at two scales rather than two claims that can drift apart.
+///
+/// `Map::contains_key` here is a map-key lookup over a `serde_json::Value` inside a
+/// debug-build assertion, not parsing dispatch — no text is scanned. The `match` is
+/// wildcard-free so a future `Value` variant breaks the build instead of silently
+/// answering `false`.
+///
+/// Cost, measured rather than assumed, because "this serializes on every parse in every
+/// debug build" reads alarming: on Torrential Gearhulk's verbatim text, debug profile,
+/// n = 300, one `serde_json::to_value` of the finished `ParsedAbilities` is **37.6 µs**
+/// against **61.3 ms** for the parse that produced it. The pipeline runs the
+/// `unlowered_guard` resolver at most twice per parse, so the assertion is ~0.12 % of the
+/// work it guards — and it never runs at all in the `tool`-profile builds that generate
+/// `card-data.json`. Both figures scale with tree size together, so the ratio is the stable
+/// quantity. Keep it.
 #[cfg(debug_assertions)]
 fn holds_parse_mark(value: &serde_json::Value, key: &str) -> bool {
     match value {
@@ -10520,7 +10602,10 @@ fn resolve_unlowered_guards(out: &mut ParsedAbilities) {
     }
     #[cfg(debug_assertions)]
     debug_assert!(
-        !holds_unlowered_guard(&serde_json::to_value(&*out).expect("ParsedAbilities serializes")),
+        !holds_parse_mark(
+            &serde_json::to_value(&*out).expect("ParsedAbilities serializes"),
+            "unlowered_guard"
+        ),
         "an unlowered_guard mark survived resolve_unlowered_guards"
     );
 }
@@ -15577,12 +15662,17 @@ mod die_result_row_spell_anaphor_tests {
 /// battlefield under your control." The admitted gate's printed card is The Spot, Living
 /// Portal: "When The Spot dies, put him on the bottom of his owner's library. If you do,
 /// return the exiled cards to their owners' hands."
+///
+/// The binding a settled return gets depends on its host (CR 607.1): printed on the source,
+/// it is the source's linked exile (`ExiledBySource`, CR 607.2a); written inside an ability
+/// an effect creates (`walk_as(.., CreatedByEffect)`), it is the `Exiled`-caused chain set
+/// (CR 607.1d). `walk` is the printed host.
 #[cfg(test)]
 mod linked_exile_return_line_tests {
     use super::{bind_linked_exile_returns_on_line, stays_on_resolution_line};
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_ir::context::ChainPriorPublishers;
-    use crate::parser::oracle_target::exiled_caused_tracked_set;
+    use crate::parser::oracle_target::{exiled_caused_tracked_set, LinkedExileReturnHost};
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, Effect, LinkedExileReturn, ModalChoice,
         NestedDefinitionEdge, OpponentMayScope, PlayerFilter, QuantityExpr, RepeatContinuation,
@@ -15600,8 +15690,12 @@ mod linked_exile_return_line_tests {
     fn chain(text: &str) -> AbilityDefinition {
         parse_effect_chain(text, AbilityKind::Spell)
     }
-    fn walk(mut def: AbilityDefinition) -> AbilityDefinition {
-        bind_linked_exile_returns_on_line(&mut def, Some(ChainPriorPublishers::Absent));
+    /// Walk a chain as a return printed on the source (CR 607.1).
+    fn walk(def: AbilityDefinition) -> AbilityDefinition {
+        walk_as(def, LinkedExileReturnHost::PrintedOnSource)
+    }
+    fn walk_as(mut def: AbilityDefinition, host: LinkedExileReturnHost) -> AbilityDefinition {
+        bind_linked_exile_returns_on_line(&mut def, Some(ChainPriorPublishers::Absent), host);
         def
     }
     fn nth(def: &AbilityDefinition, n: usize) -> &AbilityDefinition {
@@ -15635,6 +15729,20 @@ mod linked_exile_return_line_tests {
         );
         def
     }
+    /// CR 607.1 + CR 607.2a + CR 607.3: a printed return binds the source's linked exile
+    /// and moves the whole set out of exile, whatever shape (`Bounce` included) it lowered to.
+    fn assert_printed(ret: &AbilityDefinition, what: &str) {
+        assert_eq!(ret.linked_exile_return, None, "{what}: mark consumed");
+        match &*ret.effect {
+            Effect::ChangeZoneAll { origin, target, .. } => {
+                assert_eq!(*origin, Some(Zone::Exile), "{what}");
+                assert_eq!(*target, TargetFilter::ExiledBySource, "{what}");
+            }
+            other => panic!("{what}: expected the printed binding, got {other:?}"),
+        }
+    }
+    /// CR 607.1d: a created-by-effect return narrows the chain set to its `Exiled`-caused
+    /// members (D8).
     fn assert_d8(ret: &AbilityDefinition, what: &str) {
         assert_eq!(ret.linked_exile_return, None, "{what}: mark consumed");
         match &*ret.effect {
@@ -15642,7 +15750,7 @@ mod linked_exile_return_line_tests {
                 assert_eq!(*origin, Some(Zone::Exile), "{what}");
                 assert_eq!(*target, exiled_caused_tracked_set(), "{what}");
             }
-            Effect::Bounce { target, .. } => {
+            Effect::ChangeZone { target, .. } | Effect::Bounce { target, .. } => {
                 assert_eq!(*target, exiled_caused_tracked_set(), "{what}")
             }
             other => panic!("{what}: expected D8, got {other:?}"),
@@ -15659,10 +15767,10 @@ mod linked_exile_return_line_tests {
     }
 
     #[test]
-    fn u7a_line_binds_d8_after_a_non_exile_instruction() {
+    fn u7a_line_binds_the_linked_exile_after_a_non_exile_instruction() {
         let t = walk(marked(chain(DAY)));
         assert!(stays_on_resolution_line(&t), "reach guard: the sacrifice");
-        assert_d8(last(&t), "Day of the Dragons' chain");
+        assert_printed(last(&t), "Day of the Dragons' chain");
     }
 
     #[test]
@@ -15682,12 +15790,22 @@ mod linked_exile_return_line_tests {
         ))));
         assert!(!t.optional, "reach guard: mandatory antecedent");
         assert!(is_do_gate(nth(&t, 1)), "reach guard: If you do");
-        assert_d8(nth(&t, 1), "admitted gate");
+        assert_printed(nth(&t, 1), "admitted gate");
         let t = walk(marked(chain(
             "Sacrifice a creature. If you do, return the exiled cards to their owners' hands.",
         )));
         assert!(is_do_gate(nth(&t, 1)), "reach guard: If you do");
-        assert_d8(nth(&t, 1), "admitted gate, to hand (The Spot's Bounce)");
+        assert_printed(nth(&t, 1), "admitted gate, to hand (The Spot's Bounce)");
+        assert!(
+            matches!(
+                &*nth(&t, 1).effect,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Hand,
+                    ..
+                }
+            ),
+            "CR 400.3: The Spot's Bounce becomes a set-wide move to hand"
+        );
     }
 
     #[test]
@@ -15867,7 +15985,11 @@ mod linked_exile_return_line_tests {
         let mut t = chain(&format!(
             "Sacrifice all Dragons you control. At the beginning of the next end step, {RETURN}"
         ));
-        bind_linked_exile_returns_on_line(&mut t, Some(ChainPriorPublishers::Absent));
+        bind_linked_exile_returns_on_line(
+            &mut t,
+            Some(ChainPriorPublishers::Absent),
+            LinkedExileReturnHost::PrintedOnSource,
+        );
         let mut payloads = 0;
         fn visit(def: &AbilityDefinition, payloads: &mut usize) {
             def.effect.for_each_nested_definition(&mut |edge, nested| {
@@ -15920,5 +16042,27 @@ mod linked_exile_return_line_tests {
         let once = walk(chain(DAY));
         let twice = walk(once.clone());
         assert_eq!(once, twice, "a second walk changes nothing");
+    }
+
+    /// CR 607.1d: the same chain written inside an ability an effect creates keeps the
+    /// D8 binding. The set-wide return names the `Exiled`-caused chain set; a one-card
+    /// `ChangeZone` keeps its shape with the swapped target.
+    #[test]
+    fn u7k_a_created_by_effect_host_binds_the_exiled_caused_set() {
+        let t = walk_as(marked(chain(DAY)), LinkedExileReturnHost::CreatedByEffect);
+        assert!(stays_on_resolution_line(&t), "reach guard: the sacrifice");
+        assert_d8(last(&t), "Day's chain, created by an effect");
+        assert!(
+            matches!(&*last(&t).effect, Effect::ChangeZoneAll { .. }),
+            "the set-wide return is a ChangeZoneAll"
+        );
+        let mut one = marked(chain(DAY));
+        last_mut(&mut one).linked_exile_return = Some(LinkedExileReturn::OneCard);
+        let one = walk_as(one, LinkedExileReturnHost::CreatedByEffect);
+        assert_d8(last(&one), "a one-card return, created by an effect");
+        assert!(
+            matches!(&*last(&one).effect, Effect::ChangeZone { .. }),
+            "the one-card return keeps its shape"
+        );
     }
 }

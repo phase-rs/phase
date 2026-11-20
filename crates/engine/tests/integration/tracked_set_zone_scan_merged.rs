@@ -3,7 +3,9 @@
 //! rows pin where that finding must NOT happen: readers whose tracked-set
 //! reference is cause-bound to a different action (D4), reads through a carried
 //! set rather than the resolution's own chain (the D7 gate), and a delayed
-//! trigger's bound set.
+//! trigger's bound set. After the D8 revision (cr1 plan, §2.3) Day's rows hold by
+//! `ExiledBySource` scoping; the D4 guards are the Timothar row (one-card path) and the
+//! Living Death row (zone scan).
 //!
 //! Every merge here is a SYNTHETIC STEP: `merge_object_onto` stages the merged
 //! permanent instead of a real mutate cast (precedent:
@@ -13,7 +15,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, TargetFilter};
+use engine::types::ability::{CastingPermission, Effect, TargetFilter, ThisWayCause};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -26,6 +28,10 @@ const MURDER: &str = "Destroy target creature.";
 const SYPHON_FLESH: &str = "Each other player sacrifices a creature of their choice. You create a 2/2 black Zombie creature token for each creature sacrificed this way.";
 const TIMOTHAR: &str = "Ward\u{2014}Discard a card.\nWhenever another nontoken Vampire you control dies, you may pay {1} and exile it. If you do, create a 1/1 black Bat creature token with flying. It gains \"When this token deals combat damage to a player, sacrifice it and return the exiled card to the battlefield tapped.\"";
 const CHILD_OF_NIGHT: &str = "Lifelink";
+const LIVING_DEATH: &str = "Each player exiles all creature cards from their graveyard, then sacrifices all creatures they control, then puts all cards they exiled this way onto the battlefield.";
+// Vanilla (textless) filler body: there is no Oracle text to quote.
+const GRIZZLY_BEARS: &str = "";
+const RENO_AND_RUDE: &str = "Menace\nWhenever Reno and Rude deals combat damage to a player, exile the top card of that player's library. Then you may sacrifice another creature or artifact. If you do, you may play the exiled card this turn, and mana of any type can be spent to cast it.";
 const DAY_OF_THE_DRAGONS: &str = "When this enchantment enters, exile all creatures you control. Then create that many 5/5 red Dragon creature tokens with flying.\nWhen this enchantment leaves the battlefield, sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control.";
 const DISENCHANT: &str = "Destroy target artifact or enchantment.";
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
@@ -47,7 +53,8 @@ fn zone_of(runner: &GameRunner, id: ObjectId) -> Option<Zone> {
     runner.state().objects.get(&id).map(|object| object.zone)
 }
 
-/// Drive priority and the optional prompts until the stack is empty.
+/// Drive priority and the optional prompts until the stack is empty. Any other prompt is
+/// unexpected and panics, so a wrong offer can never end a row early.
 fn drain(runner: &mut GameRunner) {
     for _ in 0..60 {
         match &runner.state().waiting_for {
@@ -71,7 +78,7 @@ fn drain(runner: &mut GameRunner) {
                     break;
                 }
             }
-            _ => break,
+            other => panic!("drain: unexpected prompt {other:?}"),
         }
     }
 }
@@ -187,19 +194,11 @@ fn timothar_bat_token_topped_does_not_return_the_merged_component() {
 /// sacrifices the Dragon, and Rest in Peace exiles the sacrificed survivor and
 /// each component instead of putting them into a graveyard: CR 730.3 puts each
 /// component into its zone, and Rest in Peace's replacement applies to each card
-/// or token (CR 614.1a + CR 614.6). Day's "return the exiled cards" reads
-/// `TrackedSetFiltered` bound to `Exiled` (D8) with origin Exile, so the scan
-/// reaches Exile, where Gemrazer sits. The set's member (the Dragon) is stamped
-/// `Sacrificed`, because the cause is the action, not the landing zone (CR
-/// 614.6); Gemrazer inherits that stamp (D4), so it is not "the exiled cards" and
-/// stays in exile.
+/// or token (CR 614.1a + CR 614.6). Day's "return the exiled cards" reads `ExiledBySource` with origin Exile (CR 607.2a), so the scan reaches Exile, where Gemrazer sits. Gemrazer was sacrificed with the Dragon and put into exile by Rest in Peace's replacement (CR 614.6), not by Day's linked ETB, so no exile link names Day as its source and it stays in exile. Child of Night, which the ETB exiled, returns.
 ///
-/// SYNTHETIC STEP: the merge is staged with `merge_object_onto`. Only
-/// Gemrazer's zone is asserted: where Child of Night ends under Rest in Peace is
-/// a separate known defect this row does not depend on.
+/// SYNTHETIC STEP: the merge is staged with `merge_object_onto`.
 ///
-/// Revert sensitivity: a component path that ignores `caused_by` finds Gemrazer
-/// in the `[Exile]` scan and returns it to the battlefield.
+/// Revert sensitivity: a link of the sacrifice's redirected exile to Day (`should_track_exiled_by_source` over the resolving LTB) returns Gemrazer. Reverting D4 no longer turns this row red (measured); the zone-scan D4 guard is `living_death_under_rest_in_peace_keeps_the_merged_component_exiled`.
 #[test]
 fn day_of_the_dragons_under_rest_in_peace_keeps_the_merged_component_exiled() {
     let mut scenario = GameScenario::new();
@@ -216,9 +215,10 @@ fn day_of_the_dragons_under_rest_in_peace_keeps_the_merged_component_exiled() {
             ],
         ))
         .id();
-    scenario
+    let child = scenario
         .add_creature_from_oracle(P0, "Child of Night", 2, 1, CHILD_OF_NIGHT)
-        .with_subtypes(vec!["Vampire"]);
+        .with_subtypes(vec!["Vampire"])
+        .id();
     let gemrazer = scenario
         .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
         .with_subtypes(vec!["Beast"])
@@ -252,9 +252,80 @@ fn day_of_the_dragons_under_rest_in_peace_keeps_the_merged_component_exiled() {
         "reach guard: the sacrificed Dragon token ceased (CR 704.5d)"
     );
     assert_eq!(
+        zone_of(&runner, child),
+        Some(Zone::Battlefield),
+        "CR 607.2a: the card Day's ETB exiled returns"
+    );
+    assert_eq!(
         zone_of(&runner, gemrazer),
         Some(Zone::Exile),
-        "D4: Gemrazer was sacrificed with the Dragon, not exiled by Day, so it is not returned"
+        "CR 607.2a: Gemrazer was exiled by Rest in Peace, not by Day's ETB, so it is not one of the exiled cards"
+    );
+}
+
+/// L1 — Living Death under Rest in Peace (P1's), with P0's Grizzly Bears on the battlefield
+/// and Gemrazer merged under it, and P0's Child of Night card in the graveyard. Living Death
+/// exiles each player's creature cards from their graveyard, sacrifices all creatures, then
+/// "puts all cards they exiled this way onto the battlefield". The reader is
+/// `ChangeZoneAll { origin: None }` over `TrackedSetFiltered { caused_by: Exiled }`, which the
+/// linked-exile binding leaves unchanged because the chain holds an exile publisher. Rest in
+/// Peace redirects the sacrifice of the Bears to exile and, with it, its component Gemrazer
+/// (CR 730.3 puts each component into its zone with the survivor, CR 614.6 replaces the
+/// graveyard move). The set's member (the Bears) is stamped `Sacrificed`, because the cause is
+/// the action, not the landing zone; Gemrazer inherits that stamp (D4), so the reader does not
+/// find it even though it sits in exile (CR 730.3c + CR 608.2c). Child of Night, exiled this
+/// way, returns.
+///
+/// SYNTHETIC STEP: the merge is staged with `merge_object_onto`.
+///
+/// Revert sensitivity: a component path that ignores `caused_by` (`member_cause_matches`)
+/// finds Gemrazer in the scan and puts it onto the battlefield (measured red).
+#[test]
+fn living_death_under_rest_in_peace_keeps_the_merged_component_exiled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let bears = scenario
+        .add_creature_from_oracle(P0, "Grizzly Bears", 2, 2, GRIZZLY_BEARS)
+        .id();
+    let gemrazer = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    let child = scenario
+        .add_creature_to_graveyard(P0, "Child of Night", 2, 1)
+        .id();
+    let living_death = scenario
+        .add_spell_to_hand_from_oracle(P0, "Living Death", false, LIVING_DEATH)
+        .with_mana_cost(cost(3, vec![ManaCostShard::Black, ManaCostShard::Black]))
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 5));
+    let mut runner = scenario.build();
+    stage(&mut runner, gemrazer, bears, MergeSide::Bottom);
+
+    runner.cast(living_death).resolve();
+    drain(&mut runner);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "the resolution completed: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        zone_of(&runner, child),
+        Some(Zone::Battlefield),
+        "reach guard: the reader ran and returned the member stamped Exiled"
+    );
+    assert_eq!(
+        zone_of(&runner, bears),
+        Some(Zone::Exile),
+        "the survivor is a Sacrificed member, and Rest in Peace redirected it to exile"
+    );
+    assert_eq!(
+        zone_of(&runner, gemrazer),
+        Some(Zone::Exile),
+        "D4: Gemrazer's member was sacrificed, not exiled this way, so it is not put onto the battlefield (CR 730.3c + CR 608.2c + CR 614.6)"
     );
 }
 
@@ -377,9 +448,15 @@ fn bristlebud_farmer_empty_library_does_not_offer_the_merged_component() {
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass");
             }
-            _ => break,
+            other => panic!("Bristlebud Farmer: unexpected prompt {other:?}"),
         }
     }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "the attack trigger's resolution completed, so no prompt offered Gemrazer: {:?}",
+        runner.state().waiting_for
+    );
 
     assert_eq!(
         zone_of(&runner, foods[0]),
@@ -495,14 +572,145 @@ fn fortune_carried_set_does_not_find_the_merged_component() {
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass");
             }
-            _ => break,
+            other => panic!("Fortune: unexpected prompt {other:?}"),
         }
     }
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "reach guard: the end-of-combat delayed trigger fired and was consumed"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty()
+            && runner.state().phase == Phase::PostCombatMain,
+        "the delayed trigger's resolution completed: {:?}",
+        runner.state().waiting_for
+    );
 
     assert_eq!(
         zone_of(&runner, gemrazer),
         Some(Zone::Graveyard),
         "CR 730.3c does not reach a carried set: Gemrazer stays in the graveyard"
+    );
+}
+
+/// R-RR. Reno and Rude: "Menace\nWhenever Reno and Rude deals combat damage
+/// to a player, exile the top card of that player's library. Then you may
+/// sacrifice another creature or artifact. If you do, you may play the
+/// exiled card this turn, and mana of any type can be spent to cast it."
+///
+/// Board: a Soldier token with Gemrazer merged under it; Rest in Peace ("When
+/// this enchantment enters, exile all graveyards.\nIf a card or token would
+/// be put into a graveyard from anywhere, exile it instead."); the damaged
+/// player's library is empty. The trigger exiles nothing and sacrifices the
+/// token (CR 701.21a); Rest in Peace exiles the token and its component
+/// instead (CR 614.1a, CR 730.3). The set holds only the token.
+///
+/// CR 730.3c + CR 608.2c: "the exiled card" is what the library exile
+/// produced; the line has two publishers (`ExileTop`, `Sacrifice`), so the
+/// grant's chain rung refuses the finding (D7, B1) and Gemrazer, an exiled
+/// card the trigger never exiled from the library, gains no permission.
+///
+/// Before this change: Gemrazer has no `PlayFromExile` (raw grant).
+/// Mutation (a grant reader skips the chain rung and the
+/// publisher count and keeps only the stamp veto): Gemrazer gains `PlayFromExile`.
+///
+/// SYNTHETIC STEPS: the token is a plain creature flagged as a token, the merge
+/// is staged with `merge_object_onto`, and Reno and Rude's summoning sickness is
+/// cleared directly.
+#[test]
+fn reno_and_rude_grant_does_not_reach_a_sacrificed_tokens_component() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C"]);
+    let reno = scenario
+        .add_creature_from_oracle(P0, "Reno and Rude", 2, 1, RENO_AND_RUDE)
+        .with_subtypes(vec!["Human", "Assassin"])
+        .id();
+    let token = scenario
+        .add_creature(P0, "Soldier", 1, 1)
+        .with_subtypes(vec!["Soldier"])
+        .id();
+    let gemrazer = scenario
+        .add_creature_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+    stage(&mut runner, gemrazer, token, MergeSide::Bottom);
+    ready(&mut runner, reno);
+    assert!(
+        runner.state().players[1].library.is_empty(),
+        "reach guard: the damaged player's library is empty"
+    );
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(reno, AttackTarget::Player(P1))])
+        .expect("Reno and Rude attacks");
+    let _ = runner.combat_damage();
+    // The trigger's "you may sacrifice" prompt is P0's. Of the prompts that
+    // accept `DecideOptionalEffect { accept: true }` (the optional-effect,
+    // opponent-may and tribute choices), only the optional-effect choice is
+    // answered by the ability's controller, so the actor assertion and the
+    // accepted answer together identify the prompt.
+    assert_eq!(
+        runner.state().waiting_for.acting_player(),
+        Some(P0),
+        "the trigger's optional sacrifice is offered to its controller"
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("sacrifice the token");
+
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty(),
+        "the trigger resolved: {:?}",
+        state.waiting_for
+    );
+    let set = state
+        .chain_tracked_set_id
+        .expect("reach guard: the trigger published its chain set");
+    assert_eq!(
+        state.tracked_object_sets.get(&set),
+        Some(&vec![token]),
+        "reach guard: the set holds only the sacrificed token"
+    );
+    assert_eq!(
+        state
+            .tracked_set_member_causes
+            .get(&set)
+            .and_then(|causes| causes.get(&token))
+            .copied(),
+        Some(ThisWayCause::Sacrificed),
+        "reach guard: the token is stamped Sacrificed (CR 701.21a)"
+    );
+    assert!(
+        !state.objects.contains_key(&token),
+        "CR 704.5d: the token ceased to exist"
+    );
+    let gem = &state.objects[&gemrazer];
+    assert_eq!(
+        gem.zone,
+        Zone::Exile,
+        "CR 614.1a: Rest in Peace exiled the component instead"
+    );
+    assert_eq!(
+        gem.split_from_merge_survivor,
+        Some(ObjectIncarnationRef {
+            object_id: token,
+            incarnation: 1,
+        }),
+        "reach guard: Gemrazer is pinned to the token's successor"
+    );
+    assert!(
+        !gem.casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::PlayFromExile { .. })),
+        "CR 730.3c + CR 608.2c: two publishers, so the grant does not find Gemrazer: {:?}",
+        gem.casting_permissions
     );
 }
 

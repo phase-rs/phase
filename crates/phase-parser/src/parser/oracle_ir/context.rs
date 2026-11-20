@@ -413,7 +413,7 @@ pub enum SpellAnaphorBinding {
 
 /// CR 608.2c + CR 607.2a: the prior clauses of the current clause's OWN resolution chain (and, for a nested delayed / reflexive / continuation body, its enclosing chain), each treated as a potential tracked-set publisher because runtime publication is generic (`publish_tracked_set_for_resolution`). Distinguishes "no prior publisher"
 /// (the linked-ability LTB return `detect_etb_exile_ltb_return` pairs) from
-/// "only non-exile publishers" (the cause-bound return, chain_exiled_cause_binding) and "an exile producer" (same-chain binding).
+/// "only non-exile publishers" (the linked-exile return, `linked_exile_return_binding`: the source's linked exile when the return is printed on the source, the `Exiled`-caused chain members when an effect creates it) and "an exile producer" (same-chain binding).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChainPriorPublishers {
     /// No earlier clause in the chain (or its enclosing chain).
@@ -1005,8 +1005,10 @@ pub struct ParseContext {
     /// earlier, SEPARATELY-RESOLVED ability (e.g. an ETB Imprint or
     /// synthesized Hideaway ETB), so the singular anaphor binds durably via
     /// `TargetFilter::ExiledBySource` (CR 607.1 linked abilities), and a
-    /// return over `NonExileOnly` publishers binds only the `Exiled`-caused
-    /// members of the chain set (`chain_exiled_cause_binding`). Seeded per
+    /// return over `NonExileOnly` publishers binds the cards the linked
+    /// exile put into exile (`linked_exile_return_binding`: `ExiledBySource`
+    /// when printed on the source, the `Exiled`-caused members of the chain
+    /// set when an effect creates it). Seeded per
     /// top-level `parse_effect_chain_ir` call from the chain-local clause
     /// accumulator; defaults to `Absent` via `derive(Default)` so standalone
     /// clause parsing is unaffected.

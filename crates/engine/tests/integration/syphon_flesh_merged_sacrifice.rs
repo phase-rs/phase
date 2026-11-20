@@ -98,7 +98,10 @@ fn one_merged_creature_sacrificed_creates_one_zombie() {
                     .act(GameAction::DecideOptionalEffect { accept: true })
                     .expect("accept");
             }
-            _ => runner.advance_until_stack_empty(),
+            WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. } => {
+                runner.advance_until_stack_empty()
+            }
+            other => panic!("Syphon Flesh: unexpected prompt {other:?}"),
         }
     }
 

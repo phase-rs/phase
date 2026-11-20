@@ -76,7 +76,7 @@ pub(crate) fn looked_at_controller_library_cards(
 ///   2. the combat-damage source filter (CR 510.2) — yields `SpecificObject`
 ///      or `Or` for a bare `TrackedSet`, and `And { [source_filter, filter] }`
 ///      for the `TrackedSetFiltered` shape all 51 of these cards actually use.
-///      The `let … else` below rejects every one of those, so a combat-damage
+///      The `match` below rejects every one of those, so a combat-damage
 ///      anaphor casts nothing rather than something arbitrary;
 ///   3. the latest non-empty published set — a tracked-set shape;
 ///   4. no set at all: the sentinel `TrackedSetId(0)` is returned unchanged. It
@@ -97,7 +97,67 @@ fn tracked_set_cast_candidates(
     let (id, caused_by) = match &bound {
         TargetFilter::TrackedSet { id } => (*id, None),
         TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (*id, caused_by.as_ref()),
-        _ => return Vec::new(),
+        // Every other shape names no tracked set: nothing to cast.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(..)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => return Vec::new(),
     };
     if !state.tracked_object_sets.contains_key(&id) {
         return Vec::new();
