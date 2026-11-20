@@ -314,6 +314,32 @@ pub(crate) fn parse_cost_payment_prohibition_statics(
     ])
 }
 
+/// CR 701.21a + CR 101.2: Parse the player-scoped sacrifice prohibition
+/// "<subject> can't sacrifice <filter>." (Quark, Humble Proprietor: "You can't
+/// sacrifice Treasure tokens."). The subject is the shared prohibition-scope
+/// grammar; the object phrase is the shared type-phrase grammar and must be
+/// consumed whole.
+pub(crate) fn parse_cant_sacrifice_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (who, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    let (filter_text, _) = tag::<_, _, OracleError<'_>>("can't sacrifice ")
+        .parse(predicate)
+        .ok()?;
+    let (filter, filter_remainder) = parse_type_phrase_folding(filter_text.trim());
+    let (_, _) = (opt(tag::<_, _, OracleError<'_>>(".")), eof)
+        .parse(filter_remainder.trim())
+        .ok()?;
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some(
+        StaticDefinition::new(StaticMode::CantSacrifice { who, filter })
+            .description(text.to_string()),
+    )
+}
+
 /// CR 107.4f: Parse the K'rrik-class payment-substitution static:
 /// "For each {C} in a cost, you may pay 2 life rather than pay that mana."
 ///

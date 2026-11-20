@@ -8997,6 +8997,7 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
             BlockExceptionKind::MinBlockers { .. } => Axes::NONE,
         },
         StaticMode::CantBeBlockedBy { filter }
+        | StaticMode::CantSacrifice { filter, .. }
         | StaticMode::AttachmentRestriction { filter }
         | StaticMode::BlockRestriction { filter }
         | StaticMode::MaxUntapPerType { filter, .. } => census(filter, mode),
@@ -10262,6 +10263,22 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn sacrifice_prohibition_reads_the_history_in_its_permanent_filter() {
+        let history = |filter| {
+            let prohibition = StaticMode::CantSacrifice {
+                who: crate::types::statics::ProhibitionScope::Controller,
+                filter: TargetFilter::Typed(filter),
+            };
+            static_mode_axes(&prohibition, ScanMode::LoopFirewall).history
+        };
+        assert_eq!(history(TypedFilter::creature()), HistoryReads::NONE);
+        assert_eq!(
+            history(TypedFilter::creature().properties(vec![FilterProp::EnteredThisTurn])),
+            HistoryReads::of(HistoryMember::TurnNumber)
+        );
+    }
 
     /// CR 508.6: an attack restriction reads the attack history only when its defended filter
     /// names "a player it has already attacked this turn".

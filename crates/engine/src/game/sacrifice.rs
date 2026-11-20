@@ -63,6 +63,12 @@ pub(crate) fn sacrifice_permanent(
         return Ok(SacrificeOutcome::Complete);
     }
 
+    // CR 701.21a: a player-scoped "can't sacrifice <filter>" static (Quark,
+    // Humble Proprietor) likewise stops the sacrifice from happening.
+    if crate::game::static_abilities::player_cant_sacrifice(state, player, object_id) {
+        return Ok(SacrificeOutcome::Complete);
+    }
+
     let proposed = ProposedEvent::Sacrifice {
         object_id,
         player_id: player,

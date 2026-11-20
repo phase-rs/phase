@@ -32,10 +32,11 @@ use crate::types::game_state::{
     PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
     PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
     PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
-    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
-    PendingZoneChangeDelivery, PostReplacementDrain, PostReplacementDrainDispatch,
-    PostReplacementDrainStack, PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy,
-    ResolvingTriggerContext, WaitingFor, ABILITY_ONSET_RECORD_FIELD,
+    PendingRepeatUntil, PendingSimultaneousDeparture, PendingSpellResolution,
+    PendingVoteBallotIteration, PendingZoneChangeDelivery, PostReplacementDrain,
+    PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
+    RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    ABILITY_ONSET_RECORD_FIELD,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -917,6 +918,7 @@ pub enum ResolutionFrame {
     CounterAdditions(PendingCounterAdditionQueue),
     CopyToken(PendingCopyTokenResolution),
     DebugCardEntries(Box<PendingDebugCardEntries>),
+    SimultaneousDeparture(Box<PendingSimultaneousDeparture>),
     EachPlayerCopyChosen(PendingEachPlayerCopyChosen),
     ChooseOneOf(PendingChooseOneOf),
     VoteBallot(PendingVoteBallotIteration),
@@ -952,6 +954,7 @@ pub enum FrameKind {
     CounterAdditions,
     CopyToken,
     DebugCardEntries,
+    SimultaneousDeparture,
     EachPlayerCopyChosen,
     ChooseOneOf,
     VoteBallot,
@@ -986,6 +989,7 @@ impl ResolutionFrame {
             Self::CounterAdditions(_) => FrameKind::CounterAdditions,
             Self::CopyToken(_) => FrameKind::CopyToken,
             Self::DebugCardEntries(_) => FrameKind::DebugCardEntries,
+            Self::SimultaneousDeparture(_) => FrameKind::SimultaneousDeparture,
             Self::EachPlayerCopyChosen(_) => FrameKind::EachPlayerCopyChosen,
             Self::ChooseOneOf(_) => FrameKind::ChooseOneOf,
             Self::VoteBallot(_) => FrameKind::VoteBallot,
@@ -1025,6 +1029,7 @@ impl ResolutionFrame {
             | Self::CounterAdditions(_)
             | Self::CopyToken(_)
             | Self::DebugCardEntries(_)
+            | Self::SimultaneousDeparture(_)
             | Self::EachPlayerCopyChosen(_)
             | Self::ChooseOneOf(_)
             | Self::VoteBallot(_)
@@ -1114,6 +1119,7 @@ impl ResolutionFrame {
             | Self::CounterAdditions(_)
             | Self::CopyToken(_)
             | Self::DebugCardEntries(_)
+            | Self::SimultaneousDeparture(_)
             | Self::EachPlayerCopyChosen(_)
             | Self::ChooseOneOf(_)
             | Self::VoteBallot(_)
@@ -1409,6 +1415,7 @@ impl ResolutionStack {
                 | ResolutionFrame::CounterRemovals(_)
                 | ResolutionFrame::CounterAdditions(_)
                 | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::SimultaneousDeparture(_)
                 | ResolutionFrame::EachPlayerCopyChosen(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
@@ -1452,6 +1459,7 @@ impl ResolutionStack {
                 | ResolutionFrame::CounterRemovals(_)
                 | ResolutionFrame::CounterAdditions(_)
                 | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::SimultaneousDeparture(_)
                 | ResolutionFrame::EachPlayerCopyChosen(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
@@ -1473,6 +1481,19 @@ impl ResolutionStack {
             )
             | None => None,
         }
+    }
+
+    /// Whether the frame at the captured `child_stack_start` is a parked
+    /// simultaneous departure: the producer's own batch owner, beneath which
+    /// the producer's later instructions belong.
+    pub fn simultaneous_departure_at_child_boundary(
+        &self,
+        child_stack_start: ChildStackDepth,
+    ) -> bool {
+        self.frames
+            .slot_at_captured_depth(child_stack_start)
+            .and_then(|slot| self.frames.get(slot))
+            .is_some_and(|frame| matches!(frame, ResolutionFrame::SimultaneousDeparture(_)))
     }
 
     pub fn last(&self) -> Option<&ResolutionFrame> {
@@ -1697,6 +1718,7 @@ impl ResolutionStack {
                         | ResolutionFrame::CounterAdditions(_)
                         | ResolutionFrame::CopyToken(_)
                         | ResolutionFrame::DebugCardEntries(_)
+                        | ResolutionFrame::SimultaneousDeparture(_)
                         | ResolutionFrame::EachPlayerCopyChosen(_)
                         | ResolutionFrame::ChooseOneOf(_)
                         | ResolutionFrame::VoteBallot(_)
@@ -2635,6 +2657,7 @@ impl ResolutionStack {
                 | ResolutionFrame::CounterAdditions(_)
                 | ResolutionFrame::CopyToken(_)
                 | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::SimultaneousDeparture(_)
                 | ResolutionFrame::EachPlayerCopyChosen(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
@@ -3045,6 +3068,78 @@ impl ResolutionStack {
     ) -> Result<(), ResolutionStackError> {
         self.insert_parent_at_child_boundary(
             ResolutionFrame::DebugCardEntries(Box::new(pending)),
+            child_stack_start,
+        )
+    }
+
+    /// Returns the parked simultaneous departure only when it owns the stack
+    /// top.
+    pub fn active_simultaneous_departure(&self) -> Option<&PendingSimultaneousDeparture> {
+        match self.last() {
+            Some(ResolutionFrame::SimultaneousDeparture(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// CR 101.4 + CR 608.2f + CR 614.17a: each simultaneous event commits
+    /// once, after consultation and before its first delivery. A nested
+    /// rider can pause delivery, but cannot reopen only the members later
+    /// in the implementation's delivery order. A different frame may still
+    /// be consulting its own event at that same pause.
+    pub(crate) fn retain_uncommitted_destructions(
+        &mut self,
+        still_owed: impl Fn(ObjectId) -> bool,
+    ) {
+        for frame in self.frames.iter_mut() {
+            if let ResolutionFrame::SimultaneousDeparture(pending) = frame {
+                if !pending.is_consulting() {
+                    continue;
+                }
+                pending.queued.retain(|member| {
+                    member.cause != crate::types::game_state::DepartureCause::Destruction
+                        || member.zone_event.is_none()
+                        || still_owed(member.object_id)
+                });
+            }
+        }
+    }
+
+    /// Consume the exact parked simultaneous departure once its in-flight
+    /// child has settled.
+    pub fn take_active_simultaneous_departure(
+        &mut self,
+    ) -> Result<Option<PendingSimultaneousDeparture>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::SimultaneousDeparture(_)) => {
+                let ResolutionFrame::SimultaneousDeparture(frame) =
+                    self.pop_expected(FrameKind::SimultaneousDeparture)?
+                else {
+                    unreachable!("checked simultaneous-departure frame kind must match")
+                };
+                Ok(Some(*frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::SimultaneousDeparture,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a simultaneous departure as the active inner frame.
+    pub fn push_simultaneous_departure(&mut self, pending: PendingSimultaneousDeparture) {
+        self.push_inner(ResolutionFrame::SimultaneousDeparture(Box::new(pending)));
+    }
+
+    /// Insert a simultaneous departure below the exact child stack its
+    /// current consult or delivery raised.
+    pub fn insert_simultaneous_departure_parent_at_child_boundary(
+        &mut self,
+        pending: PendingSimultaneousDeparture,
+        child_stack_start: ChildStackDepth,
+    ) -> Result<(), ResolutionStackError> {
+        self.insert_parent_at_child_boundary(
+            ResolutionFrame::SimultaneousDeparture(Box::new(pending)),
             child_stack_start,
         )
     }
@@ -3608,6 +3703,7 @@ impl ResolutionStack {
                 | ResolutionFrame::CounterAdditions(_)
                 | ResolutionFrame::CopyToken(_)
                 | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::SimultaneousDeparture(_)
                 | ResolutionFrame::EachPlayerCopyChosen(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
@@ -3699,6 +3795,7 @@ impl ResolutionStack {
             | ResolutionFrame::CounterAdditions(_)
             | ResolutionFrame::CopyToken(_)
             | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::SimultaneousDeparture(_)
             | ResolutionFrame::EachPlayerCopyChosen(_)
             | ResolutionFrame::ChooseOneOf(_)
             | ResolutionFrame::VoteBallot(_)
@@ -4815,6 +4912,7 @@ impl ResolutionStack {
                 | ResolutionFrame::CounterAdditions(_)
                 | ResolutionFrame::CopyToken(_)
                 | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::SimultaneousDeparture(_)
                 | ResolutionFrame::ChooseOneOf(_)
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
@@ -7865,6 +7963,11 @@ fn project_frames_into_legacy_state(
                 projected
                     .resolution_stack
                     .push_debug_card_entries((**pending).clone());
+            }
+            ResolutionFrame::SimultaneousDeparture(pending) => {
+                projected
+                    .resolution_stack
+                    .push_simultaneous_departure((**pending).clone());
             }
             ResolutionFrame::EachPlayerCopyChosen(pending) => {
                 projected

@@ -1599,6 +1599,47 @@ pub(crate) fn parked_prompt_is_stale(state: &GameState, pending: &PendingReplace
         || !pending_candidates_are_current(state, pending)
 }
 
+/// CR 616.1 + CR 800.4a: a control change can transfer a choice while every
+/// stored replacement still applies. An optional replacement keeps its own
+/// choice authority; an ordering belongs to the controller of the affected object.
+pub(crate) fn departure_choice_is_current(
+    state: &GameState,
+    pending: &PendingReplacement,
+    chooser: PlayerId,
+) -> bool {
+    let current = if pending.is_optional {
+        pending
+            .candidates
+            .first()
+            .and_then(|&rid| replacement_choice_player(state, &pending.proposed, rid))
+    } else {
+        Some(pending.proposed.affected_player(state))
+    };
+    current == Some(chooser)
+        && super::players::is_alive(state, chooser)
+        && pending_candidates_are_current(state, pending)
+}
+
+/// Reconsult the existing event after a departure. Its modification, applied
+/// replacement IDs, and pipeline depth survive the change of chooser.
+pub(crate) fn repropose_departure_choice(
+    state: &mut GameState,
+    pending: PendingReplacement,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    prepare_replacement_index_for_pipeline(state);
+    let result = pipeline_loop(
+        state,
+        pending.proposed,
+        pending.depth,
+        replacement_registry(),
+        events,
+        None,
+    );
+    clear_replacement_index_pipeline(state);
+    result
+}
+
 /// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
 /// Centralizes candidate count and description extraction so callers don't repeat this logic.
 ///
@@ -4209,6 +4250,20 @@ fn destroy_applier(
         });
 
     if !is_regen {
+        // CR 614.1a + CR 614.6: a mandatory "would be destroyed, instead <effect>"
+        // replacement replaces the destruction wholesale — the event never
+        // happens and the `execute` chain runs in its place (Dr. McCoy). A
+        // `Regenerate` execute (Mossbridge Troll) instead installs a shield that
+        // the destruction then meets, so it keeps the event.
+        let substitutes_destruction = state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .and_then(|repl| repl.execute.as_deref())
+            .is_some_and(|execute| !matches!(execute.effect.as_ref(), Effect::Regenerate { .. }));
+        if substitutes_destruction {
+            return ApplyResult::Prevented;
+        }
         return ApplyResult::Modified(event);
     }
 
@@ -12462,6 +12517,15 @@ fn apply_single_replacement(
         ProposedEvent::Damage { source_id, .. } => Some(*source_id),
         _ => None,
     };
+    // CR 614.6 + CR 608.2c: a prevented Destroy is replaced by the execute chain.
+    // Its `~` is still the replacing permanent (Crackling Emergence's "sacrifice
+    // this Aura"), while its "it" / "that land" is the permanent that would have
+    // been destroyed (Dr. McCoy, Emergence). Snapshot that object before the
+    // applier consumes `proposed` so the chain can carry it as its parent target.
+    let prevented_destroy_object = match &proposed {
+        ProposedEvent::Destroy { object_id, .. } => Some(*object_id),
+        _ => None,
+    };
     let proposed_event_target = match &proposed {
         ProposedEvent::Damage { target, .. } => Some(target.clone()),
         ProposedEvent::LifeGain { player_id, .. } => Some(TargetRef::Player(*player_id)),
@@ -12831,6 +12895,13 @@ fn apply_single_replacement(
                     event_type,
                 });
                 if let Some(post) = mandatory_post_effect {
+                    let post = bind_prevented_destroy_continuation(
+                        state,
+                        post,
+                        rid.source,
+                        ability_controller,
+                        prevented_destroy_object,
+                    );
                     let drain = mandatory_post_drain(
                         post,
                         rid.source,
@@ -12875,6 +12946,44 @@ fn apply_single_replacement(
         }
     }
     Ok(proposed)
+}
+
+/// CR 614.6 + CR 608.2c: bind a prevented Destroy's replacing chain to its two
+/// distinct referents. `SelfRef` (`~`) stays the replacing permanent `source`
+/// (Crackling Emergence sacrifices itself), and the permanent that would have
+/// been destroyed becomes the chain's parent target, so "it" / "that land"
+/// (`ParentTarget`) names it (Dr. McCoy removes its counters; Emergence makes
+/// the land indestructible). A template continuation would seed its targets
+/// with `source`, conflating the two. Non-Destroy continuations, and those
+/// already resolved with captured targets, pass through unchanged.
+fn bind_prevented_destroy_continuation(
+    state: &GameState,
+    post: PostReplacementContinuation,
+    source: ObjectId,
+    controller: Option<PlayerId>,
+    prevented_destroy_object: Option<ObjectId>,
+) -> PostReplacementContinuation {
+    let (PostReplacementContinuation::Template(def), Some(destroyed), Some(controller)) =
+        (&post, prevented_destroy_object, controller)
+    else {
+        return post;
+    };
+    let mut resolved = super::ability_utils::build_resolved_from_def_with_targets(
+        def,
+        source,
+        controller,
+        vec![TargetRef::Object(destroyed)],
+    );
+    // Bind the affected permanent's controller separately from the replacement's controller.
+    if let Some(affected_controller) = state
+        .objects
+        .get(&destroyed)
+        .map(|obj| obj.controller)
+        .filter(|player| *player != controller)
+    {
+        resolved.set_scoped_player_recursive(affected_controller);
+    }
+    PostReplacementContinuation::Resolved(Box::new(resolved))
 }
 
 /// CR 614.5 + CR 616.1f: whether replacement `rid` applies to this batch view of
@@ -15448,6 +15557,21 @@ pub fn replace_event(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     replace_event_on_entry_board(state, proposed, events, None)
+}
+
+/// Discover a departure's first real choice, including one reached after a
+/// mandatory replacement. A choice-free event with no applicable replacement
+/// needs no scratch board. Speculative proposals are private to this preview.
+pub(crate) fn preview_departure_replacement(
+    board: &mut std::borrow::Cow<'_, GameState>,
+    proposed: ProposedEvent,
+) -> ReplacementResult {
+    if find_applicable_replacements(board, &proposed, replacement_registry()).is_empty() {
+        return ReplacementResult::Execute(proposed);
+    }
+    let _recorder =
+        ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
+    replace_event(board.to_mut(), proposed, &mut Vec::new())
 }
 
 pub(crate) fn replace_event_on_entry_board(

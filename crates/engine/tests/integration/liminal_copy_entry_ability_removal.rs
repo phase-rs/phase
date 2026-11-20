@@ -471,6 +471,7 @@ fn parked_created_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
             | ResolutionFrame::RepeatedOptionalPayment(_)
             | ResolutionFrame::ChangeZone(_)
             | ResolutionFrame::BatchDelivery(_)
+            | ResolutionFrame::SimultaneousDeparture(_)
             | ResolutionFrame::CounterMoves(_)
             | ResolutionFrame::CounterRemovals(_)
             | ResolutionFrame::CounterAdditions(_)

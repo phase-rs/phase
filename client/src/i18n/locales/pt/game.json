@@ -1815,6 +1815,10 @@
       "title": "Ordenar as cópias",
       "subtitle": "Escolha a mágica cuja cópia vai para a pilha em seguida"
     },
+    "departureOrder": {
+      "title": "Escolha a próxima permanente",
+      "subtitle": "Escolha para qual permanente os efeitos de substituição serão considerados em seguida"
+    },
     "memberOrder": {
       "title": "Ordene os cards",
       "subtitle": "Escolha qual card é processado em seguida"

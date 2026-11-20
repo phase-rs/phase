@@ -1815,6 +1815,10 @@
       "title": "Ustal kolejność kopii",
       "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
     },
+    "departureOrder": {
+      "title": "Wybierz następny permanent",
+      "subtitle": "Wybierz permanent, dla którego mają zostać teraz rozpatrzone efekty zastępujące"
+    },
     "memberOrder": {
       "title": "Ustal kolejność kart",
       "subtitle": "Wybierz kartę, która zostanie rozpatrzona jako następna"

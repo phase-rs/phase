@@ -180,6 +180,7 @@ pub(crate) fn can_sacrifice_for_ability(
     player: PlayerId,
 ) -> bool {
     !sacrifice_cause_muzzled(state, ability, object_id, player)
+        && !crate::game::static_abilities::player_cant_sacrifice(state, player, object_id)
         && !crate::game::static_abilities::object_has_static_other(
             state,
             object_id,
@@ -366,10 +367,15 @@ pub fn resolve(
         // CR 608.2k: the resolved back-reference IS the whole subject set;
         // never widen it with inherited targets.
         vec![referent]
-    } else if matches!(
-        sacrifice_controller_scope(filter),
-        Some(ControllerRef::ParentTargetController)
-    ) {
+    } else if matches!(filter, TargetFilter::SelfRef)
+        || matches!(
+            sacrifice_controller_scope(filter),
+            Some(ControllerRef::ParentTargetController)
+        )
+    {
+        // These filters identify the sacrifice from the eligible battlefield
+        // pool. SelfRef selects the source even when the ability inherited a
+        // different target, and excludes the source if it has phased out.
         Vec::new()
     } else if ability.targets.is_empty()
         && (crate::game::targeting::is_pure_event_context_filter(filter)
@@ -515,7 +521,7 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            && !sacrifice_cause_muzzled(state, ability, *id, chooser)
+                            && can_sacrifice_for_ability(state, ability, *id, chooser)
                     })
             })
             .collect();
@@ -686,7 +692,10 @@ pub fn resolve(
 
         let player_id = obj.controller;
 
-        if sacrifice_cause_muzzled(state, ability, obj_id, player_id) {
+        // CR 701.21a: a permanent the player can't sacrifice (Quark's player-scoped
+        // static, "can't be sacrificed", or a muzzled cause) is skipped rather
+        // than handed to `sacrifice_permanent`, which would silently refuse it.
+        if !can_sacrifice_for_ability(state, ability, obj_id, player_id) {
             continue;
         }
 

@@ -11986,6 +11986,12 @@ pub(crate) struct ImmediatelyBeforeObservers {
 }
 
 impl ImmediatelyBeforeObservers {
+    /// The layer-settled objects immediately before the event, including
+    /// their continuous abilities and controllers at that instant.
+    pub(crate) fn objects(&self) -> &crate::types::object_map::ObjectMap {
+        &self.state.objects
+    }
+
     pub(crate) fn latch(state: &GameState) -> Self {
         Self {
             state: immediately_before_projection(state),

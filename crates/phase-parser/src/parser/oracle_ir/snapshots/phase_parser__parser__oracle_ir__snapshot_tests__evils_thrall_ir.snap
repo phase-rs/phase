@@ -103,72 +103,75 @@ expression: "&ir"
                   "ReplaceMeaning": {
                     "kind": {
                       "Instead": {
-                        "kind": "Spell",
-                        "effect": {
-                          "type": "GainControl",
-                          "target": {
-                            "type": "ParentTarget"
-                          }
-                        },
-                        "cost": null,
-                        "sub_ability": null,
-                        "duration": {
-                          "UntilEndOfNextTurnOf": {
-                            "player": {
-                              "type": "Controller"
+                        "def": {
+                          "kind": "Spell",
+                          "effect": {
+                            "type": "GainControl",
+                            "target": {
+                              "type": "ParentTarget"
                             }
-                          }
-                        },
-                        "description": null,
-                        "target_prompt": null,
-                        "condition": {
-                          "type": "ConditionInstead",
-                          "inner": {
-                            "type": "QuantityCheck",
-                            "lhs": {
-                              "type": "Ref",
-                              "qty": {
-                                "type": "ObjectCount",
-                                "filter": {
-                                  "type": "Typed",
-                                  "type_filters": [
-                                    {
-                                      "Subtype": "Villain"
-                                    }
-                                  ],
-                                  "controller": "You",
-                                  "properties": [
-                                    {
-                                      "type": "Cmc",
-                                      "comparator": "GT",
-                                      "value": {
-                                        "type": "Ref",
-                                        "qty": {
-                                          "type": "ObjectManaValue",
-                                          "scope": {
-                                            "type": "Target"
+                          },
+                          "cost": null,
+                          "sub_ability": null,
+                          "duration": {
+                            "UntilEndOfNextTurnOf": {
+                              "player": {
+                                "type": "Controller"
+                              }
+                            }
+                          },
+                          "description": null,
+                          "target_prompt": null,
+                          "condition": {
+                            "type": "ConditionInstead",
+                            "inner": {
+                              "type": "QuantityCheck",
+                              "lhs": {
+                                "type": "Ref",
+                                "qty": {
+                                  "type": "ObjectCount",
+                                  "filter": {
+                                    "type": "Typed",
+                                    "type_filters": [
+                                      {
+                                        "Subtype": "Villain"
+                                      }
+                                    ],
+                                    "controller": "You",
+                                    "properties": [
+                                      {
+                                        "type": "Cmc",
+                                        "comparator": "GT",
+                                        "value": {
+                                          "type": "Ref",
+                                          "qty": {
+                                            "type": "ObjectManaValue",
+                                            "scope": {
+                                              "type": "Target"
+                                            }
                                           }
                                         }
+                                      },
+                                      {
+                                        "type": "InZone",
+                                        "zone": "Battlefield"
                                       }
-                                    },
-                                    {
-                                      "type": "InZone",
-                                      "zone": "Battlefield"
-                                    }
-                                  ]
+                                    ]
+                                  }
                                 }
+                              },
+                              "comparator": "GE",
+                              "rhs": {
+                                "type": "Fixed",
+                                "value": 1
                               }
-                            },
-                            "comparator": "GE",
-                            "rhs": {
-                              "type": "Fixed",
-                              "value": 1
                             }
-                          }
+                          },
+                          "optional_targeting": false,
+                          "optional": false,
+                          "forward_result": false
                         },
-                        "optional_targeting": false,
-                        "optional": false,
-                        "forward_result": false
+                        "antecedent": null
                       }
                     }
                   }

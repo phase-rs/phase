@@ -1815,6 +1815,10 @@
       "title": "Ordenar las copias",
       "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
     },
+    "departureOrder": {
+      "title": "Elige el siguiente permanente",
+      "subtitle": "Elige para qué permanente se considerarán a continuación los efectos de reemplazo"
+    },
     "memberOrder": {
       "title": "Ordena las cartas",
       "subtitle": "Elige qué carta se procesa a continuación"

@@ -200,6 +200,7 @@ mod issue_941_champions_full_party;
 mod issue_9516_paladin_class_level3;
 mod issue_9760_cancel_cast_life_rollback;
 mod kaalia_zenith_seeker_reveal_types_8068;
+mod kalitas_traitor_of_ghet_wrath_batch;
 mod karazikar_attack_scope_7189;
 mod kashi_tribe_damage_tap_freeze;
 mod kibo_uktabi_prince_defending_player_sacrifice;

@@ -341,7 +341,8 @@ pub enum DepartureResume {
     /// Nothing of a resolution is left for the caller to finish.
     Settled,
     /// The departure canceled the current replacement-choice pause of a parked
-    /// zone-change owner. Its surviving tail is still owed: the caller resumes
+    /// zone-change owner or invalidated its choice of which departure to
+    /// consult. Its surviving tail is still owed: the caller resumes
     /// it and settles the action before any player receives priority, and the
     /// departure left its queued triggers for that settlement to place.
     ParkedZoneChangeTail,
@@ -635,6 +636,12 @@ pub(crate) fn eliminate_players(
     // directly above — which is why this cannot live in `do_eliminate`.
     remove_stack_objects_controlled_by_leaving_players(state, &leave_nodes, events);
     retire_suppressors_of_controlled_sources_that_left(state, &leaving_set);
+    if let Some(before) = &looked_back_observers {
+        super::effects::destroy::reconcile_queued_destructions_after_player_leave(
+            state,
+            before.objects(),
+        );
+    }
 
     // CR 800.4a + CR 101.4: A player that leaves during an APNAP unless poll
     // neither answers nor remains an eligible future chooser. Preserve the
@@ -925,6 +932,19 @@ pub(crate) fn eliminate_players(
                 .resolution_stack
                 .active_zone_change_owner_pause()
                 .is_none()
+        {
+            resume = DepartureResume::ParkedZoneChangeTail;
+        }
+        // CR 800.4a + CR 616.1: after ownership and control settle, the
+        // announced members, their replacement effects, or their choosers may
+        // have left. Reconsult the batch from the caller's fresh event buffer:
+        // re-parking it must never capture the concession's own events.
+        if !leaving_set.is_empty()
+            && (super::effects::destroy::reconcile_departure_consult_after_player_leave(state)
+                || super::effects::destroy::retire_departure_order(
+                    state,
+                    super::effects::destroy::DepartureOrderChange::PlayerLeft,
+                ))
         {
             resume = DepartureResume::ParkedZoneChangeTail;
         }
@@ -2128,6 +2148,9 @@ fn do_eliminate(
     if state.pending_replacement.is_some()
         && leaving_is_latched_chooser
         && !settles_with_parked_payment
+        // A selected destruction/death member retains its in-flight proposal
+        // until every leaver's objects and control effects have been removed.
+        && !super::effects::destroy::departure_choice_in_flight(state)
         // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
         // with its chooser: the damaged permanent may survive the departure (a
         // Control Magic host returns to its owner), so the event is lifted back

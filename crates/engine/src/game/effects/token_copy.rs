@@ -895,6 +895,7 @@ pub(crate) fn copy_token_co_entrants(
                 | crate::types::resolution::ResolutionFrame::RepeatedOptionalPayment(..)
                 | crate::types::resolution::ResolutionFrame::ChangeZone(..)
                 | crate::types::resolution::ResolutionFrame::BatchDelivery(..)
+                | crate::types::resolution::ResolutionFrame::SimultaneousDeparture(..)
                 | crate::types::resolution::ResolutionFrame::CounterMoves(..)
                 | crate::types::resolution::ResolutionFrame::CounterRemovals(..)
                 | crate::types::resolution::ResolutionFrame::CounterAdditions(..)

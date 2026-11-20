@@ -2285,6 +2285,13 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::DebugCardEntries(_) => {
             crate::game::engine_debug::drain_pending_debug_card_entries(state, events);
         }
+        // CR 614.6 + CR 616.1 + CR 704.3: a simultaneous departure resumes the
+        // members it has not yet consulted or delivered once the child that
+        // paused it has settled.
+        ResolutionFrame::SimultaneousDeparture(_) => {
+            destroy::drain_pending_simultaneous_departure(state, events);
+            drain_exposed_ability_continuation(state, events);
+        }
         ResolutionFrame::EachPlayerCopyChosen(_) => {
             each_player_copy_chosen::drain_pending(state, events);
         }
@@ -2488,6 +2495,7 @@ fn exposes_paused_parent(state: &GameState, entry: ResolutionPosition) -> bool {
                 Some(crate::types::game_state::DrainStatus::Paused)
             ),
             Some(ResolutionFrame::DieRoll(_)) => roll_die::active_die_roll_is_resumable(state),
+            Some(ResolutionFrame::SimultaneousDeparture(_)) => true,
             Some(_) | None => false,
         }
 }
@@ -3544,35 +3552,24 @@ fn open_member_order_choice(
     if choices.len() < 2 {
         return false;
     }
-    let purpose = member_order_purpose(ability);
-    let player = match purpose {
-        MemberOrderPurpose::SpellCopies => {
-            let mut bound = ability.clone();
-            rebind_member_driven_parent_target(&mut bound, choices[0]);
-            copy_spell::resolve_copy_controller(state, &bound)
-        }
-        // CR 608.2f: the controller of the spell or ability performing the
-        // repeated instruction chooses the order those instructions run in.
-        MemberOrderPurpose::InstructionLoop => ability.controller,
+    let (purpose, player) = if matches!(ability.effect, Effect::CopySpell { .. }) {
+        let mut bound = ability.clone();
+        rebind_member_driven_parent_target(&mut bound, choices[0]);
+        (
+            MemberOrderPurpose::SpellCopies,
+            copy_spell::resolve_copy_controller(state, &bound),
+        )
+    } else {
+        // CR 608.2f: the controller orders the per-member instructions.
+        (MemberOrderPurpose::InstructionLoop, ability.controller)
     };
     state.waiting_for = WaitingFor::MemberOrderChoice {
         player,
-        source_id: ability.source_id,
+        source_id: Some(ability.source_id),
         choices,
         purpose,
     };
     true
-}
-
-/// CR 608.2f: the process a member-driven loop repeats is read from its head
-/// effect. A batch loop repeats `CopySpell` once per member; any other head is
-/// an instruction loop whose iterations pause for player input.
-fn member_order_purpose(ability: &ResolvedAbility) -> MemberOrderPurpose {
-    if matches!(ability.effect, Effect::CopySpell { .. }) {
-        MemberOrderPurpose::SpellCopies
-    } else {
-        MemberOrderPurpose::InstructionLoop
-    }
 }
 
 /// CR 608.2f + CR 405.3: the answer to `WaitingFor::MemberOrderChoice` — move
@@ -3641,6 +3638,9 @@ fn active_frame_requires_ability_continuation_parent(state: &GameState) -> bool 
         || state.active_counter_additions().is_some()
         || state.active_copy_token().is_some()
         || state.active_multi_draw_frame().is_some()
+        // CR 608.2c + CR 701.8a: a parked destruction batch is one instruction
+        // still in progress; the instructions after it wait beneath it.
+        || state.active_simultaneous_departure().is_some()
 }
 
 pub(crate) fn append_to_pending_continuation(
@@ -6590,6 +6590,16 @@ fn batch_completion_matches(
 /// `ResolutionFrame` so a new frame kind forces a decision.
 fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool {
     use crate::types::ability::PostReplacementContinuation;
+    let drain_matches =
+        |drain: &crate::types::game_state::PostReplacementDrain| match drain.ready_continuation() {
+            Some(PostReplacementContinuation::Template(definition)) => {
+                definition_chain_matches(definition, query)
+            }
+            Some(PostReplacementContinuation::Resolved(resolved)) => {
+                resolved_chain_matches(resolved, query)
+            }
+            None => false,
+        };
     match frame {
         ResolutionFrame::AbilityContinuation(frame) => {
             let pending = &frame.pending;
@@ -6653,19 +6663,12 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
             .results_table
             .iter()
             .any(|branch| definition_chain_matches(&branch.effect, query)),
-        ResolutionFrame::PostReplacement(stack) => {
-            stack
-                .drains()
-                .any(|drain| match drain.ready_continuation() {
-                    Some(PostReplacementContinuation::Template(definition)) => {
-                        definition_chain_matches(definition, query)
-                    }
-                    Some(PostReplacementContinuation::Resolved(resolved)) => {
-                        resolved_chain_matches(resolved, query)
-                    }
-                    None => false,
-                })
-        }
+        ResolutionFrame::PostReplacement(stack) => stack.drains().any(drain_matches),
+        ResolutionFrame::SimultaneousDeparture(pending) => pending
+            .queued
+            .iter()
+            .filter_map(|queued| queued.rider.as_ref())
+            .any(drain_matches),
         ResolutionFrame::ChangeZone(_)
         | ResolutionFrame::CounterMoves(_)
         | ResolutionFrame::CounterRemovals(_)
@@ -12595,6 +12598,7 @@ fn static_mode_reads_filter_population(
             CostPaymentProhibition::Sacrifice { filter } => has_filter(filter),
             CostPaymentProhibition::PayLife => false,
         },
+        StaticMode::CantSacrifice { filter, .. } => has_filter(filter),
         StaticMode::PlayerProtection(inner0) => has_protection(inner0),
         StaticMode::MustAttackDefender { defender } => match defender {
             RequiredDefender::Matching { filter } => has_player(filter),
@@ -28424,6 +28428,11 @@ fn resolve_chain_body(
         } // end shares_quality_failed else
     }
 
+    // CR 608.2c: Destroy consulted and delivered all slots of one instruction
+    // as one batch. Continue (or park) only the next written instruction.
+    let destroy_tail = destroy::after_destroy_slots(ability);
+    let ability = destroy_tail.as_deref().unwrap_or(ability);
+
     // CR 701.61a + CR 608.2c: Forage owns the nested B→C→tail chain it
     // constructs at runtime. Its nested completion node is the sole publisher
     // of the action and its ledgers; the outer frame must not walk or publish
@@ -29860,6 +29869,14 @@ fn resolve_chain_body(
                     .resolution_stack
                     .copy_token_at_child_boundary(child_stack_start)
                     .is_some()
+                // CR 608.2c + CR 701.8a: a destroy instruction parked its
+                // simultaneous departure at this boundary (whether on a
+                // consult's prompt or beneath a delivery's child work). Its
+                // later instructions ("You gain 1 life for each creature
+                // destroyed this way") follow the whole departure.
+                || state
+                    .resolution_stack
+                    .simultaneous_departure_at_child_boundary(child_stack_start)
                 || deal_damage::is_multi_event_damage_instruction(&ability.effect))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {

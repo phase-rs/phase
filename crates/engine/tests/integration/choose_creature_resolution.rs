@@ -2682,38 +2682,136 @@ fn delayed_trigger_fires_for_a_death_in_instructions_resumed_by_a_concession() {
     assert_resolution_settled(&runner, "Final Showdown after the concession");
 }
 
-const DISCIPLINED_DUELIST: &str = "Double strike\nThis creature enters with a shield counter on it. (If it would be dealt damage or destroyed, remove a shield counter from it instead.)";
-const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+fn add_kalitas_wipe_replacement(
+    scenario: &mut GameScenario,
+    controller: PlayerId,
+    opponent: PlayerId,
+) -> (ObjectId, ObjectId, ObjectId) {
+    let db = load_db().expect("the committed card-data fixture carries Kalitas and Jinnie Fay");
+    let kalitas = scenario.add_real_card(
+        controller,
+        "Kalitas, Traitor of Ghet",
+        Zone::Battlefield,
+        db,
+    );
+    let jinnie = scenario.add_real_card(
+        controller,
+        "Jinnie Fay, Jetmir's Second",
+        Zone::Battlefield,
+        db,
+    );
+    scenario.with_counter(jinnie, CounterType::Shield, 1);
+    let bear = scenario.add_real_card(opponent, "Grizzly Bears", Zone::Battlefield, db);
+    (kalitas, jinnie, bear)
+}
 
-/// CR 603.7 + CR 616.1: as above, but the instructions the concession resumes pause
-/// again. P2 also controls a Disciplined Duelist with its shield counter, enchanted
-/// with Hyena Umbra, so "Destroy all creatures" destroys the damaged creature and
-/// then asks P2 which replacement applies. The delayed trigger for the first death
-/// must survive that second pause, also across a save and restore taken there.
-///
-/// This row covers retention of the trigger for the death that already happened,
-/// not completion of the wipe: the Duelist is the last creature the wipe reaches,
-/// and `DestroyAll` does not resume objects after the one a replacement-order
-/// prompt interrupted (existing behaviour of the destroy loop, not changed here).
+fn decline_jinnies_zombie_replacement(
+    runner: &mut GameRunner,
+    controller: PlayerId,
+    jinnie: ObjectId,
+) {
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected Jinnie's replacement choice during delivery: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, controller);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_id == jinnie));
+    let decline = candidates
+        .iter()
+        .position(|candidate| candidate.description == "Decline")
+        .expect("Jinnie's replacement is optional");
+    runner
+        .act(GameAction::ChooseReplacement { index: decline })
+        .unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum DeathPause {
+    ZombieReplacement,
+    Scry,
+}
+
+impl DeathPause {
+    fn add_wipe(self, scenario: &mut GameScenario) -> ObjectId {
+        let (name, text) = match self {
+            Self::ZombieReplacement => ("Final Showdown", FINAL_SHOWDOWN.to_owned()),
+            // SYNTHETIC: the independent scry makes the answered choice's event
+            // buffer the sole carrier of the prior death. A pause inside the
+            // printed wipe instead parks that death's event in the batch itself.
+            Self::Scry => (
+                "Synthetic Final Showdown with scry",
+                FINAL_SHOWDOWN.replace(
+                    "Destroy all creatures.",
+                    "Destroy all tapped creatures. Scry 1.",
+                ),
+            ),
+        };
+        scenario
+            .add_spell_to_hand_from_oracle(P0, name, true, &text)
+            .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+            .id()
+    }
+
+    fn answer(
+        self,
+        runner: &mut GameRunner,
+        controller: PlayerId,
+        jinnie: ObjectId,
+        bear: ObjectId,
+    ) {
+        match self {
+            Self::ZombieReplacement => {
+                assert_eq!(runner.state().objects[&bear].zone, Zone::Exile);
+                decline_jinnies_zombie_replacement(runner, controller, jinnie);
+            }
+            Self::Scry => {
+                let WaitingFor::ScryChoice { cards, .. } = runner.state().waiting_for.clone()
+                else {
+                    panic!(
+                        "expected a separate scry after the death: {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                assert_eq!(cards.len(), 1);
+                runner.act(GameAction::SelectCards { cards }).unwrap();
+            }
+        }
+    }
+}
+
+/// CR 603.7 + CR 616.1: Devouring Tendrils damages Kalitas. During Final
+/// Showdown the fourth player's Bear is exiled by Kalitas's replacement. The
+/// shield on Jinnie lets her offer to replace the Zombie after Kalitas has
+/// died. The concession resumes the wipe, and the delayed trigger for that
+/// death must survive this delivery-time pause, including save and restore.
 #[test]
 fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concession() {
+    delayed_trigger_after_concession(DeathPause::ZombieReplacement);
+}
+
+#[test]
+fn delayed_trigger_survives_a_later_instruction_pausing_after_a_concession() {
+    delayed_trigger_after_concession(DeathPause::Scry);
+}
+
+fn delayed_trigger_after_concession(pause: DeathPause) {
     for restore_at_second_pause in [false, true] {
-        let mut scenario = GameScenario::new_n_player(3, 7);
+        let mut scenario = GameScenario::new_n_player(4, 7);
         scenario.at_phase(Phase::PreCombatMain);
         let own = scenario.add_creature(P0, "Own creature", 1, 1).id();
         let borrowed = scenario
             .add_creature(P1, "Borrowed creature", 3, 3)
             .controlled_by(P0)
             .id();
-        let bitten = scenario.add_creature(P2, "P2 creature", 2, 3).id();
-        let duelist = scenario
-            .add_creature_from_oracle(P2, "Disciplined Duelist", 2, 1, DISCIPLINED_DUELIST)
-            .id();
-        scenario.with_counter(duelist, CounterType::Shield, 1);
-        let umbra = scenario
-            .add_enchantment_from_oracle(P2, "Hyena Umbra", HYENA_UMBRA)
-            .with_subtypes(vec!["Aura"])
-            .id();
+        let (bitten, jinnie, bear) = add_kalitas_wipe_replacement(&mut scenario, P2, PlayerId(3));
+        scenario.add_card_to_library_top(P0, "Library card");
         for _ in 0..7 {
             scenario.add_basic_land(P0, ManaColor::White);
         }
@@ -2723,25 +2821,9 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
             .add_spell_to_hand_from_oracle(P0, "Devouring Tendrils", false, DEVOURING_TENDRILS)
             .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
             .id();
-        let showdown = scenario
-            .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
-            .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
-            .id();
+        let showdown = pause.add_wipe(&mut scenario);
         let mut runner = scenario.build();
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&umbra)
-            .unwrap()
-            .attached_to = Some(AttachTarget::Object(duelist));
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&duelist)
-            .unwrap()
-            .attachments
-            .push(umbra);
-        runner.state_mut().layers_dirty.mark_full();
+        runner.state_mut().objects.get_mut(&bitten).unwrap().tapped = true;
         let life = |runner: &GameRunner| runner.state().players[0].life;
         let starting_life = life(&runner);
 
@@ -2763,11 +2845,6 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
         }
         runner.advance_until_stack_empty();
         assert_eq!(runner.state().objects[&bitten].zone, Zone::Battlefield);
-        assert_eq!(
-            runner.state().objects[&umbra].attached_to,
-            Some(AttachTarget::Object(duelist)),
-            "reach guard: the Aura is still attached"
-        );
 
         let card_id = runner.state().objects[&showdown].card_id;
         runner
@@ -2798,13 +2875,6 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
             Zone::Graveyard,
             "reach guard: the damaged creature died before the second pause"
         );
-        let WaitingFor::ReplacementChoice { player, .. } = &runner.state().waiting_for else {
-            panic!(
-                "reach guard: the replacement-order prompt is the second pause: {:?}",
-                runner.state().waiting_for
-            );
-        };
-        assert_eq!(*player, P2);
         assert_eq!(life(&runner), starting_life);
         if restore_at_second_pause {
             let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
@@ -2817,9 +2887,7 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
                 .expect("restored state is publishable");
             runner = GameRunner::from_state(state);
         }
-        runner
-            .act(GameAction::ChooseReplacement { index: 0 })
-            .unwrap();
+        pause.answer(&mut runner, P2, jinnie, bear);
         for _ in 0..12 {
             if life(&runner) != starting_life && runner.state().stack.is_empty() {
                 break;
@@ -2828,11 +2896,7 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
                 break;
             }
         }
-        assert_eq!(
-            runner.state().objects[&duelist].zone,
-            Zone::Battlefield,
-            "the Duelist survives through whichever replacement was applied"
-        );
+        assert_eq!(runner.state().objects[&jinnie].zone, Zone::Battlefield);
         assert_eq!(
             life(&runner),
             starting_life + 2,
@@ -2842,53 +2906,33 @@ fn delayed_trigger_survives_a_second_pause_in_instructions_resumed_by_a_concessi
     }
 }
 
-/// CR 603.2 + CR 603.3: the ordinary-answer sibling of the concession rows. P0
-/// answers Final Showdown's choice (modes 2 and 3) with Zulaport Cutthroat;
-/// "Destroy all creatures" destroys P0's other creature and then pauses on the
-/// replacement-order prompt for P1's Disciplined Duelist (shield counter against
-/// Hyena Umbra). The Cutthroat's trigger for the death before that second pause
-/// must not be lost.
-///
-/// As with the concession row, this covers retention of the trigger for the death
-/// that already happened, not completion of the wipe after the prompt.
+/// CR 603.2 + CR 603.3: Final Showdown protects Zulaport Cutthroat, then
+/// destroys its controller's Kalitas. Before the Cutthroat trigger resolves,
+/// Jinnie's optional replacement pauses the exiled Bear's Zombie creation.
 #[test]
 fn death_trigger_survives_a_second_pause_after_the_choice_is_answered() {
+    death_trigger_after_choice(DeathPause::ZombieReplacement);
+}
+
+#[test]
+fn death_trigger_survives_a_later_instruction_pausing_after_the_choice_is_answered() {
+    death_trigger_after_choice(DeathPause::Scry);
+}
+
+fn death_trigger_after_choice(pause: DeathPause) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let cutthroat = scenario
         .add_creature_from_oracle(P0, "Zulaport Cutthroat", 1, 1, ZULAPORT_CUTTHROAT)
         .id();
-    let other = scenario.add_creature(P0, "Other own creature", 2, 2).id();
-    let duelist = scenario
-        .add_creature_from_oracle(P1, "Disciplined Duelist", 2, 1, DISCIPLINED_DUELIST)
-        .id();
-    scenario.with_counter(duelist, CounterType::Shield, 1);
-    let umbra = scenario
-        .add_enchantment_from_oracle(P1, "Hyena Umbra", HYENA_UMBRA)
-        .with_subtypes(vec!["Aura"])
-        .id();
+    let (other, jinnie, bear) = add_kalitas_wipe_replacement(&mut scenario, P0, P1);
+    scenario.add_card_to_library_top(P0, "Library card");
     for _ in 0..7 {
         scenario.add_basic_land(P0, ManaColor::White);
     }
-    let showdown = scenario
-        .add_spell_to_hand_from_oracle(P0, "Final Showdown", true, FINAL_SHOWDOWN)
-        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
-        .id();
+    let showdown = pause.add_wipe(&mut scenario);
     let mut runner = scenario.build();
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&umbra)
-        .unwrap()
-        .attached_to = Some(AttachTarget::Object(duelist));
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&duelist)
-        .unwrap()
-        .attachments
-        .push(umbra);
-    runner.state_mut().layers_dirty.mark_full();
+    runner.state_mut().objects.get_mut(&other).unwrap().tapped = true;
     let life =
         |runner: &GameRunner, player: PlayerId| runner.state().players[player.0 as usize].life;
     let (p0_life, p1_life) = (life(&runner, P0), life(&runner, P1));
@@ -2918,16 +2962,7 @@ fn death_trigger_survives_a_second_pause_after_the_choice_is_answered() {
         Zone::Graveyard,
         "reach guard: P0's other creature died before the second pause"
     );
-    let WaitingFor::ReplacementChoice { player, .. } = &runner.state().waiting_for else {
-        panic!(
-            "reach guard: the replacement-order prompt is the second pause: {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(*player, P1);
-    runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .unwrap();
+    pause.answer(&mut runner, P0, jinnie, bear);
     for _ in 0..12 {
         if life(&runner, P0) != p0_life && runner.state().stack.is_empty() {
             break;

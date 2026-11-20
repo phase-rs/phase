@@ -3827,6 +3827,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::ModifyActivationLimit { .. }
         | StaticMode::ActivateAsInstant { .. }
         | StaticMode::CantPayCost { .. }
+        | StaticMode::CantSacrifice { .. }
         | StaticMode::CantGainLife
         | StaticMode::CantLoseLife
         | StaticMode::PlayerProtection(..)
@@ -7928,6 +7929,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::ModifyActivationLimit { .. }
         | StaticMode::ActivateAsInstant { .. }
         | StaticMode::CantPayCost { .. }
+        | StaticMode::CantSacrifice { .. }
         | StaticMode::CantGainLife
         | StaticMode::CantLoseLife
         | StaticMode::PlayerProtection(..)

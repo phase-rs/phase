@@ -1559,6 +1559,8 @@ fn apply_action_boundary_core(
         Some(semantic_owner)
     };
     let preserve_interaction = interaction::action_preserves_interaction(state, &action);
+    let edits_replacement_preferences =
+        matches!(&action, GameAction::SetReplacementAutoChoice { .. });
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -1705,6 +1707,10 @@ fn apply_action_boundary_core(
             );
         }
     };
+    // Removing a saved replacement can replace a live departure-order prompt.
+    // Its old interaction ID authorizes only the decision it originally named.
+    let preserve_interaction = preserve_interaction
+        && (!edits_replacement_preferences || result.waiting_for == previous_interaction_waiting);
     // CR 602.2b + CR 601.2h: an activation whose elected total cannot be paid is
     // reversed to the state before it began. The handler only CLASSIFIED the
     // outcome; the reversal happens here, where the pre-action snapshot lives:
@@ -8941,9 +8947,16 @@ pub(super) fn resume_pending_continuation_if_priority(
                     | ResolutionFrame::ChangeZone(_)
             )
         );
+        // A simultaneous departure can be buried under more than one child.
+        // Keep settling those children before offering priority between members.
+        let has_parked_departure = state
+            .resolution_stack
+            .iter()
+            .any(|frame| matches!(frame, ResolutionFrame::SimultaneousDeparture(_)));
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
-                && !exposes_resolving_owner)
+                && !exposes_resolving_owner
+                && !has_parked_departure)
             || !after.is_strictly_inside(&before)
         {
             // CR 614.11a + CR 118.11: a bare cast/activation whose draw cost
@@ -11753,10 +11766,28 @@ fn apply_action(
     if let GameAction::SetReplacementAutoChoice { selector } = &action {
         // The stored opaque selector names the record across earlier removals.
         // Unknown selectors and records belonging to another actor are preserved.
+        let before = state.replacement_auto_choices.len();
         state.replacement_auto_choices.retain(|record| {
             record.key.player != actor || selector.as_ref().is_some_and(|id| record.id != *id)
         });
-        return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
+        if state.replacement_auto_choices.len() != before
+            && effects::destroy::retire_departure_order(
+                state,
+                effects::destroy::DepartureOrderChange::ReplacementPreferenceRemoved,
+            )
+        {
+            resume_pending_continuation_if_priority(state, &mut events)?;
+            let provisional = state.waiting_for.clone();
+            let settled = engine_priority::run_post_action_pipeline(
+                state,
+                &mut events,
+                &provisional,
+                false,
+                false,
+            )?;
+            sync_waiting_for(state, &settled);
+        }
+        return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
     // CR 603.5: SetMayTriggerAutoChoice propagates the actor's stored "don't ask
