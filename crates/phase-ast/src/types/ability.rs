@@ -7865,16 +7865,12 @@ pub enum FilterProp {
     /// for each transformed permanent you control"). Mirrors `FaceDown`/`Tapped`:
     /// a per-object battlefield state read from `GameObject::transformed`.
     Transformed,
-    /// CR 115.9c: Matches stack entries whose targets ALL satisfy the given filter.
-    /// Used for "that targets only ~", "that targets only a single creature you control", etc.
-    /// Permissive at the per-object filter level; validated against the stack entry's actual
-    /// targets by trigger matchers and retarget effects.
+    /// CR 115.9c: Used for "that targets only ~", "that targets only a single creature you control", etc.
     TargetsOnly {
         filter: Box<TargetFilter>,
     },
     /// CR 115.9b: Matches stack entries that have at least one target satisfying the filter.
     /// Used for "that targets ~", "that targets you", etc. (.any() semantics).
-    /// Contrast with TargetsOnly (CR 115.9c) which requires ALL targets to match (.all()).
     Targets {
         filter: Box<TargetFilter>,
     },

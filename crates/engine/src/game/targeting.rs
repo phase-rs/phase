@@ -4256,7 +4256,6 @@ fn stack_spell_entry_matches_filter(
     }
 
     let single_target = super::filter::single_target_count(filter);
-    let targets_only_constraint = super::filter::extract_targets_only(filter);
     let targets_constraint = super::filter::extract_targets(filter);
     let source_controller_opt = state.objects.get(&source_id).map(|o| o.controller);
     let targets = entry
@@ -4270,25 +4269,6 @@ fn stack_spell_entry_matches_filter(
     }
 
     let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
-    // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
-    if let Some(ref constraint) = targets_only_constraint {
-        if targets.is_empty()
-            || !targets.iter().all(|t| match t {
-                TargetRef::Object(id) => {
-                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
-                    state,
-                    constraint,
-                    *pid,
-                    source_controller_opt,
-                    Some(source_id),
-                ),
-            })
-        {
-            return false;
-        }
-    }
     // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
     if let Some(ref constraint) = targets_constraint {
         if targets.is_empty()
