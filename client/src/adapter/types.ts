@@ -791,6 +791,7 @@ export type DeckSection =
 export interface CardPrinting {
   set_code: string;
   collector_number: string;
+  automatic_art_catalog_version?: number;
 }
 
 /** Mirrors the engine's `DeckPrinting`: an owner's explicit printing for `count` copies. */
@@ -798,7 +799,7 @@ export interface DeckPrinting {
   section: DeckSection;
   name: string;
   count: number;
-  printing: CardPrinting;
+  printing: Pick<CardPrinting, "set_code" | "collector_number">;
 }
 
 /** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
