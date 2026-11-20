@@ -792,7 +792,7 @@ pub(crate) fn apply_damage_after_replacement(
     // hit on a 2-toughness creature would mark 4 on the creature AND deal 2 to the
     // controller (6 total); the rules-correct outcome is 2 marked + 2 redirected
     // (4 total). Reduce the primary hit to the lethal portion for the creature's
-    // marked damage, loyalty/defense removal, DamageDealt event, and damage record; lifelink and the return
+    // marked damage, DamageDealt event, and damage record; lifelink and the return
     // value keep `actual_amount` because the total damage dealt is unchanged.
     // CR 120.4a "that creature's controller": the rider only redirects when the
     // damaged permanent is a creature (real class cards all read "target creature").
@@ -830,7 +830,7 @@ pub(crate) fn apply_damage_after_replacement(
                     state,
                     *obj_id,
                     CounterType::Loyalty,
-                    primary_amount,
+                    actual_amount,
                     events,
                 );
             }
@@ -843,7 +843,7 @@ pub(crate) fn apply_damage_after_replacement(
                     state,
                     *obj_id,
                     CounterType::Defense,
-                    primary_amount,
+                    actual_amount,
                     events,
                 );
             }

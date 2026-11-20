@@ -3565,7 +3565,6 @@ pub struct PendingDamagePostCounter {
     /// The post-replacement damage amount.
     pub actual_amount: u32,
     /// CR 120.4a + CR 120.10: the excess computed before the counters were placed; the resume never recomputes it.
-    #[serde(default)]
     pub excess: u32,
     /// CR 510.2: a combat leg's post-counter work, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).

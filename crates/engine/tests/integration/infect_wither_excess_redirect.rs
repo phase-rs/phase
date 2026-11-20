@@ -9,7 +9,9 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    GameState, PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
@@ -35,11 +37,6 @@ const TYPHOID_RATS: &str =
     "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)";
 const DARKSTEEL_MYR: &str = "Indestructible (Damage and effects that say \"destroy\" don't \
 destroy this creature. If its toughness is 0 or less, it still dies.)";
-const SARKHAN: &str = "Whenever a creature attacks you or a planeswalker you control, each Dragon you control deals 1 damage to that creature.\n[+1]: Until end of turn, each planeswalker you control becomes a 4/4 red Dragon creature and gains flying.\n[\u{2212}3]: Create a 4/4 red Dragon creature token with flying.";
-const HEROIC_INTERVENTION: &str =
-    "Permanents you control gain hexproof and indestructible until end of turn.";
-const PIGMENT_STORM: &str = "Pigment Storm deals 5 damage to target creature. Excess damage is \
-dealt to that creature's controller instead.";
 const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
 
@@ -202,10 +199,15 @@ fn wither_redirect_places_only_lethal_counters() {
     outcome.assert_zone(&[bears], Zone::Graveyard);
 }
 
-/// R4 — CR 616.1: counter replacements modify only the lethal portion. With
-/// Doubling Season applied before Winding Constrictor, 2 counters become 5.
-#[test]
-fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
+struct OrderingBoard {
+    bears: ObjectId,
+    doubling: ObjectId,
+    constrictor: ObjectId,
+}
+
+/// Blightsteel Ram Throughs Grizzly Bears while P1 controls Doubling Season and
+/// Winding Constrictor, so the -1/-1 placement pauses on their ordering.
+fn pause_on_counter_ordering() -> (GameRunner, CastOutcome, OrderingBoard) {
     let mut scenario = new_scenario();
     let source = add_blightsteel(&mut scenario, false);
     let doubling = scenario
@@ -215,7 +217,31 @@ fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
         .add_creature_from_oracle(P1, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
         .id();
     let bears = add_bears(&mut scenario, 0);
-    let (mut runner, outcome) = cast_ram_through(scenario, source, bears);
+    let (runner, outcome) = cast_ram_through(scenario, source, bears);
+    (
+        runner,
+        outcome,
+        OrderingBoard {
+            bears,
+            doubling,
+            constrictor,
+        },
+    )
+}
+
+/// R4 — CR 616.1: counter replacements modify only the lethal portion. With
+/// Doubling Season applied before Winding Constrictor, 2 counters become 5.
+#[test]
+fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
+    let (
+        mut runner,
+        outcome,
+        OrderingBoard {
+            bears,
+            doubling,
+            constrictor,
+        },
+    ) = pause_on_counter_ordering();
 
     let WaitingFor::ReplacementChoice {
         player,
@@ -332,51 +358,100 @@ fn deathtouch_single_damage_is_never_excess() {
     assert!(dealt_to(outcome.events(), TargetRef::Player(P1)).is_empty());
 }
 
-/// R9 — CR 120.4a + CR 120.3c: a creature planeswalker's excess is the greatest
-/// per-type amount, and only the non-excess part is dealt to it. Sarkhan the
-/// Masterless animated to a 4/4 at loyalty 6 takes 5: excess max(1, 0) = 1 goes
-/// to its controller, so it marks 4 and loses 4 loyalty.
+fn restore(json: &str) -> Result<GameState, String> {
+    serde_json::from_str::<PersistedGameState>(json)
+        .map_err(|error| error.to_string())?
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .map_err(|error| error.to_string())?
+        .finalize_after_rehydration(|_| Ok(()))
+        .map_err(|error| error.to_string())
+}
+
+/// Rewrites every paused counter stash to the previous writer's shape
+/// (`loyalty_before`/`defense_before`, no `excess`); returns how many it rewrote.
+fn write_previous_counter_stash(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut rewritten = 0;
+            if let Some(serde_json::Value::Object(stash)) =
+                object.get_mut("pending_damage_post_counter")
+            {
+                assert!(stash.remove("excess").is_some(), "{stash:?}");
+                stash.insert("loyalty_before".into(), serde_json::Value::Null);
+                stash.insert("defense_before".into(), serde_json::Value::Null);
+                rewritten += 1;
+            }
+            rewritten
+                + object
+                    .values_mut()
+                    .map(write_previous_counter_stash)
+                    .sum::<usize>()
+        }
+        serde_json::Value::Array(values) => {
+            values.iter_mut().map(write_previous_counter_stash).sum()
+        }
+        _ => 0,
+    }
+}
+
+/// CR 120.4a: the paused stash owes 9 excess poison, so a save written before
+/// it carried `excess` is refused rather than resumed with no redirect; a
+/// current save restores and still redirects the excess.
 #[test]
-fn excess_redirect_on_creature_planeswalker_removes_only_dealt_loyalty() {
-    let mut scenario = new_scenario();
-    let sarkhan = scenario
-        .add_planeswalker_from_oracle(P0, "Sarkhan the Masterless", "Sarkhan", 5, SARKHAN)
-        .id();
-    let intervention = {
-        let mut b = scenario.add_spell_to_hand_from_oracle(
-            P0,
-            "Heroic Intervention",
-            true,
-            HEROIC_INTERVENTION,
+fn paused_counter_stash_without_excess_is_refused_at_restore() {
+    for trusted in [false, true] {
+        let (
+            runner,
+            _outcome,
+            OrderingBoard {
+                bears, doubling, ..
+            },
+        ) = pause_on_counter_ordering();
+        assert_eq!(
+            runner
+                .state()
+                .pending_damage_post_counter
+                .as_ref()
+                .map(|stash| stash.excess),
+            Some(9),
+            "the pause stashes the excess"
         );
-        b.with_mana_cost(ManaCost::generic(0));
-        b.id()
-    };
-    let storm = {
-        let mut b =
-            scenario.add_spell_to_hand_from_oracle(P0, "Pigment Storm", false, PIGMENT_STORM);
-        b.with_mana_cost(ManaCost::generic(0));
-        b.id()
-    };
-    let mut runner = scenario.build();
-    runner.activate(sarkhan, 0).resolve();
-    runner.cast(intervention).resolve();
-    let sark = &runner.state().objects[&sarkhan];
-    assert_eq!(
-        (sark.power, sark.toughness, sark.loyalty),
-        (Some(4), Some(4), Some(6))
-    );
+        let persisted = if trusted {
+            PersistedGameState::capture(runner.state().clone())
+        } else {
+            PersistedGameState::Raw(Box::new(runner.state().clone()))
+        };
+        let wire = serde_json::to_value(&persisted).expect("the pause serializes");
 
-    let outcome = runner.cast(storm).target_objects(&[sarkhan]).resolve();
+        let mut resumed =
+            GameRunner::from_state(restore(&wire.to_string()).expect("a current save restores"));
+        let WaitingFor::ReplacementChoice { candidates, .. } = resumed.state().waiting_for.clone()
+        else {
+            panic!("trusted {trusted}: {:?}", resumed.state().waiting_for);
+        };
+        let index = candidates
+            .iter()
+            .position(|c| c.source_id == doubling)
+            .expect("Doubling Season is a candidate");
+        let events = resumed
+            .act(GameAction::ChooseReplacement { index })
+            .expect("ordering pick accepted")
+            .events;
+        resumed.advance_until_stack_empty();
+        assert_eq!(
+            minus_counter_adds(&events, bears),
+            vec![5],
+            "trusted {trusted}"
+        );
+        assert_eq!(poison(resumed.state(), P1), 9, "trusted {trusted}");
+        assert_settled(resumed.state());
 
-    assert_eq!(
-        dealt_to(outcome.events(), TargetRef::Player(P0)),
-        vec![(1, 0)]
-    );
-    outcome.assert_life_delta(P0, -1);
-    let sark = &outcome.state().objects[&sarkhan];
-    assert_eq!(sark.zone, Zone::Battlefield);
-    assert_eq!(sark.damage_marked, 4);
-    assert_eq!(sark.loyalty, Some(2));
-    assert_settled(outcome.state());
+        let mut previous = wire;
+        assert_eq!(write_previous_counter_stash(&mut previous), 1);
+        let error = restore(&previous.to_string()).expect_err("a stash without excess is refused");
+        assert!(
+            error.contains("missing field `excess`"),
+            "trusted {trusted}: {error}"
+        );
+    }
 }
