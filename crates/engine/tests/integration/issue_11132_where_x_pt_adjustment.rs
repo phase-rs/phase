@@ -21,6 +21,8 @@ const WINE_OF_BLOOD_AND_IRON: &str = "{4}: Target creature gets +X/+0 until end 
 const BERSERK: &str = "Cast this spell only before the combat damage step.\nTarget creature gains trample and gets +X/+0 until end of turn, where X is its power. At the beginning of the next end step, destroy that creature if it attacked this turn.";
 const FATAL_FRENZY: &str = "Until end of turn, target creature you control gains trample and gets +X/+0, where X is its power. Sacrifice it at the beginning of the next end step.";
 const WINGED_TEMPLE_OF_ORAZCA: &str = "(Transforms from Hadana's Climb.)\n{T}: Add one mana of any color.\n{1}{G}{U}, {T}: Target creature you control gains flying and gets +X/+X until end of turn, where X is its power.";
+const YEW_SPIRIT: &str =
+    "{2}{G}{G}: This creature gets +X/+X until end of turn, where X is its power.";
 const AURIOK_BLADEWARDEN: &str =
     "{T}: Target creature gets +X/+X until end of turn, where X is this creature's power.";
 const RAVENOUS_GIGANTOTHERIUM: &str = "Devour 3 (As this creature enters, you may sacrifice any number of creatures. It enters with three times that many +1/+1 counters on it.)\nWhen this creature enters, it deals X damage divided as you choose among up to X target creatures, where X is its power. Each of those creatures deals damage equal to its power to this creature.";
@@ -150,6 +152,22 @@ fn auriok_bladewarden_keeps_its_own_power() {
     let mut r = s.build();
     let out = r.activate(auriok, 0).target_object(bear).resolve();
     assert_eq!(out.power_toughness(bear), (4, 3));
+}
+
+/// With no target, "its" names the pumped source itself.
+#[test]
+fn yew_spirit_adds_its_own_power() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let mut pool = mana(2, ManaType::Colorless);
+    pool.extend(mana(2, ManaType::Green));
+    s.with_mana_pool(P0, pool);
+    let yew = s
+        .add_creature_from_oracle(P0, "Yew Spirit", 3, 3, YEW_SPIRIT)
+        .id();
+    let mut r = s.build();
+    let out = r.activate(yew, 0).resolve();
+    assert_eq!(out.power_toughness(yew), (6, 6));
 }
 
 /// "its power" in a damage clause names the source: only a pump's subject is
