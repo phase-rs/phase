@@ -8,19 +8,22 @@
 //! this creature's current controller. The power modifier applies in layer 7c
 //! (CR 613.4c) and updates as the graveyard changes while this creature remains
 //! on the battlefield and has the ability (CR 604.2 + CR 611.3a + CR 611.3b).
-//! The ETB mill sentence remains in the fixture so it carries the card's full
-//! Oracle text while this test isolates the static ability.
+//! The public-action regression resolves the ETB mill and a later Cremate
+//! exile so the static ability is checked across real graveyard changes.
 
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const DARK_MATTER_MANIPULATOR_ORACLE: &str = "When this creature enters, mill three cards.\n\
 This creature gets +2/+0 for every seven cards in your graveyard.";
+
+const CREMATE_ORACLE: &str = "Exile target card from a graveyard. Draw a card.";
 
 /// Add actual card objects of several card types to one player's graveyard.
 fn add_mixed_graveyard(scenario: &mut GameScenario, player: PlayerId, label: &str, count: usize) {
@@ -95,55 +98,68 @@ fn dark_matter_manipulator_counts_its_controller_graveyard_thresholds() {
 }
 
 #[test]
-fn dark_matter_manipulator_updates_after_graveyard_zone_moves() {
+fn dark_matter_manipulator_updates_after_public_mill_and_cremate_actions() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let manipulator = scenario
-        .add_creature_from_oracle(
+        .add_creature_to_hand_from_oracle(
             P0,
             "Dark Matter Manipulator",
             1,
             2,
             DARK_MATTER_MANIPULATOR_ORACLE,
         )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
         .id();
-    let _ordinary_creature = scenario.add_creature(P0, "Ordinary Creature", 2, 2).id();
-    add_mixed_graveyard(&mut scenario, P0, "Your", 6);
-    add_mixed_graveyard(&mut scenario, P1, "Opponent", 14);
-    let seventh_card = scenario
-        .add_land_to_exile(P0, "Seventh Graveyard Card")
+    let cremate = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cremate", true, CREMATE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
         .id();
+    add_mixed_graveyard(&mut scenario, P0, "Your", 4);
+    let milled_cards = [
+        scenario.add_card_to_library_top(P0, "Milled One"),
+        scenario.add_card_to_library_top(P0, "Milled Two"),
+        scenario.add_card_to_library_top(P0, "Milled Three"),
+    ];
+    scenario.add_card_to_library_top(P1, "Cremate Draw");
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
 
     let mut runner = scenario.build();
-    flush_layers(runner.state_mut());
-    assert_eq!(effective_pt(&runner, manipulator), (1, 2));
-
-    // CR 611.3a-b: the layer pass sees the seventh card enter the graveyard
-    // through the normal zone pipeline and reapplies the continuous effect.
-    let mut events = Vec::new();
-    assert!(!move_object_for_test(
-        runner.state_mut(),
-        ZoneMoveRequest::effect(seventh_card, Zone::Graveyard, manipulator),
-        &mut events,
-    ));
-    assert_eq!(runner.state().objects[&seventh_card].zone, Zone::Graveyard);
-    assert!(
-        runner.state().layers_dirty.is_dirty(),
-        "the zone pipeline must invalidate layers"
-    );
-    flush_layers(runner.state_mut());
+    runner.cast(manipulator).resolve();
+    for card in milled_cards {
+        assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
+    }
+    assert_eq!(runner.graveyard_count(P0), 7, "the ETB mill reaches seven");
     assert_eq!(effective_pt(&runner, manipulator), (3, 2));
+    assert!(runner.state().stack.is_empty(), "the ETB trigger resolved");
+    assert_eq!(runner.state().priority_player, P0);
 
-    // The same real object leaves the graveyard through the zone pipeline, so
-    // the next normal layer flush returns the source to its base 1/2.
-    events.clear();
-    assert!(!move_object_for_test(
-        runner.state_mut(),
-        ZoneMoveRequest::effect(seventh_card, Zone::Exile, manipulator),
-        &mut events,
-    ));
-    assert_eq!(runner.state().objects[&seventh_card].zone, Zone::Exile);
-    assert!(runner.state().layers_dirty.is_dirty());
-    flush_layers(runner.state_mut());
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority to P1");
+    assert_eq!(runner.state().priority_player, P1);
+
+    let cremate_outcome = runner
+        .cast(cremate)
+        .target_object(milled_cards[0])
+        .resolve();
+    assert_eq!(runner.state().objects[&milled_cards[0]].zone, Zone::Exile);
+    assert_eq!(runner.graveyard_count(P0), 6);
     assert_eq!(effective_pt(&runner, manipulator), (1, 2));
+    cremate_outcome.assert_hand_drawn(P1, 1);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().priority_player, P0);
 }
