@@ -4338,10 +4338,10 @@ mod tests {
                     section: DeckSection::MainDeck,
                     name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
                     count: 1,
-                    printing: CardPrinting {
-                        set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
-                        collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
-                    },
+                    printing: CardPrinting::owner(
+                        "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                        "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                    ),
                 })
                 .collect(),
             ..Default::default()

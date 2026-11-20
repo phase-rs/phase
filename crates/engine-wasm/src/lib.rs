@@ -4053,6 +4053,56 @@ mod codec_bridge_tests {
     }
 
     #[test]
+    fn viewer_codec_carries_marked_art_only_for_disclosed_faces() {
+        let (mut state, [hand, _]) = install_hidden_state();
+        let public = engine::game::zones::create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Forest".into(),
+            Zone::Battlefield,
+        );
+        let marked = serde_json::json!({
+            "set_code":"m21","collector_number":"272","automatic_art_catalog_version":1
+        });
+        let foretold = engine::game::zones::create_object(
+            &mut state,
+            CardId(904),
+            PlayerId(0),
+            "Foretold Forest".into(),
+            Zone::Exile,
+        );
+        let object = state.objects.get_mut(&foretold).unwrap();
+        object.face_down = true;
+        object.foretold = true;
+        for id in [public, hand, foretold] {
+            let printing = serde_json::from_value(marked.clone()).unwrap();
+            let object = state.objects.get_mut(&id).unwrap();
+            object.printing =
+                engine::types::display_only::DisplayOnly::new(Some(std::sync::Arc::new(printing)));
+            object.base_printing = object.printing.clone();
+        }
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        for viewer in [0, 1] {
+            let wire: serde_json::Value =
+                serde_json::from_str(&live_handle(Some(viewer)).json_inner()).unwrap();
+            for carrier in ["printing", "base_printing"] {
+                assert_eq!(wire["objects"][public.0.to_string()][carrier], marked);
+                for id in [hand, foretold] {
+                    let private = &wire["objects"][id.0.to_string()];
+                    assert!(private.is_object());
+                    if viewer == 0 {
+                        assert_eq!(private[carrier], marked);
+                    } else {
+                        assert!(private.get(carrier).is_none());
+                    }
+                }
+            }
+        }
+        clear_game_state();
+    }
+
+    #[test]
     fn codec_uninitialized_viewer_returns_no_handle_without_installing_game() {
         clear_game_state();
         assert!(state_codec_for_viewer_inner(None).unwrap().is_none());
@@ -6993,6 +7043,166 @@ mod production_restore_owner_regression_tests {
     use engine::game::token_presets::known_token_preset_by_id;
     use engine::types::format::ChallengeDeck;
     use engine::types::phase::Phase;
+
+    fn start_basic_art_restore_fixture(player: Option<PlayerDeckList>) {
+        use engine::types::card_type::{CardType, CoreType, Supertype};
+        use serde_json::json;
+
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let forest = engine::types::card::CardFace {
+            name: "Forest".into(),
+            scryfall_oracle_id: Some("b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6".into()),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".into()],
+            },
+            ..Default::default()
+        };
+        let control = engine::types::card::CardFace {
+            name: "Control".into(),
+            scryfall_oracle_id: Some("uncovered-control".into()),
+            card_type: CardType {
+                core_types: vec![CoreType::Land],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db =
+            CardDatabase::from_json_str(&json!({"forest": forest, "control": control}).to_string())
+                .unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(db)));
+        let seat = PlayerDeckList {
+            main_deck: vec!["Forest".into(); 12],
+            ..Default::default()
+        };
+        initialize_game_inner(
+            Some(Ok(DeckList {
+                player: player.clone().unwrap_or_else(|| seat.clone()),
+                opponent: if player.is_some() {
+                    PlayerDeckList {
+                        main_deck: vec!["Control".into(); 12],
+                        ..Default::default()
+                    }
+                } else {
+                    seat
+                },
+                ..Default::default()
+            })),
+            4910,
+            Some(Ok(serde_json::to_value(FormatConfig::freeform()).unwrap())),
+            MatchConfig::default(),
+            2,
+            Some(0),
+            None,
+            InitSessionKind::Local,
+        )
+        .expect("solo Freeform game starts");
+    }
+
+    #[test]
+    fn owner_printing_trusted_restore_preserves_saved_appearance() {
+        use serde_json::{json, Value};
+
+        start_basic_art_restore_fixture(None);
+        let saved: Value = serde_json::from_str(&export_game_state_json().unwrap()).unwrap();
+        let id = ObjectId(1);
+        let key = id.0.to_string();
+        let card_id = saved["state"]["objects"][&key]["card_id"].clone();
+        assert!(!card_id.is_null());
+        let stamp = json!({
+            "set_code": "m21",
+            "collector_number": "273",
+            "automatic_art_catalog_version": 1,
+        });
+        for expected in [Some(&stamp), None] {
+            let mut input = saved.clone();
+            let object = input["state"]["objects"][&key].as_object_mut().unwrap();
+            for field in ["printing", "base_printing"] {
+                match expected {
+                    Some(stamp) => {
+                        object.insert(field.into(), stamp.clone());
+                    }
+                    None => {
+                        object.remove(field);
+                    }
+                }
+                assert_eq!(object.get(field), expected);
+            }
+            restore_game_state_inner(&input.to_string()).expect("the trusted save restores");
+            let (installed, wire) = with_installed_state(|state| {
+                (
+                    serde_json::to_value(&state.objects[&id]).unwrap(),
+                    serde_json::to_value(local_seat_client_state(state)).unwrap(),
+                )
+            })
+            .unwrap();
+            let visible = &wire["state"]["objects"][&key];
+            for object in [&installed, visible] {
+                assert_eq!(object["name"], "Forest");
+                assert_eq!(object["card_id"], card_id);
+                for field in ["printing", "base_printing"] {
+                    assert_eq!(object.get(field), expected);
+                }
+            }
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn owner_printing_trusted_restore_round_trips_automatic_copy_mapping() {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        use serde_json::{json, Value};
+
+        start_basic_art_restore_fixture(Some(PlayerDeckList {
+            main_deck: ["Forest", "Forest", "Forest", "Control"]
+                .map(str::to_string)
+                .into(),
+            printings: vec![DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Forest".into(),
+                count: 1,
+                printing: CardPrinting::owner("m21", "272"),
+            }],
+            ..Default::default()
+        }));
+        let saved = export_game_state_json().unwrap();
+        let envelope: Value = serde_json::from_str(&saved).unwrap();
+        restore_game_state_inner(&saved).expect("the assigned game restores");
+        let wire = with_installed_state(|state| {
+            serde_json::to_value(local_seat_client_state(state)).unwrap()
+        })
+        .unwrap();
+        for (id, name, stamp) in [
+            (
+                1,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"272", "automatic_art_catalog_version":1}),
+            ),
+            (2, "Control", Value::Null),
+            (
+                3,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"273", "automatic_art_catalog_version":1}),
+            ),
+            (
+                4,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"272"}),
+            ),
+        ] {
+            for snapshot in [&envelope, &wire] {
+                let object = &snapshot["state"]["objects"][id.to_string()];
+                assert_eq!(object["name"], name);
+                assert_eq!(object["card_id"], id);
+                for field in ["printing", "base_printing"] {
+                    assert_eq!(object[field], stamp);
+                }
+            }
+        }
+        clear_game_state();
+    }
 
     #[test]
     fn production_restore_owner_repairs_revealed_smackdown_ref_on_first_serialized_snapshot() {
@@ -13420,10 +13630,7 @@ mod deck_list_seat_validation_tests {
             section: DeckSection::MainDeck,
             name: "Plains".to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: set_code.to_string(),
-                collector_number: "1".to_string(),
-            },
+            printing: CardPrinting::owner(set_code, "1"),
         }
     }
 
