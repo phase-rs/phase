@@ -18,8 +18,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenHostRequest,
-    TokenSpec,
+    CounterCause, EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics,
+    TokenHostRequest, TokenSpec,
 };
 use std::collections::HashSet;
 
@@ -208,6 +208,8 @@ pub(crate) fn place_loyalty_counters(
         target,
         CounterType::Loyalty,
         count,
+        // CR 614.16: Jace's emblem loyalty is placed by a resolving ability.
+        CounterCause::ResolvingEffect,
         events,
     ) {
         stash_pending_counter_completion(state, EffectKind::EmpowerJace, source_id);

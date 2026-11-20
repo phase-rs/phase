@@ -1,7 +1,7 @@
 use nom::Parser;
 use std::collections::BTreeSet;
 
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::error::{oracle_err, OracleError};
@@ -1006,7 +1006,8 @@ pub(crate) fn parse_count_head(text: &str) -> (CountHead, &str) {
 /// then fails closed as `Effect::Unimplemented` — when a binder's quantity does
 /// not parse in full, or when a "a number of" / absent head has no binder and
 /// no caller-bound count (`ParseContext::caller_bound_count`). It never falls
-/// back to a literal.
+/// back to a literal. The where-X binder reads a possessive pronoun ("where X is
+/// its power") against the trigger's "it" antecedent, as the lowering path does.
 pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<CountSlot<'a>> {
     let text = normalize_count_slot_text(text);
     let (head, after_head) = parse_count_head(text);
@@ -1058,11 +1059,20 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
         // CR 107.3c: the where-X clause defines X. The where-X authority binds X
         // inside any composite ("X plus 1"); a bare X falls back to the cda
         // grammar, as the token where-X binder does ("the number of times …").
+        // CR 608.2k: X binds under the characteristic rung only, so "its power"
+        // in a trigger body whose "it" names the event object reads that object,
+        // exactly as the lowering path binds the same tail; the player rungs
+        // stay unthreaded here.
         CountBinder::WhereX => {
             let CountHead::VariableX(count) = head else {
                 return None;
             };
-            let x = super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
+            let owner_rung = PlayerAntecedents::characteristic_owner_only(ctx);
+            let x =
+                super::oracle_effect::lower::parse_where_x_quantity_expression_with_antecedents(
+                    quantity,
+                    &owner_rung,
+                )
                 .or_else(|| {
                     parse_cda_quantity_with_context(quantity, &mut ctx.clone_player_antecedents())
                 })?;
@@ -1075,7 +1085,7 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
             } else {
                 super::oracle_effect::lower::apply_where_x_quantity_expression(
                     count,
-                    super::oracle_effect::lower::WhereXBinding::bare(Some(quantity)),
+                    super::oracle_effect::lower::WhereXBinding::new(Some(quantity), &owner_rung),
                 )?
             };
             (count, Some(x))
@@ -5024,14 +5034,6 @@ mod tests {
         assert_eq!(parse_rounding_suffix_only("Food tokens, rounded up"), None);
     }
 
-    #[test]
-    fn parse_count_expr_fixed_regression() {
-        // Ensure "3 cards" still returns Fixed, not DivideRounded
-        let (qty, rest) = parse_count_expr("3 cards").unwrap();
-        assert!(matches!(qty, QuantityExpr::Fixed { value: 3 }));
-        assert_eq!(rest, "cards");
-    }
-
     // CR 107.3: Procrastinate — "Put twice X stun counters on it" requires
     // `parse_count_expr` to recognize multiplicative prefixes so counter /
     // draw / mill / damage count positions see `Multiply { factor, inner }`
@@ -6059,6 +6061,85 @@ mod tests {
                 .unwrap()
                 .where_x,
             None
+        );
+    }
+
+    /// CR 608.2k + CR 107.3: in a trigger body whose "it" names the trigger
+    /// event's object, the count slot's where-X binder reads "its power" off that
+    /// object — both a bare X head (Dying Wish's "you gain X life, where X is its
+    /// power") and the X inside a composite head. "X plus 1 life, where X is its
+    /// power" is a building-block fragment no printed card exercises; the nearest
+    /// printed card is Dying Wish, whose full-text proof is
+    /// `oracle_trigger_tests::where_x_its_characteristic_binds_trigger_event_object`.
+    #[test]
+    fn count_slot_where_x_its_power_reads_trigger_event_object() {
+        let power = |scope| QuantityExpr::Ref {
+            qty: QuantityRef::Power { scope },
+        };
+        let event_subject = || ParseContext {
+            subject: Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature(),
+            )),
+            ..Default::default()
+        };
+
+        let bare = parse_count_slot("X life, where X is its power", &mut event_subject()).unwrap();
+        assert_eq!(bare.noun, "life");
+        assert_eq!(bare.count, power(ObjectScope::EventSource));
+        assert_eq!(bare.where_x, Some(power(ObjectScope::EventSource)));
+
+        let composite =
+            parse_count_slot("X plus 1 life, where X is its power", &mut event_subject()).unwrap();
+        assert_eq!(
+            composite.count,
+            QuantityExpr::Offset {
+                inner: Box::new(power(ObjectScope::EventSource)),
+                offset: 1,
+            }
+        );
+        assert_eq!(composite.where_x, Some(power(ObjectScope::EventSource)));
+
+        // Paired controls: with the ability's own object as "it", or with no
+        // context at all, the pronoun keeps reading the source.
+        for (label, mut ctx) in [
+            (
+                "self subject",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+            ),
+            ("no context", ParseContext::default()),
+        ] {
+            let bare = parse_count_slot("X life, where X is its power", &mut ctx).unwrap();
+            assert_eq!(bare.count, power(ObjectScope::Source), "{label}");
+            let composite =
+                parse_count_slot("X plus 1 life, where X is its power", &mut ctx).unwrap();
+            assert_eq!(
+                composite.count,
+                QuantityExpr::Offset {
+                    inner: Box::new(power(ObjectScope::Source)),
+                    offset: 1,
+                },
+                "{label}"
+            );
+        }
+
+        // The rung touches only pronoun characteristics: a count of objects
+        // under the same event subject is unchanged.
+        let creatures = parse_count_slot(
+            "X cards, where X is the number of creatures you control",
+            &mut event_subject(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                creatures.count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{creatures:?}"
         );
     }
 

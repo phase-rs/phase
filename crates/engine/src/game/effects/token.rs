@@ -38,8 +38,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedFaceUp, CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest,
-    TokenSpec,
+    CopiedFaceUp, CopyTokenSpec, CounterCause, EntryChoices, ProposedEvent, TokenAttackRequest,
+    TokenHostRequest, TokenSpec,
 };
 use crate::types::resolution::{ChildStackDepth, ResolutionFrame};
 use crate::types::resolved_commands::{
@@ -1518,7 +1518,6 @@ fn drive_token_event_delivery(
     } else {
         pause_event
     };
-
     // CR 111.1 + CR 614.12: the held owner's tokens are published for the delivery
     // (`deliver_with_held_copy_owner`). The window closes before the owner is re-parked,
     // at whichever exit the delivery took, so the re-park reads the frame and the order
@@ -1989,6 +1988,9 @@ fn apply_create_token_batch(
                     obj_id,
                     counter_type.clone(),
                     *counter_count,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    CounterCause::ReplacementOrPrevention,
                     events,
                 )
             {
@@ -2002,6 +2004,9 @@ fn apply_create_token_batch(
                             object_id: obj_id,
                             counter_type: counter_type.clone(),
                             count: *count,
+                            // CR 614.16: entering-with-counters placements are
+                            // replacement-driven entry modifications.
+                            cause: CounterCause::ReplacementOrPrevention,
                         }
                     })
                     .collect();
@@ -2624,7 +2629,12 @@ pub(crate) fn commit_liminal_copy_token_entry(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    let continuation = match &event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            liminal_copy_token_continuation(state, *entry_ref)
+        }
+        _ => None,
+    };
     commit_liminal_copy_token_entry_with_continuation(state, event, continuation, false, events)
 }
 
@@ -2650,7 +2660,7 @@ fn commit_liminal_copy_token_entry_with_continuation(
         }
     };
     let post_actions = continuation
-        .map(liminal_copy_token_continuation_post_action)
+        .map(|continuation| liminal_copy_token_continuation_post_action(continuation, 0))
         .into_iter()
         .collect();
     commit_liminal_token_entry_with_post_actions(
@@ -2685,7 +2695,12 @@ fn complete_liminal_token_entry_and_continue_copy_batch(
     rediscover: bool,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    let continuation = match &event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => {
+            liminal_copy_token_continuation(state, *entry_ref)
+        }
+        _ => None,
+    };
     if !commit_liminal_copy_token_entry_with_continuation(
         state,
         event,
@@ -2699,7 +2714,7 @@ fn complete_liminal_token_entry_and_continue_copy_batch(
 }
 
 #[derive(Clone)]
-struct LiminalCopyTokenContinuation {
+pub(crate) struct LiminalCopyTokenContinuation {
     owner: PlayerId,
     copy: Box<CopyTokenSpec>,
     enter_tapped: EtbTapState,
@@ -2707,14 +2722,11 @@ struct LiminalCopyTokenContinuation {
     remaining_count: u32,
 }
 
-fn liminal_copy_token_continuation_for_event(
+pub(crate) fn liminal_copy_token_continuation(
     state: &GameState,
-    event: &ProposedEvent,
+    entry_ref: ObjectId,
 ) -> Option<LiminalCopyTokenContinuation> {
-    let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
-        return None;
-    };
-    let entry = state.liminal_entries.get(entry_ref)?;
+    let entry = state.liminal_entries.get(&entry_ref)?;
     let copy = entry.copy_resume.clone()?;
     Some(LiminalCopyTokenContinuation {
         owner: entry.object.projected().owner,
@@ -2725,7 +2737,7 @@ fn liminal_copy_token_continuation_for_event(
     })
 }
 
-fn continue_liminal_copy_token_batch(
+pub(crate) fn continue_liminal_copy_token_batch(
     state: &mut GameState,
     continuation: Option<LiminalCopyTokenContinuation>,
     events: &mut Vec<GameEvent>,
@@ -2743,6 +2755,8 @@ fn continue_liminal_copy_token_batch(
         // handoff publishes the ledger and advances or consumes the owner.
         let copy_owner = state.active_copy_token().cloned();
         let initial_created_ids = state.last_created_token_ids.clone();
+        // CR 122.6a + CR 614.1c: carry only the reusable batch seed.
+        // Counters earned by an entrant's roll or Tribute belong to that entry event.
         let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
             continuation.owner,
@@ -2850,9 +2864,14 @@ pub(crate) fn finish_liminal_copy_token_batch(
     !state.active_copy_token().is_some() || matches!(state.waiting_for, WaitingFor::Priority { .. })
 }
 
-fn liminal_copy_token_continuation_post_action(
-    continuation: LiminalCopyTokenContinuation,
+pub(crate) fn liminal_copy_token_continuation_post_action(
+    mut continuation: LiminalCopyTokenContinuation,
+    entrants_to_skip: usize,
 ) -> PendingCounterPostAction {
+    continuation.copy.attack_request = continuation
+        .copy
+        .attack_request
+        .after_entrants(entrants_to_skip);
     PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
         owner: continuation.owner,
         copy: continuation.copy,
@@ -3270,6 +3289,9 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                             object_id: entry_ref,
                             counter_type: counter_type.clone(),
                             count: *count,
+                            // CR 614.16: entering-with-counters placements are
+                            // replacement-driven entry modifications.
+                            cause: CounterCause::ReplacementOrPrevention,
                         })
                         .collect();
                     let mut post_actions = vec![finalization];
@@ -3320,6 +3342,9 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                     entry_ref,
                     counter_type.clone(),
                     *counter_count,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    CounterCause::ReplacementOrPrevention,
                     events,
                 ),
                 // CR 122.6a: the controller puts the counters; CR 306.5b /
@@ -3350,6 +3375,9 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                     object_id: entry_ref,
                     counter_type: counter_type.clone(),
                     count: *count,
+                    // CR 614.16: entering-with-counters placements are
+                    // replacement-driven entry modifications.
+                    cause: CounterCause::ReplacementOrPrevention,
                 })
                 .collect();
             let mut post_actions = vec![finalization];

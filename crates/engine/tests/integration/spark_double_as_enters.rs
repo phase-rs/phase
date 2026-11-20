@@ -2778,12 +2778,12 @@ mod feldon_tokens {
         // Reach guard: each copy stopped on its own Tribute, answered by the
         // chosen opponent; the first answer went on to the second copy's choice.
         if pay {
-            // CR 702.104a + CR 616.1f: each entrant independently offers Tribute,
-            // then orders its own paid counter's replacements.
+            // CR 702.104a + CR 616.1f: each entering copy independently
+            // offers Tribute, then orders its own paid counter's replacements.
             assert_eq!(
                 (tributes, counter_orders),
                 (2, 2),
-                "each copy offers Tribute and orders its own counter"
+                "each copy offers Tribute and orders its paid counter"
             );
         } else {
             assert_eq!((tributes, counter_orders), (2, 0), "one Tribute per copy");
@@ -2832,18 +2832,18 @@ mod feldon_tokens {
     /// The same event when the opponent pays the Tribute and its counter stops
     /// on its Hardened Scales / Doubling Season order: the order's answer puts
     /// the copy onto the battlefield and hands its entry to the event, so Soul
-    /// Warden sees both copies. Each copy independently offers Tribute and
-    /// receives only its own paid counters.
+    /// Warden sees both copies. Each copy offers its own Tribute before entering
+    /// and receives only its own counters, even after the first copy suspends.
+    /// CR 702.104a + CR 616.1f.
     #[test]
     fn a_paid_tribute_whose_counter_is_ordered_keeps_its_entrant_in_the_event() {
         let (copies, gained) = fanatic_copies_and_warden_life(2, P1, true);
         assert_eq!(copies.len(), 2, "Doubling Season makes two copies");
         assert_eq!(gained, 2, "Soul Warden sees both copies");
-        assert!(
-            copies
-                .iter()
-                .all(|(power, haste)| *power == Some(7) && !haste),
-            "each 3/3 has four counters from Scales-before-Season, with Tribute paid"
+        assert_eq!(
+            copies,
+            vec![(Some(7), false); 2],
+            "each 3/3 gets four counters from Scales-before-Season and no unpaid Tribute bonus"
         );
     }
 

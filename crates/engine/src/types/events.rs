@@ -1017,6 +1017,17 @@ pub enum ExertOrigin {
     AbilityCost,
 }
 
+/// CR 603.7: whether a triggered ability that triggered is an ability of its
+/// source or a delayed triggered ability an effect created. Public projection
+/// of the scheduler's private firing identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggeredAbilityOrigin {
+    /// A triggered ability its source has (CR 603.1).
+    SourceAbility,
+    /// CR 603.7: a delayed triggered ability.
+    Delayed,
+}
+
 /// CR 104.3: why a player lost the game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LossReason {
@@ -1420,6 +1431,20 @@ pub enum GameEvent {
     },
     StackPushed {
         object_id: ObjectId,
+    },
+    /// CR 603.2 + CR 603.3d: a triggered ability triggered and reached
+    /// placement. `stack_entry: None` = removed during placement (CR 603.3c,
+    /// CR 603.3d). `controller` is the ability's controller (CR 603.3a).
+    /// `causes` is engine bookkeeping for the observer matcher. The event
+    /// stream never carries it (`filter_events_for_viewer`); state carriers do,
+    /// redacted per viewer (CR 400.2 + CR 708.5). It is never empty: an
+    /// occurrence with no cause record is not emitted.
+    AbilityTriggered {
+        stack_entry: Option<ObjectId>,
+        source_id: ObjectId,
+        controller: PlayerId,
+        origin: TriggeredAbilityOrigin,
+        causes: Vec<GameEvent>,
     },
     StackResolved {
         object_id: ObjectId,
@@ -2008,6 +2033,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+        /// CR 614.1c + CR 614.12 + CR 113.6 + CR 603.10: the entrant whose as-enters
+        /// replacement made this roll before its entry happened. Its abilities do not
+        /// function yet, so it alone is not an observer of this event. `None` for
+        /// every other roll. CR 603.2 + CR 603.10: the roll's observers are collected
+        /// when it is rolled, with the battlefield as it is then, and placed with its
+        /// entry; every other scan refuses a stamped roll.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_entry_source: Option<ObjectId>,
     },
     /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
     /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never

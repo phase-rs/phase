@@ -295,6 +295,7 @@ pub fn resolve(
                     is_cost_payment: false,
                     enters_modified_if: None,
                     duration: None,
+                    privacy_zones: None,
                 };
                 return Ok(());
             }
@@ -395,6 +396,7 @@ pub fn resolve(
                     is_cost_payment: false,
                     enters_modified_if: None,
                     duration: None,
+                    privacy_zones: None,
                 };
                 return Ok(());
             }
@@ -598,6 +600,7 @@ fn set_scoped_bounce_waiting_for(
         enters_modified_if: None,
         duration: None,
         performed_by: None,
+        privacy_zones: None,
     };
 }
 
@@ -992,6 +995,7 @@ pub fn resolve_all(
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             };
             return Ok(());
         }

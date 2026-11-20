@@ -152,7 +152,8 @@
     "loading": "{{name}}を読み込み中",
     "unimplemented": "未実装: {{mechanics}}",
     "dfc": "両面カード",
-    "tapped": "タップ状態"
+    "tapped": "タップ状態",
+    "reloadArt": "タップしてアートを再読み込み"
   },
   "preview": {
     "holdCtrlBack": "Ctrlを押して裏面を表示",
@@ -161,6 +162,8 @@
     "flip": "反転",
     "report": "問題を報告",
     "reported": "報告済み ✓",
+    "reportNotSent": "未送信",
+    "reloadArt": "アートを再読み込み",
     "altParsedAbilities": "Alt: 解析済み能力",
     "debugId": "ID: {{id}}",
     "engineParse": "エンジン解析",
@@ -1590,6 +1593,7 @@
     },
     "search": {
       "title": "ライブラリーを検索",
+      "instructionWithTitle": "{{title}}：{{instruction}}",
       "subtitleExact_one": "{{count}}枚のカードを選択",
       "subtitleExact_other": "{{count}}枚のカードを選択",
       "subtitleUpTo_one": "最大{{count}}枚のカードを選択",
@@ -1894,6 +1898,13 @@
       "titleExact_one": "カード1枚を捨てる",
       "titleExact_other": "カード{{count}}枚を捨てる",
       "titleWard": "護法 — カード1枚を捨てる",
+      "instructionWithReason": "{{reason}}：{{instruction}}",
+      "reason": {
+        "ward": "護法",
+        "connive": "謀議",
+        "additionalCost": "追加コスト",
+        "manaAbility": "マナ能力"
+      },
       "subtitleUpTo_one": "捨てるカードを最大{{count}}枚選択",
       "subtitleUpTo_other": "捨てるカードを最大{{count}}枚選択",
       "subtitleUnless": "{{count}}枚のカード、または条件に一致するカード1枚を捨てるものを選択",
@@ -2479,6 +2490,9 @@
     "optionalTriggers": "任意の誘発型能力（{{count, number}}）",
     "replacementChoices": "置換効果の選択（{{count, number}}）"
   },
+  "choiceModal": {
+    "holdForFullCard": "長押しでカード全体を表示"
+  },
   "optionalEffect": {
     "sourceFallback": "効果",
     "title": "{{name}} — 任意の効果",
@@ -2593,7 +2607,7 @@
     "appliedLast": "最後に適用 — これが有効",
     "resultLabel": "結果：{{outcome}}",
     "confirmOrder": "順序を確認",
-    "dragHint": "ドラッグして並べ替えるか、矢印を使用。",
+    "dragHint": "<grip>⠿</grip> ハンドルをドラッグして並べ替えるか、矢印を使用。",
     "chooseSubtitle": "適用する置換効果を選択",
     "candidateFallback": "置換効果{{number}}",
     "orderSubtitleComposing": "これらの効果はすべてこのイベントの起こり方を変更します。適用順をドラッグで設定してください — すべて適用されるため順序で結果が変わります（CR 616.1）。",
@@ -2602,6 +2616,7 @@
     "composesNote": "すべての効果が適用され、順序によって組み合わせ方が変わります。",
     "moveUpNamed": "{{name}}を前へ移動",
     "moveDownNamed": "{{name}}を後へ移動",
+    "dragHandleNamed": "{{name}}をドラッグして並べ替え",
     "positionAnnounce": "{{total}}個中{{position}}番目"
   },
   "retargetChoice": {
@@ -2707,6 +2722,20 @@
     "EndCombat": "戦闘終了",
     "PostCombatMain": "メイン・フェイズ2",
     "End": "終了ステップ",
+    "Cleanup": "クリンナップ"
+  },
+  "phaseShortName": {
+    "Untap": "アンタップ",
+    "Upkeep": "アップキープ",
+    "Draw": "ドロー",
+    "PreCombatMain": "メイン1",
+    "BeginCombat": "戦闘開始",
+    "DeclareAttackers": "攻撃",
+    "DeclareBlockers": "ブロック",
+    "CombatDamage": "ダメージ",
+    "EndCombat": "戦闘終了",
+    "PostCombatMain": "メイン2",
+    "End": "終了",
     "Cleanup": "クリンナップ"
   },
   "counterMoveDistribution": {

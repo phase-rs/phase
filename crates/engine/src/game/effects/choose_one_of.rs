@@ -476,6 +476,7 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityKind, CardSelectionMode, Chooser, Comparator, PlayerFilter, PlayerRelation,
         PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, ZoneOwner,
@@ -918,8 +919,9 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::PlayerAttribute {
                     relation: PlayerRelation::Opponent,
-                    attr: Box::new(QuantityRef::LifeLostThisTurn {
+                    attr: Box::new(QuantityRef::LifeLost {
                         player: PlayerScope::ScopedPlayer,
+                        window: TurnWindow::ThisTurn,
                     }),
                     comparator: Comparator::GE,
                     value: Box::new(QuantityExpr::Fixed { value: 3 }),

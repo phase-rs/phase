@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DiceRollOverlay } from "../DiceRollOverlay";
+import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { useUiStore } from "../../../stores/uiStore";
 import type { DiceRollPayload } from "../../../stores/uiStore";
 
@@ -39,8 +40,30 @@ afterEach(() => {
   renderer.mockClear();
   coinRenderer.mockClear();
   reportBoundaryError.mockClear();
-  useUiStore.setState({ diceRoll: null, diceRollQueue: [] });
+  useUiStore.getState().resetDiceRoll();
+  usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
 });
+
+it("counts the static fallback down from when it shows, not from the landing timeout", async () => {
+  // At this speed each roll's countdown is 800 ms. A fallback face that never
+  // reported its landing would hold its roll for the 8 s landing timeout.
+  usePreferencesStore.setState({ animationSpeedMultiplier: 0.25 });
+  render(<DiceRollOverlay />);
+
+  await act(async () => {
+    useUiStore.getState().flashDiceRoll({ kind: "coin", playerId: 0, won: true, context: "ability" });
+    useUiStore.getState().flashDiceRoll({
+      kind: "die", context: "ability", sides: 20, rolls: [{ playerId: 0, value: 17 }],
+    });
+    await Promise.resolve();
+  });
+
+  expect(await screen.findByText(/you won the flip/i)).toBeInTheDocument();
+  expect(coinRenderer).toHaveBeenCalled();
+  await waitFor(() => expect(useUiStore.getState().diceRoll?.kind).toBe("die"), { timeout: 3000 });
+  await waitFor(() => expect(useUiStore.getState().diceRoll).toBeNull(), { timeout: 3000 });
+  expect(renderer).toHaveBeenCalled();
+}, 10_000);
 
 it("contains a throwing renderer, preserves the mounted parent state and lets Escape dismiss the overlay", async () => {
   render(<GameParent />);

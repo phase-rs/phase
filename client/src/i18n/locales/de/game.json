@@ -152,7 +152,8 @@
     "loading": "{{name}} wird geladen",
     "unimplemented": "Nicht implementiert: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Getappt"
+    "tapped": "Getappt",
+    "reloadArt": "Zum Neuladen des Artworks tippen"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
@@ -161,6 +162,8 @@
     "flip": "Umdrehen",
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
+    "reportNotSent": "Nicht gesendet",
+    "reloadArt": "Artwork neu laden",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -1552,6 +1555,7 @@
     },
     "search": {
       "title": "Bibliothek durchsuchen",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Wähle {{count}} Karte",
       "subtitleExact_other": "Wähle {{count}} Karten",
       "subtitleUpTo_one": "Wähle bis zu {{count}} Karte",
@@ -1856,6 +1860,13 @@
       "titleExact_one": "Wirf eine Karte ab",
       "titleExact_other": "Wirf {{count}} Karten ab",
       "titleWard": "Schutz — Wirf eine Karte ab",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Schutz",
+        "connive": "Tricksen",
+        "additionalCost": "Zusätzliche Kosten",
+        "manaAbility": "Manafähigkeit"
+      },
       "subtitleUpTo_one": "Wähle bis zu {{count}} Karte zum Abwerfen",
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten zum Abwerfen",
       "subtitleUnless": "Wähle {{count}} Karten oder 1 passende Karte zum Abwerfen",
@@ -2441,6 +2452,9 @@
     "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
     "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Gedrückt halten, um die ganze Karte zu sehen"
+  },
   "optionalEffect": {
     "sourceFallback": "Effekt",
     "title": "{{name}} - Optionaler Effekt",
@@ -2555,7 +2569,7 @@
     "appliedLast": "Zuletzt angewendet — dieser gilt",
     "resultLabel": "Ergebnis: {{outcome}}",
     "confirmOrder": "Reihenfolge bestätigen",
-    "dragHint": "Zum Umsortieren ziehen oder die Pfeile benutzen.",
+    "dragHint": "Zum Umsortieren am Griff <grip>⠿</grip> ziehen oder die Pfeile benutzen.",
     "chooseSubtitle": "Wähle, welcher Ersatzeffekt angewendet wird.",
     "candidateFallback": "Ersatzeffekt {{number}}",
     "orderSubtitleComposing": "Diese Effekte ändern alle, wie dieses Ereignis geschieht. Ziehe, um die Reihenfolge festzulegen — jeder wird angewendet, die Reihenfolge ändert das Ergebnis (CR 616.1).",
@@ -2564,6 +2578,7 @@
     "composesNote": "Jeder Effekt wird angewendet — die Reihenfolge ändert ihre Kombination.",
     "moveUpNamed": "{{name}} nach vorne verschieben",
     "moveDownNamed": "{{name}} nach hinten verschieben",
+    "dragHandleNamed": "{{name}} zum Umsortieren ziehen",
     "positionAnnounce": "Position {{position}} von {{total}}"
   },
   "retargetChoice": {
@@ -2689,6 +2704,20 @@
     "EndCombat": "Kampfende",
     "PostCombatMain": "Hauptphase 2",
     "End": "Endschritt",
+    "Cleanup": "Aufräumen"
+  },
+  "phaseShortName": {
+    "Untap": "Enttappen",
+    "Upkeep": "Versorgung",
+    "Draw": "Ziehen",
+    "PreCombatMain": "Haupt 1",
+    "BeginCombat": "Kampf",
+    "DeclareAttackers": "Angreifer",
+    "DeclareBlockers": "Blocker",
+    "CombatDamage": "Schaden",
+    "EndCombat": "Kampfende",
+    "PostCombatMain": "Haupt 2",
+    "End": "Ende",
     "Cleanup": "Aufräumen"
   },
   "counterMoveDistribution": {

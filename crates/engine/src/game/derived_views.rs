@@ -5840,10 +5840,12 @@ mod tests {
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(2),
             anchor: PlayerId(0),
+            id: crate::types::identifiers::ExtraTurnId(1),
         });
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(0),
             anchor: PlayerId(0),
+            id: crate::types::identifiers::ExtraTurnId(2),
         });
 
         let views = derive_views(&state, None);

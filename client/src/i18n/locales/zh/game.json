@@ -454,6 +454,7 @@
     "dfc": "双面牌",
     "faceDownName": "面朝下的牌",
     "loading": "正在加载{{name}}",
+    "reloadArt": "点击重新加载插画",
     "tapped": "已横置",
     "unimplemented": "未实现：{{mechanics}}"
   },
@@ -593,6 +594,13 @@
       "titleSplit": "分配剩余的牌"
     },
     "discard": {
+      "instructionWithReason": "{{reason}}：{{instruction}}",
+      "reason": {
+        "additionalCost": "额外费用",
+        "connive": "筹谋",
+        "manaAbility": "法术力异能",
+        "ward": "守护"
+      },
       "subtitleExact_one": "选择{{count}}张牌弃掉",
       "subtitleExact_other": "选择{{count}}张牌弃掉",
       "subtitleKeep_one": "选择1张牌保留 —— 其余的弃掉",
@@ -884,6 +892,7 @@
       "title": "占卜"
     },
     "search": {
+      "instructionWithTitle": "{{title}}：{{instruction}}",
       "subtitleDistinctExact_one": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctExact_other": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctUpTo_one": "至多选择{{count}}张特性各不相同的牌",
@@ -2162,6 +2171,9 @@
       "title": "承诺赠礼？"
     }
   },
+  "choiceModal": {
+    "holdForFullCard": "长按查看整张牌"
+  },
   "optionalEffect": {
     "dontAskAgain": "本局游戏不再询问",
     "dontAskAgainForSameCard": "本局游戏中，对这张牌的每张同名牌都使用此选择",
@@ -2252,6 +2264,20 @@
     "PreCombatMain": "战斗前主阶段",
     "Untap": "重置步骤",
     "Upkeep": "维持步骤"
+  },
+  "phaseShortName": {
+    "BeginCombat": "战斗开始",
+    "Cleanup": "净化",
+    "CombatDamage": "战斗伤害",
+    "DeclareAttackers": "攻击",
+    "DeclareBlockers": "阻挡",
+    "Draw": "抓牌",
+    "End": "结束",
+    "EndCombat": "战斗结束",
+    "PostCombatMain": "主阶段2",
+    "PreCombatMain": "主阶段1",
+    "Untap": "重置",
+    "Upkeep": "维持"
   },
   "phaseStop": {
     "beginCombatDescription": "选择攻击者之前的最后一个优先权窗口。",
@@ -2385,7 +2411,9 @@
     "holdCtrlFront": "按住 Ctrl 以显示正面",
     "parse": "解析",
     "ptDeltaFrom": "来自{{source}}的{{delta}}",
+    "reloadArt": "重新加载插画",
     "report": "报告问题",
+    "reportNotSent": "未发送",
     "reported": "已报告 ✓",
     "rulingCount_one": "{{count}}条规则释疑",
     "rulingCount_other": "{{count}}条规则释疑",
@@ -2440,7 +2468,8 @@
     "chooseSubtitle": "选择要让哪个替代性效应生效。",
     "composesNote": "每个效应都会生效 —— 顺序会改变它们的结合方式。",
     "confirmOrder": "确认顺序",
-    "dragHint": "拖动以重新排序，或使用箭头。",
+    "dragHandleNamed": "拖动{{name}}以重新排序",
+    "dragHint": "拖动 <grip>⠿</grip> 手柄以重新排序，或使用箭头。",
     "eyebrow": "结算顺序",
     "moveDownNamed": "将{{name}}后移",
     "moveUpNamed": "将{{name}}前移",

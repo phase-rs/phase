@@ -4,7 +4,7 @@
  * asserts on the user-visible English copy, so framing bugs (e.g. "Your
  * priority" shown to a spectator) are caught at the rendered-text level.
  */
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { Phase, StackEntry, WaitingFor } from "../../../adapter/types.ts";
@@ -86,6 +86,28 @@ describe("TurnStatusLine", () => {
     expect(screen.getByRole("tooltip", { hidden: true })).toHaveTextContent(
       "Waiting for Sorin — responding to the stack",
     );
+  });
+
+  it("compact: shows only a dot and the waited-on name, and still announces the sentence", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 1 } }, state: { active_player: 1 } });
+    render(<TurnStatusLine compact />);
+    // The sentence moves to screen-reader text; the visible name is hidden from
+    // assistive tech so the live region does not read the name twice. (The
+    // reason tooltip portals to document.body, outside the region.)
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Waiting for Sorin");
+    expect(within(region).getByText("Sorin", { ignore: ".sr-only *" })).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+  });
+
+  it("compact: names the local player as You on their own decision", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } }, state: { active_player: 0 } });
+    render(<TurnStatusLine compact />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    expect(within(region).getByText("You")).toHaveAttribute("aria-hidden", "true");
   });
 
   it("never frames the decision as the spectator's own", () => {
