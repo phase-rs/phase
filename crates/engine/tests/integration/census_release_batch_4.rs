@@ -4,8 +4,9 @@
 //! loaded from the card database through `add_real_card`) and is driven through the public
 //! cast / pass-priority / choose-target actions of `GameRunner` on a three-player table, so that the
 //! "for each opponent" fan-out has two opponents to serve and a caster whose own permanents must
-//! never be offered. Only textless filler creatures, tokens-by-the-engine and plain lands are
-//! synthetic; the support cards that carry an ability (Murder, Tropical Island) are printed cards.
+//! never be offered. Only textless fillers (vanilla creatures, one with a Knight subtype, textless
+//! artifacts and enchantments) and plain lands are synthetic; the support cards that carry an
+//! ability (Murder, Tropical Island) are printed cards.
 //!
 //! Each shape asserts the announced slot structure first (CR 601.2c, CR 603.3d: one player slot and
 //! one object slot per opponent, the object slot offering exactly that opponent's eligible
@@ -30,8 +31,7 @@ use crate::support::shared_card_db;
 const P2: PlayerId = PlayerId(2);
 
 /// Pool mana for every printed cost used below (CR 106.4), so that a cast pays exactly its printed
-/// cost and never taps a land the test needs untapped. Murder, the one second spell, is paid from
-/// the same pool, hence the surplus of black.
+/// cost and never taps a land the test needs untapped.
 fn pool() -> Vec<ManaUnit> {
     let mut kinds = Vec::new();
     for kind in [
