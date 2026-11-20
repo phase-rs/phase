@@ -1,15 +1,15 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, PlayerFilter,
+    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceScope,
     MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume,
-    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, WaitingFor,
-    WardSacrificePaymentResume,
+    PendingPlayerScopeUnlessPayment, PendingPlayerScopeUnlessPunishment,
+    ResolutionOptionalPaymentOption, WaitingFor, WardSacrificePaymentResume,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -988,6 +988,77 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
     true
 }
 
+/// CR 101.4 + CR 118.12a: Begin the one-poll-per-player form of a scoped
+/// "punishment unless they pay a cost" instruction. The normal player-scope
+/// driver cannot own this grammar: it would apply the punishment per seat
+/// immediately, whereas CR 101.4 requires all choices to be made in APNAP
+/// order (with later players seeing earlier choices) before any payment or
+/// punishment resolves. This covers cards like:
+/// - Hag of Ceaseless Torment: "each opponent loses 3 life unless that player sacrifices a nonland permanent or discards a card"
+/// - Bellowing Mauler: "each player loses 4 life unless they sacrifice a nontoken creature of their choice"
+pub(crate) fn begin_player_scope_unless_punishment(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    players: Vec<PlayerId>,
+    after_scope: Option<Box<ResolvedAbility>>,
+    scope: &PlayerFilter,
+) -> bool {
+    let Some(modifier) = ability.unless_pay.as_ref() else {
+        return false;
+    };
+    // The payer must be ScopedPlayer (bound per iteration by the fan-out).
+    if !matches!(modifier.payer, TargetFilter::ScopedPlayer) {
+        return false;
+    }
+    // The effect must be a punishment (LoseLife) that applies to each decliner.
+    // We accept any effect here; the key is that the cost is paid to AVOID it.
+    // The cost can be Sacrifice, Discard, PayLife, Mana, etc.
+    let Some((current_player, remaining_players)) = players.split_first() else {
+        return false;
+    };
+
+    // Build the punishment effect: the original effect with player_scope and unless_pay cleared.
+    let mut punishment_effect = ability.clone();
+    punishment_effect.player_scope = None;
+    punishment_effect.unless_pay = None;
+    // The punishment effect targets the scoped player (who declined).
+    // For LoseLife, the target is already the scoped player via the fan-out binding.
+    // We don't need to modify the effect's targets.
+
+    state.pending_player_scope_unless_punishment =
+        Some(Box::new(PendingPlayerScopeUnlessPunishment {
+            punishment_effect: Box::new(punishment_effect),
+            cost: modifier.cost.clone(),
+            remaining_players: remaining_players.to_vec(),
+            declining_players: Vec::new(),
+            paying_players: Vec::new(),
+            sacrifice_choices: Vec::new(),
+            discard_choices: Vec::new(),
+            current_player: *current_player,
+            original_controller: ability.original_controller.unwrap_or(ability.controller),
+            player_scope: scope.clone(),
+            after_scope,
+            resolving_entry: state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+        }));
+    set_player_scope_unless_punishment_waiting_for(state);
+    true
+}
+
+fn set_player_scope_unless_punishment_waiting_for(state: &mut GameState) {
+    let pending = state
+        .pending_player_scope_unless_punishment
+        .as_ref()
+        .expect("player-scope unless punishment prompt requires aggregate state");
+    state.waiting_for = WaitingFor::UnlessPayment {
+        player: pending.current_player,
+        cost: pending.cost.clone(),
+        pending_effect: pending.punishment_effect.clone(),
+        trigger_event: None,
+        effect_description: None,
+        remaining: Vec::new(),
+    };
+}
+
 fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
     let pending = state
         .pending_player_scope_unless_payment
@@ -1071,6 +1142,127 @@ pub(crate) fn settle_eliminated_player_scope_token_unless_payment(
     settle_player_scope_token_unless_payment(state, pending, events)
 }
 
+/// CR 101.4 + CR 118.12a: Advance the player-scope unless punishment poll after
+/// a player has made their choice (pay or decline). Collect the choice, prompt
+/// the next player, or settle all payments and punishments when done.
+fn advance_player_scope_unless_punishment(
+    state: &mut GameState,
+    player: PlayerId,
+    paid: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(mut pending) = state.pending_player_scope_unless_punishment.take() else {
+        unreachable!("player-scope unless punishment settlement requires aggregate state")
+    };
+    if !paid {
+        pending.declining_players.push(player);
+    } else {
+        pending.paying_players.push(player);
+        // The actual payment details (which permanent to sacrifice, which card to discard)
+        // are collected via the WardSacrificeChoice / WardDiscardChoice prompts which
+        // are handled separately and feed back into this state.
+    }
+    // Filter out eliminated players.
+    pending.remaining_players.retain(|player| {
+        state
+            .players
+            .get(player.0 as usize)
+            .is_some_and(|candidate| !candidate.is_eliminated)
+    });
+    if let Some((next, rest)) = pending.remaining_players.split_first() {
+        pending.current_player = *next;
+        pending.remaining_players = rest.to_vec();
+        state.pending_player_scope_unless_punishment = Some(pending);
+        set_player_scope_unless_punishment_waiting_for(state);
+        return Ok(state.waiting_for.clone());
+    }
+
+    settle_player_scope_unless_punishment(state, pending, events)
+}
+
+/// CR 101.4 + CR 118.12a: After all players have chosen, resolve all payments
+/// (sacrifices, discards, life payments) simultaneously, then resolve all
+/// punishments (life loss) simultaneously for decliners.
+fn settle_player_scope_unless_punishment(
+    state: &mut GameState,
+    pending: Box<PendingPlayerScopeUnlessPunishment>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // Clear the UnlessPayment prompt before resolving payments/punishments.
+    set_active_priority(state);
+
+    // First, execute all deferred sacrifices simultaneously.
+    // The choices were collected via WardSacrificeChoice but not executed.
+    for (player, permanents) in &pending.sacrifice_choices {
+        for &perm_id in permanents {
+            // Check the permanent still exists and is controlled by the player.
+            if let Some(perm) = state.objects.get(&perm_id) {
+                if perm.controller == *player {
+                    crate::game::sacrifice::sacrifice_permanent(state, perm_id, *player, events)?;
+                }
+            }
+        }
+    }
+
+    // Execute all deferred discards simultaneously.
+    for (player, cards) in &pending.discard_choices {
+        for &card_id in cards {
+            if let Some(card) = state.objects.get(&card_id) {
+                if card.controller == *player && card.zone == crate::types::zones::Zone::Hand {
+                    effects::discard::complete_discard_to_graveyard(
+                        state,
+                        card_id,
+                        *player,
+                        Some(pending.punishment_effect.source_id),
+                        None,
+                        std::collections::HashSet::new(),
+                        events,
+                    );
+                }
+            }
+        }
+    }
+
+    // PayLife/Mana/Other costs were paid inline during handle_unless_payment.
+    // They are already resolved.
+
+    // Resolve punishments for decliners.
+    if !pending.declining_players.is_empty() {
+        // The punishment effect is resolved once per decliner.
+        // We need to bind the effect to each decliner and resolve.
+        for decliner in &pending.declining_players {
+            let mut effect = (*pending.punishment_effect).clone();
+            // Bind the effect to this decliner.
+            effect.set_controller_recursive(*decliner);
+            effect.set_scoped_player_recursive(*decliner);
+            effect.set_original_controller_recursive(pending.original_controller);
+            effects::resolve_ability_chain(state, &effect, events, 0)
+                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+        }
+    }
+
+    // Run the after-scope continuation if present.
+    if let Some(after_scope) = pending.after_scope {
+        effects::resolve_ability_chain(state, &after_scope, events, 0)
+            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+    }
+
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 800.4a + CR 101.4: After eliminating a player during the punishment poll,
+/// settle the remaining punishments.
+pub(crate) fn settle_eliminated_player_scope_unless_punishment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let pending = state
+        .pending_player_scope_unless_punishment
+        .take()
+        .expect("elimination settlement requires aggregate state");
+    settle_player_scope_unless_punishment(state, pending, events)
+}
+
 fn finish_player_scope_token_unless_payment(
     state: &mut GameState,
     player: PlayerId,
@@ -1120,6 +1312,196 @@ fn handle_player_scope_token_unless_payment(
     Ok(action_result(events, state.waiting_for.clone()))
 }
 
+fn handle_player_scope_unless_punishment(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let WaitingFor::UnlessPayment { player, cost, .. } = waiting_for else {
+        unreachable!("aggregate punishment uses UnlessPayment")
+    };
+    if !pay {
+        // Player declined - advance the poll (they'll suffer the punishment at settlement).
+        return finish_player_scope_unless_punishment(state, player, false, events);
+    }
+
+    // Player chose to pay. The cost can be Sacrifice, Discard, PayLife, Mana, etc.
+    // For Sacrifice and Discard, we need to prompt for the specific choice.
+    // For PayLife/Mana, we pay inline and advance.
+    match cost {
+        AbilityCost::Sacrifice(sac_cost) => {
+            let pending_effect = state
+                .pending_player_scope_unless_punishment
+                .as_ref()
+                .expect("aggregate state remains live while payment is prompted")
+                .punishment_effect
+                .clone();
+            let eligible = eligible_unless_sacrifice_permanents(
+                state,
+                player,
+                pending_effect.source_id,
+                &sac_cost.target,
+            );
+            if eligible.is_empty() {
+                return finish_player_scope_unless_punishment(state, player, false, events);
+            }
+            // Determine the count needed.
+            let count = match sac_cost.requirement {
+                SacrificeRequirement::Count { count } => count,
+                _ => 1, // Default to 1 for aggregate requirements
+            };
+            state.waiting_for = WaitingFor::WardSacrificeChoice {
+                player,
+                permanents: eligible,
+                pending_effect,
+                remaining: count,
+                min_total_power: None,
+            };
+            Ok(action_result(events, state.waiting_for.clone()))
+        }
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection,
+            self_scope: _,
+        } => {
+            let pending_effect = state
+                .pending_player_scope_unless_punishment
+                .as_ref()
+                .expect("aggregate state remains live while payment is prompted")
+                .punishment_effect
+                .clone();
+            let resolved_count = crate::game::quantity::resolve_quantity_with_targets(
+                state,
+                &count,
+                pending_effect.as_ref(),
+            );
+            let count = u32::try_from(resolved_count.max(0)).unwrap_or(0);
+
+            let hand_cards = crate::game::casting::find_eligible_discard_targets(
+                state,
+                player,
+                pending_effect.source_id,
+                pending_effect.context.granting_object,
+                filter.as_ref(),
+            );
+            if (hand_cards.len() as u32) < count {
+                return finish_player_scope_unless_punishment(state, player, false, events);
+            } else if count == 0 {
+                // Zero-count discard is auto-paid.
+                return finish_player_scope_unless_punishment(state, player, true, events);
+            } else if selection.is_random() {
+                // Random discard - pay inline.
+                match crate::game::effects::discard::discard_at_random(
+                    state,
+                    crate::game::effects::discard::RandomDiscardRequest {
+                        player,
+                        source_id: pending_effect.source_id,
+                        count: count as usize,
+                        eligible: hand_cards,
+                        cause: crate::game::effects::discard::DiscardCause::Cost,
+                        discard_frame: None,
+                    },
+                    events,
+                ) {
+                    crate::game::effects::discard::RandomDiscardOutcome::Completed { .. } => {
+                        finish_player_scope_unless_punishment(state, player, true, events)
+                    }
+                    crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
+                        remaining_eligible,
+                        remaining_count,
+                        ..
+                    } => {
+                        // Store the resume state for the punishment poll.
+                        state.pending_cost_move_resume = Some(
+                            crate::types::game_state::PendingCostMoveResume::RandomDiscardUnlessPayment(
+                                Box::new(
+                                    crate::types::game_state::RandomDiscardUnlessPaymentResume {
+                                        source_id: pending_effect.source_id,
+                                        pending_effect: pending_effect.clone(),
+                                        trigger_event: None,
+                                        payer: player,
+                                        remaining_eligible,
+                                        remaining_count: remaining_count as u32,
+                                    },
+                                ),
+                            ),
+                        );
+                        Ok(action_result(events, state.waiting_for.clone()))
+                    }
+                }
+            } else {
+                state.waiting_for = WaitingFor::WardDiscardChoice {
+                    player,
+                    cards: hand_cards,
+                    pending_effect,
+                    remaining: count,
+                    filter: filter.clone(),
+                };
+                Ok(action_result(events, state.waiting_for.clone()))
+            }
+        }
+        AbilityCost::PayLife { .. }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::EffectCost { .. } => {
+            // These costs are paid inline through the payment authority.
+            // We delegate to the standard handle_unless_payment but with a flag
+            // to indicate we're in a punishment poll.
+            // For now, pay inline and advance.
+            let pending_effect = state
+                .pending_player_scope_unless_punishment
+                .as_ref()
+                .expect("aggregate state remains live while payment is prompted")
+                .punishment_effect
+                .clone();
+            match super::costs::pay_ability_cost_for_resolution(
+                state,
+                player,
+                &cost,
+                pending_effect.as_ref(),
+                events,
+            )? {
+                super::costs::PaymentOutcome::Paid => {
+                    finish_player_scope_unless_punishment(state, player, true, events)
+                }
+                super::costs::PaymentOutcome::Failed { .. } => {
+                    finish_player_scope_unless_punishment(state, player, false, events)
+                }
+                super::costs::PaymentOutcome::Paused { .. } => {
+                    // Store resume state.
+                    state.pending_cost_move_resume = Some(
+                        crate::types::game_state::PendingCostMoveResume::CounterAdditionUnlessPayment {
+                            cost: cost.clone(),
+                            pending_effect,
+                            trigger_event: None,
+                            effect_description: None,
+                            remaining: Vec::new(),
+                        },
+                    );
+                    Ok(action_result(events, state.waiting_for.clone()))
+                }
+            }
+        }
+        _ => {
+            // Unsupported cost type for punishment poll - treat as decline.
+            finish_player_scope_unless_punishment(state, player, false, events)
+        }
+    }
+}
+
+fn finish_player_scope_unless_punishment(
+    state: &mut GameState,
+    player: PlayerId,
+    paid: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let waiting_for = advance_player_scope_unless_punishment(state, player, paid, events)?;
+    Ok(action_result(events, waiting_for))
+}
+
 pub(super) fn handle_unless_payment(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -1139,6 +1521,20 @@ pub(super) fn handle_unless_payment(
         })
     {
         return handle_player_scope_token_unless_payment(state, waiting_for, pay, events);
+    }
+    if state
+        .pending_player_scope_unless_punishment
+        .as_ref()
+        .is_some_and(|pending| {
+            matches!(
+                &waiting_for,
+                WaitingFor::UnlessPayment { player, pending_effect, .. }
+                    if *player == pending.current_player
+                        && pending_effect.source_id == pending.punishment_effect.source_id
+            )
+        })
+    {
+        return handle_player_scope_unless_punishment(state, waiting_for, pay, events);
     }
     let WaitingFor::UnlessPayment {
         player,
@@ -2425,6 +2821,23 @@ pub(super) fn handle_ward_discard_choice(
         ));
     };
 
+    // CR 101.4 + CR 118.12a: If we're in a player-scope unless punishment poll,
+    // defer the discard until all choices are collected. Store the choice
+    // and advance the punishment poll.
+    if let Some(pending) = state.pending_player_scope_unless_punishment.as_mut() {
+        if pending.current_player == player {
+            if chosen.len() != 1 || !legal_cards.contains(&chosen[0]) {
+                return Err(EngineError::InvalidAction(
+                    "Must select exactly one card to discard".to_string(),
+                ));
+            }
+            // Store the choice for later simultaneous execution.
+            pending.discard_choices.push((player, chosen));
+            // Advance the punishment poll (this will prompt the next player or settle).
+            return advance_player_scope_unless_punishment(state, player, true, events);
+        }
+    }
+
     if chosen.len() != 1 || !legal_cards.contains(&chosen[0]) {
         return Err(EngineError::InvalidAction(
             "Must select exactly one card to discard".to_string(),
@@ -2835,6 +3248,24 @@ pub(super) fn handle_ward_sacrifice_choice(
             "Not waiting for ward sacrifice choice".to_string(),
         ));
     };
+
+    // CR 101.4 + CR 118.12a: If we're in a player-scope unless punishment poll,
+    // defer the sacrifice until all choices are collected. Store the choice
+    // and advance the punishment poll.
+    if let Some(pending) = state.pending_player_scope_unless_punishment.as_mut() {
+        if pending.current_player == player {
+            // Validate the choice.
+            if chosen.len() != 1 || !permanents.contains(&chosen[0]) {
+                return Err(EngineError::InvalidAction(
+                    "Must select exactly one permanent to sacrifice".to_string(),
+                ));
+            }
+            // Store the choice for later simultaneous execution.
+            pending.sacrifice_choices.push((player, chosen));
+            // Advance the punishment poll (this will prompt the next player or settle).
+            return advance_player_scope_unless_punishment(state, player, true, events);
+        }
+    }
 
     if let Some(threshold) = min_total_power {
         // CR 118.12a: Validate that the chosen permanents are unique and meet the aggregate constraint.

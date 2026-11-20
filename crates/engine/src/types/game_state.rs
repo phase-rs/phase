@@ -27,11 +27,11 @@ use super::ability::{
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DelayedTriggerKind,
     DigRestOrder, DigRestSplitScope, Duration, EffectKind, EntryAttackDestination, FaceDownProfile,
     GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    ReturnResultId, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
-    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
-    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    PermanentEntryMode, PileSource, PlayerFilter, QuantityExpr, ReplacementDefinition,
+    ResolvedAbility, ReturnResultId, SearchDestinationSplit, SearchOrderingHint,
+    SearchSelectionConstraint, StackAbilityKind, StaticCondition, TapCreaturesSelectionMode,
+    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -5554,6 +5554,44 @@ pub struct PendingPlayerScopeUnlessPayment {
     pub current_player: PlayerId,
     /// The typed sacrifice cost is retained to re-emit the next existing prompt.
     pub cost: AbilityCost,
+}
+
+/// CR 101.4 + CR 118.12a: An APNAP poll for a player-scoped "unless" instruction
+/// where each player may pay a cost to avoid a punishment effect. All choices are
+/// collected in APNAP order, then all payments are resolved, then all punishments
+/// apply simultaneously. This covers cards like Hag of Ceaseless Torment and
+/// Bellowing Mauler: "each opponent loses N life unless that player sacrifices
+/// a nonland permanent or discards a card" / "each player loses N life unless
+/// they sacrifice a nontoken creature".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeUnlessPunishment {
+    /// The scoped ability template with the punishment effect (e.g., LoseLife).
+    /// This is resolved once per decliner after all choices are collected.
+    pub punishment_effect: Box<ResolvedAbility>,
+    /// The unless cost that players may pay to avoid the punishment.
+    pub cost: AbilityCost,
+    /// Seats still to answer in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Seats that declined (will suffer the punishment).
+    pub declining_players: Vec<PlayerId>,
+    /// Seats that paid (with their chosen payment details).
+    pub paying_players: Vec<PlayerId>,
+    /// For sacrifice costs: the chosen permanents per paying player.
+    pub sacrifice_choices: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// For discard costs: the chosen cards per paying player.
+    pub discard_choices: Vec<(PlayerId, Vec<ObjectId>)>,
+    /// The seat whose choice prompt is currently live.
+    pub current_player: PlayerId,
+    /// The original controller of the ability (for "you" references).
+    pub original_controller: PlayerId,
+    /// The player scope filter (to re-evaluate matching players if needed).
+    pub player_scope: PlayerFilter,
+    /// The after-scope continuation to run after the punishment resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_scope: Option<Box<ResolvedAbility>>,
+    /// CR 608.2c: the stack entry whose resolution opened this collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_entry: Option<ObjectId>,
 }
 
 /// CR 101.4 + CR 701.21a: Accumulated terminal state for a simultaneous
@@ -24770,6 +24808,11 @@ declare_game_state! {
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
+    /// CR 101.4 + CR 118.12a: An APNAP poll for a player-scoped "unless"
+    /// punishment instruction. Choices are collected from all affected players
+    /// before any payment or punishment resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_unless_punishment: Option<Box<PendingPlayerScopeUnlessPunishment>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -32809,6 +32852,7 @@ impl GameState {
             repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
+            pending_player_scope_unless_punishment: None,
             pending_discard_batch: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
@@ -37005,6 +37049,8 @@ impl PartialEq for GameState {
                 == other.pending_player_scope_sacrifice_choice
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
+            && self.pending_player_scope_unless_punishment
+                == other.pending_player_scope_unless_punishment
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink

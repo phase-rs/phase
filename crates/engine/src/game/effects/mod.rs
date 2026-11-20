@@ -22101,6 +22101,22 @@ fn resolve_chain_body(
         ) {
             return Ok(ResolutionProgress::Waiting);
         }
+        // CR 101.4 + CR 118.12a: A scoped punishment instruction whose each
+        // player may avert by paying a cost (sacrifice, discard, pay life, etc.)
+        // has one aggregate outcome: all choices in APNAP order, then all
+        // payments simultaneously, then all punishments simultaneously.
+        // The after_scope continuation (instructions after the clause) will be
+        // handled by the coordinator at settlement time. For now we pass None
+        // as these cards have no continuation; if needed, split the chain earlier.
+        if crate::game::engine_payment_choices::begin_player_scope_unless_punishment(
+            state,
+            ability,
+            matching_players.clone(),
+            None,
+            scope,
+        ) {
+            return Ok(ResolutionProgress::Waiting);
+        }
         // Inspect the original child chain before splitting it. The splitter
         // intentionally detaches a final searched-this-way shuffle, but it can
         // also detach arbitrary delivery riders; only the former is explicitly
