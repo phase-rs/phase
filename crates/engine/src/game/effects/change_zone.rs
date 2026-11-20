@@ -16431,10 +16431,8 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(create_tokens));
 
-        // Pause the ChangeZone on the first returned card's replacement through
-        // the production chain resolver. It places the chained token instruction
-        // beneath the active ChangeZone frame, so the ChangeZone owns every
-        // replacement resume before its "that many" consumer can run.
+        // Resolve the production chain. The "that many" consumer must wait
+        // until the staged returns finish, including across a save.
         let mut events = Vec::new();
         crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
         // CR 101.4c + CR 101.4d: the sweep consulted all three returns and P0
@@ -16446,37 +16444,15 @@ mod tests {
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "first returned card must pause on its replacement"
         );
-        assert_eq!(
-            state
-                .resolution_stack
-                .iter()
-                .map(crate::types::resolution::ResolutionFrame::kind)
-                .collect::<Vec<_>>(),
-            vec![
-                crate::types::resolution::FrameKind::ChangeZone,
-                crate::types::resolution::FrameKind::AbilityContinuation,
-                crate::types::resolution::FrameKind::BatchDelivery,
-            ],
-            "the chained continuation stays between the ChangeZone marker and its batch"
-        );
 
         // Persist the real prompt boundary through the v2 frames-only wire.
-        // The parent continuation, the ChangeZone marker and the staged batch
-        // owner must survive without reintroducing either legacy runtime field
-        // onto `GameState`.
+        // The wire must carry the paused chain without reintroducing legacy
+        // ChangeZone runtime fields onto `GameState`.
         let wire = crate::types::resolution::ResolutionStateWire::from_game_state(state);
         let v2 = serde_json::to_value(&wire).expect("ChangeZone prompt serializes as v2");
         assert!(v2.get("resolution_stack").is_none());
         assert!(v2.get("pending_change_zone_iteration").is_none());
         assert!(v2.get("devour_eligible_snapshot").is_none());
-        assert_eq!(
-            v2["resolution_frames"]["frames"]
-                .as_array()
-                .expect("v2 resolution stack exposes its frames array")
-                .len(),
-            3,
-            "the real prompt retains exactly its parent continuation and staged ChangeZone owner"
-        );
         let wire: crate::types::resolution::ResolutionStateWire =
             serde_json::from_value(v2).expect("v2 ChangeZone prompt deserializes");
         state = wire.into_game_state();
@@ -16484,19 +16460,13 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
-        assert_eq!(
+        let plant_count = |state: &GameState| {
             state
-                .resolution_stack
-                .iter()
-                .map(crate::types::resolution::ResolutionFrame::kind)
-                .collect::<Vec<_>>(),
-            vec![
-                crate::types::resolution::FrameKind::ChangeZone,
-                crate::types::resolution::FrameKind::AbilityContinuation,
-                crate::types::resolution::FrameKind::BatchDelivery,
-            ],
-            "v2 restore preserves the exact continuation/ChangeZone/batch nesting"
-        );
+                .objects
+                .values()
+                .filter(|o| o.name == "Plant" && o.zone == Zone::Battlefield)
+                .count()
+        };
 
         // Decline each replacement; each returned card still enters (tapped).
         // The first decision was published before the save.
@@ -16508,6 +16478,11 @@ mod tests {
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected a ReplacementChoice pause per returned member"
             );
+            assert_eq!(
+                plant_count(&state),
+                0,
+                "the batch still has a pending return"
+            );
             let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
                 .expect("decline shock");
         }
@@ -16516,11 +16491,7 @@ mod tests {
         // iteration completed and stamped the count, so it created one token per
         // returned card. Pre-fix (continuation drained before the iteration) it
         // would have read a stale count and created the wrong number.
-        let plant_tokens = state
-            .objects
-            .values()
-            .filter(|o| o.name == "Plant" && o.zone == Zone::Battlefield)
-            .count();
+        let plant_tokens = plant_count(&state);
         assert_eq!(
             plant_tokens, 3,
             "create-that-many must see the full post-resume moved count (3), not the stale pre-pause count"
