@@ -16472,12 +16472,45 @@ fn optionality_is_per_iteration(state: &GameState, ability: &ResolvedAbility) ->
 /// `PayLife` excludes "pay any amount of life" (`is_pay_any_amount`): X is chosen at
 /// payment and 0 is always payable (CR 119.4b), so it is never impossible.
 /// A spoken Un-action payment is infeasible for a payer who has not opted in.
+///
+/// For `Composite` costs (conjoined payments like "pay {1} and discard a card"),
+/// affordability is decidable when every sub-cost is decidable. For `OneOf`
+/// costs (alternative payments), affordability is decidable when at least one
+/// branch is decidable (since the player can choose that branch).
 fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
-    matches!(
-        cost,
-        AbilityCost::TapCreatures { .. } | AbilityCost::SayPhrase { .. }
-    ) || matches!(cost, AbilityCost::PayLife { amount }
-            if !crate::types::ability::is_pay_any_amount(amount))
+    // Check leaf costs whose affordability `can_pay_resolution` can decide without
+    // interactive prompts.
+    let is_decidable_leaf = match cost {
+        AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::GetPlayerCounters { .. } => true,
+        AbilityCost::Discard {
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            ..
+        } => true,
+        AbilityCost::Exile { filter, .. } => !matches!(filter, Some(crate::types::ability::TargetFilter::SelfRef)),
+        AbilityCost::Sacrifice(cost) => {
+            !matches!(cost.target, crate::types::ability::TargetFilter::SelfRef)
+                && cost.requirement.fixed_count().is_some()
+        }
+        AbilityCost::EffectCost { .. } => cost.supports_effect_cost_payment(),
+        _ => false,
+    };
+
+    // `PayLife` with "any amount" (X) is always payable (0 is legal), so it's
+    // never impossible and doesn't need a feasibility gate.
+    let is_pay_life_fixed = matches!(cost, AbilityCost::PayLife { amount }
+        if !crate::types::ability::is_pay_any_amount(amount));
+
+    is_decidable_leaf
+        || is_pay_life_fixed
+        || matches!(cost, AbilityCost::Composite { costs } if costs.iter().all(optional_pay_cost_affordability_is_decidable))
+        || matches!(cost, AbilityCost::OneOf { costs } if costs.iter().any(optional_pay_cost_affordability_is_decidable))
 }
 
 /// CR 608.2d: "A player can't choose an impossible option." An optional effect
