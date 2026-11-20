@@ -715,6 +715,9 @@ pub struct UnblockedAttackPreview {
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// Chooser-private ranking for an unrestricted creature-type prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_choice_suggestions: Vec<String>,
     /// The sole player currently authorized to answer the live prompt. Omitted
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2441,6 +2444,35 @@ pub fn derive_filtered_views(
     viewer: Option<PlayerId>,
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
+    // CR 400.2: deck composition includes hidden library and hand information.
+    // Derive only from authority, and disclose only to the prompt owner while
+    // they submit their own choice. CR 723.4: under turn control, information
+    // about cards outside the game stays visible only to the controlled
+    // player, so a controller submitting for them gets no pool suggestions.
+    views.named_choice_suggestions = match (&authoritative_state.waiting_for, viewer) {
+        (
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: crate::types::ability::ChoiceType::CreatureType { options },
+                options: legal_options,
+                ..
+            },
+            Some(viewer),
+        ) if options.is_empty()
+            && *player == viewer
+            && crate::game::interaction::interaction_submitter_for_owner(
+                authoritative_state,
+                *player,
+            ) == viewer =>
+        {
+            crate::game::effects::choose::suggested_creature_types(
+                authoritative_state,
+                *player,
+                legal_options,
+            )
+        }
+        _ => Vec::new(),
+    };
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
     // CR 702.24a: whether the prompt continues a payment already begun is read
     // from the payment's parked owner, which the viewer projection drops.

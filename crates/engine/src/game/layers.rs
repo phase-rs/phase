@@ -5487,6 +5487,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -9761,6 +9762,8 @@ fn gather_transient_continuous_effects_with(
             // `static_abilities::transient_cant_be_targeted_prohibits`, so it is
             // not an ability on the recipient and "loses all abilities" cannot
             // clear it.
+            // CR 611.2c + CR 101.2: CantBeCountered is likewise a live rule
+            // prohibition, not an ability that can be removed from its recipient.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
@@ -9768,7 +9771,8 @@ fn gather_transient_continuous_effects_with(
                         | StaticMode::ReduceAbilityCost { .. }
                         | StaticMode::CastFromHandFree { .. }
                         | StaticMode::Goaded
-                        | StaticMode::CantBeTargeted { .. },
+                        | StaticMode::CantBeTargeted { .. }
+                        | StaticMode::CantBeCountered,
                 }
             ) {
                 continue;

@@ -7569,6 +7569,11 @@ pub enum FilterProp {
     /// (land play) or cast (spell), excluding tokens put directly onto the
     /// battlefield without a prior zone.
     WasPlayed,
+    /// CR 601.2i + CR 707.10: the candidate was cast by the scoped player
+    /// in the current turn's journal; an uncast spell copy does not qualify.
+    CastThisTurn {
+        caster: ControllerRef,
+    },
     /// CR 508.1b: Matches attacking creatures, optionally scoped by which player
     /// the creature is attacking.
     Attacking {
@@ -8308,6 +8313,7 @@ impl FilterProp {
             | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
             | FilterProp::Attacking { .. }
             | FilterProp::Blocking
             | FilterProp::BlockingSource
@@ -9532,6 +9538,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -9786,6 +9793,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -10087,6 +10095,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
             | FilterProp::Attacking { .. }
             | FilterProp::Blocking
             | FilterProp::BlockingSource
@@ -10750,6 +10759,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -13217,7 +13227,8 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
             }
             AttachmentReferent::Source | AttachmentReferent::Recipient => false,
         },
-        FilterProp::ProtectorMatches { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
@@ -27905,9 +27916,17 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Controller | TargetFilter::Player | TargetFilter::ScopedPlayer => true,
         TargetFilter::Typed(tf) => {
-            tf.type_filters == [TypeFilter::Permanent]
+            (tf.type_filters == [TypeFilter::Permanent]
                 && tf.controller.is_some()
-                && tf.properties.is_empty()
+                && tf.properties.is_empty())
+                // CR 115.1 + CR 702.26b: "each creature target player controls
+                // phases out" (Galadriel's Dismissal, Teferi, Timeless
+                // Voyager) declares the PLAYER as the target; the creature
+                // population is expanded from that anchor at resolution. The
+                // companion player slot (`ability_needs_companion_target_player_slot`)
+                // supplies the declaration, so the object filter itself must not
+                // add a second, spurious creature target slot.
+                || filter_references_target_player(filter)
         }
         _ => false,
     }
@@ -29803,6 +29822,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource

@@ -762,11 +762,38 @@ select.select-dark option {
     container-type: size;
   }
 }
+/* Card choices on a phone. Below lg, where the overlay fills the screen and a
+   sideways strip leaves the cards small, ChoiceCardGrid draws a choice's cards
+   (Search Library, the effect-zone prompts, separating into piles) in this grid,
+   which fills the width and scrolls down. React picks the grid only below lg, so
+   these rules need no media query, and a grid that is drawn is always sized.
+
+   Columns are at least 10rem, a width at which a card's rules text still reads
+   on a phone, but never so wide that fewer than two fit: every phone held
+   upright shows two (a little under 10rem each on the narrowest), and phones
+   turned sideways show three to five.
+   Each card sits in a cell ChoiceCardGrid renders, an inline-size container, so
+   100cqw resolves at the card to its cell's width: the card fills its column
+   and its height follows the 5:7 card. The cell is the grid's own element, so
+   the sizing never reaches into a card's markup. */
+.card-choice-grid {
+  display: grid;
+  grid-auto-rows: min-content;
+  grid-template-columns: repeat(auto-fill, minmax(min(10rem, calc(50% - 0.25rem)), 1fr));
+  gap: 0.5rem;
+}
+.card-choice-grid-cell {
+  --card-w: 100cqw;
+  --card-h: calc(var(--card-w) * 7 / 5);
+  display: flex;
+  container-type: inline-size;
+}
 /* CardImage's wrapper is inline-block (w-fit); as a block it drops the line-box
    gap an inline box leaves under the card. This selects the card's markup, so it
    only sets display: a markup change brings the gap back, never a wrong size. */
 .zone-viewer-strip .inline-block,
-.card-choice-strip .inline-block {
+.card-choice-strip .inline-block,
+.card-choice-grid-cell .inline-block {
   display: block;
 }
 .zone-viewer-strip > *,
