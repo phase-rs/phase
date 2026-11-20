@@ -1508,10 +1508,13 @@ mod tests {
             .declare_attackers(&[(reno, AttackTarget::Player(P1))])
             .expect("Reno and Rude attacks");
         let _ = runner.combat_damage();
-        // The trigger's "you may sacrifice" prompt is P0's; `DecideOptionalEffect`
-        // is accepted only while that prompt is pending, so the answer itself
-        // proves the prompt kind (the CR 603.5 prompt census pins every source
-        // site that names the prompt variant, so this fixture does not).
+        // The trigger's "you may sacrifice" prompt is P0's. Of the prompts that
+        // accept `DecideOptionalEffect { accept: true }` (the optional-effect,
+        // opponent-may and tribute choices), only the optional-effect choice is
+        // answered by the ability's controller, so the actor assertion and the
+        // accepted answer together identify the prompt (the CR 603.5 prompt
+        // census in `engine.rs` counts every test site that matches the variant
+        // by name, so this fixture does not).
         assert_eq!(
             runner.state().waiting_for.acting_player(),
             Some(P0),

@@ -2325,8 +2325,11 @@ pub(crate) mod finding {
     /// tracked-set filter returns the members, then the components its reader
     /// finds, and agrees with the filter predicate for every object.
     ///
-    /// Nearest printed card: Bringer of the Last Gift (sacrifice, then return
-    /// those). SYNTHETIC: no printed card exhibits a discriminating board for
+    /// Nearest printed card: Bringer of the Last Gift ("each player sacrifices
+    /// all other creatures they control. Then each player returns all creature
+    /// cards from their graveyard that weren't put there this way to the
+    /// battlefield."), whose "this way" exclusion is the predicate side of this
+    /// agreement. SYNTHETIC: no printed card exhibits a discriminating board for
     /// the enumerator alone, and the merge, the sacrifice and the resolution
     /// carrier are staged by hand.
     ///
