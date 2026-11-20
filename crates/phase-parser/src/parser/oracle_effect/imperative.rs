@@ -77,7 +77,7 @@ use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    chain_exiled_cause_binding, fold_article_led_type_union, match_mass_union_separator,
+    fold_article_led_type_union, linked_exile_return_mark, match_mass_union_separator,
     parse_anaphoric_target_ref, parse_declared_damage_source_target,
     parse_definite_parent_reference, parse_event_context_ref, parse_exiled_card_anaphor,
     parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
@@ -2527,27 +2527,15 @@ pub(super) fn parse_targeted_action_ast(
         if super::target_span_dropped_this_way_anaphor(target_text, &target) {
             return None;
         }
-        // CR 607.2a + CR 406.6: "the exiled card(s)" over a chain whose
-        // prior publishers are all non-exile (Day of the Dragons' sacrifice,
-        // Timothar's granted sacrifice, The Spot's library put) refers only to
-        // the cards the linked exile instruction put into exile, never to the
-        // chain's own members. Applied after the clause-level origin inference,
-        // so the `origin` local and the target's zone constraints stay as
-        // parsed; the set-wide lowering supplies the exile origin.
-        let d8 = exiled_anaphor.zip(chain_exiled_cause_binding(
-            ctx.chain_prior_publishers,
-            &target,
-        ));
-        let (target, is_mass) = match d8 {
-            // CR 607.2a: a plural linked-exile anaphor is the whole linked set — a
-            // set-wide move, never the single-pick ChangeZone route. The hand arm
-            // with no origin already emits Bounce, the set-wide reader (The Spot).
-            Some((AnaphorNumber::Plural, bound)) => {
-                (bound, is_mass || !(returns_to_hand && origin.is_none()))
-            }
-            Some((AnaphorNumber::Singular, bound)) => (bound, is_mass),
-            None => (target, is_mass),
-        };
+        // CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel. Whether
+        // it names only the cards the linked exile instruction exiled depends on the
+        // return's own resolution chain (CR 608.2c), and that chain is fixed only on
+        // the finished tree, after assembly and the Phase 2 passes have placed this
+        // clause on one side or the other of a delayed-trigger edge (CR 603.7c). The
+        // clause keeps this binding and carries the mark;
+        // `parser::oracle::bind_linked_exile_returns` decides it there.
+        let linked_exile_return =
+            exiled_anaphor.and_then(|number| linked_exile_return_mark(number, &target));
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;
         // mass destinations use ChangeZoneAll. Only pure mass-bounce
@@ -2585,6 +2573,7 @@ pub(super) fn parse_targeted_action_ast(
                         enters_under,
                         enter_tapped: d.enter_tapped,
                         enter_with_counters: d.enter_with_counters,
+                        linked_exile_return,
                     })
                 } else {
                     // CR 701.3a + CR 303.4f: "return … to the battlefield attached
@@ -2605,6 +2594,7 @@ pub(super) fn parse_targeted_action_ast(
                         enter_with_counters: d.enter_with_counters,
                         face_down: d.face_down,
                         attach_host,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2665,6 +2655,7 @@ pub(super) fn parse_targeted_action_ast(
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
+                        linked_exile_return,
                     })
                 } else if origin.is_some() {
                     Some(TargetedImperativeAst::ReturnToZone {
@@ -2673,12 +2664,14 @@ pub(super) fn parse_targeted_action_ast(
                         destination: Zone::Hand,
                         up_to: return_up_to,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 } else {
                     Some(TargetedImperativeAst::Return {
                         target,
                         selection,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2706,6 +2699,7 @@ pub(super) fn parse_targeted_action_ast(
                         enters_under: EntersUnderSpec::Default,
                         enter_tapped: false,
                         enter_with_counters: vec![],
+                        linked_exile_return,
                     })
                 } else {
                     Some(TargetedImperativeAst::ReturnToZone {
@@ -2714,6 +2708,7 @@ pub(super) fn parse_targeted_action_ast(
                         destination: d.zone,
                         up_to: return_up_to,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2729,6 +2724,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         selection,
                         multi_target: return_multi_target,
+                        linked_exile_return,
                     })
                 }
             }
@@ -2858,6 +2854,48 @@ pub(super) fn parse_targeted_action_ast(
     None
 }
 
+/// CR 400.7 + CR 608.2c: a set-wide return — every object of `target` moves to
+/// `destination` together. Single authority for the `ChangeZoneAll` a mass return
+/// lowers to: the `ReturnAllToZone` lowering and the finished-tree linked-exile pass
+/// (`parser::oracle::bind_linked_exile_returns`) both build it here.
+///
+/// CR 406.6 + CR 607.2a: a linked-exile population (`ExiledBySource`, or the
+/// chain set narrowed to its `Exiled`-caused members) is in exile, so it moves out
+/// of exile whatever origin the text implied.
+pub(crate) fn return_all_to_zone_effect(
+    origin: Option<Zone>,
+    destination: Zone,
+    target: TargetFilter,
+    enters_under: Option<ControllerRef>,
+    enter_tapped: crate::types::zones::EtbTapState,
+    enter_with_counters: Vec<(crate::types::counter::CounterType, QuantityExpr)>,
+) -> Effect {
+    let origin = match &target {
+        TargetFilter::ExiledBySource => Some(Zone::Exile),
+        TargetFilter::TrackedSetFiltered {
+            caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+            ..
+        } => Some(Zone::Exile),
+        _ => origin,
+    };
+    Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_tapped,
+        enters_attacking: false,
+        // CR 122.1 + CR 122.1h: each returned object enters with these
+        // counters (e.g. a finality counter on Shilgengar's mass return).
+        enter_with_counters,
+        face_down_profile: None,
+        library_position: None,
+        library_shuffle: Default::default(),
+        random_order: false,
+    }
+}
+
 pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
     match ast {
         // CR 701.26a/b: map the parser AST tap/untap variants onto the
@@ -2953,6 +2991,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             selection,
             multi_target: _,
+            linked_exile_return: _,
         } => Effect::Bounce {
             target,
             destination: None,
@@ -2983,6 +3022,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_with_counters,
             face_down,
             attach_host: _,
+            linked_exile_return: _,
         } => {
             // CR 110.2a: fail closed. A printed control clause whose
             // antecedent could not be named must NOT collapse into the
@@ -3040,6 +3080,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             destination,
             up_to,
             multi_target: _,
+            linked_exile_return: _,
         } => Effect::ChangeZone {
             actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
@@ -3064,6 +3105,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_under,
             enter_tapped,
             enter_with_counters,
+            linked_exile_return: _,
         } => {
             // CR 110.2a: fail closed on an unbindable control clause rather
             // than silently defaulting the controller for the whole moved
@@ -3074,30 +3116,14 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                     p.printed_clause(),
                 );
             }
-            let origin = match &target {
-                TargetFilter::ExiledBySource => Some(Zone::Exile),
-                TargetFilter::TrackedSetFiltered {
-                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
-                    ..
-                } => Some(Zone::Exile),
-                _ => origin,
-            };
-            Effect::ChangeZoneAll {
-                actor: crate::types::ability::LibraryInstructionActor::Controller,
+            return_all_to_zone_effect(
                 origin,
                 destination,
                 target,
-                enters_under: enters_under.as_controller_ref(),
-                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
-                enters_attacking: false,
-                // CR 122.1 + CR 122.1h: each returned object enters with these
-                // counters (e.g. a finality counter on Shilgengar's mass return).
+                enters_under.as_controller_ref(),
+                crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 enter_with_counters,
-                face_down_profile: None,
-                library_position: None,
-                library_shuffle: Default::default(),
-                random_order: false,
-            }
+            )
         }
         // CR 115.6: the "up to N" target cardinality is an ability-level field
         // (`ParsedEffectClause.multi_target`), not an `Effect::Fight` field. It is
@@ -11681,6 +11707,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration: None,
         sub_ability: Some(Box::new(shuffle)),
@@ -17619,6 +17646,21 @@ pub(crate) fn try_parse_reflexive_coin_flip_branch<'a>(
 }
 
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
+    // CR 607.2a: a return's "the exiled card(s)" mark rides the AST variant, which
+    // `lower_targeted_action_ast` turns into a bare `Effect`; lift it onto the clause
+    // here, the one seam every imperative-family lowering passes through.
+    let linked_exile_return = match &ast {
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(targeted)) => {
+            targeted.linked_exile_return()
+        }
+        _ => None,
+    };
+    let mut clause = lower_imperative_family_clause(ast);
+    clause.linked_exile_return = linked_exile_return;
+    clause
+}
+
+fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
         // CR 701.9a + CR 701.70a + CR 608.2c: Recruit's contingent token sees exactly the
         // immediately preceding discard result. The typed condition is carried
@@ -18605,6 +18647,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_with_counters,
                 face_down,
                 attach_host: Some(host),
+                linked_exile_return,
             },
         )) => {
             // CR 110.2a: fail closed before the attachment is installed. An
@@ -18630,6 +18673,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     enter_with_counters,
                     face_down,
                     attach_host: None,
+                    linked_exile_return,
                 },
             ));
             // CR 701.3a: the returning Aura/permanent is SelfRef; the host is the

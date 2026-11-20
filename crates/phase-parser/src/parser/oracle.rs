@@ -85,7 +85,9 @@ use super::oracle_effect::{
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
-use super::oracle_ir::context::{ParseContext, ResolvedChainRoot, SpellAnaphorBinding};
+use super::oracle_ir::context::{
+    ChainPriorPublishers, ParseContext, ResolvedChainRoot, SpellAnaphorBinding,
+};
 use super::oracle_ir::diagnostic::ClauseGapKind;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
@@ -9792,6 +9794,332 @@ fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
     }
 }
 
+/// CR 607.2a + CR 608.2c + CR 603.7c: decide the binding of every "the exiled card(s)"
+/// return (`AbilityDefinition::linked_exile_return`) on the finished tree, and clear every
+/// mark.
+///
+/// The decision reads the return's OWN resolution chain: the instructions before it, in
+/// the order written (CR 608.2c), folded into a `ChainPriorPublishers` by the same
+/// classifier the clause parser uses (`chain_clause_is_exile_producer`), while the chain
+/// stays on one resolution line (`stays_on_resolution_line`). A return off that line keeps
+/// the bare sentinel, START's binding. It runs once,
+/// after assembly, the relocation pass, every Phase 2 pass and lowering, so wherever those
+/// stages put the return is where it is judged; no stage reports where it put it.
+///
+/// Roots are the definitions that resolve as their own chain: each spell/activated
+/// ability, each trigger's `execute`, each replacement's `execute` and decline, each
+/// definition a static grants, and a one-shot draw replacement's substitute. A
+/// `CreateDelayedTrigger` payload is NOT a root and is never entered from its creator:
+/// the delayed trigger's binding is fixed when it is created (CR 603.7c), so a mark inside
+/// it keeps the sentinel. The sweep that follows the root walks visits every remaining
+/// definition node and clears any mark a root walk did not reach (payload interiors), so
+/// the payload exclusion holds by construction rather than by a list of payload routes.
+fn bind_linked_exile_returns(out: &mut ParsedAbilities) {
+    use crate::types::ability::{ContinuousModification, ReplacementMode};
+    use crate::types::ability_visit::{nodes_mut, DefinitionNodeMut};
+    for def in &mut out.abilities {
+        bind_linked_exile_returns_on_line(def, Some(ChainPriorPublishers::Absent));
+    }
+    let mut on_node = |node: DefinitionNodeMut<'_>| {
+        match node {
+            // Every root walk has run before the sweep reaches the nodes below its root,
+            // so a mark still here sits in a delayed-trigger payload (or another node no
+            // root walk enters) and keeps the sentinel.
+            DefinitionNodeMut::Ability(def) => def.linked_exile_return = None,
+            DefinitionNodeMut::Trigger(trigger) => {
+                if let Some(execute) = trigger.execute.as_deref_mut() {
+                    bind_linked_exile_returns_on_line(execute, Some(ChainPriorPublishers::Absent));
+                }
+            }
+            DefinitionNodeMut::Replacement(replacement) => {
+                if let Some(execute) = replacement.execute.as_deref_mut() {
+                    bind_linked_exile_returns_on_line(execute, Some(ChainPriorPublishers::Absent));
+                }
+                match &mut replacement.mode {
+                    ReplacementMode::MayCost { decline, .. }
+                    | ReplacementMode::Optional { decline } => {
+                        if let Some(decline) = decline.as_deref_mut() {
+                            bind_linked_exile_returns_on_line(
+                                decline,
+                                Some(ChainPriorPublishers::Absent),
+                            );
+                        }
+                    }
+                    ReplacementMode::Mandatory => {}
+                }
+            }
+            // CR 113.1a + CR 113.3b: an ability an effect grants is an ability of the object it is granted to; activating it puts it on the stack, where it resolves as its own chain. Granted triggers,
+            // replacements and statics are their own nodes in this sweep.
+            DefinitionNodeMut::Static(static_def) => {
+                for modification in &mut static_def.modifications {
+                    if let ContinuousModification::GrantAbility { definition } = modification {
+                        bind_linked_exile_returns_on_line(
+                            definition,
+                            Some(ChainPriorPublishers::Absent),
+                        );
+                    }
+                }
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    };
+    for def in &mut out.abilities {
+        let _ = nodes_mut::visit_ability_def(def, &mut on_node);
+    }
+    for trigger in &mut out.triggers {
+        let _ = nodes_mut::visit_trigger(trigger, &mut on_node);
+    }
+    for static_def in &mut out.statics {
+        let _ = nodes_mut::visit_static(static_def, &mut on_node);
+    }
+    for replacement in &mut out.replacements {
+        let _ = nodes_mut::visit_replacement(replacement, &mut on_node);
+    }
+    #[cfg(debug_assertions)]
+    debug_assert!(
+        !holds_parse_mark(
+            &serde_json::to_value(&*out).expect("ParsedAbilities serializes"),
+            "linked_exile_return"
+        ),
+        "a linked_exile_return mark survived bind_linked_exile_returns"
+    );
+}
+
+/// CR 608.2c + CR 118.12: does `def` stay on its chain's resolution line, the single
+/// path on which every definition before it has resolved, in the order written?
+///
+/// `def` leaves the line when it gives the chain a second resolution path at its own
+/// place. That is a condition, a "may", an unless cost, an "Otherwise" or an "instead",
+/// a per-player or repeated instruction, or a mode choice. Exactly one gate stays on the
+/// line: `def`'s own "If you do" (`is_optional_effect_performed`). It is admitted only
+/// while the definitions before it are on the line, so no definition off the line can
+/// resolve before it. The instructions that do resolve before it are some of the line's,
+/// whatever set the flag (the mandatory-rider seed in `resolve_chain_body`, an effect that
+/// sets its own flag, or the parent context), and the fold over all of them is therefore
+/// a safe prior.
+///
+/// Every field is named, so a new `AbilityDefinition` field must be classified here.
+fn stays_on_resolution_line(def: &AbilityDefinition) -> bool {
+    let AbilityDefinition {
+        // A second resolution path at `def` (CR 608.2c; CR 118.12 / CR 118.12a):
+        condition,
+        optional,
+        optional_player,
+        optional_for,
+        unless_pay,
+        else_ability,
+        player_scope,
+        repeat_for,
+        repeat_until,
+        modal,
+        mode_abilities,
+        // Walked by the caller: the effect's nested definitions and the next instruction.
+        effect: _,
+        sub_ability: _,
+        // None of these opens a second path at `def`: targeting and announcement
+        // metadata, payment-time data, provenance tags, and parser scratch.
+        kind: _,
+        declares_chosen_group: _,
+        reads_chosen_group: _,
+        declares_return_result: _,
+        reads_return_result: _,
+        cost: _,
+        duration: _,
+        description: _,
+        target_prompt: _,
+        activation_restrictions: _,
+        activation_mana_payment_restriction: _,
+        activator_filter: _,
+        activation_zone: _,
+        ability_tag: _,
+        optional_targeting: _,
+        multi_target: _,
+        target_constraints: _,
+        target_choice_timing: _,
+        distribute: _,
+        min_x_value: _,
+        announced_x: _,
+        cant_be_copied: _,
+        illegal_targets_disposition: _,
+        cost_reduction: _,
+        forward_result: _,
+        starting_with: _,
+        target_selection_mode: _,
+        target_chooser: _,
+        sub_link: _,
+        target_reads: _,
+        entry_onset: _,
+        iteration_kind_binding: _,
+        sibling_condition: _,
+        instruction_join: _,
+        unlowered_guard: _,
+        linked_exile_return: _,
+        face_down_in_exile: _,
+        granting_object: _,
+        grant_chain: _,
+    } = def;
+    condition
+        .as_ref()
+        .is_none_or(AbilityCondition::is_optional_effect_performed)
+        && !*optional
+        && optional_player.is_none()
+        && optional_for.is_none()
+        && unless_pay.is_none()
+        && else_ability.is_none()
+        && player_scope.is_none()
+        && repeat_for.is_none()
+        && repeat_until.is_none()
+        && modal.is_none()
+        && mode_abilities.is_empty()
+}
+
+/// CR 607.2a + CR 608.2c: settle the marks of one resolution chain, from `def` on.
+///
+/// `line` is `Some(prior)` while every definition before `def` on its chain is on the
+/// resolution line (`stays_on_resolution_line`), `prior` folding their instructions in
+/// the order written; it is `None` once one of them left it. A definition on the line
+/// settles against `prior`. Every other definition settles against
+/// `ChainPriorPublishers::Absent`, which keeps the sentinel: START's binding.
+///
+/// A same-resolution branch (a coin flip's win and lose, a vote, a die result, a pile, a
+/// "choose one", a declined reveal), a mode and an `else_ability` are walked off the
+/// line, and the line ends after the definition that holds them. A
+/// `CreateDelayedTrigger` payload is never entered: the runtime fixes its binding when it
+/// is created (CR 603.7c), and the sweep clears its marks. A boon's trigger is not
+/// entered from here either: it is a `Trigger` node, which the sweep walks as its own
+/// root. A draw-replacement substitute resolves later as a chain of its own, so it starts a
+/// fresh line.
+fn bind_linked_exile_returns_on_line(
+    def: &mut AbilityDefinition,
+    line: Option<ChainPriorPublishers>,
+) {
+    use crate::types::ability::NestedDefinitionEdge;
+    let here = line.filter(|_| stays_on_resolution_line(def));
+    settle_linked_exile_return(def, here.unwrap_or(ChainPriorPublishers::Absent));
+    let own = if crate::parser::oracle_effect::chain_clause_is_exile_producer(&def.effect) {
+        ChainPriorPublishers::IncludesExile
+    } else {
+        ChainPriorPublishers::NonExileOnly
+    };
+    let mut after = here.map(|prior| prior.join(own));
+    def.effect
+        .for_each_nested_definition_mut(&mut |edge, nested| match edge {
+            // CR 603.7c: a delayed trigger's binding is fixed when it is created; the
+            // sweep clears the marks inside its payload.
+            NestedDefinitionEdge::CreateDelayedTriggerEffect => {}
+            // A boon's trigger is a `Trigger` node; the sweep walks it as its own root (no
+            // creation binding; digital-only, no CR entry).
+            NestedDefinitionEdge::CreateBoonTrigger => {}
+            NestedDefinitionEdge::CreateDrawReplacementEffect => {
+                bind_linked_exile_returns_on_line(nested, Some(ChainPriorPublishers::Absent));
+            }
+            NestedDefinitionEdge::RevealFromHandOnDecline
+            | NestedDefinitionEdge::VotePerChoice
+            | NestedDefinitionEdge::VoteObjectOutcome
+            | NestedDefinitionEdge::SeparateIntoPilesChosen
+            | NestedDefinitionEdge::SeparateIntoPilesUnchosen
+            | NestedDefinitionEdge::ExileTopCardContestWinner
+            | NestedDefinitionEdge::RollDieResult
+            | NestedDefinitionEdge::FlipCoinsWin
+            | NestedDefinitionEdge::FlipCoinsLose
+            | NestedDefinitionEdge::ChooseOneOfBranch => {
+                after = None;
+                bind_linked_exile_returns_on_line(nested, None);
+            }
+        });
+    for mode in &mut def.mode_abilities {
+        bind_linked_exile_returns_on_line(mode, None);
+    }
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        bind_linked_exile_returns_on_line(else_def, None);
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        bind_linked_exile_returns_on_line(sub, after);
+    }
+}
+
+/// CR 607.2a: settle one definition's mark against its chain's prior publishers. The
+/// rewrite applies only while the return still has the shape the clause lowered to (the
+/// sentinel on a `Bounce`, `ChangeZone` or `ChangeZoneAll`); a return a later pass
+/// rebuilt keeps its binding.
+fn settle_linked_exile_return(
+    def: &mut AbilityDefinition,
+    prior: crate::parser::oracle_ir::context::ChainPriorPublishers,
+) {
+    use crate::types::ability::LinkedExileReturn;
+    let Some(mark) = def.linked_exile_return.take() else {
+        return;
+    };
+    let Some(bound) = crate::parser::oracle_target::chain_exiled_cause_binding(prior) else {
+        return;
+    };
+    let is_sentinel = |target: &TargetFilter| {
+        matches!(
+            target,
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0)
+            }
+        )
+    };
+    let set_wide = match &mut *def.effect {
+        // CR 607.2a: one card, or the whole set moved to a hand: the move keeps its
+        // shape and names the narrowed set.
+        Effect::Bounce { target, .. } if is_sentinel(target) => {
+            *target = bound;
+            return;
+        }
+        Effect::ChangeZone { target, .. }
+            if is_sentinel(target) && mark == LinkedExileReturn::OneCard =>
+        {
+            *target = bound;
+            return;
+        }
+        // CR 607.2a + CR 400.7: the whole linked set moves together.
+        Effect::ChangeZone {
+            target,
+            destination,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            origin,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            target,
+            destination,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            origin,
+            ..
+        } if is_sentinel(target) => super::oracle_effect::imperative::return_all_to_zone_effect(
+            *origin,
+            *destination,
+            bound,
+            enters_under.take(),
+            *enter_tapped,
+            std::mem::take(enter_with_counters),
+        ),
+        _ => return,
+    };
+    *def.effect = set_wide;
+}
+
+/// Debug hygiene for parser-scratch marks: does any object in `value` carry `key`?
+#[cfg(debug_assertions)]
+fn holds_parse_mark(value: &serde_json::Value, key: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key(key) || map.values().any(|v| holds_parse_mark(v, key))
+        }
+        serde_json::Value::Array(items) => items.iter().any(|v| holds_parse_mark(v, key)),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
 /// CR 614.1a + CR 608.2n (O1a) / CR 608.2c + CR 614.1a (O1b): does the assembled tree
 /// place this body under a typed owner that consumes it in the dropped guard's stead?
 /// Reads the owner head's `Effect` variant and the body link's `Effect` shape and outcome
@@ -10593,6 +10921,9 @@ fn parse_oracle_pipeline(
                 .entered();
         lower_oracle_ir(&mut ir)
     };
+    // CR 607.2a + CR 608.2c + CR 603.7c: every return's chain is final here; decide
+    // "the exiled card(s)" before the stage clone, so both trees carry the result.
+    bind_linked_exile_returns(&mut parsed);
     let mut raw_lowered = capture_stages.then(|| parsed.clone());
     render_granting_self_descriptions(&mut parsed, card_name);
     demote_unbound_delayed_sweeps(&mut parsed);
@@ -14926,5 +15257,360 @@ mod die_result_row_spell_anaphor_tests {
                 other => panic!("{binding:?}: row 20 must lower to Counter, got {other:?}"),
             }
         }
+    }
+}
+
+/// U7: the resolution line that decides "the exiled card(s)" (`stays_on_resolution_line`,
+/// `bind_linked_exile_returns_on_line`).
+///
+/// No printed card exhibits these shapes. The nearest printed card is Day of the Dragons,
+/// whose own-chain return follows a non-exile sacrifice: "When this enchantment leaves the
+/// battlefield, sacrifice all Dragons you control. Then return the exiled cards to the
+/// battlefield under your control." The admitted gate's printed card is The Spot, Living
+/// Portal: "When The Spot dies, put him on the bottom of his owner's library. If you do,
+/// return the exiled cards to their owners' hands."
+#[cfg(test)]
+mod linked_exile_return_line_tests {
+    use super::{bind_linked_exile_returns_on_line, stays_on_resolution_line};
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::parser::oracle_ir::context::ChainPriorPublishers;
+    use crate::parser::oracle_target::exiled_caused_tracked_set;
+    use crate::types::ability::{
+        AbilityCondition, AbilityDefinition, AbilityKind, Effect, LinkedExileReturn, ModalChoice,
+        NestedDefinitionEdge, OpponentMayScope, PlayerFilter, QuantityExpr, RepeatContinuation,
+        TargetFilter,
+    };
+    use crate::types::identifiers::TrackedSetId;
+    use crate::types::zones::Zone;
+
+    /// One path-forming mutation of a definition (U7f).
+    type Mutation = Box<dyn Fn(&mut AbilityDefinition)>;
+
+    const RETURN: &str = "return the exiled cards to the battlefield under your control.";
+    const DAY: &str = "Sacrifice all Dragons you control. Then return the exiled cards to the battlefield under your control.";
+
+    fn chain(text: &str) -> AbilityDefinition {
+        parse_effect_chain(text, AbilityKind::Spell)
+    }
+    fn walk(mut def: AbilityDefinition) -> AbilityDefinition {
+        bind_linked_exile_returns_on_line(&mut def, Some(ChainPriorPublishers::Absent));
+        def
+    }
+    fn nth(def: &AbilityDefinition, n: usize) -> &AbilityDefinition {
+        (0..n).fold(def, |d, _| d.sub_ability.as_deref().expect("sub"))
+    }
+    fn last(def: &AbilityDefinition) -> &AbilityDefinition {
+        def.sub_ability.as_deref().map_or(def, last)
+    }
+    fn last_mut(def: &mut AbilityDefinition) -> &mut AbilityDefinition {
+        match def.sub_ability {
+            Some(ref mut sub) => last_mut(sub),
+            None => def,
+        }
+    }
+    fn is_do_gate(def: &AbilityDefinition) -> bool {
+        def.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+    }
+    fn sentinel() -> TargetFilter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        }
+    }
+    /// Reach guard: the return still carries its mark before the walk.
+    fn marked(def: AbilityDefinition) -> AbilityDefinition {
+        assert_eq!(
+            last(&def).linked_exile_return,
+            Some(LinkedExileReturn::WholeSet),
+            "reach guard: the return's mark"
+        );
+        def
+    }
+    fn assert_d8(ret: &AbilityDefinition, what: &str) {
+        assert_eq!(ret.linked_exile_return, None, "{what}: mark consumed");
+        match &*ret.effect {
+            Effect::ChangeZoneAll { origin, target, .. } => {
+                assert_eq!(*origin, Some(Zone::Exile), "{what}");
+                assert_eq!(*target, exiled_caused_tracked_set(), "{what}");
+            }
+            Effect::Bounce { target, .. } => {
+                assert_eq!(*target, exiled_caused_tracked_set(), "{what}")
+            }
+            other => panic!("{what}: expected D8, got {other:?}"),
+        }
+    }
+    fn assert_bare(ret: &AbilityDefinition, what: &str) {
+        assert_eq!(ret.linked_exile_return, None, "{what}: mark consumed");
+        match &*ret.effect {
+            Effect::ChangeZone { target, .. }
+            | Effect::ChangeZoneAll { target, .. }
+            | Effect::Bounce { target, .. } => assert_eq!(*target, sentinel(), "{what}"),
+            other => panic!("{what}: expected the bare sentinel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn u7a_line_binds_d8_after_a_non_exile_instruction() {
+        let t = walk(marked(chain(DAY)));
+        assert!(stays_on_resolution_line(&t), "reach guard: the sacrifice");
+        assert_d8(last(&t), "Day of the Dragons' chain");
+    }
+
+    #[test]
+    fn u7b_line_keeps_the_sentinel_after_an_exile_or_with_nothing_before() {
+        let t = walk(marked(chain(&format!("Exile target creature. {RETURN}"))));
+        assert_bare(last(&t), "after an exile");
+        let t = walk(marked(chain(
+            "Return the exiled cards to the battlefield under your control.",
+        )));
+        assert_bare(&t, "nothing before");
+    }
+
+    #[test]
+    fn u7c_if_you_do_after_a_mandatory_instruction_stays_on_the_line() {
+        let t = walk(marked(chain(&format!(
+            "Sacrifice a creature. If you do, {RETURN}"
+        ))));
+        assert!(!t.optional, "reach guard: mandatory antecedent");
+        assert!(is_do_gate(nth(&t, 1)), "reach guard: If you do");
+        assert_d8(nth(&t, 1), "admitted gate");
+        let t = walk(marked(chain(
+            "Sacrifice a creature. If you do, return the exiled cards to their owners' hands.",
+        )));
+        assert!(is_do_gate(nth(&t, 1)), "reach guard: If you do");
+        assert_d8(nth(&t, 1), "admitted gate, to hand (The Spot's Bounce)");
+    }
+
+    #[test]
+    fn u7d_if_you_do_after_an_exile_keeps_the_sentinel() {
+        let t = walk(marked(chain(&format!(
+            "Sacrifice all Dragons you control. Exile target creature. If you do, {RETURN}"
+        ))));
+        assert!(is_do_gate(nth(&t, 2)), "reach guard: If you do");
+        assert_bare(nth(&t, 2), "admitted gate after an exile");
+    }
+
+    #[test]
+    fn u7e_if_you_do_after_an_optional_instruction_leaves_the_line() {
+        let t = walk(marked(chain(&format!(
+            "Sacrifice all Dragons you control. You may draw a card. If you do, {RETURN}"
+        ))));
+        assert!(nth(&t, 1).optional, "reach guard: optional draw");
+        assert!(is_do_gate(nth(&t, 2)), "reach guard: If you do");
+        assert_bare(nth(&t, 2), "gate on an optional antecedent");
+    }
+
+    /// Every field that gives the chain a second path leaves the line, on the head (so
+    /// the return after it keeps the sentinel) and on the return itself.
+    #[test]
+    fn u7f_every_path_forming_field_leaves_the_line() {
+        let unless = chain("Draw a card unless target opponent pays 3 life.")
+            .unless_pay
+            .expect("reach guard: parsed unless cost");
+        let draw = chain("Draw a card.");
+        let cases: Vec<(&str, Mutation)> = vec![
+            (
+                "condition",
+                Box::new(|d| d.condition = Some(AbilityCondition::IsMonarch)),
+            ),
+            (
+                "If you don't",
+                Box::new(|d| {
+                    d.condition = Some(AbilityCondition::Not {
+                        condition: Box::new(AbilityCondition::effect_performed()),
+                    })
+                }),
+            ),
+            ("optional", Box::new(|d| d.optional = true)),
+            (
+                "optional_player",
+                Box::new(|d| d.optional_player = Some(TargetFilter::Any)),
+            ),
+            (
+                "optional_for",
+                Box::new(|d| d.optional_for = Some(OpponentMayScope::AnyOpponent)),
+            ),
+            (
+                "unless_pay",
+                Box::new(move |d| d.unless_pay = Some(unless.clone())),
+            ),
+            (
+                "else_ability",
+                Box::new({
+                    let draw = draw.clone();
+                    move |d| d.else_ability = Some(Box::new(draw.clone()))
+                }),
+            ),
+            (
+                "player_scope",
+                Box::new(|d| d.player_scope = Some(PlayerFilter::Opponent)),
+            ),
+            (
+                "repeat_for",
+                Box::new(|d| d.repeat_for = Some(QuantityExpr::Fixed { value: 2 })),
+            ),
+            (
+                "repeat_until",
+                Box::new(|d| d.repeat_until = Some(RepeatContinuation::ControllerChoice)),
+            ),
+            (
+                "modal",
+                Box::new(|d| d.modal = Some(ModalChoice::default())),
+            ),
+            (
+                "mode_abilities",
+                Box::new(move |d| d.mode_abilities = vec![draw.clone()]),
+            ),
+        ];
+        for (what, mutate) in &cases {
+            let mut head = marked(chain(DAY));
+            mutate(&mut head);
+            assert!(!stays_on_resolution_line(&head), "{what}: head leaves");
+            assert_bare(last(&walk(head)), &format!("{what} on the head"));
+            let mut t = marked(chain(DAY));
+            mutate(last_mut(&mut t));
+            assert!(!stays_on_resolution_line(last(&t)), "{what}: return leaves");
+            assert_bare(last(&walk(t)), &format!("{what} on the return"));
+        }
+    }
+
+    #[test]
+    fn u7g_a_branch_ends_the_line() {
+        let t = chain(&format!("Flip a coin. If you win the flip, {RETURN}"));
+        let Effect::FlipCoins {
+            win_effect: Some(win),
+            ..
+        } = &*t.effect
+        else {
+            panic!("reach guard: FlipCoins win branch, got {:?}", t.effect);
+        };
+        assert_eq!(
+            win.linked_exile_return,
+            Some(LinkedExileReturn::WholeSet),
+            "reach guard: the branch return's mark"
+        );
+        let t = walk(t);
+        let Effect::FlipCoins {
+            win_effect: Some(win),
+            ..
+        } = &*t.effect
+        else {
+            panic!("FlipCoins win branch survives the walk, got {:?}", t.effect);
+        };
+        assert_bare(win, "the win branch");
+        let t = walk(marked(chain(
+            "Sacrifice all Dragons you control. Flip a coin. If you win the flip, draw a card. Return the exiled cards to the battlefield under your control.",
+        )));
+        assert!(
+            matches!(&*nth(&t, 1).effect, Effect::FlipCoins { .. }),
+            "reach guard: the flip"
+        );
+        assert_bare(last(&t), "after the flip");
+    }
+
+    #[test]
+    fn u7h_otherwise_instead_and_if_you_cant_leave_the_line() {
+        let t = chain(&format!(
+            "Sacrifice all Dragons you control. Draw a card if you control a Dragon. Otherwise, {RETURN}"
+        ));
+        let else_def = nth(&t, 1)
+            .else_ability
+            .as_deref()
+            .expect("reach guard: else");
+        assert_eq!(
+            else_def.linked_exile_return,
+            Some(LinkedExileReturn::WholeSet),
+            "reach guard: the else return's mark"
+        );
+        let t = walk(t);
+        let else_def = nth(&t, 1)
+            .else_ability
+            .as_deref()
+            .expect("the else survives the walk");
+        assert_bare(else_def, "Otherwise");
+        let t = walk(marked(chain(&format!(
+            "Sacrifice all Dragons you control. Draw a card. If you control a Dragon, instead {RETURN}"
+        ))));
+        assert!(
+            last(&t)
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_instead_override),
+            "reach guard: instead"
+        );
+        assert_bare(last(&t), "instead");
+        let t = walk(marked(chain(&format!(
+            "Draw a card. Sacrifice a creature. If you can't, {RETURN}"
+        ))));
+        assert!(
+            matches!(
+                last(&t).condition,
+                Some(AbilityCondition::Not { ref condition })
+                    if matches!(**condition, AbilityCondition::ZoneChangedThisWay { .. })
+            ),
+            "reach guard: If you can't"
+        );
+        assert_bare(last(&t), "If you can't");
+    }
+
+    #[test]
+    fn u7i_a_delayed_payload_is_not_entered() {
+        let mut t = chain(&format!(
+            "Sacrifice all Dragons you control. At the beginning of the next end step, {RETURN}"
+        ));
+        bind_linked_exile_returns_on_line(&mut t, Some(ChainPriorPublishers::Absent));
+        let mut payloads = 0;
+        fn visit(def: &AbilityDefinition, payloads: &mut usize) {
+            def.effect.for_each_nested_definition(&mut |edge, nested| {
+                if edge == NestedDefinitionEdge::CreateDelayedTriggerEffect {
+                    *payloads += 1;
+                    let ret = last(nested);
+                    assert_eq!(
+                        ret.linked_exile_return,
+                        Some(LinkedExileReturn::WholeSet),
+                        "the payload's mark is left for the sweep"
+                    );
+                    match &*ret.effect {
+                        Effect::ChangeZone { target, .. } => assert_eq!(*target, sentinel()),
+                        other => panic!("payload return: {other:?}"),
+                    }
+                }
+            });
+            if let Some(sub) = def.sub_ability.as_deref() {
+                visit(sub, payloads);
+            }
+        }
+        visit(&t, &mut payloads);
+        assert_eq!(payloads, 1, "reach guard: one delayed payload");
+    }
+
+    #[test]
+    fn u7j_settle_keeps_a_rebuilt_return_and_is_idempotent() {
+        let mut t = marked(chain(DAY));
+        match &mut *last_mut(&mut t).effect {
+            Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
+                *target = TargetFilter::ParentTarget
+            }
+            other => panic!("reach guard: return shape, got {other:?}"),
+        }
+        let t = walk(t);
+        assert_eq!(last(&t).linked_exile_return, None, "mark consumed");
+        assert!(
+            matches!(
+                &*last(&t).effect,
+                Effect::ChangeZone {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                } | Effect::ChangeZoneAll {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "a rebuilt return keeps its binding"
+        );
+        let once = walk(chain(DAY));
+        let twice = walk(once.clone());
+        assert_eq!(once, twice, "a second walk changes nothing");
     }
 }

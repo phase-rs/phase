@@ -10,10 +10,10 @@ use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
     ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
     ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
-    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter,
+    LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -368,26 +368,39 @@ pub(crate) fn exiled_caused_tracked_set() -> TargetFilter {
     }
 }
 
-/// CR 607.2a + CR 406.6: "the exiled card(s)" in a chain whose prior
-/// publishers are all non-exile departures refers only to cards put in exile by
-/// the linked ability — never to the chain's own sacrificed / library-put
-/// members. Rebinds the bare chain sentinel to the `Exiled`-caused subset.
-/// `Some` iff D8 applies; `None` keeps the caller's binding (no prior publisher:
-/// the O-ring LTB shape `detect_etb_exile_ltb_return` pairs; or a same-chain
-/// exile producer).
-pub(crate) fn chain_exiled_cause_binding(
-    chain: ChainPriorPublishers,
+/// CR 607.2a: the mark a return written "the exiled card(s)" carries when the
+/// phrase is bound to the bare chain sentinel. Any other binding (a same-clause
+/// exile antecedent, `ExiledBySource`, a narrowed sentinel) is not the linked-set
+/// return and carries no mark. Grammatical number selects the move: plural names
+/// the whole set (a set-wide move), singular one card.
+pub(crate) fn linked_exile_return_mark(
+    number: AnaphorNumber,
     binding: &TargetFilter,
-) -> Option<TargetFilter> {
-    match (chain, binding) {
-        (
-            ChainPriorPublishers::NonExileOnly,
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            },
-        ) => Some(exiled_caused_tracked_set()),
-        (ChainPriorPublishers::NonExileOnly, _)
-        | (ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile, _) => None,
+) -> Option<LinkedExileReturn> {
+    matches!(
+        binding,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    )
+    .then_some(match number {
+        AnaphorNumber::Singular => LinkedExileReturn::OneCard,
+        AnaphorNumber::Plural => LinkedExileReturn::WholeSet,
+    })
+}
+
+/// CR 607.2a + CR 406.6 + CR 608.2c: the binding of a marked "the exiled card(s)"
+/// return, from the prior publishers of its OWN resolution chain. Over only
+/// non-exile departures (Day of the Dragons' sacrifice, Timothar's granted
+/// sacrifice, The Spot's library put) the phrase names only the cards the linked
+/// exile instruction put into exile, never the chain's own members, so the
+/// sentinel is narrowed to the `Exiled`-caused subset. `None` keeps the sentinel:
+/// with no prior publisher (the O-ring LTB shape `detect_etb_exile_ltb_return`
+/// pairs) or over a same-chain exile producer.
+pub(crate) fn chain_exiled_cause_binding(chain: ChainPriorPublishers) -> Option<TargetFilter> {
+    match chain {
+        ChainPriorPublishers::NonExileOnly => Some(exiled_caused_tracked_set()),
+        ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile => None,
     }
 }
 
@@ -12331,11 +12344,11 @@ mod tests {
         }
     }
 
-    /// U2 — CR 607.2a + CR 406.6: only the bare chain sentinel over a chain of
-    /// non-exile publishers is rebound to the `Exiled`-caused subset; every
-    /// other chain state and binding passes through.
+    /// U2 — CR 607.2a + CR 406.6: only the bare chain sentinel carries the
+    /// linked-exile mark, numbered by the anaphor; and only a chain of non-exile
+    /// publishers rebinds a marked return to the `Exiled`-caused subset.
     #[test]
-    fn chain_exiled_cause_binding_rebinds_only_the_bare_sentinel_over_non_exile_chains() {
+    fn linked_exile_mark_and_binding_cover_only_the_bare_sentinel_over_non_exile_chains() {
         let bindings = [
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -12346,21 +12359,29 @@ mod tests {
             TargetFilter::ExiledBySource,
             TargetFilter::Any,
         ];
+        for (number, mark) in [
+            (AnaphorNumber::Singular, LinkedExileReturn::OneCard),
+            (AnaphorNumber::Plural, LinkedExileReturn::WholeSet),
+        ] {
+            for (index, binding) in bindings.iter().enumerate() {
+                assert_eq!(
+                    linked_exile_return_mark(number, binding),
+                    (index == 0).then_some(mark),
+                    "{number:?} × {binding:?}"
+                );
+            }
+        }
         let exiled_caused = TargetFilter::TrackedSetFiltered {
             id: TrackedSetId(0),
             filter: Box::new(TargetFilter::Any),
             caused_by: Some(ThisWayCause::Exiled),
         };
         for chain in CHAIN_STATES {
-            for (index, binding) in bindings.iter().enumerate() {
-                let expected = (chain == ChainPriorPublishers::NonExileOnly && index == 0)
-                    .then(|| exiled_caused.clone());
-                assert_eq!(
-                    chain_exiled_cause_binding(chain, binding),
-                    expected,
-                    "{chain:?} × {binding:?}"
-                );
-            }
+            assert_eq!(
+                chain_exiled_cause_binding(chain),
+                (chain == ChainPriorPublishers::NonExileOnly).then(|| exiled_caused.clone()),
+                "{chain:?}"
+            );
         }
     }
 

@@ -34914,10 +34914,11 @@ macro_rules! define_effect_quantity_walk {
     };
 }
 
-impl Effect {
-    define_effect_quantity_walk!([]; for_each_quantity_expr);
-    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut);
-
+/// One body, two receivers: the shared [`Effect::for_each_nested_definition`] and
+/// the exclusive [`Effect::for_each_nested_definition_mut`] (the
+/// `define_effect_quantity_walk!` precedent), so the edge set cannot drift between them.
+macro_rules! define_nested_definition_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_deref:ident) => {
     /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
     /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
     ///
@@ -34943,9 +34944,9 @@ impl Effect {
     /// the entire point of this visitor: a wildcard is invisible, and the defect
     /// it produces is a card reporting support it does not have, which is worse
     /// than a card honestly reporting a gap.
-    pub fn for_each_nested_definition<'a>(
-        &'a self,
-        f: &mut dyn FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
+    pub fn $name<'a>(
+        &'a $($mut_)? self,
+        f: &mut dyn FnMut(NestedDefinitionEdge, &'a $($mut_)? AbilityDefinition),
     ) {
         match self {
             // CR 701.38: a vote picks one choice from a list. Each listed
@@ -35013,14 +35014,14 @@ impl Effect {
             // unimplemented detection see through the boon wrapper exactly as
             // they see through `CreateDelayedTrigger`.
             Effect::CreateBoon { trigger, .. } => {
-                if let Some(execute) = trigger.execute.as_deref() {
+                if let Some(execute) = trigger.execute.$as_deref() {
                     f(NestedDefinitionEdge::CreateBoonTrigger, execute)
                 }
             }
             // CR 706.3a: one payload per results-table striation.
             Effect::RollDie { results, .. } => {
                 for result in results {
-                    f(NestedDefinitionEdge::RollDieResult, &result.effect);
+                    f(NestedDefinitionEdge::RollDieResult, &$($mut_)? result.effect);
                 }
             }
             // CR 705.1: coin-flip branches, in every run mode. Each side is its own edge.
@@ -35277,6 +35278,14 @@ impl Effect {
             | Effect::Unimplemented { .. } => {}
         }
     }
+    };
+}
+
+impl Effect {
+    define_effect_quantity_walk!([]; for_each_quantity_expr);
+    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut);
+    define_nested_definition_walk!([]; for_each_nested_definition; as_deref);
+    define_nested_definition_walk!([mut]; for_each_nested_definition_mut; as_deref_mut);
 
     /// CR 107.3 + CR 608.2c: Returns the `QuantityExpr` carrying this effect's
     /// primary count/amount, for the full class of count- and amount-bearing
@@ -37328,6 +37337,8 @@ pub struct AbilityDefinition {
     pub instruction_join: InstructionJoin,
     /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
     pub unlowered_guard: Option<UnloweredGuard>,
+    /// CR 607.2a: see [`LinkedExileReturn`]. Always `None` on a finished parse.
+    pub linked_exile_return: Option<LinkedExileReturn>,
     /// Typed intent for SearchLibrary clauses that exile the found card face down.
     /// This is deliberately separate from `FaceDownProfile`, which describes
     /// battlefield characteristics only.
@@ -37723,6 +37734,8 @@ struct AbilityDefinitionRepr<'a> {
     instruction_join: InstructionJoin,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linked_exile_return: &'a Option<LinkedExileReturn>,
     #[serde(skip_serializing_if = "ExileConcealment::is_public")]
     face_down_in_exile: ExileConcealment,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37785,6 +37798,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition,
             instruction_join,
             unlowered_guard,
+            linked_exile_return,
             face_down_in_exile,
             granting_object,
             grant_chain,
@@ -37839,6 +37853,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition: *sibling_condition,
             instruction_join: *instruction_join,
             unlowered_guard,
+            linked_exile_return,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
             grant_chain,
@@ -37975,6 +37990,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
     #[serde(default)]
+    linked_exile_return: Option<LinkedExileReturn>,
+    #[serde(default)]
     face_down_in_exile: ExileConcealment,
     #[serde(default)]
     granting_object: Option<ObjectIncarnationRef>,
@@ -38041,6 +38058,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             sibling_condition: de.sibling_condition,
             instruction_join: de.instruction_join,
             unlowered_guard: de.unlowered_guard,
+            linked_exile_return: de.linked_exile_return,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
             grant_chain: de.grant_chain,
@@ -38350,6 +38368,31 @@ pub struct UnloweredGuard {
     pub clause_text: String,
 }
 
+/// CR 607.2a: a return whose object is written "the exiled card" / "the exiled cards",
+/// parsed with the bare chain sentinel (`TrackedSet(0)`) as its target.
+///
+/// Whether that phrase names only the cards the linked exile instruction exiled
+/// (`TrackedSetFiltered { caused_by: Exiled }`) depends on what the return's OWN
+/// resolution chain did before it (CR 608.2c), and a delayed trigger's payload is
+/// a separate chain whose binding is fixed when the trigger is created (CR 603.7c).
+/// Neither is known where the clause is parsed: assembly and the Phase 2 passes can
+/// still move the clause across a `CreateDelayedTrigger` edge. The parser therefore
+/// marks the clause here and decides the binding once, on the finished tree, in
+/// `parser::oracle::bind_linked_exile_returns`.
+///
+/// `None` on every tree `parse_oracle_pipeline` hands out (both the production
+/// `ParsedAbilities` and the `RawLoweredIr` stage clone); serialized when set so a
+/// mark that escaped the pass is visible in `card-data.json`. Like
+/// [`UnloweredGuard`], a tree built by `parse_effect_chain` outside the pipeline keeps
+/// its mark and the sentinel target, which is the unrebound binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkedExileReturn {
+    /// "the exiled card": one card of the linked set.
+    OneCard,
+    /// "the exiled cards": the whole linked set, moved set-wide.
+    WholeSet,
+}
+
 impl fmt::Debug for AbilityDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // JSON serialization instead of field-by-field Debug — avoids stack overflow
@@ -38423,6 +38466,7 @@ impl AbilityDefinition {
             sibling_condition: SiblingCondition::Dependent,
             instruction_join: InstructionJoin::Own,
             unlowered_guard: None,
+            linked_exile_return: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
             grant_chain: Vec::new(),

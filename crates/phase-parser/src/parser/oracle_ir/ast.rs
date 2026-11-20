@@ -77,6 +77,11 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 607.2a: set when this clause returns "the exiled card(s)" bound to the bare
+    /// chain sentinel. Carried onto the assembled `AbilityDefinition` and decided on the
+    /// finished tree; see [`crate::types::ability::LinkedExileReturn`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     /// CR 608.2c: the text the head instruction owns, when a compound split separated it
     /// from its "and" continuation (`try_split_targeted_compound`), which is then its own
     /// `sub_ability` checked against its own text there. `None` when the clause's text is
@@ -1335,6 +1340,46 @@ impl TargetedImperativeAst {
             other => other,
         }
     }
+
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Return {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnToBattlefield {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnToZone {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnAllToZone {
+                linked_exile_return,
+                ..
+            } => *linked_exile_return,
+            Self::Tap { .. }
+            | Self::Untap { .. }
+            | Self::TapAll { .. }
+            | Self::UntapAll { .. }
+            | Self::TapAggregate { .. }
+            | Self::Goad { .. }
+            | Self::GoadAll { .. }
+            | Self::SetRoomDoorLock { .. }
+            | Self::Sacrifice { .. }
+            | Self::Discard { .. }
+            | Self::DiscardCard { .. }
+            | Self::ReturnAll { .. }
+            | Self::Fight { .. }
+            | Self::GainControl { .. }
+            | Self::ControlNextTurn { .. }
+            | Self::Earthbend { .. }
+            | Self::Airbend { .. }
+            | Self::ZoneCounterProxy(..) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1437,6 +1482,9 @@ pub(crate) enum TargetedImperativeAst {
         /// eligible permanent at resolution via `EffectZoneChoice` rather than
         /// the targeting pipeline.
         selection: BounceSelection,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.7: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
     /// for "return all/each [filter] to their owners' hands" Oracle text.
@@ -1485,6 +1533,9 @@ pub(crate) enum TargetedImperativeAst {
         /// `forward_result` so the Aura enters attached and skips the CR 303.4f
         /// host-choice consult.
         attach_host: Option<TargetFilter>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
@@ -1505,6 +1556,9 @@ pub(crate) enum TargetedImperativeAst {
         /// / Forage precedent) — `Effect::ChangeZone` has no count slot of its
         /// own, so the quantity rides the clause's `MultiTargetSpec` instead.
         multi_target: Option<MultiTargetSpec>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of
@@ -1524,6 +1578,9 @@ pub(crate) enum TargetedImperativeAst {
         /// Threaded onto `Effect::ChangeZoneAll.enter_with_counters`. Empty for
         /// returns that carry no counters.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     Fight {
         target: TargetFilter,
@@ -2425,6 +2482,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
         unlowered_guard: None,
+        linked_exile_return: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }

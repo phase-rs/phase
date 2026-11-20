@@ -1170,6 +1170,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
@@ -1309,6 +1310,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         // field: `parse_effect_chain` outside the pipeline leaves marks intact, and
         // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a

@@ -420,20 +420,6 @@ impl ChainPriorPublishers {
         }
     }
 
-    /// What a delayed-trigger payload inherits from the chain that creates it.
-    ///
-    /// CR 603.7c: a delayed trigger's binding is fixed when the trigger is
-    /// created, and its payload resolves later as its own chain, so the creating
-    /// chain's non-exile clauses are not prior publishers of the payload's own
-    /// resolution chain. Only the exile-producer fact crosses the boundary:
-    /// `NonExileOnly` becomes `Absent`, `IncludesExile` and `Absent` are kept.
-    pub fn across_delayed_trigger_boundary(self) -> Self {
-        match self {
-            Self::NonExileOnly | Self::Absent => Self::Absent,
-            Self::IncludesExile => Self::IncludesExile,
-        }
-    }
-
     /// Whether an earlier clause of the chain is an exile producer.
     pub fn includes_exile(self) -> bool {
         matches!(self, Self::IncludesExile)
@@ -1467,9 +1453,6 @@ impl ParseContext {
     /// the chunk's own context, whose other state that chunk keeps.
     pub fn enter_delayed_trigger_body(&mut self) {
         self.trigger_condition_objects = TriggerConditionObjects::Unestablished;
-        self.chain_prior_publishers = self
-            .chain_prior_publishers
-            .across_delayed_trigger_boundary();
     }
 
     /// CR 608.2c + CR 608.2k: the binding a bare "that spell" anaphor takes here.
