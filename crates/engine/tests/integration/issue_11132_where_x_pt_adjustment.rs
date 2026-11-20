@@ -8,11 +8,14 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{Effect, ObjectScope, QuantityExpr, QuantityRef};
+use engine::types::ability::{Effect, ObjectScope, QuantityExpr, QuantityRef, TargetRef};
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const RUSH_OF_BLOOD: &str = "Target creature gets +X/+0 until end of turn, where X is its power.";
 const BATTLEGROWTH: &str = "Put a +1/+1 counter on target creature.";
@@ -26,6 +29,7 @@ const YEW_SPIRIT: &str =
 const AURIOK_BLADEWARDEN: &str =
     "{T}: Target creature gets +X/+X until end of turn, where X is this creature's power.";
 const RAVENOUS_GIGANTOTHERIUM: &str = "Devour 3 (As this creature enters, you may sacrifice any number of creatures. It enters with three times that many +1/+1 counters on it.)\nWhen this creature enters, it deals X damage divided as you choose among up to X target creatures, where X is its power. Each of those creatures deals damage equal to its power to this creature.";
+const GIANT_SPIDER: &str = "Reach (This creature can block creatures with flying.)";
 
 fn mana(n: usize, ty: ManaType) -> Vec<ManaUnit> {
     (0..n)
@@ -198,6 +202,64 @@ fn ravenous_gigantotherium_damage_keeps_its_own_power() {
             }
         }]
     );
+}
+
+#[test]
+fn ravenous_gigantotherium_deals_its_own_power_and_takes_the_targets() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let mut pool = mana(5, ManaType::Colorless);
+    pool.extend(mana(2, ManaType::Green));
+    s.with_mana_pool(P0, pool);
+    let mut b = s.add_creature_to_hand(P0, "Ravenous Gigantotherium", 3, 3);
+    b.from_oracle_text_with_keywords(&["Devour"], RAVENOUS_GIGANTOTHERIUM)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+            generic: 5,
+        });
+    let giga = b.id();
+    let mut b = s.add_creature(P1, "Giant Spider", 2, 4);
+    b.from_oracle_text_with_keywords(&["Reach"], GIANT_SPIDER);
+    let spider = b.id();
+    let mut r = s.build();
+    let card_id = r.state().objects[&giga].card_id;
+    r.act(GameAction::CastSpell {
+        object_id: giga,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("cast Ravenous Gigantotherium");
+    let mut prompts = Vec::new();
+    for _ in 0..32 {
+        match r.state().waiting_for.clone() {
+            WaitingFor::EffectZoneChoice { .. } => {
+                prompts.push("devour");
+                r.act(GameAction::SelectCards { cards: vec![] })
+                    .expect("devour nothing");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                let target = prompts
+                    .iter()
+                    .all(|p| *p != "targets")
+                    .then_some(TargetRef::Object(spider));
+                prompts.push("targets");
+                r.act(GameAction::ChooseTarget { target })
+                    .expect("target only Giant Spider");
+            }
+            WaitingFor::Priority { .. } if r.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                r.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert_eq!(prompts, ["targets", "targets"]);
+    let state = r.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.objects[&spider].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&spider].damage_marked, 3);
+    assert_eq!(state.objects[&giga].damage_marked, 2);
 }
 
 /// CR 107.1b composes with the rebind: a negative target power adds +0/+0.
