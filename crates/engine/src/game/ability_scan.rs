@@ -4413,8 +4413,13 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             filter,
             use_lki: _,
             subject_slot: _,
+            subject,
         } => {
             let mut acc = Axes::NONE;
+            // CR 603.2: `EventSource` reads the object the current trigger event
+            // names; `Target` (the default) is declared state. One axes mapping for
+            // every `ObjectScope`, shared with the quantity scan.
+            acc = acc.or(scan_object_scope(subject));
             acc = acc.or(scan_target_filter(
                 filter,
                 FilterReadContext::SnapshotOrEvent,
@@ -9127,8 +9132,6 @@ fn scan_activation_restriction(
         | ActivationRestriction::DuringYourTurn
         | ActivationRestriction::DuringYourUpkeep
         | ActivationRestriction::DuringCombat
-        | ActivationRestriction::BeforeAttackersDeclared
-        | ActivationRestriction::BeforeCombatDamage
         | ActivationRestriction::OnlyOnceEachTurn
         | ActivationRestriction::OnlyOnce
         | ActivationRestriction::MaxTimesEachTurn { count: _ }
@@ -9145,6 +9148,16 @@ fn scan_activation_restriction(
             maximum: _,
         }
         | ActivationRestriction::MatchesCardCastTiming => Axes::NONE,
+        // The turn's step tally: a bare window closes once the first combat phase has ended.
+        ActivationRestriction::BeforeAttackersDeclared
+        | ActivationRestriction::BeforeCombatDamage => Axes {
+            event: false,
+            sibling: SiblingReads::None,
+            projected: true,
+            source_counters: false,
+            history: HistoryReads::NONE,
+            that_player: false,
+        },
     }
 }
 

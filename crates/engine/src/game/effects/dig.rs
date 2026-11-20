@@ -1485,6 +1485,7 @@ mod tests {
             ])),
             use_lki: false,
             subject_slot: None,
+            subject: crate::types::ability::ObjectScope::Target,
         });
         state.park_ability_continuation(PendingContinuation::new(Box::new(gain_life), &state));
 

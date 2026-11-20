@@ -8074,6 +8074,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
                         filter: TargetFilter::SelfRef,
                         use_lki: false,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     }),
                 })
                 .description(
