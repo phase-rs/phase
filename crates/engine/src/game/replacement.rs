@@ -9769,21 +9769,48 @@ fn legacy_object_replacement_candidates(
     legacy_object_replacement_candidates_on_entry_board(state, event, registry, None)
 }
 
-/// CR 614.5 + CR 707.5: a staged copy keeps superseded definitions only to
-/// reserve their indices on the current event. Only the new body can apply.
+/// CR 614.5 + CR 707.5: a staged copy that exposes its acquired replacements keeps the
+/// superseded definitions only to reserve their indices on the current event.
+/// Only the new body can apply.
 pub(super) fn liminal_entry_replacements(
     entry: &crate::types::game_state::LiminalEntry,
 ) -> impl Iterator<Item = (usize, &ReplacementDefinition)> {
-    let object = entry.object.projected();
-    let definitions = &object.replacement_definitions;
-    let superseded = if entry.copy_settlement.is_some() {
-        definitions
-            .len()
-            .saturating_sub(object.base_replacement_definitions.len())
-    } else {
-        0
+    let superseded = entry
+        .copy_settlement
+        .as_ref()
+        .and_then(|settlement| settlement.superseded_replacements)
+        .unwrap_or(0);
+    entry
+        .object
+        .projected()
+        .replacement_definitions
+        .iter_all()
+        .enumerate()
+        .skip(superseded)
+}
+
+/// CR 614.6 + CR 707.5: whether a replacement other than the entrant's own would send
+/// this entry to another zone. The redirect ends the entry before its entry finisher
+/// runs, so a chosen copy's acquired entry replacements must be ordered ahead of it.
+pub(crate) fn liminal_entry_has_foreign_redirect(state: &GameState, event: &ProposedEvent) -> bool {
+    let Some(entry_ref) = liminal_entry_ref(event) else {
+        return false;
     };
-    definitions.iter_all().enumerate().skip(superseded)
+    find_applicable_replacements(state, event, replacement_registry())
+        .into_iter()
+        .filter(|rid| rid.source != entry_ref)
+        .filter_map(|rid| replacement_choice_definition(state, rid).map(|def| (rid, def)))
+        .any(|(rid, def)| {
+            event_modifiers_for_ability(
+                def.execute.as_deref(),
+                state,
+                rid.source,
+                replacement_ability_controller(state, rid, def),
+                event,
+            )
+            .redirect_zone
+            .is_some_and(|zone| zone != Zone::Battlefield)
+        })
 }
 
 fn liminal_entry_replacement_candidates<'a>(

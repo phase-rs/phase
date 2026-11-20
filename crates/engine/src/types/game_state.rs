@@ -25919,6 +25919,10 @@ pub struct TokenCopySettlement {
     /// duration subject.
     pub copy_incarnation: ObjectIncarnationRef,
     pub staged_name: String,
+    /// `Some(n)`: the chosen copy's acquired entry replacements are offered with the entrant's
+    /// own, which keep their indices as the first `n` staged definitions (CR 707.5). `None`:
+    /// the entry finisher settles them after the entrant enters.
+    pub superseded_replacements: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2368,17 +2368,11 @@ fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selecte
         } => {
             assert_eq!(*player, P0);
             assert_eq!(*kind, ReplacementChoiceKind::Order);
-            // CR 707.5 + CR 616.1: the chosen Triskelion's acquired enters-with-counters
-            // replacement orders alongside Root Maze and untapped Archelos.
             assert_eq!(
                 candidates.len(),
-                3,
-                "Root Maze, untapped Archelos and the copied counters order entry"
+                2,
+                "only Root Maze and untapped Archelos order entry"
             );
-            assert!(candidates
-                .iter()
-                .any(|candidate| candidate.source_id == token_id
-                    && candidate.description.contains("three +1/+1 counters")));
             assert!(candidates
                 .iter()
                 .any(|candidate| candidate.source_id == root_maze));
@@ -2447,16 +2441,7 @@ fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selecte
         .act(GameAction::ChooseReplacement {
             index: root_maze_first,
         })
-        .expect("apply Root Maze first");
-    if let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for {
-        let counters = candidates
-            .iter()
-            .position(|candidate| candidate.description.contains("three +1/+1 counters"))
-            .expect("the copied counters remain to be ordered");
-        runner
-            .act(GameAction::ChooseReplacement { index: counters })
-            .expect("finish entry with Archelos applied last");
-    }
+        .expect("finish entry with Archelos applied last");
     assert_settled(runner.state(), "copy entry after its chosen model leaves");
     assert_eq!(
         battlefield_tokens_named(runner.state(), "Triskelion"),

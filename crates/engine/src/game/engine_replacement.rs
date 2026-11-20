@@ -3406,15 +3406,7 @@ fn settle_token_entry_after_copy(
             &state.all_creature_types,
         );
     }
-    if !staged.replacement_definitions.is_empty() && !superseded.is_empty() {
-        // CR 614.5: the copied definitions must not inherit the already-applied
-        // indices of the superseded body. Only the suffix can apply.
-        staged.replacement_definitions = superseded
-            .iter_all()
-            .chain(staged.replacement_definitions.iter_all())
-            .cloned()
-            .collect();
-    }
+    let acquired = staged.replacement_definitions.clone();
     let settlement = Box::new(TokenCopySettlement {
         target_id,
         ability: ability.clone(),
@@ -3424,6 +3416,31 @@ fn settle_token_entry_after_copy(
         copy_display: copy.display.clone(),
         copy_incarnation: copy.incarnation,
         staged_name: staged.name.clone(),
+        superseded_replacements: None,
+    });
+    // CR 614.5: the entrant keeps its own definitions as the first indices so the
+    // applied identities carry over; the acquired ones follow them.
+    staged.replacement_definitions = superseded
+        .iter_all()
+        .chain(acquired.iter_all())
+        .cloned()
+        .collect();
+    let superseded_len = superseded.len();
+    if let Some(entry) = state.liminal_entries.get_mut(&source_id) {
+        entry.object = LiminalEntrant::Token(TokenProjection::materialize(staged.clone()));
+    }
+    // CR 614.6 + CR 707.5: acquired replacements are offered here only when another
+    // replacement could redirect the entrant, which would end the entry before its
+    // finisher settles them; otherwise that finisher still does.
+    let expose = super::replacement::liminal_entry_has_foreign_redirect(state, &resume_event);
+    staged.replacement_definitions = if expose {
+        staged.replacement_definitions
+    } else {
+        superseded
+    };
+    let settlement = Box::new(TokenCopySettlement {
+        superseded_replacements: expose.then_some(superseded_len),
+        ..*settlement
     });
     if let Some(entry) = state.liminal_entries.get_mut(&source_id) {
         entry.object = LiminalEntrant::Token(TokenProjection::materialize(staged));
@@ -3563,6 +3580,12 @@ fn complete_token_entry_after_copy(
         )),
         _ => None,
     };
+    // CR 707.5: the acquired replacements were offered with the redirecting ones, so the
+    // entry finisher must not apply them a second time.
+    let acquired_settled = matches!(
+        &step,
+        SettleStep::Executed(_, settlement) if settlement.superseded_replacements.is_some()
+    );
     let outcome = match step {
         SettleStep::Unsettled(event) => TokenEntrySettlement::Enter(event),
         SettleStep::Executed(event, settlement) => {
@@ -3601,12 +3624,12 @@ fn complete_token_entry_after_copy(
     // CR 122.6: place the event's counters with the copy exceptions after
     // installing the copy. The continuation above captured the batch seed.
     let settled_counters = if let (
-        Some(_),
+        true,
         ProposedEvent::TokenEntry {
             enter_with_counters,
             ..
         },
-    ) = (&captured, &mut resume_event)
+    ) = (acquired_settled, &mut resume_event)
     {
         let mut counters = std::mem::take(enter_with_counters);
         if let Some(entry) = state.liminal_entries.get_mut(&source_id) {
