@@ -9752,17 +9752,21 @@ fn gather_transient_continuous_effects_with(
             // clear it.
             // CR 611.2c + CR 101.2: CantBeCountered is likewise a live rule
             // prohibition, not an ability that can be removed from its recipient.
-            if matches!(
-                modification,
-                ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MayLookAtFaceDown
-                        | StaticMode::ReduceAbilityCost { .. }
-                        | StaticMode::CastFromHandFree { .. }
-                        | StaticMode::Goaded
-                        | StaticMode::CantBeTargeted { .. }
-                        | StaticMode::CantBeCountered,
-                }
-            ) {
+            // CR 611.2c + CR 613.11: Combat reads admitted opponent-relative
+            // restrictions after characteristic and ability changes.
+            if transient_relative_blocker_filter(modification).is_some()
+                || matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MayLookAtFaceDown
+                            | StaticMode::ReduceAbilityCost { .. }
+                            | StaticMode::CastFromHandFree { .. }
+                            | StaticMode::Goaded
+                            | StaticMode::CantBeTargeted { .. }
+                            | StaticMode::CantBeCountered,
+                    }
+                )
+            {
                 continue;
             }
             // After both skips above and before `layer()` below: a narrowed
@@ -11499,6 +11503,38 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
 fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
     matches!(mode, StaticMode::MustAttackDefender { .. })
+}
+
+/// CR 611.2c: Combat evaluates admitted opponent-relative block restrictions
+/// directly. The tree must contain an opponent leaf, and every typed leaf must
+/// have empty properties and either no controller or an opponent controller.
+/// Filters containing a `You` leaf use the existing static projection.
+pub(crate) fn transient_relative_blocker_filter(
+    modification: &ContinuousModification,
+) -> Option<&TargetFilter> {
+    use crate::types::ability::ControllerRef;
+
+    fn relative(filter: &TargetFilter) -> Option<bool> {
+        match filter {
+            TargetFilter::Typed(typed) if typed.properties.is_empty() => match &typed.controller {
+                None => Some(false),
+                Some(ControllerRef::Opponent) => Some(true),
+                _ => None,
+            },
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+                .iter()
+                .try_fold(false, |found, filter| Some(relative(filter)? || found)),
+            TargetFilter::Not { filter } => relative(filter),
+            _ => None,
+        }
+    }
+
+    match modification {
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::CantBeBlockedBy { filter },
+        } if relative(filter) == Some(true) => Some(filter),
+        _ => None,
+    }
 }
 
 /// CR 109.5: True when a `TargetFilter` constrains the controller of matched

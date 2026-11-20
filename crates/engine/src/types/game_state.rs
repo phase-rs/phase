@@ -3569,12 +3569,7 @@ pub enum DamagePostLossStage {
 /// lifelink share was already folded into `lifelink_by_source` at park time),
 /// so the post-replacement funnel never drains it directly. The snapshot
 /// carries source identity/incarnation (CR 400.7), controller (CR 702.15b),
-/// keywords, and `lifelink_bonus`; the pre-damage loyalty/defense below ride
-/// alongside it (CR 120.10 measures planeswalker/battle excess against the
-/// values *before* the damage was dealt, and loyalty removal already ran by
-/// park time). Creature excess still recomputes from post-counter state at
-/// resume (toughness/`damage_marked` are untouched by the counter placement),
-/// so the resumed record matches the never-paused path on both axes.
+/// keywords, and `lifelink_bonus`; the `excess` below rides alongside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostCounter {
     /// CR 400.7: the damage context at pause time (source identity/incarnation,
@@ -3584,15 +3579,8 @@ pub struct PendingDamagePostCounter {
     pub target: TargetRef,
     /// The post-replacement damage amount.
     pub actual_amount: u32,
-    /// CR 120.10: the target's loyalty *before* the damage was dealt, captured
-    /// before loyalty removal (which runs ahead of the wither arm). `None`
-    /// when the target is not a planeswalker (or has no loyalty field).
-    #[serde(default)]
-    pub loyalty_before: Option<u32>,
-    /// CR 120.10: the target's defense *before* the damage was dealt, captured
-    /// before defense removal. `None` when the target is not a battle.
-    #[serde(default)]
-    pub defense_before: Option<u32>,
+    /// CR 120.4a + CR 120.10: the excess computed before the counters were placed; the resume never recomputes it.
+    pub excess: u32,
     /// CR 510.2: a combat leg's post-counter work, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).
     #[serde(default)]
