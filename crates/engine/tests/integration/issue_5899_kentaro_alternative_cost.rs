@@ -43,21 +43,18 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
         .expect("Kentaro must offer a castable alternative cost for a Samurai");
 
     match &runner.state().waiting_for {
-        WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(costs) => {
-                assert_eq!(costs.len(), 2);
-                match &costs[0] {
-                    AbilityCost::Mana {
-                        cost: ManaCost::Cost {
-                            shards,
-                            generic: 3,
-                        },
-                    } if shards.is_empty() => {}
-                    _ => panic!("expected first choice to be {{3}} mana cost, got {:?}", costs[0]),
-                }
-            }
-            other => panic!("expected Kentaro alternative-cost choice, got {other:?}"),
-        },
+        WaitingFor::OptionalCostChoice { cost, .. } => assert!(matches!(
+            cost,
+            AdditionalCost::Choice(
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards,
+                        generic: 3,
+                    },
+                },
+                _
+            ) if shards.is_empty()
+        )),
         other => panic!("expected Kentaro alternative-cost choice, got {other:?}"),
     }
 

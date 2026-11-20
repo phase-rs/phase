@@ -2359,13 +2359,6 @@ pub struct BattlefieldEntryRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
-    /// CR 708.2: Whether the object entered the battlefield face down (morph,
-    /// disguise, manifest, cloak). Enables data-driven ETB condition queries like
-    /// "if a face-down creature entered the battlefield under your control this turn"
-    /// (Tunnel Tipster). The entry-time face-down status is captured before any
-    /// turn-face-up replacement effects apply.
-    #[serde(default)]
-    pub face_down: bool,
 }
 
 #[cfg(feature = "test-support")]
@@ -2381,7 +2374,6 @@ impl Clone for BattlefieldEntryRecord {
             colors,
             keywords,
             controller,
-            face_down,
         } = self;
         Self {
             object_id: *object_id,
@@ -2392,7 +2384,6 @@ impl Clone for BattlefieldEntryRecord {
             colors: colors.clone(),
             keywords: keywords.clone(),
             controller: *controller,
-            face_down: *face_down,
         }
     }
 }

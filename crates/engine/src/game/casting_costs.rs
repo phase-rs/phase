@@ -717,7 +717,7 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     match (pending.additional_cost_flow.as_ref(), additional_cost) {
-        (_, AdditionalCost::Choice(_)) => {}
+        (_, AdditionalCost::Choice(_, _)) => {}
         (Some(AdditionalCost::Kicker { .. }), _) => {
             return handle_decide_kicker_cost(state, player, pending, pay, events);
         }
@@ -812,16 +812,7 @@ pub(crate) fn handle_decide_additional_cost(
         AdditionalCost::Kicker { .. } => {
             unreachable!("kicker costs are handled before generic optional costs")
         }
-        AdditionalCost::Choice(costs) => {
-            // TODO: Support N-way choices (currently only binary choices work with DecideOptionalCost)
-            // For now, assume exactly 2 choices as per existing binary choice prompt design.
-            let (preferred, fallback) = match costs.as_slice() {
-                [first, second] => (first.clone(), second.clone()),
-                _ => {
-                    // Fallback for unexpected N>2: treat first as preferred, last as fallback
-                    (costs.first().cloned().unwrap_or(AbilityCost::Mana { cost: ManaCost::zero() }), costs.last().cloned().unwrap_or(AbilityCost::Mana { cost: ManaCost::zero() }))
-                }
-            };
+        AdditionalCost::Choice(preferred, fallback) => {
             if pay {
                 let is_card_additional_cost_choice = !answers_alternative_cost;
                 if is_card_additional_cost_choice {
@@ -1566,7 +1557,7 @@ pub(crate) fn finish_pending_cost_or_cast(
             return Ok(make_optional_cost_choice(
                 state,
                 player,
-                AdditionalCost::Choice(vec![alt_cost.cost, AbilityCost::Mana { cost: fallback }]),
+                AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: fallback }),
                 0,
                 pending,
             ));
@@ -1625,14 +1616,14 @@ pub(crate) fn finish_pending_cost_or_cast(
                     pending,
                 ));
             }
-            AdditionalCost::Kicker { .. } | AdditionalCost::Choice(_) => {
+            AdditionalCost::Kicker { .. } | AdditionalCost::Choice(_, _) => {
                 pending.additional_cost_queue.remove(0);
                 return finish_pending_cost_or_cast(state, player, pending, events);
             }
         }
     }
 
-    if let Some(choice @ AdditionalCost::Choice(_)) = pending.additional_cost_flow.clone() {
+    if let Some(choice @ AdditionalCost::Choice(..)) = pending.additional_cost_flow.clone() {
         return Ok(make_optional_cost_choice(state, player, choice, 0, pending));
     }
 
@@ -9470,7 +9461,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
             return Ok(make_optional_cost_choice(
                 state,
                 player,
-                AdditionalCost::Choice(vec![alt_cost.cost, AbilityCost::Mana { cost: cost.clone() }]),
+                AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: cost.clone() }),
                 0,
                 pending,
             ));
@@ -9705,9 +9696,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
                     pending,
                 ));
             }
-            AdditionalCost::Choice(costs) => {
-                // For binary choices, try preferred (first) then fallback (second).
-                // For N>2, try each in order until one is payable.
+            AdditionalCost::Choice(preferred, fallback) => {
                 let mut pending = pending_cast_keeping(
                     object_id,
                     card_id,
@@ -9725,26 +9714,33 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 pending.payment_mode = payment_mode;
                 pending.additional_cost_flow =
                     imposed_required_cost.clone().map(AdditionalCost::Required);
-                // CR 601.2b: Try each choice in order until one is payable.
-                for choice_cost in costs {
-                    if additional_cost_declaration_is_offerable(
+                // CR 601.2b: If the preferred branch is unpayable, fall through
+                // to the fallback without prompting. If both are unpayable, the
+                // spell cannot be cast.
+                if !additional_cost_declaration_is_offerable(
+                    state,
+                    player,
+                    &pending,
+                    preferred.clone(),
+                )? {
+                    if !additional_cost_declaration_is_offerable(
                         state,
                         player,
                         &pending,
-                        choice_cost.clone(),
+                        fallback.clone(),
                     )? {
-                        return Ok(make_optional_cost_choice(
-                            state,
-                            player,
-                            additional_cost.clone(),
-                            0,
-                            pending,
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot pay either alternative additional cost".to_string(),
                         ));
                     }
+                    return pay_additional_cost(state, player, fallback.clone(), pending, events);
                 }
-                // No choice is payable
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot pay any alternative additional cost".to_string(),
+                return Ok(make_optional_cost_choice(
+                    state,
+                    player,
+                    additional_cost,
+                    0,
+                    pending,
                 ));
             }
         }

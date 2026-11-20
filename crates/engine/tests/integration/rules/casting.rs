@@ -1683,12 +1683,12 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             damage_source: None,
             excess: None,
         })
-        .with_additional_cost(AdditionalCost::Choice(vec![
+        .with_additional_cost(AdditionalCost::Choice(
             AbilityCost::Blight { count: 1 },
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 2 },
             },
-        ]))
+        ))
         .id();
 
     let mut runner = scenario.build();
@@ -2736,17 +2736,16 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(costs) => {
-                assert_eq!(costs.len(), 2);
+            AdditionalCost::Choice(alt, printed) => {
                 assert_eq!(
-                    costs[0],
+                    *alt,
                     AbilityCost::Mana {
                         cost: ManaCost::zero()
                     },
                     "alternative cost must be {{0}} (Rooftop Storm)"
                 );
                 assert_eq!(
-                    costs[1],
+                    *printed,
                     AbilityCost::Mana {
                         cost: ManaCost::Cost {
                             shards: vec![],
@@ -2856,17 +2855,16 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(costs) => {
-                assert_eq!(costs.len(), 2);
+            AdditionalCost::Choice(alt, printed) => {
                 assert_eq!(
-                    costs[0],
+                    *alt,
                     AbilityCost::Mana {
                         cost: ManaCost::zero()
                     },
                     "alternative cost must be {{0}}"
                 );
                 assert_eq!(
-                    costs[1],
+                    *printed,
                     AbilityCost::Mana {
                         cost: ManaCost::Cost {
                             shards: vec![],

@@ -83,7 +83,7 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     match runner.state().waiting_for.clone() {
         WaitingFor::OptionalCostChoice { cost, .. } => {
             assert!(
-                matches!(cost, engine::types::ability::AdditionalCost::Choice(_)),
+                matches!(cost, engine::types::ability::AdditionalCost::Choice(_, _)),
                 "must offer AdditionalCost::Choice"
             );
         }
