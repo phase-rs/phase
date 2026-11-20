@@ -362,6 +362,7 @@ mod umbra_stalker_graveyard_chroma_4066;
 mod un_card_actions;
 mod unbound_flourishing;
 mod undead_alchemist_combat_damage_to_mill;
+mod undercity_throne_unchosen_cards;
 mod undying_malice_edict_sacrifice_5942;
 mod unexpected_request_delayed_unattach;
 mod unholy_citadel_legendary_color_banding_grant;
