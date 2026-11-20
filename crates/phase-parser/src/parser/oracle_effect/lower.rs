@@ -13277,14 +13277,18 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
     // creature for the demonstrative to bind to, so it keeps `CostPaidObject`
     // and still reads the sacrificed creature.
     let referent = where_x_target_referent(where_x);
-    let rebind_magnitude_target_anaphor = referent == Some(TargetReferent::Demonstrative)
-        && effect
-            .target_filter()
-            .is_some_and(target_filter_names_creature);
-    // CR 608.2c: "its power" in the where-clause of "target creature gets +X/…"
-    // names the clause subject, the announced target, not the ability source.
-    let rebind_subject_pronoun = referent == Some(TargetReferent::SubjectPronoun)
-        && matches!(effect, Effect::Pump { target, .. } if target_filter_names_creature(target));
+    let pt_rebind_from = referent
+        .filter(|referent| match referent {
+            TargetReferent::Demonstrative => effect
+                .target_filter()
+                .is_some_and(target_filter_names_creature),
+            // CR 608.2c: "its power" in the where-clause of "target creature gets
+            // +X/…" names the clause subject, the announced target, not the source.
+            TargetReferent::SubjectPronoun => {
+                matches!(effect, Effect::Pump { target, .. } if target_filter_names_creature(target))
+            }
+        })
+        .map(TargetReferent::provisional_scope);
     // CR 107.3c: set when the clause DEFINES X but the definition is not
     // representable. Recorded here and converted to a gap node after the match
     // (the arms hold a mutable borrow of `effect`'s fields).
@@ -13354,8 +13358,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         | Effect::SkipNextTurn { count: amount, .. }
         | Effect::Surveil { count: amount, .. } => {
             bind_where_x_quantity(amount, where_x, &mut unbound_where_x);
-            if rebind_magnitude_target_anaphor {
-                rebind_pt_scope_to_target(amount, ObjectScope::CostPaidObject);
+            if let Some(from) = pt_rebind_from {
+                rebind_pt_scope_to_target(amount, from);
             }
         }
         // CR 705.1: the flip count of an `Exactly` run is the where-X slot; an
@@ -13363,8 +13367,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         Effect::FlipCoins { flips, .. } => {
             if let Some(amount) = flips.count_expr_mut() {
                 bind_where_x_quantity(amount, where_x, &mut unbound_where_x);
-                if rebind_magnitude_target_anaphor {
-                    rebind_pt_scope_to_target(amount, ObjectScope::CostPaidObject);
+                if let Some(from) = pt_rebind_from {
+                    rebind_pt_scope_to_target(amount, from);
                 }
             }
         }
@@ -13598,13 +13602,9 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
                 }
                 _ => unbound_where_x = where_x.expression.map(str::to_string),
             }
-            if rebind_magnitude_target_anaphor {
-                rebind_pt_value_scope_to_target(power, ObjectScope::CostPaidObject);
-                rebind_pt_value_scope_to_target(toughness, ObjectScope::CostPaidObject);
-            }
-            if rebind_subject_pronoun {
-                rebind_pt_value_scope_to_target(power, ObjectScope::Source);
-                rebind_pt_value_scope_to_target(toughness, ObjectScope::Source);
+            if let Some(from) = pt_rebind_from {
+                rebind_pt_value_scope_to_target(power, from);
+                rebind_pt_value_scope_to_target(toughness, from);
             }
         }
         Effect::PreventDamage {
