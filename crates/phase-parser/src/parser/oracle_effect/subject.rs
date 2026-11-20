@@ -16,6 +16,7 @@ use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
@@ -6176,26 +6177,6 @@ fn build_pt_choice_clause(
 /// postnominal mana-value grammar. This keeps the compound fallback narrow:
 /// other dynamic quantities (for example, cards drawn this turn) remain owned
 /// by their existing lowering path instead of being reinterpreted here.
-fn filter_prop_contains_cmc(property: &FilterProp) -> bool {
-    match property {
-        FilterProp::Cmc { .. } => true,
-        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_cmc),
-        FilterProp::Not { prop } => filter_prop_contains_cmc(prop),
-        _ => false,
-    }
-}
-
-fn target_filter_contains_cmc(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().any(filter_prop_contains_cmc),
-        TargetFilter::Not { filter } => target_filter_contains_cmc(filter),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(target_filter_contains_cmc)
-        }
-        _ => false,
-    }
-}
-
 fn quantity_expr_contains_cmc_zone_count(quantity: &QuantityExpr) -> bool {
     match quantity {
         QuantityExpr::Ref {
@@ -6204,23 +6185,18 @@ fn quantity_expr_contains_cmc_zone_count(quantity: &QuantityExpr) -> bool {
                     filter: Some(filter),
                     ..
                 },
-        } => target_filter_contains_cmc(filter),
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => quantity_expr_contains_cmc_zone_count(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().any(quantity_expr_contains_cmc_zone_count)
-        }
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_contains_cmc_zone_count(left)
-                || quantity_expr_contains_cmc_zone_count(right)
-        }
-        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
+        } => filter_contains_filter_prop(filter, &|property| {
+            matches!(property, FilterProp::Cmc { .. })
+        }),
+        _ => quantity.any_ref(&mut |quantity_ref| match quantity_ref {
+            QuantityRef::ZoneCardCount {
+                filter: Some(filter),
+                ..
+            } => filter_contains_filter_prop(filter, &|property| {
+                matches!(property, FilterProp::Cmc { .. })
+            }),
+            _ => false,
+        }),
     }
 }
 
@@ -9899,6 +9875,33 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmc_zone_count_detection_walks_nested_filter_grammar() {
+        use crate::types::ability::{Comparator, CountScope, PlayerRelation, ZoneRef};
+
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Hand,
+                card_types: Vec::new(),
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::ControlsCount {
+                        relation: PlayerRelation::All,
+                        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::Cmc {
+                                comparator: Comparator::GE,
+                                value: QuantityExpr::Fixed { value: 4 },
+                            },
+                        ])),
+                        comparator: Comparator::GE,
+                        count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                    }),
+                }),
+            },
+        };
+        assert!(quantity_expr_contains_cmc_zone_count(&quantity));
+    }
 
     #[test]
     fn r2_owner_anaphor_requires_prior_object_declaration() {

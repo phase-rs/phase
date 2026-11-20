@@ -115,6 +115,11 @@ fn algorithmic_ferocity_static_parse_keeps_dynamic_cmc_pump_and_fight() {
 
 #[test]
 fn filtered_cmc_compound_pump_preserves_non_unit_multiplier() {
+    // Synthetic class-shape fixture: Algorithmic Ferocity is the reviewed
+    // printed example for this filtered-count grammar, but its real coefficient
+    // is +1/+0. The census found no printed card exercising a non-unit
+    // coefficient, so +2/+0 proves the shared `Multiply` wrapper cannot collapse
+    // the same class back to a fixed pump.
     use crate::parser::oracle::parse_oracle_text;
 
     let parsed = parse_oracle_text(
