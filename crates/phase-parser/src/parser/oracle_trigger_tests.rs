@@ -32691,6 +32691,119 @@ fn source_counter_state_trigger_chain_typed_referent_keeps_parent_target() {
     );
 }
 
+/// CR 608.2c + CR 115.1d: "tap target creature … and put a stun counter on it"
+/// puts the counter on the announced target even when the trigger subject is a
+/// typed non-source object — the entering land (Grappling Kraken), "this
+/// creature or another enchantment you control" (Fear of Sleep Paralysis) or the
+/// equipped creature (Mjölnir, Storm Hammer). Verbatim MTGJSON Oracle text,
+/// keywords, types and subtypes. Reverting the typed-referent continuation pin in
+/// `try_split_targeted_compound` exports `PutCounter { target: SelfRef }`.
+#[test]
+fn typed_trigger_subject_compound_stun_counter_binds_the_tapped_target() {
+    /// A verbatim MTGJSON card and the trigger modes whose chains are checked.
+    struct CardRow<'a> {
+        name: &'a str,
+        oracle: &'a str,
+        keywords: &'a [&'a str],
+        types: &'a [&'a str],
+        subtypes: &'a [&'a str],
+        modes: &'a [TriggerMode],
+    }
+    let cards = [
+        CardRow {
+            name: "Grappling Kraken",
+            oracle: "Landfall — Whenever a land you control enters, tap target creature an opponent controls and put a stun counter on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+            keywords: &["Landfall"],
+            types: &["Creature"],
+            subtypes: &["Kraken"],
+            modes: &[TriggerMode::ChangesZone],
+        },
+        CardRow {
+            name: "Fear of Sleep Paralysis",
+            oracle: "Flying\nEerie — Whenever this creature or another enchantment you control enters and whenever you fully unlock a Room, tap up to one target creature and put a stun counter on it.\nStun counters can't be removed from permanents your opponents control. (They won't untap if they have stun counters.)",
+            keywords: &["Eerie", "Flying"],
+            types: &["Enchantment", "Creature"],
+            subtypes: &["Nightmare"],
+            // The `FullyUnlock` half was already `ParentTarget`; asserted as
+            // the sibling of the typed-subject `ChangesZone` half.
+            modes: &[TriggerMode::ChangesZone, TriggerMode::FullyUnlock],
+        },
+        CardRow {
+            name: "Mjölnir, Storm Hammer",
+            oracle: "When Mjölnir enters, attach it to target legendary creature you control.\nWhenever equipped creature attacks, tap target creature defending player controls and put a stun counter on it. Then Mjölnir deals damage to each opponent equal to the number of tapped creatures that opponent controls.\nEquip {4}",
+            keywords: &["Equip"],
+            types: &["Artifact"],
+            subtypes: &["Equipment"],
+            modes: &[TriggerMode::Attacks],
+        },
+    ];
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for CardRow {
+        name,
+        oracle,
+        keywords,
+        types,
+        subtypes,
+        modes,
+    } in cards
+    {
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &owned(keywords),
+            &owned(types),
+            &owned(subtypes),
+        );
+        for mode in modes {
+            let trigger = parsed
+                .triggers
+                .iter()
+                .find(|t| t.mode == *mode)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: expected a {mode:?} trigger, got {:?}",
+                        parsed.triggers
+                    )
+                });
+            let effects = trigger_chain_effects(trigger);
+            assert!(
+                effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::SetTapState {
+                        target: TargetFilter::Typed(_),
+                        ..
+                    }
+                )),
+                "{name} {mode:?}: reach guard — the chain must tap the announced \
+                 typed target, got {effects:?}"
+            );
+            assert!(
+                effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Stun,
+                        target: TargetFilter::ParentTarget,
+                        ..
+                    }
+                )),
+                "{name} {mode:?}: the stun counter must go on the tapped target \
+                 (ParentTarget), got {effects:?}"
+            );
+            assert!(
+                !effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )),
+                "{name} {mode:?}: no counter may land on the ability's source, \
+                 got {effects:?}"
+            );
+        }
+    }
+}
+
 // --- Compound trigger tests ---
 
 #[test]
