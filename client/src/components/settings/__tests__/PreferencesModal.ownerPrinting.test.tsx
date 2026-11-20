@@ -44,8 +44,12 @@ describe("PreferencesModal owner printing preference", () => {
     expect(usePreferencesStore.getState()).toMatchObject(siblings);
     const modal = render(<PreferencesModal onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Visual" }));
+    expect(screen.getByText("In-game card art")).toBeInTheDocument();
+    expect(screen.getByText(
+      "Use the card owner’s chosen printing and varied basic-land art when available. Turn off to use your own card art preferences.",
+    )).toBeInTheDocument();
     const checkbox = screen.getByRole("checkbox", {
-      name: englishSettings.visual.showOwnerPrintings,
+      name: "Show chosen and varied card art",
     });
     expect(checkbox).toBeChecked();
 
@@ -66,7 +70,7 @@ describe("PreferencesModal owner printing preference", () => {
     await act(async () => { await usePreferencesStore.persist.rehydrate(); });
     render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
     expect(screen.getByRole("checkbox", {
-      name: englishSettings.visual.showOwnerPrintings,
+      name: "Show chosen and varied card art",
     })).not.toBeChecked();
     expect(usePreferencesStore.getState().showOwnerPrintings).toBe(false);
     expect(usePreferencesStore.getState()).toMatchObject(siblings);
