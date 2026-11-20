@@ -157,6 +157,137 @@ describe("workspace placement", () => {
       expect(new Set(Object.values(placed).map(([column]) => column)).size).toBe(6);
     });
 
+    // The board is sorted once and then edited, so the groups on screen drift
+    // from the groups the sort laid out. A merged column must stay a destination.
+    function sortedBoard(
+      sort: "color" | "type",
+      kinds: readonly DraftPoolGroupKind[],
+      columnCount: number,
+      traits: Record<string, Partial<DraftCardInstance>>,
+      zone: "deck" | "sideboard",
+    ) {
+      const pool = kinds.map((kind) => ({ ...card(kind, kind), ...traits[kind] }));
+      const poolGroups = groupsFor(sort, pool, kinds);
+      const preferences: DraftBoardPreferences = { sort, columnCount, rows: "one", showHeaders: true };
+      const state: DraftWorkspaceState = {
+        ...createDraftWorkspaceState(),
+        placements: Object.fromEntries(
+          pool.map((entry) => [entry.instance_id, { zone, row: 0, column: 0, order: 0 }]),
+        ),
+      };
+      return { pool, poolGroups, preferences, rebuilt: rebuildWorkspaceZone(state, zone, pool, poolGroups, preferences) };
+    }
+
+    function groupsFor(
+      sort: "color" | "type",
+      pool: readonly DraftCardInstance[],
+      kinds: readonly DraftPoolGroupKind[],
+    ): DraftPoolGroups {
+      // One group per kind, in first-seen order, like the engine reports them.
+      const byKind = new Map<DraftPoolGroupKind, DraftCardInstance[]>();
+      pool.forEach((entry, index) => byKind.set(kinds[index], [...(byKind.get(kinds[index]) ?? []), entry]));
+      const axis = [...byKind].map(([kind, entries]) => ({
+        kind,
+        total: entries.length,
+        cards: entries.map((entry) => ({ card: entry, count: 1, instance_ids: [entry.instance_id] })),
+      }));
+      return sort === "color"
+        ? { ...groups(), color_groups: axis }
+        : { ...groups(), type_groups: axis };
+    }
+
+    const column = (placed: DraftWorkspaceState, id: string) => placed.placements[id].column;
+    // The new card sits in the zone's first column, as reconcile defaults it.
+    const withArrival = (
+      state: DraftWorkspaceState, id: string, zone: "deck" | "sideboard",
+    ): DraftWorkspaceState => ({
+      ...state,
+      placements: { ...state.placements, [id]: { zone, row: 0, column: 0, order: 0 } },
+    });
+
+    it("keeps_the_merged_column_a_destination_after_a_group_empties_out", () => {
+      const { pool, poolGroups, preferences, rebuilt } = sortedBoard(
+        "color", COLOR_KINDS, 6, COLOR_TRAITS, "sideboard",
+      );
+      // The only black card leaves for the deck: the zone now holds six groups.
+      const moved: DraftWorkspaceState = {
+        ...rebuilt,
+        placements: { ...rebuilt.placements, black: { ...rebuilt.placements.black, zone: "deck" } },
+      };
+      for (const kind of ["multicolor", "colorless"]) {
+        const later = { ...pool.find((entry) => entry.name === kind)!, instance_id: `later-${kind}` };
+        expect(resolveWorkspacePickPlacement(
+          later, "sideboard", pool, poolGroups, moved, preferences,
+        ).column).toBe(column(rebuilt, kind));
+      }
+      expect(column(rebuilt, "multicolor")).toBe(5);
+    });
+
+    it("keeps_the_merged_column_a_destination_after_a_new_group_arrives", () => {
+      const noMulticolor = COLOR_KINDS.filter((kind) => kind !== "multicolor");
+      const sorted = sortedBoard("color", noMulticolor, 5, COLOR_TRAITS, "sideboard");
+      // A multicolor card then joins the pool, so the engine now reports seven groups.
+      const arrival = { ...card("arrival", "multicolor"), colors: ["W", "U"] };
+      const pool = [...sorted.pool, arrival];
+      const poolGroups = groupsFor("color", pool, [...noMulticolor, "multicolor"]);
+      const board = withArrival(sorted.rebuilt, "arrival", "sideboard");
+      const shared = column(sorted.rebuilt, "green");
+      expect(column(sorted.rebuilt, "colorless")).toBe(shared);
+      for (const kind of ["green", "colorless"]) {
+        const later = { ...pool.find((entry) => entry.name === kind)!, instance_id: `later-${kind}` };
+        expect(resolveWorkspacePickPlacement(
+          later, "sideboard", pool, poolGroups, board, sorted.preferences,
+        ).column).toBe(shared);
+      }
+    });
+
+    it("keeps_a_type_sort_merged_column_a_destination_after_a_new_type_group_arrives", () => {
+      const kinds: DraftPoolGroupKind[] = [
+        "creature", "instant", "sorcery", "enchantment", "artifact", "planeswalker", "land",
+      ];
+      const traits = Object.fromEntries(kinds.map((kind) => [kind, { type_line: kind }]));
+      const sorted = sortedBoard("type", kinds, 6, traits, "sideboard");
+      const battle = { ...card("battle"), type_line: "Battle" };
+      const pool = [...sorted.pool, battle];
+      const poolGroups = groupsFor("type", pool, [...kinds, "other"]);
+      const board = withArrival(sorted.rebuilt, "battle", "sideboard");
+      for (const kind of ["planeswalker", "land"]) {
+        const later = { ...pool.find((entry) => entry.name === kind)!, instance_id: `later-${kind}` };
+        expect(resolveWorkspacePickPlacement(
+          later, "sideboard", pool, poolGroups, board, sorted.preferences,
+        ).column).toBe(column(sorted.rebuilt, kind));
+      }
+    });
+
+    it("places_a_batch_of_arrivals_into_the_merged_column_after_a_group_empties_out", () => {
+      const { pool, preferences, rebuilt } = sortedBoard(
+        "color", COLOR_KINDS, 6, COLOR_TRAITS, "deck",
+      );
+      const arrivals = ["multicolor", "colorless"].map((kind) => (
+        { ...pool.find((entry) => entry.name === kind)!, instance_id: `arrive-${kind}` }
+      ));
+      const grown = [...pool, ...arrivals];
+      const grownGroups = groupsFor("color", grown, [
+        ...COLOR_KINDS, "multicolor", "colorless",
+      ]);
+      expect(grownGroups.color_groups).toHaveLength(7);
+      const state: DraftWorkspaceState = {
+        ...rebuilt,
+        placements: {
+          ...rebuilt.placements,
+          black: { ...rebuilt.placements.black, zone: "sideboard" },
+          ...Object.fromEntries(arrivals.map((entry) => [
+            entry.instance_id, { zone: "deck", row: 0, column: 0, order: 0 },
+          ])),
+        },
+      };
+      const placed = placeArrivingPoolCards(
+        state, arrivals.map((entry) => entry.instance_id), grown, grownGroups, preferences,
+      );
+      expect(column(placed, "arrive-multicolor")).toBe(5);
+      expect(column(placed, "arrive-colorless")).toBe(5);
+    });
+
     it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {
       expect(sideboardColumns(5)).toEqual({
         white: 0, blue: 1, black: 2, red: 3, green: 3, multicolor: 4, colorless: 4,
