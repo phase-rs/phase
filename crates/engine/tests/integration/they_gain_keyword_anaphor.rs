@@ -19,7 +19,10 @@
 //! comma-and keyword list lowers to one `AddKeyword` per keyword carrying the
 //! grant's duration (CR 611.2c). At resolution the sentinel binds the chain
 //! tracked set the counter clause lazily publishes (`CounterAdded` harvest in
-//! `affected_objects_from_events`).
+//! `affected_objects_from_events`). When the counter clause itself reads a
+//! tracked set ("each of those creatures"), the chain did not establish the
+//! population, so "they" stays the bare `ParentTarget` anaphor for the
+//! cross-item relation pass to bind (Unbreakable Formation's addendum).
 //!
 //! Cards unlocked: Unbreakable Formation (addendum), Overseer of Vault 76
 //! (reflexive remove-counters trigger), and the multi-keyword list form shared
@@ -27,14 +30,20 @@
 
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{AbilityDefinition, ContinuousModification, Effect, TargetFilter};
+use engine::types::identifiers::TrackedSetId;
 use engine::types::keywords::Keyword;
 
-/// Walk the sub_ability chain and collect every `AddKeyword` granted to an
-/// anaphoric frozen-population subject (the "they gain ..." continuous grant).
-/// After a same-chain mass ("each ...") clause, "they" binds the `TrackedSet`
+/// The frozen-population sentinel "they" binds after a same-chain mass clause.
+const FROZEN_SET: TargetFilter = TargetFilter::TrackedSet {
+    id: TrackedSetId(0),
+};
+
+/// Walk the sub_ability chain and collect every `AddKeyword` granted to the
+/// `anaphor` subject (the "they gain ..." continuous grant). After a
+/// same-chain mass ("each ...") clause, "they" binds the `TrackedSet`
 /// sentinel for the frozen population — never the target-relative
 /// `ParentTarget`, which misbinds on spells that declare a target.
-fn they_gain_keywords(def: &AbilityDefinition) -> Vec<Keyword> {
+fn they_gain_keywords(def: &AbilityDefinition, anaphor: &TargetFilter) -> Vec<Keyword> {
     let mut cur = Some(def);
     while let Some(d) = cur {
         if let Effect::GenericEffect {
@@ -43,7 +52,7 @@ fn they_gain_keywords(def: &AbilityDefinition) -> Vec<Keyword> {
         {
             let is_anaphor = static_abilities
                 .iter()
-                .any(|s| matches!(s.affected, Some(TargetFilter::TrackedSet { .. })));
+                .any(|s| s.affected.as_ref() == Some(anaphor));
             if is_anaphor {
                 let kws: Vec<Keyword> = static_abilities
                     .iter()
@@ -77,7 +86,10 @@ fn assert_no_unimplemented(def: &AbilityDefinition) {
 }
 
 /// Unbreakable Formation addendum — single-keyword "they gain" after a
-/// "put a +1/+1 counter on each of those creatures" conjunct.
+/// "put a +1/+1 counter on each of those creatures" conjunct. The counter
+/// clause reads a tracked set this fragment never published, so "they" stays
+/// the bare anaphor; the full card's document relation pass binds it
+/// (`break_of_day_fateful_hour::unbreakable_formation_addendum_*`).
 #[test]
 fn unbreakable_formation_addendum_they_gain_vigilance() {
     let def = parse_effect_chain(
@@ -85,7 +97,10 @@ fn unbreakable_formation_addendum_they_gain_vigilance() {
         engine::types::ability::AbilityKind::Spell,
     );
     assert_no_unimplemented(&def);
-    assert_eq!(they_gain_keywords(&def), vec![Keyword::Vigilance]);
+    assert_eq!(
+        they_gain_keywords(&def, &TargetFilter::ParentTarget),
+        vec![Keyword::Vigilance]
+    );
 }
 
 /// Overseer of Vault 76 reflexive clause — "they gain vigilance" after
@@ -97,7 +112,10 @@ fn overseer_of_vault_76_they_gain_vigilance() {
         engine::types::ability::AbilityKind::Spell,
     );
     assert_no_unimplemented(&def);
-    assert_eq!(they_gain_keywords(&def), vec![Keyword::Vigilance]);
+    assert_eq!(
+        they_gain_keywords(&def, &FROZEN_SET),
+        vec![Keyword::Vigilance]
+    );
 }
 
 /// The multi-keyword comma-and list ("vigilance, indestructible, and haste")
@@ -110,7 +128,7 @@ fn and_they_gain_emits_keyword_list() {
     );
     assert_no_unimplemented(&def);
     assert_eq!(
-        they_gain_keywords(&def),
+        they_gain_keywords(&def, &FROZEN_SET),
         vec![Keyword::Vigilance, Keyword::Indestructible, Keyword::Haste]
     );
 }
@@ -172,7 +190,10 @@ fn counter_chain_they_gain_vigilance_lands_on_countered_creatures() {
         engine::types::ability::AbilityKind::Spell,
     );
     assert_no_unimplemented(&def);
-    assert_eq!(they_gain_keywords(&def), vec![Keyword::Vigilance]);
+    assert_eq!(
+        they_gain_keywords(&def, &FROZEN_SET),
+        vec![Keyword::Vigilance]
+    );
     let head = build_resolved_from_def_with_targets(&def, source, PlayerId(0), vec![]);
 
     let mut events = Vec::new();

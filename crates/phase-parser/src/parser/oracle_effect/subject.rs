@@ -5352,9 +5352,9 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
         //
         // When that population is itself a tracked-set read ("put a +1/+1
         // counter on each of those creatures"), this chain did not establish
-        // it: the antecedent is an earlier printed paragraph, and the
-        // document relation pass (`CrossItemMassPopulationAnaphor`, Unbreakable
-        // Formation's addendum) binds the bare anaphor below to it.
+        // it, so the bare anaphor below stays for whatever binds that set; for
+        // a cross-paragraph rider that is the document relation pass
+        // (`CrossItemMassPopulationAnaphor`, Unbreakable Formation's addendum).
         _ if ctx
             .chain_prior_mass_population
             .as_ref()
