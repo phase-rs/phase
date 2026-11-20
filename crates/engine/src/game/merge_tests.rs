@@ -2017,8 +2017,9 @@ pub(crate) mod finding {
     /// Nearest printed card: Bringer of the Last Gift ("each player sacrifices
     /// all other creatures they control. Then each player returns all creature
     /// cards from their graveyard that weren't put there this way to the
-    /// battlefield."). SYNTHETIC: no printed card exhibits a cause-free
-    /// one-publisher reader over a sacrificed merged survivor.
+    /// battlefield."), which exhibits this cause-free one-publisher reader
+    /// end to end (`bringer_of_the_last_gift.rs`). SYNTHETIC: the merge, the
+    /// sacrifice and the resolution carrier are staged by hand.
     #[test]
     fn e1_one_publisher_finds_the_component() {
         for token_topped in [false, true] {
@@ -2196,9 +2197,12 @@ pub(crate) mod finding {
     /// does. Revert sensitivity: no inheritance finds both.
     ///
     /// Nearest printed cards: Timothar, Baron of Bats ("...exile it. If you do,
-    /// create a 1/1 black Bat creature token with flying. It gains \"When this
+    /// create a 1/1 black Bat creature token with flying. It gains "When this
     /// token deals combat damage to a player, sacrifice it and return the exiled
-    /// card to the battlefield tapped.\"") and Living Death. SYNTHETIC.
+    /// card to the battlefield tapped."") and Living Death ("Each player exiles
+    /// all creature cards from their graveyard, then sacrifices all creatures
+    /// they control, then puts all cards they exiled this way onto the
+    /// battlefield."). SYNTHETIC.
     #[test]
     fn u8_a_component_inherits_its_members_producer_action() {
         let mut d = departed_merged(true);

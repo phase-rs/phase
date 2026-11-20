@@ -1019,7 +1019,9 @@ fn is_census_publisher(effect: &Effect) -> bool {
 ///   transition, and every member of the set must carry that action's stamp
 ///   (the veto: a set holding an unstamped or differently-caused member was not
 ///   produced solely by that action). For a modal root the line is walked from
-///   the root, so a later-mode reader is conservatively not admitted.
+///   the root, so earlier chosen modes are on it too: a later-mode reader is
+///   admitted only when no earlier mode publishes and its effect occurs once on
+///   the line (the conservative direction).
 ///
 /// No cost-exile branch: no marker persists that the resolution could recognize,
 /// so every carried concrete id is rejected (the safe direction).
