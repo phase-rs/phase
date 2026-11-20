@@ -88,7 +88,6 @@ face = [
   { key = "animus of predation", class = "condition_wrong", clauses = ["Draft this card face up.", "As you draft a card, you may remove it from the draft face up.", "If you removed a creature card with flying from the draft with cards named Animus of Predation, this creature has flying.", "The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, and vigilance."] },
   { key = "annihilating fire", class = "dropped_qualifier", clauses = ["If a creature dealt damage this way would die this turn, exile it instead."] },
   { key = "anthousa, setessan hero", class = "extra_effect", clauses = ["They're still lands."] },
-  { key = "anzrag, the quake-mole", class = "missing_effect", clauses = ["{3}{R}{R}{G}{G}: Anzrag must be blocked each combat this turn if able."] },
   { key = "aphetto dredging", class = "dropped_qualifier", clauses = ["Return up to three target creature cards of the creature type of your choice from your graveyard to your hand."] },
   { key = "apocalypse chime", class = "dropped_qualifier", clauses = ["Destroy all nontoken permanents with a name originally printed in the Homelands expansion."] },
   { key = "appetite for brains", class = "wrong_object", clauses = ["You choose a card from it with mana value 4 or greater and exile that card."] },

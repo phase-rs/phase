@@ -5,6 +5,7 @@ use engine::ai_support::{adversarial_swarm_witness, SwarmWitnessResult};
 use engine::game::combat::{
     can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
     collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
+    BlockRestrictions,
 };
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
@@ -34,9 +35,9 @@ use crate::zone_eval::available_mana;
 /// through the per-pair `can_block_pair` checks. Hoisting these out of the
 /// O(battlefield²) attacker/blocker loops avoids re-walking the battlefield's
 /// functioning statics for every candidate pair.
-pub(crate) struct BlockLegalitySlices {
+pub(crate) struct BlockLegalitySlices<'a> {
     blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
-    block_restriction: Vec<(ObjectId, StaticDefinition)>,
+    block_restriction: BlockRestrictions<'a>,
     blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
     // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
     // hoisted once so per-pair legality skips the O(N) CanBlockShadow sweep.
@@ -65,8 +66,8 @@ impl<'a> AttackTargetingContext<'a> {
     }
 }
 
-impl BlockLegalitySlices {
-    pub(crate) fn collect(state: &GameState) -> Self {
+impl<'a> BlockLegalitySlices<'a> {
+    pub(crate) fn collect(state: &'a GameState) -> Self {
         Self {
             blocker_restriction: collect_blocker_restriction_statics(state),
             block_restriction: collect_block_restriction_statics(state),
@@ -1204,7 +1205,7 @@ struct ExpandedComparisonInput<'a> {
     opponents: &'a [PlayerId],
     candidates: &'a [ObjectId],
     mandatory: &'a [ObjectId],
-    slices: &'a BlockLegalitySlices,
+    slices: &'a BlockLegalitySlices<'a>,
     blockers_by_controller: &'a HashMap<PlayerId, Vec<ObjectId>>,
     valid_attack_targets: Option<&'a [AttackTarget]>,
     valid_attack_targets_by_attacker: Option<&'a HashMap<ObjectId, Vec<AttackTarget>>>,
@@ -2182,7 +2183,7 @@ pub fn choose_blockers_with_profile(
     // The block-restriction statics are collected once here and threaded through
     // the precomputed variant: every pass below reads this per attacker, and the
     // non-precomputed entry point re-walks the battlefield on each call.
-    let block_restriction_statics = engine::game::combat::collect_block_restriction_statics(state);
+    let block_restriction_statics = BlockRestrictions::from_statics(state);
     let required_blockers = |attacker_id: &ObjectId| -> usize {
         engine::game::combat::min_blockers_required_from_precomputed(
             state,
@@ -3486,7 +3487,7 @@ fn defender_best_block(
     attacker_id: ObjectId,
     attacker_value: f64,
     blockers: &[ObjectId],
-    slices: &BlockLegalitySlices,
+    slices: &BlockLegalitySlices<'_>,
 ) -> Option<DefenderBlock> {
     let eligible: Vec<_> = blockers
         .iter()
