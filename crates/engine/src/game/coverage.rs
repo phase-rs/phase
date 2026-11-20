@@ -2728,6 +2728,9 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
             crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner => {
                 format!("at that player's next {}", fmt_phase(phase))
             }
+            crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { .. } => {
+                format!("at that player's next {}", fmt_phase(phase))
+            }
         },
         DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. } => {
             format!("at that added {}", fmt_phase(phase))
@@ -5193,6 +5196,11 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::ScopedPlayerMatches { filter } => {
             format!("scoped player is {}", fmt_player_filter(filter))
         }
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => format!(
+            "{} attacked {} this turn",
+            fmt_player_scope(attacker),
+            fmt_player_scope(defender)
+        ),
     }
 }
 
@@ -5566,6 +5574,34 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::AnyPlayerAttackedYouLastTurn {
             scope: AttackedYouScope::AttackedPlayer,
         } => "the attacked player attacked you during their last turn".into(),
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // Exhaustive on purpose: every endpoint renders distinctly so the
+            // coverage diff shows a change between any two of them. A new
+            // `ControllerRef` breaks the build here instead of collapsing
+            // into a shared fallback label.
+            let endpoint = |scope: &ControllerRef| match scope {
+                ControllerRef::You => "you",
+                ControllerRef::Opponent => "an opponent",
+                ControllerRef::ScopedPlayer => "the scoped player",
+                ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => "target player",
+                ControllerRef::ParentTargetController => "the parent target's controller",
+                ControllerRef::EventTargetController => "the event target's controller",
+                ControllerRef::ParentTargetOwner => "the parent target's owner",
+                ControllerRef::DefendingPlayer => "the defending player",
+                ControllerRef::ChosenPlayer { .. } => "the chosen player",
+                ControllerRef::DeclaredPlayer { .. } => "the declared player",
+                ControllerRef::SourceChosenPlayer => "the source-chosen player",
+                ControllerRef::TriggeringPlayer => "the triggering player",
+                ControllerRef::EnchantedPlayer => "the enchanted player",
+                ControllerRef::ActivePlayer => "the active player",
+                ControllerRef::SpecificPlayer { .. } => "a specific player",
+            };
+            format!(
+                "{} attacked {} this turn",
+                endpoint(attacker),
+                endpoint(defender)
+            )
+        }
         SC::OpponentPoisonAtLeast { count } => format!("an opponent has {count}+ poison"),
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
@@ -5725,6 +5761,16 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             "damage as though unblocked".into()
         }
         ContinuousModification::ChangeController => "change controller".into(),
+        // CR 725.5: designation-anchored control — label names the holder so
+        // coverage distinguishes it from source-controller changes. Exhaustive
+        // over `Designation`: a future leaf breaks the build here by design.
+        ContinuousModification::ChangeControllerToDesignation { designation } => {
+            match designation {
+                crate::types::ability::Designation::Monarch => {
+                    "change controller to monarch".into()
+                }
+            }
+        }
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
@@ -6142,7 +6188,11 @@ fn build_trigger_item(
 ) -> ParsedItem {
     // CR 603.8: StateCondition triggers use the priority pipeline, not the
     // event-based trigger registry — they are supported.
-    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry);
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry)
+        && !trig.unsupported_damage_prevention_qualifiers();
     let mut children = Vec::new();
     if let Some(execute) = &trig.execute {
         children.push(build_ability_item(
@@ -8735,7 +8785,12 @@ fn check_trigger(
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
     // (collect_state_triggers), not the event-based trigger registry. They are supported.
-    if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs surface the same
+    // gap — the def AS SPECIFIED cannot fire (shared refusal authority on
+    // `TriggerDefinition`).
+    if !trigger_mode_is_supported(&trigger.mode, trigger_registry)
+        || trigger.unsupported_damage_prevention_qualifiers()
+    {
         let label = format!("Trigger:{}", trigger.mode);
         if !missing.contains(&label) {
             missing.push(label);
@@ -10196,6 +10251,14 @@ fn is_static_definition_supported(
             .condition
             .as_ref()
             .is_some_and(StaticCondition::contains_unrecognized)
+        // CR 109.4 (Matt R2-F4, widened by R7-F2): a resolution-scoped
+        // `ChosenPlayer` or target-relative endpoint has no answer inside the
+        // layer pipeline, so the runtime entry gate refuses the whole tree —
+        // coverage must refuse it too (shared authority on `StaticCondition`).
+        && !stat
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::has_unanswerable_attack_endpoint)
         && stat.modifications.iter().all(|modification| {
             modification_is_supported(
                 modification,
@@ -10254,6 +10317,12 @@ fn is_trigger_supported(
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
     if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+        return false;
+    }
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    if trigger.unsupported_damage_prevention_qualifiers() {
         return false;
     }
     trigger.execute.as_deref().is_none_or(|execute| {
@@ -10464,25 +10533,6 @@ enum StructuralFeature {
     /// carry it. Narrowing it to the two in-batch drains is Command Zone #267. The card parses,
     /// and outside combat the choice is asked, so nothing else in coverage can see it.
     DamageReplacementChoiceUnaskedInCombat,
-    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement
-    /// `replacement::is_damage_substitution` selects: Phytohydra, Force Bubble, Nefarious Lich,
-    /// Soul-Scar Mage, Szadek, Lord of Secrets, Undead Alchemist) whose CR 616.1 choice is not
-    /// offered against protection. Protection prevents the damage at the pre-replacement gate,
-    /// before the substitution is offered ("Any damage that would be dealt by sources that have the
-    /// stated quality to a permanent or player with protection is prevented."), so the affected
-    /// player never chooses between them (CR 616.1e): Pyroclasm at a Silver Knight under an
-    /// opposing Soul-Scar Mage, or Szadek's combat damage to a player under Teferi's Protection.
-    /// The card parses. This fence records the missing order choice against protection, so nothing
-    /// else in coverage can see it.
-    DamageSubstitutionChoiceIncomplete,
-    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next 1 damage that would be
-    /// dealt to this creature this turn is dealt to target creature you control instead." —
-    /// Nomads en-Kor) sends its part to a recipient where protection from the source prevents it
-    /// at the pre-replacement gate, ahead of any other prevention shield there (Test of Faith),
-    /// so the recipient's controller is not offered the order CR 616.1 gives them. The card
-    /// parses, and with no competing shield on the recipient it works, so nothing else in
-    /// coverage can see it.
-    CappedRedirectRecipientChoiceIncomplete,
     /// CR 615.7: several sources of one simultaneous damage instruction can deal damage to one
     /// recipient (Allies at Last: "each deal damage equal to their power to target creature";
     /// Rakdos Charm: "Each creature deals 1 damage to its controller"). A limited shield there
@@ -10517,12 +10567,6 @@ impl StructuralFeature {
             CounterExileRiderTailDropped => "structural:counter_exile_rider_tail_dropped",
             DamageReplacementChoiceUnaskedInCombat => {
                 "structural:damage_replacement_choice_unasked_in_combat"
-            }
-            DamageSubstitutionChoiceIncomplete => {
-                "structural:damage_substitution_choice_incomplete"
-            }
-            CappedRedirectRecipientChoiceIncomplete => {
-                "structural:capped_redirect_recipient_choice_incomplete"
             }
             SharedShieldSplitUnoffered => "structural:shared_shield_split_unoffered",
         }
@@ -10560,17 +10604,6 @@ impl StructuralFeature {
             // `damage_substitution_replacements::a_parked_may_gets_no_automatic_yes_in_combat`
             // (Battletide Alchemist: the Ogre's 3 combat damage is neither dealt nor prevented).
             DamageReplacementChoiceUnaskedInCombat => FeatureSupport::Unhandled,
-            // MEASURED UNHANDLED: `damage_substitution_replacements`
-            // (`protection_prevents_ahead_of_a_substitutions_choice`,
-            // `protection_prevents_ahead_of_soul_scar_mages_choice`,
-            // `protection_prevents_ahead_of_szadeks_choice`: the protected recipient's player is
-            // never asked, and no counters are put).
-            DamageSubstitutionChoiceIncomplete => FeatureSupport::Unhandled,
-            // MEASURED UNHANDLED: `unpreventable_damage_prevention_effects`
-            // (`a_capped_redirects_part_meets_protection_before_a_competing_shield`: the pro-red
-            // Silver Knight's protection prevents the redirected point and Test of Faith is never
-            // offered, so no counter is placed).
-            CappedRedirectRecipientChoiceIncomplete => FeatureSupport::Unhandled,
             // MEASURED UNHANDLED: `damage_substitution_replacements`
             // (`a_batch_keeps_a_shared_shield_for_the_players_choice`: Mending Hands meets the
             // Hill Giant's or the Rumbling Baloth's damage in full, giving 3/20 or 0/23; the
@@ -11358,20 +11391,6 @@ fn extract_ability_features_with_token_statics(
     ) {
         emit_structural(features, StructuralFeature::SharedShieldSplitUnoffered);
     }
-    // CR 614.9: a shield that redirects only the next N damage.
-    if matches!(
-        &*def.effect,
-        Effect::CreateDamageReplacement {
-            redirect_to: Some(_),
-            redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
-            ..
-        }
-    ) {
-        emit_structural(
-            features,
-            StructuralFeature::CappedRedirectRecipientChoiceIncomplete,
-        );
-    }
     if prevention_rider_asks_a_choice_in_combat(def) {
         emit_structural(
             features,
@@ -11535,14 +11554,6 @@ fn extract_damage_replacement_choice_feature(
             StructuralFeature::DamageReplacementChoiceUnaskedInCombat,
         );
     }
-    // CR 614.1a: the runtime's own substitution predicate, so the fence and the engine select
-    // the same class.
-    if crate::game::replacement::is_damage_substitution(repl) {
-        emit_structural(
-            features,
-            StructuralFeature::DamageSubstitutionChoiceIncomplete,
-        );
-    }
 }
 
 fn extract_trigger_features(
@@ -11691,6 +11702,7 @@ fn extract_ability_condition_features(
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
@@ -12188,6 +12200,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs). Used by cross-scope decline-tail
         // gates (Liliana, Waker of the Dead — parent `All`, decline `Opponent`).
         AbilityCondition::ScopedPlayerMatches { .. } => ("ScopedPlayerMatches", Handled),
+        // CR 508.6: handled by `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::PlayerAttackedPlayer { .. } => ("PlayerAttackedPlayer", Handled),
     }
 }
 
@@ -12786,6 +12800,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
         StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
+        // CR 508.6: bridges to `AbilityCondition::PlayerAttackedPlayer`,
+        // runtime-handled (same shape as `WasStartingPlayer` below).
+        StaticCondition::PlayerAttackedPlayer { .. } => ("PlayerAttackedPlayer", Handled),
         // CR 702.185c: "a spell was warped this turn"; bridges to Ability/Trigger
         // `SpellCastWithVariantThisTurn`, both runtime-handled.
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
@@ -17007,24 +17024,22 @@ mod tests {
     }
 
     /// (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types)
-    type DamageSubstitutionCase = (
+    type DamageShieldCase = (
         &'static str,
         &'static str,
         &'static [&'static str],
         &'static [&'static str],
     );
 
-    const DAMAGE_SUBSTITUTION_TAG: &str = "structural:damage_substitution_choice_incomplete";
-
-    /// CR 614.1a + CR 616.1 + CR 702.16e: the protection fence keys on the runtime's substitution
-    /// predicate (`replacement::is_damage_substitution`), so it covers the class uniformly:
-    /// Soul-Scar Mage, Szadek and Undead Alchemist, whose substitution the fence is the only gap
-    /// of, and the "If damage would be dealt to …, … instead" lines (Phytohydra, Force Bubble,
-    /// Nefarious Lich). A prevention shield (Test of Faith, Phantom Centaur) and an amount
-    /// modification (Furnace of Rath) are not substitutions and are not fenced.
+    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement the runtime's
+    /// `replacement::is_damage_substitution` selects) is offered beside protection's prevention,
+    /// so its affected player orders them, and it carries no coverage gap: Soul-Scar Mage, Szadek,
+    /// Undead Alchemist, and the "If damage would be dealt to …, … instead" lines (Phytohydra,
+    /// Force Bubble). Nefarious Lich's exile choice keeps its own
+    /// `damage_replacement_choice_unasked_in_combat` gap.
     #[test]
-    fn a_damage_substitution_is_a_coverage_gap() {
-        let fenced_alone: [DamageSubstitutionCase; 3] = [
+    fn a_damage_substitution_has_no_coverage_gap() {
+        let cases: [DamageShieldCase; 5] = [
             (
                 "Soul-Scar Mage",
                 "Prowess\nIf a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
@@ -17043,24 +17058,6 @@ mod tests {
                 &[],
                 &["Creature"],
             ),
-        ];
-        for (name, oracle, keywords, types) in fenced_alone {
-            let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(DAMAGE_SUBSTITUTION_TAG),
-                Some(&FeatureSupport::Unhandled),
-                "{name}"
-            );
-            assert_eq!(
-                card_face_gaps(&face),
-                vec![format!("ResolverFeature:{DAMAGE_SUBSTITUTION_TAG}")],
-                "{name}: the fence is the face's only gap"
-            );
-        }
-
-        let fenced: [DamageSubstitutionCase; 3] = [
             (
                 "Phytohydra",
                 "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
@@ -17073,57 +17070,16 @@ mod tests {
                 &[],
                 &["Enchantment"],
             ),
-            (
-                "Nefarious Lich",
-                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.",
-                &[],
-                &["Enchantment"],
-            ),
         ];
-        for (name, oracle, keywords, types) in fenced {
-            let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(DAMAGE_SUBSTITUTION_TAG),
-                Some(&FeatureSupport::Unhandled),
-                "{name}"
-            );
-        }
-
-        let unfenced: [DamageSubstitutionCase; 3] = [
-            (
-                "Test of Faith",
-                "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
-                &[],
-                &["Instant"],
-            ),
-            (
-                "Furnace of Rath",
-                "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
-                &[],
-                &["Enchantment"],
-            ),
-            (
-                "Phantom Centaur",
-                "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
-                &["Protection"],
-                &["Creature"],
-            ),
-        ];
-        for (name, oracle, keywords, types) in unfenced {
+        for (name, oracle, keywords, types) in cases {
             let face = counter_rider_face(name, oracle, keywords, types);
             assert!(
-                !face.abilities.is_empty()
-                    || face
-                        .replacements
-                        .iter()
-                        .any(|repl| repl.event == ReplacementEvent::DamageDone),
-                "{name}: reach guard — the damage line parses"
+                face.replacements
+                    .iter()
+                    .any(crate::game::replacement::is_damage_substitution),
+                "{name}: reach guard — the substitution parses"
             );
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
+            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
         }
     }
 
@@ -17166,9 +17122,6 @@ mod tests {
                     .any(crate::game::replacement::is_damage_substitution),
                 "{name}: no replacement is a damage substitution"
             );
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
             assert!(!coverage.is_supported(), "{name}");
         }
     }
@@ -17365,60 +17318,40 @@ mod tests {
         }
     }
 
-    /// CR 614.9 + CR 616.1: a capped redirect ("The next N damage ... is dealt to ... instead")
-    /// is fenced as `capped_redirect_recipient_choice_incomplete`, as an activated ability
-    /// (Nomads en-Kor), a spell (Harm's Way) and a granted ability (Martyrdom). An uncapped
-    /// redirect (Pariah: "All damage that would be dealt to you is dealt to enchanted creature
-    /// instead.") is not.
+    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next N damage ... is dealt to ...
+    /// instead") offers its part's recipient protection beside any other prevention shield there,
+    /// so it carries no coverage gap, as an activated ability (Nomads en-Kor) or a spell (Harm's
+    /// Way).
     #[test]
-    fn a_capped_redirect_is_a_coverage_gap() {
-        const TAG: &str = "structural:capped_redirect_recipient_choice_incomplete";
-        type Case = (
-            &'static str,
-            &'static str,
-            &'static [&'static str],
-            &'static [&'static str],
-            bool,
-        );
-        let cards: [Case; 4] = [
+    fn a_capped_redirect_has_no_coverage_gap() {
+        let cards: [DamageShieldCase; 2] = [
             (
                 "Nomads en-Kor",
                 "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.",
                 &[],
                 &["Creature"],
-                true,
             ),
             (
                 "Harm's Way",
                 "The next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead.",
                 &[],
                 &["Instant"],
-                true,
-            ),
-            (
-                "Martyrdom",
-                "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.",
-                &[],
-                &["Instant"],
-                true,
-            ),
-            (
-                "Pariah",
-                "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.",
-                &["Enchant"],
-                &["Enchantment"],
-                false,
             ),
         ];
-        for (name, oracle, keywords, types, fenced) in cards {
+        for (name, oracle, keywords, types) in cards {
             let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(TAG),
-                fenced.then_some(&FeatureSupport::Unhandled),
-                "{name}"
+            assert!(
+                face.abilities.iter().any(|def| matches!(
+                    &*def.effect,
+                    Effect::CreateDamageReplacement {
+                        redirect_to: Some(_),
+                        redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
+                        ..
+                    }
+                )),
+                "{name}: reach guard — the capped redirect parses"
             );
+            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
         }
     }
 
@@ -17777,6 +17710,84 @@ mod tests {
         );
     }
 
+    /// CR 615.13 (Matt M5): qualifier-bearing `DamagePreventedOnce` defs are
+    /// refused at ALL THREE coverage authorities — parse-details items,
+    /// missing parts, and carrier support — because the runtime matcher
+    /// cannot honor the qualifiers. The unqualified Squire shape stays
+    /// supported everywhere. Pre-fix the qualified forms are admitted.
+    #[test]
+    fn qualified_damage_prevention_trigger_is_unsupported() {
+        use crate::types::ability::DamageKindFilter;
+
+        let trigger_registry = super::build_trigger_registry();
+        let static_registry = super::build_static_registry();
+        let traversal = super::TokenStaticTraversal::Include;
+        let plain = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        assert!(
+            super::is_trigger_supported(&plain, &trigger_registry, &static_registry, traversal),
+            "unqualified prevention trigger stays supported"
+        );
+        assert!(
+            super::build_trigger_item(&plain, &trigger_registry, &static_registry, traversal)
+                .supported,
+            "unqualified prevention trigger item stays supported"
+        );
+        let mut missing = Vec::new();
+        super::check_trigger(
+            &plain,
+            &trigger_registry,
+            &static_registry,
+            traversal,
+            &mut missing,
+        );
+        assert!(
+            missing.is_empty(),
+            "unqualified prevention trigger surfaces no gap: {missing:?}"
+        );
+
+        let source = crate::types::identifiers::ObjectId(7);
+        let qualified = [
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::CombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::NoncombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .valid_source(TargetFilter::SpecificObject { id: source }),
+        ];
+        for trigger in &qualified {
+            assert!(
+                !super::is_trigger_supported(
+                    trigger,
+                    &trigger_registry,
+                    &static_registry,
+                    traversal
+                ),
+                "qualified prevention trigger must be unsupported: {trigger:?}"
+            );
+            assert!(
+                !super::build_trigger_item(trigger, &trigger_registry, &static_registry, traversal)
+                    .supported,
+                "qualified prevention trigger item must be unsupported: {trigger:?}"
+            );
+            let mut missing = Vec::new();
+            super::check_trigger(
+                trigger,
+                &trigger_registry,
+                &static_registry,
+                traversal,
+                &mut missing,
+            );
+            assert!(
+                missing.iter().any(|gap| gap.starts_with("Trigger:")),
+                "qualified prevention trigger must surface a gap: {missing:?}"
+            );
+        }
+    }
+
     /// An explicit Exile origin can retrieve the intended set when it is still
     /// the latest, but does not preserve that identity across a later publisher.
     #[test]
@@ -17834,6 +17845,7 @@ mod tests {
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 ..Default::default()
             }
@@ -18603,6 +18615,7 @@ mod tests {
             prohibit(ProhibitedActivity::Attack {
                 defended,
                 protected_player: None,
+                protected_scope: None,
             })
         };
 
@@ -24263,6 +24276,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -24314,6 +24328,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -27213,6 +27228,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -27258,6 +27274,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -27300,6 +27317,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -27336,6 +27354,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -28060,6 +28079,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -28095,6 +28115,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -28140,6 +28161,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -28176,6 +28198,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -28214,6 +28237,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -28258,6 +28282,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             });
         }
 
@@ -28458,6 +28483,66 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// CR 109.4 (Matt R2-F4): a typed Continuous static gated on a
+    /// `PlayerAttackedPlayer` with a resolution-scoped `ChosenPlayer`
+    /// endpoint is UNSUPPORTED — the layer pipeline has no resolving
+    /// ability to answer it, so the runtime entry gate refuses the whole
+    /// tree. CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal covers the
+    /// target-relative endpoints (`TargetPlayer`/`TargetOpponent`), which
+    /// read no declared target without a resolving ability. The `Not`
+    /// wrapper must not bypass the refusal (the leaf view recurses), while
+    /// the same gate with bindable endpoints stays supported. Pre-fix the
+    /// target-relative shapes are admitted.
+    #[test]
+    fn unanswerable_attack_endpoint_nested_not_gate_is_unsupported_static() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+
+        for attacker in [
+            ControllerRef::ChosenPlayer { index: 0 },
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+        ] {
+            let refused = StaticDefinition::continuous().condition(StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: attacker.clone(),
+                    defender: ControllerRef::You,
+                }),
+            });
+            assert!(
+                !is_static_supported(
+                    &refused,
+                    &trigger_registry,
+                    &static_registry,
+                    TokenStaticTraversal::Include,
+                ),
+                "a Continuous static gated on an unanswerable Not(attacked you) \
+                 endpoint must be reported unsupported, not silently accepted \
+                 as fully parsed: {refused:?}"
+            );
+        }
+
+        // Sanity: the same gate with bindable endpoints stays supported —
+        // proving the gap signal comes from the unanswerable leaf, not from
+        // the attack gate or the Not wrapper themselves. `ActivePlayer`
+        // reads live game state with no ability context.
+        let supported = StaticDefinition::continuous().condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ActivePlayer,
+                defender: ControllerRef::You,
+            }),
+        });
+        assert!(
+            is_static_supported(
+                &supported,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
+            "Not(ActivePlayer attacked you) must remain supported"
+        );
+    }
+
     /// CR 113.11: CantHaveKeyword is a data-carrying static (parameterized by
     /// keyword). Archetype of Imagination et al. must be covered once this arm
     /// is present in `is_data_carrying_static()`.
@@ -28488,6 +28573,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
