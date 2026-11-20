@@ -1,13 +1,14 @@
 //! CR 500.1 + CR 506.1: a bare "before <combat step>" window is a point in the turn — open from
-//! the start of the turn until that step of the turn's first combat phase — while "during combat
-//! before <combat step>" is measured in each combat phase.
+//! the start of the turn until that step of the turn's first combat phase, while a combat phase is
+//! still ahead (a skipped combat phase never occurs, CR 500.11) — while "during combat before
+//! <combat step>" is measured in each combat phase.
 
 use engine::game::combat::AttackTarget;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::ObjectId;
 
@@ -27,6 +28,7 @@ Draw a card at the beginning of the next turn's upkeep.";
 const SAVE_POINT: &str = "When this enchantment enters, draw a card.
 Sacrifice this enchantment: Remove each creature from combat and untap each creature that attacked this turn. There is an additional combat phase after this one. Activate only during combat before combat damage has been dealt.";
 const RELENTLESS_ASSAULT: &str = "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.";
+const MOMENT_OF_SILENCE: &str = "Target player skips their next combat phase this turn.";
 
 fn assert_refused<T>(result: Result<T, EngineError>, restriction: &str) {
     match result {
@@ -54,13 +56,16 @@ fn activate(runner: &mut GameRunner, source: ObjectId) -> Result<(), EngineError
     Ok(())
 }
 
-/// Passes through the turn, declaring no attackers, until P0 holds priority on an empty stack in
-/// the beginning of combat step of the turn's `n`th combat phase.
-fn drive_to_beginning_of_combat(runner: &mut GameRunner, n: u32) {
+/// Passes through the turn, declaring `attacks` and no blocks, until P0 holds priority on an
+/// empty stack in a state satisfying `done`.
+fn drive_until(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    done: impl Fn(&GameState) -> bool,
+) {
     for _ in 0..300 {
         let state = runner.state();
-        if state.phase == Phase::BeginCombat
-            && state.steps_started_this_turn.count(Phase::BeginCombat) == n
+        if done(state)
             && state.stack.is_empty()
             && matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
         {
@@ -68,14 +73,25 @@ fn drive_to_beginning_of_combat(runner: &mut GameRunner, n: u32) {
         }
         let action = match state.waiting_for {
             WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
-                attacks: Vec::<(ObjectId, AttackTarget)>::new(),
+                attacks: attacks.to_vec(),
                 bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
             },
             _ => GameAction::PassPriority,
         };
         runner.act(action).expect("the turn advances");
     }
-    panic!("combat {n} never began");
+    panic!("the turn never reached the requested state");
+}
+
+/// Drives to the beginning of combat step of the turn's `n`th combat phase, declaring no attackers.
+fn drive_to_beginning_of_combat(runner: &mut GameRunner, n: u32) {
+    drive_until(runner, &[], |state| {
+        state.phase == Phase::BeginCombat
+            && state.steps_started_this_turn.count(Phase::BeginCombat) == n
+    });
 }
 
 #[test]
@@ -256,4 +272,194 @@ fn opponents_turn_before_attackers_window_opens_in_upkeep() {
         .cast(theirs)
         .try_resolve()
         .expect("Siren's Call in the opponent's upkeep");
+}
+
+/// P0's precombat main phase with Moment of Silence and Relentless Assault in hand, and lands for
+/// Angus Mackenzie.
+struct SkippedCombat {
+    runner: GameRunner,
+    bear: ObjectId,
+    angus: ObjectId,
+    talas: ObjectId,
+    berserk: ObjectId,
+    rapid_fire: ObjectId,
+    moment_of_silence: ObjectId,
+    relentless: ObjectId,
+}
+
+fn skipped_combat() -> SkippedCombat {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for color in [ManaColor::Green, ManaColor::White, ManaColor::Blue] {
+        scenario.add_basic_land(P0, color);
+    }
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let angus = scenario
+        .add_creature_from_oracle(P0, "Angus Mackenzie", 2, 2, ANGUS)
+        .id();
+    let talas = scenario
+        .add_creature_from_oracle(P0, "Talas Researcher", 1, 1, TALAS)
+        .id();
+    let berserk = scenario
+        .add_spell_to_hand_from_oracle(P0, "Berserk", true, BERSERK)
+        .id();
+    let rapid_fire = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rapid Fire", true, RAPID_FIRE)
+        .id();
+    let moment_of_silence = scenario
+        .add_spell_to_hand_from_oracle(P0, "Moment of Silence", true, MOMENT_OF_SILENCE)
+        .id();
+    let relentless = scenario
+        .add_spell_to_hand_from_oracle(P0, "Relentless Assault", false, RELENTLESS_ASSAULT)
+        .id();
+    scenario.with_library_top(P0, &["Island", "Island"]);
+    let mut runner = scenario.build();
+    runner
+        .cast(moment_of_silence)
+        .target_player(P0)
+        .try_resolve()
+        .expect("Moment of Silence resolves");
+    SkippedCombat {
+        runner,
+        bear,
+        angus,
+        talas,
+        berserk,
+        rapid_fire,
+        moment_of_silence,
+        relentless,
+    }
+}
+
+fn assert_windows_open(board: &mut SkippedCombat) {
+    let runner = &mut board.runner;
+    activate(runner, board.angus).expect("Angus Mackenzie");
+    runner
+        .cast(board.berserk)
+        .target_object(board.bear)
+        .try_resolve()
+        .expect("Berserk");
+    assert!(runner.state().players[0].graveyard.contains(&board.berserk));
+    runner
+        .cast(board.rapid_fire)
+        .target_object(board.bear)
+        .try_resolve()
+        .expect("Rapid Fire");
+    let hand = runner.state().players[0].hand.len();
+    activate(runner, board.talas).expect("Talas Researcher");
+    assert_eq!(runner.state().players[0].hand.len(), hand + 1);
+}
+
+fn no_combat_begun(state: &GameState) -> bool {
+    state.phase == Phase::PostCombatMain
+        && state.steps_started_this_turn.count(Phase::BeginCombat) == 0
+}
+
+#[test]
+fn added_main_phase_before_the_first_actual_combat_keeps_bare_windows_open() {
+    let mut board = skipped_combat();
+    board
+        .runner
+        .cast(board.relentless)
+        .try_resolve()
+        .expect("Relentless Assault resolves");
+    drive_until(&mut board.runner, &[], |state| {
+        no_combat_begun(state) && !state.extra_phase_resume.is_empty()
+    });
+    assert_windows_open(&mut board);
+    drive_to_beginning_of_combat(&mut board.runner, 1);
+}
+
+#[test]
+fn postcombat_main_after_a_skipped_combat_closes_bare_windows() {
+    let mut board = skipped_combat();
+    let runner = &mut board.runner;
+    drive_until(runner, &[], |state| {
+        no_combat_begun(state) && state.extra_phase_resume.is_empty()
+    });
+    assert!(runner.state().players[0]
+        .graveyard
+        .contains(&board.moment_of_silence));
+    assert_refused(activate(runner, board.angus), "BeforeCombatDamage");
+    assert_refused(
+        runner
+            .cast(board.berserk)
+            .target_object(board.bear)
+            .try_resolve(),
+        "BeforeCombatDamage",
+    );
+    assert_refused(
+        runner
+            .cast(board.rapid_fire)
+            .target_object(board.bear)
+            .try_resolve(),
+        "BeforeBlockersDeclared",
+    );
+    assert_refused(activate(runner, board.talas), "BeforeAttackersDeclared");
+}
+
+#[test]
+fn combat_added_after_a_skipped_combat_reopens_bare_windows() {
+    let mut board = skipped_combat();
+    drive_until(&mut board.runner, &[], |state| {
+        no_combat_begun(state) && state.extra_phase_resume.is_empty()
+    });
+    board
+        .runner
+        .cast(board.relentless)
+        .try_resolve()
+        .expect("Relentless Assault resolves");
+    assert_windows_open(&mut board);
+    drive_to_beginning_of_combat(&mut board.runner, 1);
+}
+
+#[test]
+fn added_main_phase_after_the_first_combat_closes_bare_windows() {
+    let mut board = two_combats();
+    let runner = &mut board.runner;
+    drive_until(runner, &[], |state| {
+        state.phase == Phase::PostCombatMain
+            && state.steps_started_this_turn.count(Phase::BeginCombat) == 1
+            && !state.extra_phase_resume.is_empty()
+    });
+    assert_refused(
+        runner
+            .cast(board.berserk[0])
+            .target_object(board.bear)
+            .try_resolve(),
+        "BeforeCombatDamage",
+    );
+    assert_refused(
+        runner
+            .cast(board.rapid_fire)
+            .target_object(board.bear)
+            .try_resolve(),
+        "BeforeBlockersDeclared",
+    );
+    assert_refused(activate(runner, board.talas), "BeforeAttackersDeclared");
+}
+
+#[test]
+fn damage_step_of_an_added_first_combat_closes_bare_windows() {
+    let mut board = two_combats();
+    let runner = &mut board.runner;
+    drive_until(runner, &[(board.bear, AttackTarget::Player(P1))], |state| {
+        state.phase == Phase::CombatDamage
+            && state.steps_started_this_turn.count(Phase::BeginCombat) == 1
+            && !state.extra_phase_resume.is_empty()
+    });
+    assert_refused(
+        runner
+            .cast(board.berserk[0])
+            .target_object(board.bear)
+            .try_resolve(),
+        "BeforeCombatDamage",
+    );
+    assert_refused(
+        runner
+            .cast(board.rapid_fire)
+            .target_object(board.bear)
+            .try_resolve(),
+        "BeforeBlockersDeclared",
+    );
 }

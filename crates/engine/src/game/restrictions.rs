@@ -2652,16 +2652,30 @@ fn before_combat_step(
     step: Phase,
     anchor: CombatWindowAnchor,
 ) -> bool {
+    use crate::types::phase::{PhaseGroup, TurnSegment};
     // `Phase` orders steps in turn order.
-    state.phase < step
-        && match anchor {
-            // Chosen only alongside `DuringCombat`, which confines the phase to a combat step.
-            CombatWindowAnchor::CombatInProgress => true,
-            CombatWindowAnchor::FirstCombatOfTurn => !super::turns::first_phase_of_turn_has_ended(
-                state,
-                crate::types::phase::PhaseGroup::Combat,
-            ),
+    match anchor {
+        // Chosen only alongside `DuringCombat`, which confines the phase to a combat step.
+        CombatWindowAnchor::CombatInProgress => state.phase < step,
+        CombatWindowAnchor::FirstCombatOfTurn => {
+            // CR 500.11 + CR 505.1a: outside combat, open while a combat phase is ahead — the turn's
+            // own combat (an added main phase is labelled postcombat) or a queued added one.
+            let ahead = if state.phase.is_combat() {
+                state.phase < step
+            } else {
+                state
+                    .extra_phase_resume
+                    .first()
+                    .map_or(state.phase, |unit| unit.anchor)
+                    < Phase::BeginCombat
+                    || state
+                        .extra_phases
+                        .iter()
+                        .any(|ep| ep.segment == TurnSegment::Phase(PhaseGroup::Combat))
+            };
+            ahead && !super::turns::first_phase_of_turn_has_ended(state, PhaseGroup::Combat)
         }
+    }
 }
 
 fn you_control_creature_with_keyword(
