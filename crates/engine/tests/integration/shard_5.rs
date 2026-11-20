@@ -39,6 +39,7 @@ mod revenant_patriarch_skip_combat;
 mod rhys_evermore_remove_counters;
 mod ria_ivor_bane_of_bladehold;
 mod riftsweeper_owner_binding;
+mod rikku_resourceful_guardian_your_counters;
 mod riku_modal_modes_chosen_cap;
 mod riku_modal_spell_trigger;
 mod ring_entering_blocker;

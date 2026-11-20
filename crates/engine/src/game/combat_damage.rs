@@ -1965,15 +1965,13 @@ fn complete_combat_phase_c_remnant(
         .take_if(|stashed| stashed.is_combat)
     {
         let ctx = DamageContext::from(stashed.ctx);
-        // CR 120.10: the remnant passes the STASHED pre-damage values — never
-        // a live reread (loyalty/defense removal already ran before the park).
+        // CR 120.10: the remnant passes the stashed excess, never a recompute.
         match wither_infect_post_counter_core(
             state,
             &ctx,
             &stashed.target,
             stashed.actual_amount,
-            stashed.loyalty_before,
-            stashed.defense_before,
+            stashed.excess,
             true,
             &mut record.batch_events,
         ) {
