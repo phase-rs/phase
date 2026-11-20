@@ -37754,6 +37754,20 @@ impl GameState {
         }
     }
 
+    /// CR 732.1b: retires the action-scoped journal entries a committed repetition of a taken
+    /// shortcut recorded from journal position `start` on.
+    ///
+    /// CR 601.2 + CR 733.1: a live cast reversal reads the entries since its cast began, so
+    /// nothing is retired under one. A confirmed take installs none, and is offered only where
+    /// a player has priority, so none is live while its repetitions commit.
+    pub(crate) fn retire_repetition_journal(&mut self, start: usize) {
+        if self.spell_cast_reversal.is_some() {
+            return;
+        }
+        self.resolved_rules_journal
+            .retire_action_scoped_since(start);
+    }
+
     /// CR 118.3a: defensively guarantee every unit in `player`'s mana pool carries
     /// a unique, nonzero `pip_id`, re-stamping the `ManaPipId(0)` sentinel and any
     /// duplicate. Production mana is stamped on entry via [`Self::add_mana_to_pool`],

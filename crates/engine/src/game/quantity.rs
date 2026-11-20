@@ -2063,19 +2063,22 @@ pub fn resolve_quantity_with_recipient(
 /// CR 205.2a + CR 607.2a: Resolve a quantity for a cast-time cost modifier,
 /// carrying the spell being cast as the `SharedCardTypes` intersection subject.
 /// `source_id` remains the static's source permanent (the exile link anchor),
-/// while `spell_id` supplies the spell-side card types.
+/// while `spell_id` supplies the spell-side card types and `caster` binds
+/// `CountScope::ScopedPlayer` to the player casting that spell.
 pub fn resolve_quantity_with_spell(
     state: &GameState,
     expr: &QuantityExpr,
     controller: PlayerId,
     source_id: ObjectId,
     spell_id: ObjectId,
+    caster: PlayerId,
 ) -> i32 {
     resolve_quantity_with_ctx(
         state,
         expr,
         controller,
         QuantityContext {
+            scoped_player: Some(caster),
             spell: Some(spell_id),
             ..QuantityContext::new(source_id)
         },
@@ -4983,14 +4986,7 @@ fn current_cast_occurrence_matches(
     {
         return false;
     }
-    let Ok(index) = usize::try_from(occurrence.turn_journal_index) else {
-        return false;
-    };
-    state
-        .spells_cast_this_turn_by_player
-        .get(&occurrence.caster)
-        .and_then(|records| records.get(index))
-        .is_some_and(|record| record.spell_object_id == Some(ability.source_id))
+    crate::game::ledger::cast_occurrence_is_current(state, occurrence, ability.source_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18450,7 +18446,7 @@ mod tests {
             "without a spell subject, SharedCardTypes must fail closed rather than use the source"
         );
         assert_eq!(
-            resolve_quantity_with_spell(&state, &expr, PlayerId(0), source, spell),
+            resolve_quantity_with_spell(&state, &expr, PlayerId(0), source, spell, PlayerId(0)),
             1,
             "the exact spell subject shares Creature with the source-linked exile population"
         );

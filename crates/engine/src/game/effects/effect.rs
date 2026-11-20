@@ -278,13 +278,14 @@ fn evaluate_static_condition_for_ability(
     }
 }
 
-/// CR 611.2c: a resolved "can't be the target of ..." grant is a rule effect read
+/// CR 611.2c: a resolved targeting or countering prohibition is a rule effect read
 /// straight off its transient effect, not an ability on the recipient.
-fn is_cant_be_targeted_rule_effect(modification: &ContinuousModification) -> bool {
+fn is_live_prohibition_rule_effect(modification: &ContinuousModification) -> bool {
     matches!(
         modification,
         ContinuousModification::AddStaticMode {
-            mode: crate::types::statics::StaticMode::CantBeTargeted { .. },
+            mode: crate::types::statics::StaticMode::CantBeTargeted { .. }
+                | crate::types::statics::StaticMode::CantBeCountered,
         }
     )
 }
@@ -325,12 +326,12 @@ fn install_transient(
                 .map(|occurrence| occurrence.caster),
         );
     }
-    // CR 400.7 + CR 611.2c: a targeted "can't be the target" rule effect applies to
+    // CR 400.7 + CR 611.2c: a targeted prohibition applies to
     // the recipient as it was when the effect resolved; a blinked or otherwise
     // re-created object is a new object it no longer reaches.
     let affected_recipient = match &affected {
         TargetFilter::SpecificObject { id }
-            if modifications.iter().any(is_cant_be_targeted_rule_effect) =>
+            if modifications.iter().any(is_live_prohibition_rule_effect) =>
         {
             state
                 .objects
@@ -559,20 +560,36 @@ fn bind_transient_effect(
     // never grafts it onto an object. A targeted grant (Vines of Vastwood) falls
     // through to the chosen-target arms, which bind the recipient's incarnation
     // (see `install_transient`).
-    if modifications.iter().any(is_cant_be_targeted_rule_effect) {
-        if let Some(affected) = static_def.affected.clone() {
-            if !generic_effect_affected_uses_inherited_targets(&affected) {
-                install_transient(
+    if let Some(affected) = static_def.affected.clone() {
+        if !generic_effect_affected_uses_inherited_targets(&affected)
+            && modifications.iter().any(is_live_prohibition_rule_effect)
+        {
+            // CR 611.2c: determine rule-changing and characteristic-changing
+            // populations independently, even when one definition contains both.
+            let (rules, characteristics): (Vec<_>, Vec<_>) = modifications
+                .into_iter()
+                .partition(is_live_prohibition_rule_effect);
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                affected,
+                rules,
+                static_def.condition.clone(),
+            );
+            if !characteristics.is_empty() {
+                bind_transient_effect(
                     state,
-                    end_permission,
                     ability,
-                    duration.clone(),
-                    affected,
-                    modifications,
-                    static_def.condition.clone(),
+                    static_def,
+                    target_filter,
+                    duration,
+                    end_permission,
+                    characteristics,
                 );
-                return;
             }
+            return;
         }
     }
 
