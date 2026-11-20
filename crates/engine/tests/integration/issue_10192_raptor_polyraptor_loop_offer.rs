@@ -212,16 +212,20 @@ fn entry_damage_on_minted_token_offers_unbounded_not_spend() {
 /// across the compared frames is a spent driving resource, so the newly-minted-token exclusion
 /// must not over-exclude it.
 ///
-/// Board (printed cards via `add_real_card`): the entry-damage token loop of
-/// `build_entry_damage_token_loop`, but with Marauding Raptor swapped for Forerunner of the
-/// Empire ("Whenever a Dinosaur you control enters, you may have this creature deal 1 damage to
-/// each creature.") and Maskwood Nexus ("Creatures you control are every creature type."), so
-/// every minted Saproling is a Dinosaur. Each repetition then marks 1 damage on Forerunner and on
-/// every Saproling already in play. Those objects persist across repetitions while their marked
-/// damage grows toward toughness (CR 704.5g), so it is a finite resource the period spends: the
-/// minted-object exclusion must not hide it, and the engine must never offer this loop as an
-/// unbounded shortcut. (The paired tests in this module run the same scaffolding with entry-only
-/// damage and are offered unbounded.)
+/// Board (printed cards via `add_real_card`): the Sprout Swarm (buyback + convoke) recast loop of
+/// `build_entry_damage_token_loop`, with Marauding Raptor swapped for Terror of the Peaks
+/// ("Whenever another creature you control enters, this creature deals damage equal to that
+/// creature's power to any target.") whose per-entry damage the drive aims (pinned
+/// `TriggerTargetSelection`) at the persisting Armored Whirl Turtle (0/5 vanilla). The minted
+/// Saprolings' entry damage is fixed (each enters, holds, never gains more), so the exclusion
+/// covers nothing here: instead the Turtle's marked damage GROWS by one every repetition as it
+/// nears its toughness (CR 704.5g) — a finite resource the period spends on a permanent that
+/// survives every compared frame, exactly the shape that the minted-token exclusion must NOT hide.
+///
+/// The offer is asserted unconditionally: a counted loop this shape must still be offered (CR
+/// 732.2a permits "a loop that repeats a specified number of times"), and the offer must be the
+/// bounded one — counted, with empty unbounded axes. Suppressing shortcut offers entirely would
+/// leave the loop unprompted and must fail here.
 #[test]
 fn persisting_permanent_damage_is_never_offered_unbounded() {
     let Some(db) = shared_card_db() else {
@@ -231,11 +235,8 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
     scenario.at_phase(Phase::PreCombatMain);
 
     scenario.add_real_card(P0, "Witherbloom, the Balancer", Zone::Battlefield, db);
-    let forerunner = scenario.add_real_card(P0, "Forerunner of the Empire", Zone::Battlefield, db);
-    scenario.add_real_card(P0, "Maskwood Nexus", Zone::Battlefield, db);
-    scenario.add_real_card(P0, "Glorious Anthem", Zone::Battlefield, db);
-    scenario.add_real_card(P0, "Gaea's Anthem", Zone::Battlefield, db);
-    scenario.add_real_card(P0, "Intangible Virtue", Zone::Battlefield, db);
+    let sponge = scenario.add_real_card(P0, "Armored Whirl Turtle", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Terror of the Peaks", Zone::Battlefield, db);
     let mut fodder = Vec::new();
     for _ in 0..6 {
         fodder.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
@@ -253,11 +254,7 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
         }
     }
 
-    // Maskwood Nexus expands "every creature type" against the game's creature-type list, which
-    // deck loading fills from the card pool; a scenario has no deck, so supply the two types the
-    // loop reads (sorted, as deck loading leaves it).
-    runner.state_mut().all_creature_types = vec!["Dinosaur".to_string(), "Saproling".to_string()];
-
+    let mut offered = false;
     'recasts: for &tap_id in &fodder[..3] {
         runner
             .cast(sprout)
@@ -267,12 +264,15 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
         for _ in 0..60 {
             match runner.state().waiting_for.clone() {
                 WaitingFor::LoopShortcut { .. } => {
+                    offered = true;
                     break 'recasts;
                 }
-                WaitingFor::OptionalEffectChoice { .. } => {
+                WaitingFor::TriggerTargetSelection { player, .. } if player == P0 => {
                     runner
-                        .act(GameAction::DecideOptionalEffect { accept: true })
-                        .expect("accept Forerunner's may-damage");
+                        .act(GameAction::ChooseTarget {
+                            target: Some(engine::types::ability::TargetRef::Object(sponge)),
+                        })
+                        .expect("aim Terror of the Peaks' entry damage at the persisting Turtle");
                 }
                 WaitingFor::OrderTriggers { triggers, .. } => {
                     let order: Vec<usize> = (0..triggers.len()).collect();
@@ -286,41 +286,58 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
                     }
                     runner.act(GameAction::PassPriority).expect("pass priority");
                 }
-                other => panic!("unexpected waiting_for in the Forerunner loop: {other:?}"),
+                other => panic!("unexpected waiting_for in the Terror loop: {other:?}"),
             }
         }
     }
-    // Reach guards: the loop was actually driven through public actions, and the damage landed on
-    // permanents that persisted (Forerunner survives with damage marked).
-    let forerunner_obj = runner
-        .state()
-        .objects
-        .get(&forerunner)
-        .expect("Forerunner object exists");
-    assert_eq!(
-        forerunner_obj.zone,
-        Zone::Battlefield,
-        "Forerunner must survive the driven repetitions"
-    );
+    // CR 704.5g + CR 732.2a: the offer is unconditional — a counted loop of this shape must still
+    // be offered (a loop that repeats a specified number of times), so suppressing shortcut
+    // offers entirely cannot satisfy the control.
     assert!(
-        forerunner_obj.damage_marked >= 2,
-        "reach-guard: Forerunner must accumulate damage across repetitions, got {}",
-        forerunner_obj.damage_marked
+        offered,
+        "persisting-damage loop must still be offered a shortcut, got {:?}",
+        runner.state().waiting_for
     );
 
-    // CR 704.5g + CR 732.2a: persisting damage bounds the offer — whenever a shortcut is
-    // offered, it must not be the unbounded one.
-    if let WaitingFor::LoopShortcut {
+    // Reach guard: Terror's entry damage landed on a permanent that persists across every
+    // compared frame (the Turtle survives with damage marked), so the bounded reading below is
+    // about persisting damage, not a minted token's entry damage.
+    let sponge_obj = runner
+        .state()
+        .objects
+        .get(&sponge)
+        .expect("Armored Whirl Turtle object exists");
+    assert_eq!(
+        sponge_obj.zone,
+        Zone::Battlefield,
+        "Armored Whirl Turtle must survive the driven repetitions"
+    );
+    assert!(
+        sponge_obj.damage_marked >= 1,
+        "reach-guard: Terror's entry damage must be marked on the persisting Turtle, got {}",
+        sponge_obj.damage_marked
+    );
+
+    let WaitingFor::LoopShortcut {
         certificate,
         schema,
         ..
     } = &runner.state().waiting_for
-    {
-        assert!(
-            schema.is_bounded() && certificate.unbounded.is_empty(),
-            "damage accumulating on persisting permanents must not be offered unbounded: {schema:?} {certificate:?}"
-        );
-    }
+    else {
+        unreachable!()
+    };
+    assert!(
+        schema.is_bounded(),
+        "damage accumulating on persisting permanents must bound the offer as Spend: {schema:?}"
+    );
+    assert!(
+        certificate.unbounded.is_empty(),
+        "bounded offer must carry no unbounded axes: {certificate:?}"
+    );
+    assert!(
+        certificate.per_cycle.is_some(),
+        "counted Spend offer must carry a per-cycle signature: {certificate:?}"
+    );
 }
 
 /// CR 111.1 + CR 704.5g + CR 732.2a (issue #10192): Optional "Enrage — you may create a token copy"
