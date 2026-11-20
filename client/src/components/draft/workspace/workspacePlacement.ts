@@ -1107,27 +1107,73 @@ export function resolveWorkspaceSortColumn(
     return manaValueColumn(card.cmc, model.columnCount);
   }
   const groupKind = cardSortGroup(card, model.effectiveSort);
-  const matches = model.columns.filter((column) => {
-    if (column.header.descriptors.some((descriptor) => descriptor.kind !== "engine-group")) {
-      return false;
-    }
-    const sortGroupKinds = column.header.descriptors.flatMap((descriptor) => (
-      descriptor.kind === "engine-group"
-      && SORT_GROUP_KINDS[model.effectiveSort].has(descriptor.groupKind)
-        ? [descriptor.groupKind]
-        : []
-    ));
-    if (!sortGroupKinds.includes(groupKind)) return false;
-    return sortGroupKinds.length === 1
-      || allocatorCouldShareColumn(
-        axisGroups(model.effectiveSort, poolGroups).map((group) => group.kind),
-        sortGroupKinds,
-        model.columnCount,
-      );
+  const axis = axisGroups(model.effectiveSort, poolGroups);
+  const axisKinds = axis.map((group) => group.kind);
+  // Which columns the zone's cards of each group occupy, the card being placed
+  // aside. A group the player has spread over several columns was not laid
+  // out as a unit, so no shared column built from it is trusted.
+  const kindOf = new Map<string, DraftPoolGroupKind>();
+  axis.forEach((group) => group.cards.forEach((entry) => (
+    entry.instance_ids.forEach((instanceId) => kindOf.set(instanceId, group.kind))
+  )));
+  const groupColumns = new Map<DraftPoolGroupKind, Set<number>>();
+  for (const [instanceId, placement] of Object.entries(workspace.placements)) {
+    const kind = kindOf.get(instanceId);
+    if (placement.zone !== zone || instanceId === card.instance_id || kind === undefined) continue;
+    groupColumns.set(kind, (groupColumns.get(kind) ?? new Set()).add(placement.column));
+  }
+  const unsplit = (kinds: readonly DraftPoolGroupKind[]) => (
+    kinds.every((kind) => groupColumns.get(kind)?.size === 1)
+  );
+  const columnKinds = (column: WorkspaceBoardColumnModel): DraftPoolGroupKind[] | null => (
+    column.header.descriptors.some((descriptor) => descriptor.kind !== "engine-group")
+      ? null
+      : column.header.descriptors.flatMap((descriptor) => (
+        descriptor.kind === "engine-group"
+        && SORT_GROUP_KINDS[model.effectiveSort].has(descriptor.groupKind)
+          ? [descriptor.groupKind]
+          : []
+      ))
+  );
+  const holding = model.columns.flatMap((column) => {
+    const kinds = columnKinds(column);
+    return kinds === null ? [] : [{ column, kinds }];
   });
-  // A column already holding the group wins over an empty one merely reserved for it.
-  const matchingColumn = matches.find((column) => column.count > 0) ?? matches[0];
-  if (matchingColumn !== undefined) return matchingColumn.column;
+
+  // A column holding only this group wins over any shared one: it is the one
+  // the sort (or the player) gave the group, wherever the allocator might have
+  // folded it. A column already holding the group wins over an empty one
+  // merely reserved for it.
+  const pure = holding.filter(({ kinds }) => kinds.length === 1 && kinds[0] === groupKind);
+  const pureColumn = pure.find(({ column }) => column.count > 0) ?? null;
+  if (pureColumn !== null) return pureColumn.column.column;
+  // A shared column counts only when the allocator could have laid out its
+  // groups together and none of them was pulled apart afterwards; a column the
+  // player mixed by hand stays rejected.
+  const shared = holding.find(({ column, kinds }) => (
+    column.count > 0
+    && kinds.length > 1
+    && kinds.includes(groupKind)
+    && unsplit(kinds)
+    && allocatorCouldShareColumn(axisKinds, kinds, model.columnCount)
+  ));
+  if (shared !== undefined) return shared.column.column;
+  if (pure[0] !== undefined) return pure[0].column.column;
+
+  const hasEmptyColumn = model.columns.some((column) => column.count === 0);
+  if (!hasEmptyColumn && !groupColumns.has(groupKind)) {
+    // Every column is occupied and none holds this group: its own column of a
+    // shared pair emptied out. It rejoins the column the allocator would have
+    // paired it into (the rightmost, as the allocator folds the tail).
+    const rejoining = holding.filter(({ column, kinds }) => (
+      column.count > 0
+      && !kinds.includes(groupKind)
+      && unsplit(kinds)
+      && allocatorCouldShareColumn(axisKinds, [...kinds, groupKind], model.columnCount)
+    ));
+    const rejoin = rejoining[rejoining.length - 1];
+    if (rejoin !== undefined) return rejoin.column.column;
+  }
   if (model.effectiveSort === "color") {
     return model.columns.find((column) => column.count === 0)?.column ?? 0;
   }
@@ -1192,7 +1238,9 @@ export function placeArrivingPoolCards(
   preferences: DraftBoardPreferences,
 ): DraftWorkspaceState {
   let next = workspace;
+  const pending = new Set(arrivingInstanceIds);
   for (const instanceId of arrivingInstanceIds) {
+    pending.delete(instanceId);
     const card = pool.find((entry) => entry.instance_id === instanceId);
     if (card === undefined) continue;
     const placement = next.placements[instanceId];
@@ -1202,12 +1250,20 @@ export function placeArrivingPoolCards(
     // the belt to that braces, and the one thing it catches on its own is a
     // caller that widened the list to cards already in the sideboard.
     if (placement === undefined || placement.zone !== "deck") continue;
+    // Arrivals still waiting for their turn hold only reconcile's default
+    // column; leaving them in would read as cards spread over the board.
+    const settled: DraftWorkspaceState = {
+      ...next,
+      placements: Object.fromEntries(
+        Object.entries(next.placements).filter(([id]) => !pending.has(id)),
+      ),
+    };
     const hint = resolveWorkspacePickPlacement(
       card,
       "deck",
       pool,
       poolGroups,
-      next,
+      settled,
       preferences,
     );
     next = appendWorkspaceInstanceToResolvedDestination(next, pool, instanceId, {

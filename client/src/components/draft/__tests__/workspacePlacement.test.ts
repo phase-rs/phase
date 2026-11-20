@@ -288,6 +288,84 @@ describe("workspace placement", () => {
       expect(column(placed, "arrive-colorless")).toBe(5);
     });
 
+    // Boards built from named cards: [id, color group, zone].
+    type Spec = readonly [string, DraftPoolGroupKind, "deck" | "sideboard"];
+    function colorBoard(specs: readonly Spec[], columnCount: number) {
+      const pool = specs.map(([id, kind]) => ({ ...card(id, id), colors: COLOR_TRAITS[kind].colors ?? [] }));
+      const byKind = new Map<DraftPoolGroupKind, DraftCardInstance[]>();
+      specs.forEach(([, kind], index) => byKind.set(kind, [...(byKind.get(kind) ?? []), pool[index]]));
+      const poolGroups: DraftPoolGroups = {
+        ...groups(),
+        // The engine reports color groups in its fixed order, whatever the pool holds.
+        color_groups: COLOR_KINDS.flatMap((kind) => (byKind.has(kind) ? [[kind, byKind.get(kind)!] as const] : [])).map(([kind, entries]) => ({
+          kind,
+          total: entries.length,
+          cards: entries.map((entry) => ({ card: entry, count: 1, instance_ids: [entry.instance_id] })),
+        })),
+      };
+      const preferences: DraftBoardPreferences = {
+        sort: "color", columnCount, rows: "one", showHeaders: true,
+      };
+      let state: DraftWorkspaceState = {
+        ...createDraftWorkspaceState(),
+        placements: Object.fromEntries(specs.map(([id, , zone]) => [
+          id, { zone, row: 0, column: 0, order: 0 },
+        ])),
+      };
+      state = rebuildWorkspaceZone(state, "deck", pool, poolGroups, preferences);
+      return { pool, poolGroups, preferences, state };
+    }
+    const pickFor = (
+      board: ReturnType<typeof colorBoard>, state: DraftWorkspaceState, id: string, zone: "deck" | "sideboard",
+    ) => resolveWorkspacePickPlacement(
+      board.pool.find((entry) => entry.instance_id === id)!,
+      zone, board.pool, board.poolGroups, state, board.preferences,
+    ).column;
+    const dragTo = (state: DraftWorkspaceState, id: string, destination: number): DraftWorkspaceState => ({
+      ...state,
+      placements: { ...state.placements, [id]: { ...state.placements[id], column: destination } },
+    });
+    const sendTo = (state: DraftWorkspaceState, id: string, zone: "deck" | "sideboard"): DraftWorkspaceState => ({
+      ...state,
+      placements: { ...state.placements, [id]: { ...state.placements[id], zone } },
+    });
+
+    it("prefers_the_column_holding_only_the_group_over_a_column_the_player_mixed", () => {
+      const board = colorBoard([
+        ["opt", "blue", "deck"], ["plains", "colorless", "deck"], ["island", "colorless", "deck"],
+        ["forest", "colorless", "sideboard"], ["pacifism", "white", "sideboard"],
+      ], 2);
+      expect([column(board.state, "opt"), column(board.state, "island")]).toEqual([0, 1]);
+      // Plains is dragged into Opt's column: blue and colorless now share column 0 by hand.
+      const mixed = dragTo(board.state, "plains", 0);
+      expect(pickFor(board, mixed, "forest", "deck")).toBe(1);
+    });
+
+    it("keeps_a_pure_group_column_ahead_of_a_hand_mixed_column_with_five_colors", () => {
+      const board = colorBoard([
+        ["pacifism", "white", "deck"], ["opt", "blue", "deck"], ["night", "black", "deck"],
+        ["shock", "red", "deck"], ["elves", "green", "deck"], ["bears", "green", "deck"],
+        ["satyr", "multicolor", "sideboard"], ["manalith", "colorless", "sideboard"],
+      ], 5);
+      // Grizzly Bears is dragged into the red column.
+      const mixed = dragTo(board.state, "bears", 3);
+      expect(pickFor(board, mixed, "elves", "deck")).toBe(4);
+    });
+
+    it("keeps_the_other_group_a_destination_after_one_of_a_merged_pair_leaves", () => {
+      const specs: readonly Spec[] = [
+        ["pacifism", "white", "deck"], ["opt", "blue", "deck"], ["night", "black", "deck"],
+        ["shock", "red", "deck"], ["elves", "green", "deck"],
+        ["satyr", "multicolor", "deck"], ["manalith", "colorless", "deck"],
+      ];
+      const board = colorBoard(specs, 6);
+      expect(column(board.state, "satyr")).toBe(5);
+      expect(column(board.state, "manalith")).toBe(5);
+      // Manalith leaves: a later colorless card rejoins Satyr's column, and back.
+      expect(pickFor(board, sendTo(board.state, "manalith", "sideboard"), "manalith", "deck")).toBe(5);
+      expect(pickFor(board, sendTo(board.state, "satyr", "sideboard"), "satyr", "deck")).toBe(5);
+    });
+
     it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {
       expect(sideboardColumns(5)).toEqual({
         white: 0, blue: 1, black: 2, red: 3, green: 3, multicolor: 4, colorless: 4,
