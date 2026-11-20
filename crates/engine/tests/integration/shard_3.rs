@@ -79,6 +79,7 @@ mod dragon_egg_token_granted_activated_pump;
 mod dragon_man_reformed_robot_graveyard_discard_cost;
 mod dragon_whelp_activation_threshold_8388;
 mod dragon_whelp_blink_departed_tally;
+mod dragonbroods_relic_token;
 mod dragons_eye_savants_morph;
 mod dragonstorm_forecaster_named_or_tutor;
 mod drake_familiar_unrestricted_return_to_hand;
