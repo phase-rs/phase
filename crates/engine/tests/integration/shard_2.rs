@@ -7,6 +7,8 @@
 
 pub mod support;
 
+mod anzrag_must_be_blocked;
+
 mod a_killer_among_us;
 mod aang_compound_tail;
 mod aang_journey_partial_fail_to_find_2722;
@@ -132,6 +134,7 @@ mod become_chosen_subtype;
 mod become_color_set_std_batch;
 mod become_prepared_declared_target;
 mod becomes_target_paused_cast_triggers;
+mod before_combat_step_windows;
 mod behold_chosen_object_power_damage;
 mod belbe_thornbow_life_loss;
 mod belladonna_took;
@@ -167,6 +170,7 @@ mod bramble_elemental_aura_attach;
 mod brass_knuckles_equipment_threshold;
 mod brawl_commander_damage_exclusion;
 mod bre_of_clan_stoutarm_endstep;
+mod break_of_day_fateful_hour;
 mod breathless_knight_graveyard_origin;
 mod breeches_blastmaker_coin_flip_copy;
 mod brightling_pt_disjunction_choice;
@@ -390,6 +394,7 @@ mod cut_a_deal_draw_this_way_count;
 mod damage_done_once_by_controller_player_recipients;
 mod damage_prevention_formula;
 mod damage_redirect_target_constraints;
+mod damaged_player_counter_branch;
 mod dandan_analysis_ai_support_reads;
 mod dandan_declare_round;
 mod dandan_free_reveal;

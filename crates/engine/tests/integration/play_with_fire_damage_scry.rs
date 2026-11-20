@@ -5,8 +5,9 @@ use engine::game::{effects, zones::create_object};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::types::ability::{
-    AbilityCondition, Comparator, DamageChannel, Effect, EffectScope, PreventionAmount,
-    PreventionScope, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
+    AbilityCondition, Comparator, DamageChannel, Effect, EffectScope, ObjectScope,
+    PreventionAmount, PreventionScope, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -57,6 +58,7 @@ fn play_with_fire_parses_player_damage_scry_condition() {
                     filter: TargetFilter::Typed(filter),
                     use_lki: true,
                     subject_slot: None,
+                    subject: ObjectScope::Target
                 } if filter.type_filters == vec![TypeFilter::Permanent])
         )),
         "the rider must reject permanent damage targets: {conditions:?}"

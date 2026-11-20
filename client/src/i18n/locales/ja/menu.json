@@ -158,6 +158,7 @@
     "subscribe": "購読",
     "unsubscribe": "購読解除",
     "lastRefreshed": "最終更新: {{date}}",
+    "dataProvidedBy": "データ提供:",
     "addCustomFeed": "カスタムフィードを追加",
     "add": "追加",
     "offlineUnavailable": "オフライン中はフィードを更新できません。",

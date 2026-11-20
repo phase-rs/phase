@@ -106,13 +106,14 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    history_clause_subject, parse_anaphoric_target_ref, parse_definite_anaphor,
-    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
-    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
-    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, population_drops_block_history_clause,
-    resolve_singular_exiled_card_target, strip_block_history_clauses, unique_slot_for_anaphor,
-    AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
+    history_clause_subject, parse_anaphoric_target_ref, parse_block_history_clause,
+    parse_definite_anaphor, parse_definite_parent_reference, parse_event_context_ref,
+    parse_fight_target, parse_parent_target_controller_population, parse_target,
+    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    population_drops_block_history_clause, resolve_singular_exiled_card_target,
+    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
+    DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -1957,6 +1958,7 @@ fn rewrite_keyword_anaphor_for_cost_paid_parent(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = &condition
     else {
         return condition;
@@ -2023,6 +2025,7 @@ fn keyword_anaphor_referent_is_unpublished_resolution_pick(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = condition
     else {
         return false;
@@ -13516,6 +13519,22 @@ fn parse_effect_clause_inner_with_damage_context(
         return parsed_clause(effect);
     }
 
+    // CR 611.2a + CR 614.1a + CR 514.2: floating turn-bound "if a [nontoken]
+    // creature would enter and it wasn't cast, exile it instead" (Mistcaller,
+    // Hallowed Moonlight). Dispatched after `strip_leading_duration` for the same
+    // reason as the Don't Blink lift above: the duration-stripped recursive call
+    // reaches it and the window is re-attached as `AbilityDefinition.duration`.
+    // This front door supports only clauses with a stated duration; durationless
+    // clauses remain unsupported here (CR 611.2a permits resolution-generated
+    // continuous effects without a stated duration) and keep their honest guard gap.
+    if let Some(effect) = super::oracle_replacement::parse_windowed_enter_wasnt_cast_exile_install(
+        &lower,
+        text,
+        ctx.stated_clause_duration.as_ref(),
+    ) {
+        return parsed_clause(effect);
+    }
+
     // CR 614.1a + CR 514.2: floating turn-bound life-floor replacement
     // ("Until end of turn, damage that would reduce your life total to less
     // than 1 reduces it to 1 instead." — Angel's Grace; Angel of Grace's ETB
@@ -21656,9 +21675,10 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return Some(parsed_clause(effect));
     }
 
-    // CR 111.11: "create [token description] for each X" → Token with dynamic count.
+    // CR 701.7a: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
-    // types, colors, keywords). Replace the embedded count with the for-each quantity.
+    // types, colors, keywords). The embedded count multiplies the for-each quantity, as in the
+    // numeric and damage arms.
     //
     // The base may carry a subject ("You create a Treasure token …" — You've Been
     // Caught Stealing). Try the raw base first (preserves subject-bearing forms
@@ -21666,7 +21686,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // the correct owner), then fall back to the subject-stripped imperative so a
     // leading "you " no longer strands the for-each quantity.
     //
-    // CR 109.5 + CR 111.11: the stripped fallback is CONTROLLER-only. This arm
+    // CR 109.5 + CR 111.2: the stripped fallback is CONTROLLER-only. This arm
     // early-returns from `try_parse_for_each_effect` and so never runs the
     // subject→owner rebinding used by the numeric/targeted arms, and
     // `try_parse_token` defaults `Effect::Token.owner` to
@@ -21702,7 +21722,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 supertypes,
                 static_abilities,
                 enter_with_counters,
-                count: _,
+                count: base_count,
             } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
@@ -21714,8 +21734,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 // base (name/P/T/types) from `base_tp` — the text BEFORE "for
                 // each" — so `try_parse_token`'s own "this way" dispatch never
                 // sees the "for each" clause here; `scoped_count` above, from
-                // this function's OWN `quantity`, is the only count this path
-                // ever produces. A bare "card put into a graveyard this way"
+                // this function's OWN `quantity`, is the only for-each count this
+                // path ever produces. A bare "card put into a graveyard this way"
                 // counts only tracked cards delivered to Graveyard (CR 614.6);
                 // this is the normal path for Pinnacle Starcage's one-pile move.
                 // When a preceding Dig puts the rest into Graveyard, re-resolve
@@ -21754,7 +21774,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     supertypes,
                     static_abilities,
                     enter_with_counters,
-                    count,
+                    count: replace_fixed_quantity(base_count, count),
                 }
             }
             other => other,
@@ -24867,8 +24887,34 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // continuation context is otherwise blank, and a blank context is not evidence
     // of any antecedent. Same pin the chunk loop applies when a continued
     // instruction named the source (`parsed_clause_targets_self_ref`).
+    // CR 608.2c: when the primary instruction instead introduced a typed object
+    // referent — an announced "target creature …" (CR 115.1d) or a typed chosen
+    // object — that object is the pronoun's antecedent: "tap target creature an
+    // opponent controls and put a stun counter on it" (Grappling Kraken). Pin
+    // `ParentTarget`, the same rung the chunk loop applies across sentences
+    // (`chain_has_prior_typed_referent`). Without it the blank context sends
+    // `resolve_it_pronoun` to its `SelfRef` fallback, and under a typed trigger
+    // subject the anaphor rewrite below never repairs that.
+    //
+    // The pin substitutes for that skipped rewrite and nothing more, so it is
+    // installed only where the rewrite is skipped (a typed trigger subject) and
+    // never where it would reach a block-history clause. The rewrite only
+    // retargets the effect after parsing; a pin installed before parsing would
+    // also bind the clause's bare "it" as an earlier instruction's target
+    // (`resolve_relation_subject`). CR 509.1g + CR 608.2i: the partner of
+    // "all creatures it blocked this turn" is this same instruction's target,
+    // not an earlier instruction's, so the clause declines and the continuation
+    // fails closed (`instruction_drops_block_partner`), exactly as it does on
+    // the rewrite path ("destroy target creature and all creatures it blocked
+    // this turn").
     if uses_parent_target_reference && effect_targets_self_ref(&primary_effect) {
         continuation_ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
+    } else if uses_parent_target_reference
+        && ctx_has_typed_trigger_subject(ctx)
+        && has_typed_target_widened(&primary_effect)
+        && nom_primitives::scan_at_word_boundaries(&sub_lower, parse_block_history_clause).is_none()
+    {
+        continuation_ctx.object_pronoun_ref = Some(TargetFilter::ParentTarget);
     }
 
     // CR 608.2c: when the primary instruction announced an OBJECT target, a
@@ -25216,9 +25262,12 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
-    // CR 608.2k carve-out (issue #319): in typed-trigger-subject context the
-    // pronoun has already been correctly resolved to TriggeringSource by
-    // `resolve_pronoun_target` — preserve that binding instead of clobbering.
+    // Issue #319 carve-out: under a typed trigger subject the continuation keeps
+    // the binding it was parsed with instead of being rewritten to
+    // `ParentTarget` here. The blank continuation context never carries the
+    // trigger subject, so no CR 608.2k `TriggeringSource` binding reaches this
+    // point; a typed primary referent is pinned to `ParentTarget` above instead,
+    // unless the continuation holds a block-history clause (see the pin's guard).
     if uses_parent_target_reference && !ctx_has_typed_trigger_subject(ctx) {
         // CR 608.2c: same fail-closed refusal as the chunk-loop arms —
         // see `anaphor_rewrite_would_drop_this_way_binding`.
@@ -32235,9 +32284,10 @@ fn effect_reads_announced_root_slots(
         || matches!(
             condition,
             Some(AbilityCondition::TargetMatchesFilter {
+                filter: _,
                 use_lki: false,
                 subject_slot: None,
-                ..
+                subject: ObjectScope::Target,
             })
         )
     {
@@ -42994,7 +43044,7 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
     mass_population_filter(&clause.parsed.effect).cloned()
 }
 
-/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If this clause is a
+/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If an effect is a
 /// `GenericEffect` Continuous-mode static grant over a BROADCAST population (a
 /// keyword/P-T/ability "gain(s)"/"have"/"has" grant, not a chosen-target
 /// application), return the population filter it establishes. Feeds
@@ -43009,12 +43059,12 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
 /// a broadcast population qualifies. Only a single static definition is
 /// accepted: a `GenericEffect` carrying two or more static defs has no single
 /// population to name without risking a wrong-antecedent guess.
-fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+pub(crate) fn continuous_grant_population(effect: &Effect) -> Option<&TargetFilter> {
     let Effect::GenericEffect {
         static_abilities,
         target: None,
         ..
-    } = &clause.parsed.effect
+    } = effect
     else {
         return None;
     };
@@ -43025,7 +43075,11 @@ fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilt
         return None;
     }
     let filter = static_def.affected.as_ref()?;
-    is_broadcast_population_filter(filter).then(|| filter.clone())
+    is_broadcast_population_filter(filter).then_some(filter)
+}
+
+fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    continuous_grant_population(&clause.parsed.effect).cloned()
 }
 
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
@@ -43580,6 +43634,26 @@ fn contains_explicit_tracked_set_pronoun(lower: &str) -> bool {
         || scan_contains_phrase(lower, "the exiled creature")
 }
 
+/// CR 608.2c: Detect a plural mass-population anaphor in a document paragraph.
+/// The caller supplies the producer's typed mass-population proof; this helper
+/// only recognizes the printed noun axis with the shared nom boundary scanner.
+pub(crate) fn contains_mass_population_anaphor(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("those creatures"),
+                tag("those permanents"),
+                tag("those tokens"),
+                tag("those auras"),
+                tag("those enchantments"),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 /// CR 608.2c: a clause led by a plural subject anaphor ("They are 5/5 …",
 /// "Those permanents gain …") names the set the earlier instructions published.
 fn starts_with_plural_subject_anaphor(lower: &str) -> bool {
@@ -43920,6 +43994,45 @@ pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &
     }
 }
 
+/// CR 608.2c: Re-anchor only the `ParentTarget` grant proven to be conditional
+/// on this ability path. A whole-tree rewrite is unsound here: a consumer can
+/// contain a singular or sibling `ParentTarget` grant that has no relationship
+/// to the preceding mass population.
+pub(super) fn rewrite_conditional_grant_parent_to_filter(
+    effect: &mut Effect,
+    replacement: &TargetFilter,
+    condition_in_scope: bool,
+) {
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return;
+    };
+
+    if condition_in_scope {
+        if let Some(target) = target {
+            if matches!(target, TargetFilter::ParentTarget) {
+                rewrite_filter_parent_to(target, replacement);
+            }
+        }
+    }
+    for static_def in static_abilities {
+        if static_def
+            .affected
+            .as_ref()
+            .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+            && (condition_in_scope || static_def.condition.is_some())
+        {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to(affected, replacement);
+            }
+        }
+    }
+}
+
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {
@@ -44224,7 +44337,7 @@ fn stamp_inside_delayed(effect: &mut Effect, expected: Zone) {
     }
 }
 
-fn append_to_deepest_sub_ability(
+pub(super) fn append_to_deepest_sub_ability(
     ability: &mut AbilityDefinition,
     tail: Option<Box<AbilityDefinition>>,
 ) {
@@ -58729,6 +58842,7 @@ pub mod test_helpers {
             filter: TargetFilter::Typed(TypedFilter::creature()),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     }
 
@@ -63814,5 +63928,24 @@ mod population_walk_destination_tests {
             vec![Some(TargetFilter::ParentTarget)],
             "a declined producer's grant keeps the bare anaphor"
         );
+    }
+
+    /// CR 608.2c: every plural object noun in the mass-population anaphor axis
+    /// is recognized by the same boundary-safe nom combinator. Singular
+    /// references do not enter this cross-item relation.
+    #[test]
+    fn mass_population_anaphor_covers_plural_object_vocabulary() {
+        for phrase in [
+            "those creatures gain flying",
+            "those permanents gain flying",
+            "those tokens gain flying",
+            "those auras gain flying",
+            "those enchantments gain flying",
+        ] {
+            assert!(contains_mass_population_anaphor(phrase), "{phrase}");
+        }
+        assert!(!contains_mass_population_anaphor(
+            "that creature gains flying"
+        ));
     }
 }

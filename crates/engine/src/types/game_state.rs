@@ -3554,12 +3554,7 @@ pub enum DamagePostLossStage {
 /// lifelink share was already folded into `lifelink_by_source` at park time),
 /// so the post-replacement funnel never drains it directly. The snapshot
 /// carries source identity/incarnation (CR 400.7), controller (CR 702.15b),
-/// keywords, and `lifelink_bonus`; the pre-damage loyalty/defense below ride
-/// alongside it (CR 120.10 measures planeswalker/battle excess against the
-/// values *before* the damage was dealt, and loyalty removal already ran by
-/// park time). Creature excess still recomputes from post-counter state at
-/// resume (toughness/`damage_marked` are untouched by the counter placement),
-/// so the resumed record matches the never-paused path on both axes.
+/// keywords, and `lifelink_bonus`; the `excess` below rides alongside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostCounter {
     /// CR 400.7: the damage context at pause time (source identity/incarnation,
@@ -3569,15 +3564,8 @@ pub struct PendingDamagePostCounter {
     pub target: TargetRef,
     /// The post-replacement damage amount.
     pub actual_amount: u32,
-    /// CR 120.10: the target's loyalty *before* the damage was dealt, captured
-    /// before loyalty removal (which runs ahead of the wither arm). `None`
-    /// when the target is not a planeswalker (or has no loyalty field).
-    #[serde(default)]
-    pub loyalty_before: Option<u32>,
-    /// CR 120.10: the target's defense *before* the damage was dealt, captured
-    /// before defense removal. `None` when the target is not a battle.
-    #[serde(default)]
-    pub defense_before: Option<u32>,
+    /// CR 120.4a + CR 120.10: the excess computed before the counters were placed; the resume never recomputes it.
+    pub excess: u32,
     /// CR 510.2: a combat leg's post-counter work, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).
     #[serde(default)]
@@ -9689,6 +9677,8 @@ pub enum CopyEntryResumeStage {
     ChoiceSettled,
     /// The acquired choice paused before counter evaluation.
     BeforeCounters(Box<CopyEntryPendingCounters>),
+    /// The liminal proposal settled the copied replacements before entering.
+    ReplacementsSettled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9834,12 +9824,14 @@ pub enum PendingCounterPostAction {
         entry_events: TokenEntryEventEmission,
     },
     /// CR 707.2 + CR 122.6a: create the rest of a liminal copy batch after a
-    /// committed token's counter pause. A liminal batch has no creation counters
-    /// and each token's scheduled counters are its own, so none is carried.
+    /// committed token's counter pause. Carry the creation seed, not the
+    /// counters earned by the committed token's own entry.
     ContinueLiminalCopyTokenBatch {
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
         remaining_count: u32,
     },
     /// CR 400.7 + CR 616.1: realize the token battlefield entry parked in
@@ -26000,6 +25992,34 @@ impl<'de> Deserialize<'de> for LiminalEntrant {
     }
 }
 
+/// CR 616.1c + CR 614.12: a liminal token entrant's own as-enters copy that has been chosen and
+/// placed on the entrant while the remaining entry replacements are rediscovered against it. Held
+/// on the entry across a prompt that rediscovery raises, so the answer resumes the selected
+/// copy's entry completion (copy chain, acquired entry counters, birth record) instead of
+/// abandoning it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCopySettlement {
+    pub target_id: ObjectId,
+    /// The resolved copy effect (with the token's copy exceptions folded in) applied after the
+    /// entry commits.
+    pub ability: ResolvedAbility,
+    /// The one-shot entry-counter exceptions held out of `ability`.
+    pub held_exceptions: Vec<ContinuousModification>,
+    /// The entrant as it was before the chosen copy was placed on it.
+    pub original: LiminalEntrant,
+    /// The chosen copy's copiable values and display, for a birth that the copy redirects.
+    pub copy_values: Box<CopiableValues>,
+    pub copy_display: crate::game::game_object::DisplayIdentity,
+    /// The incarnation of the object the copy was chosen from (CR 400.7), the copy effect's
+    /// duration subject.
+    pub copy_incarnation: ObjectIncarnationRef,
+    pub staged_name: String,
+    /// `Some(n)`: the chosen copy's acquired entry replacements are offered with the entrant's
+    /// own, which keep their indices as the first `n` staged definitions (CR 707.5). `None`:
+    /// the entry finisher settles them after the entrant enters.
+    pub superseded_replacements: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
     pub object: LiminalEntrant,
@@ -26031,6 +26051,9 @@ pub struct LiminalEntry {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    /// CR 616.1c: see [`TokenCopySettlement`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_settlement: Option<Box<TokenCopySettlement>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -38799,6 +38822,24 @@ impl GameState {
         else {
             return false;
         };
+        // CR 702.82a: counters earned by this entrant's own replacement belong to
+        // its entry event, not the pristine batch payload used by later entrants.
+        if let Some(PendingLiminalEntryResume::Token {
+            source_id,
+            event:
+                crate::types::proposed_event::ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_with_counters,
+                    ..
+                },
+            ..
+        }) = self.pending_liminal_entry_resume.as_mut()
+        {
+            if *source_id == id && *entry_ref == id {
+                enter_with_counters.push((counter_type, count));
+                return true;
+            }
+        }
         // The commit folds this list into the entry's counter pass in order, so
         // appending is what puts these counters after any the creating effect
         // already specified — CR 702.104a's "an ADDITIONAL N +1/+1 counters".
@@ -46490,6 +46531,7 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                copy_settlement: None,
                 object: LiminalEntrant::Token(projection.clone()),
                 name: "Goblin".to_string(),
                 source_id: object_id,
@@ -46590,6 +46632,7 @@ mod tests {
                 remaining: vec![PositionedTokenBatch {
                     position: 1,
                     batch: TokenBatch {
+                        redirected_to: None,
                         owner: PlayerId(0),
                         spec: Box::new(spec),
                         copy: None,

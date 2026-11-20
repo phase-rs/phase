@@ -1621,6 +1621,33 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
     }
 }
 
+/// CR 122.1f: display phrase for a "<player> is poisoned" condition.
+fn fmt_player_is_poisoned(player: &PlayerScope) -> String {
+    match player {
+        PlayerScope::Controller => "is poisoned".into(),
+        // `Opponent { Max }` is the parser's encoding of the existential "an opponent".
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        } => "an opponent is poisoned".into(),
+        // RecipientController reaches this condition only by rebinding the "that player" anaphor (ScopedPlayer).
+        PlayerScope::ScopedPlayer | PlayerScope::RecipientController => {
+            "that player is poisoned".into()
+        }
+        PlayerScope::Target
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. }
+        | PlayerScope::ParentObjectTarget { .. }
+        | PlayerScope::Opponent {
+            aggregate: AggregateFunction::Min | AggregateFunction::Sum,
+        }
+        | PlayerScope::AllPlayers { .. } => {
+            format!("{} is poisoned", fmt_player_scope(player))
+        }
+    }
+}
+
 /// CR 123.6d + CR 123.6e: "unique vowels on that sticker", "letter 'o' in name
 /// stickers on self".
 fn fmt_name_sticker_letter_count(stickers: &NameStickerSet, letters: &LetterQuery) -> String {
@@ -3320,14 +3347,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ..
         } => {
             let mut desc = String::new();
-            match count {
-                QuantityExpr::Fixed { value: n } if *n != 1 => {
-                    desc.push_str(&format!("{n}× "));
-                }
-                QuantityExpr::Ref { qty } => {
-                    desc.push_str(&format!("{}× ", fmt_quantity_ref(qty)));
-                }
-                _ => {}
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                desc.push_str(&format!("{}× ", fmt_quantity(count)));
             }
             // CR 208.1: only creature tokens have power/toughness; suppress the
             // P/T display for noncreature tokens (Treasure, Clue, Vibranium, …)
@@ -4584,9 +4605,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             enters_attacking,
             attack_destination,
+            count,
             ..
         } => {
             d.push(("copies".into(), fmt_target(target)));
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
             if *enters_attacking {
                 d.push(("attacking".into(), "yes".into()));
             }
@@ -5065,9 +5090,29 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             format!("target has {} (instead)", keyword_label(keyword))
         }
         AbilityCondition::HasObjectTarget => "has an object target".into(),
-        AbilityCondition::TargetMatchesFilter { filter, .. } => {
-            format!("target is {}", fmt_target(filter))
-        }
+        AbilityCondition::TargetMatchesFilter {
+            filter,
+            use_lki: _,
+            subject_slot: _,
+            subject,
+        } => match subject {
+            // CR 603.2: the object the trigger event names, not a declared target.
+            ObjectScope::EventSource => format!("triggering object is {}", fmt_target(filter)),
+            ObjectScope::Source
+            | ObjectScope::Target
+            | ObjectScope::Recipient
+            | ObjectScope::CostPaidObject
+            | ObjectScope::Anaphoric
+            | ObjectScope::Demonstrative
+            | ObjectScope::AmassedArmy
+            | ObjectScope::EventTarget
+            | ObjectScope::OtherRevealedCard
+            | ObjectScope::OwnedLinkedExileCard
+            | ObjectScope::BatchSource
+            | ObjectScope::ChainRootTarget
+            | ObjectScope::GrantingObject
+            | ObjectScope::SpecificObject { .. } => format!("target is {}", fmt_target(filter)),
+        },
         AbilityCondition::TriggeringSpellTargetsFilter { filter } => {
             format!("triggering spell targets {}", fmt_target(filter))
         }
@@ -5234,12 +5279,7 @@ fn fmt_trigger_condition(
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         TC::IsMonarch { .. } => "that player is monarch".into(),
-        // CR 122.1f + CR 508.5: keep the defending-player wording distinct so a
-        // gap string names the player the trigger actually tests.
-        TC::IsPoisoned {
-            player: PlayerScope::DefendingPlayer,
-        } => "defending player is poisoned".into(),
-        TC::IsPoisoned { .. } => "that player is poisoned".into(),
+        TC::IsPoisoned { player } => fmt_player_is_poisoned(player),
         TC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -5506,11 +5546,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
-        // CR 122.1f: keep the subject wording parallel to `TC::IsPoisoned`.
-        SC::PlayerIsPoisoned {
-            player: PlayerScope::Controller,
-        } => "is poisoned".into(),
-        SC::PlayerIsPoisoned { .. } => "that player is poisoned".into(),
+        SC::PlayerIsPoisoned { player } => fmt_player_is_poisoned(player),
         SC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -13370,6 +13406,18 @@ enum ParsedElement<'a> {
     Replacement(&'a ReplacementDefinition),
 }
 
+fn effect_has_nested_static_condition(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            static_abilities,
+            ..
+        } if static_abilities
+            .iter()
+            .any(|static_ability| static_ability.condition.is_some())
+    )
+}
+
 impl<'a> ParsedElement<'a> {
     fn description_lower(&self) -> Option<String> {
         match self {
@@ -13419,12 +13467,15 @@ impl<'a> ParsedElement<'a> {
                     || d.activation_restrictions
                         .iter()
                         .any(|r| matches!(r, ActivationRestriction::RequiresCondition { .. }))
+                    || effect_has_nested_static_condition(&d.effect)
             }),
             ParsedElement::Trigger(t) => {
                 t.condition.is_some()
-                    || t.execute
-                        .as_ref()
-                        .is_some_and(|e| ability_tree_any(e, &|d| d.condition.is_some()))
+                    || t.execute.as_ref().is_some_and(|e| {
+                        ability_tree_any(e, &|d| {
+                            d.condition.is_some() || effect_has_nested_static_condition(&d.effect)
+                        })
+                    })
             }
             ParsedElement::Static(s) => s.condition.is_some(),
             ParsedElement::Replacement(r) => {
@@ -19047,6 +19098,80 @@ mod tests {
             fmt_trigger_condition(&tq, &crate::types::triggers::TriggerMode::Phase)
                 .contains("is odd")
         );
+    }
+
+    #[test]
+    fn player_is_poisoned_condition_text_names_its_subject() {
+        let details = |face: &CardFace| -> Vec<(String, String)> {
+            build_parse_details_for_face(face)
+                .into_iter()
+                .flat_map(|item| item.details)
+                .collect()
+        };
+        let detail = |key: &str, value: &str| (key.to_string(), value.to_string());
+
+        let betrayers = max_speed_matrix_face(
+            "Viridian Betrayers",
+            "This creature has infect as long as an opponent is poisoned. (It deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)",
+            &[],
+            &["Creature"],
+            &["Phyrexian", "Elf", "Warrior"],
+        );
+        let betrayers_details = details(&betrayers);
+        assert!(
+            betrayers_details.contains(&detail("conditional", "an opponent is poisoned")),
+            "{betrayers_details:?}"
+        );
+
+        let rats = max_speed_matrix_face(
+            "Septic Rats",
+            "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)\nWhenever this creature attacks, if defending player is poisoned, it gets +1/+1 until end of turn.",
+            &["Infect"],
+            &["Creature"],
+            &["Phyrexian", "Rat"],
+        );
+        let rats_details = details(&rats);
+        assert!(
+            rats_details.contains(&detail("condition", "defending player is poisoned")),
+            "{rats_details:?}"
+        );
+
+        for (player, expected) in [
+            (PlayerScope::Controller, "is poisoned"),
+            (
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+                "an opponent is poisoned",
+            ),
+            (PlayerScope::ScopedPlayer, "that player is poisoned"),
+            (PlayerScope::RecipientController, "that player is poisoned"),
+            (
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+                "min of opponents is poisoned",
+            ),
+            (PlayerScope::Target, "target player is poisoned"),
+        ] {
+            assert_eq!(
+                fmt_static_condition(&StaticCondition::PlayerIsPoisoned {
+                    player: player.clone()
+                }),
+                expected,
+                "static {player:?}"
+            );
+            assert_eq!(
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::IsPoisoned {
+                        player: player.clone()
+                    },
+                    &TriggerMode::Attacks,
+                ),
+                expected,
+                "trigger {player:?}"
+            );
+        }
     }
 
     #[test]
@@ -25487,6 +25612,38 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     #[test]
+    fn test_audit_accepts_condition_on_nested_generic_static() {
+        let mut face = make_face();
+        let oracle = "Target creature gains flying as long as you control a Dragon.";
+        face.oracle_text = Some(oracle.to_string());
+        let static_ability = StaticDefinition::continuous()
+            .affected(TargetFilter::Any)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(StaticCondition::DuringYourTurn)
+            .description(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![static_ability],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            )
+            .description(oracle.to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(!findings
+            .iter()
+            .any(|finding| matches!(finding, SemanticFinding::DroppedCondition { .. })));
+    }
+
+    #[test]
     fn test_audit_skips_draft_procedure_lines() {
         let face = make_face();
         let oracle = "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack.\nIf you do, put this card into that booster pack.";
@@ -27349,6 +27506,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     filter: TargetFilter::Any,
                     use_lki: false,
                     subject_slot: None,
+                    subject: ObjectScope::Target,
                 },
                 "TargetMatchesFilter",
             ),

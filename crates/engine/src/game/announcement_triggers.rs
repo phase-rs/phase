@@ -116,8 +116,8 @@ fn claim_indices(
         .extend(occurrences);
 }
 
-/// Records that an ordinary collector outside this module (a paused cost span)
-/// already collected `events[start..end]`, so announcement staging at the end
+/// Records that an ordinary collector outside this module (a paused cost span, or
+/// `copy_spell`'s inline `SpellCopied` collection) already collected `events[start..end]`, so announcement staging at the end
 /// of the action does not collect them a second time.
 pub(crate) fn claim_ordinary_collected_span(
     state: &mut GameState,
