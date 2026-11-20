@@ -20041,7 +20041,8 @@ mod issue_4548_full_create_tests {
 #[cfg(test)]
 mod game_submission_tests {
     use super::issue_4548_full_create_tests::{
-        recv_server_message, spawn_full_mode_server, spawn_full_mode_server_with_db,
+        recv_server_message, send_test_message, spawn_full_mode_server,
+        spawn_full_mode_server_with_db, test_client_hello,
     };
     use super::*;
     use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
@@ -20970,6 +20971,80 @@ mod game_submission_tests {
         .await;
         server.abort();
         result.expect("stale socket replacement scenario timed out");
+    }
+
+    #[tokio::test]
+    async fn full_websocket_refuses_previous_game_protocol_before_state_delivery() {
+        let (url, server, _temp_dir, _app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut host = connect_and_hello(url.clone()).await;
+            let deck = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let (game_code, player_token, full_key) = create_started_ai_game(
+                &mut host,
+                None,
+                deck,
+                Some(engine::types::format::FormatConfig::freeform().with_sandbox()),
+            )
+            .await;
+            let reconnect = ClientMessage::Reconnect {
+                game_code,
+                player_token,
+                full_key,
+            };
+
+            let previous = PROTOCOL_VERSION - 1;
+            let (mut outdated, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut outdated).await,
+                ServerMessage::ServerHello {
+                    mode: ServerMode::Full,
+                    protocol_version: PROTOCOL_VERSION,
+                    ..
+                }
+            ));
+            let mut hello = test_client_hello(Vec::new());
+            let ClientMessage::ClientHello { protocol_version, .. } = &mut hello else {
+                unreachable!("test_client_hello builds ClientHello");
+            };
+            *protocol_version = previous;
+            send_test_message(&mut outdated, &hello, false).await;
+            send_test_message(&mut outdated, &reconnect, false).await;
+
+            let refusal = recv_server_message(&mut outdated).await;
+            assert!(
+                matches!(&refusal, ServerMessage::Error { message, .. } if *message == format!(
+                    "Protocol version mismatch (client={previous} server={PROTOCOL_VERSION}). Please update your client."
+                )),
+                "expected a protocol refusal as the first reply, got {refusal:?}"
+            );
+            let reply = recv_server_message(&mut outdated).await;
+            assert!(
+                matches!(&reply, ServerMessage::Error { message, .. }
+                    if message == "ClientHello required before any other message"),
+                "expected the reconnect to be refused before state delivery, got {reply:?}"
+            );
+
+            let mut current = connect_and_hello(url).await;
+            send_test_message(&mut current, &reconnect, false).await;
+            loop {
+                match recv_server_message(&mut current).await {
+                    ServerMessage::GameStarted { state, your_player, .. } => {
+                        assert_eq!(your_player, PlayerId(0));
+                        assert!(!state.objects.is_empty(), "reconnect must deliver game objects");
+                        break;
+                    }
+                    ServerMessage::Error { message, .. } => panic!("current reconnect failed: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        server.abort();
+        result.expect("Full WebSocket protocol admission timed out");
     }
 
     #[tokio::test]
