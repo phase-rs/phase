@@ -59,7 +59,7 @@ export interface CuratedMembershipInput {
 export interface CuratedMembership {
   /** Ascending by `assetKey`, so the list is a function of its content. */
   readonly descriptors: readonly ScryfallAssetDescriptor[];
-  /** SHA-256 over asset keys and source URLs, including lookup keys for curated packs. */
+  /** SHA-256 over each descriptor's asset key, source URL, and sorted unique candidate keys. */
   readonly membershipDigest: CatalogRoot;
 }
 
