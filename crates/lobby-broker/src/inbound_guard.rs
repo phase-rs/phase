@@ -659,10 +659,7 @@ mod tests {
             section: DeckSection::MainDeck,
             name: name.to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: set_code.to_string(),
-                collector_number: collector_number.to_string(),
-            },
+            printing: CardPrinting::owner(set_code, collector_number),
         }
     }
 
