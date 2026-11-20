@@ -4160,6 +4160,34 @@ fn damaged_object_context_from_events(
     damaged.next().is_none().then_some(first)
 }
 
+/// CR 608.2c + CR 614.6 + CR 614.9: the object a referent-less chain's anaphor
+/// names — the single object an earlier instruction of this resolution actually
+/// acted on, published by [`parent_referent_context_from_events`] as
+/// `effect_context_object`. For a damage instruction that is the recipient of
+/// the damage as dealt: a redirected event never happened to the original
+/// recipient, so Marauding Raptor's "deals 2 damage to it. If a Dinosaur is
+/// dealt damage this way" reads the creature Harm's Way chose, not the
+/// entering creature. Damage that reached only players, or was fully
+/// prevented (CR 615.1a), publishes no object, so the result is `None` — the
+/// trigger subject is never borrowed in its place.
+///
+/// `None` as well when the chain names a referent of its own
+/// (`parent_chain_referents` is `Some`: a declared slot, even one left empty),
+/// or when the published object has since changed zones (CR 400.7).
+fn referentless_chain_instruction_object(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<ObjectId> {
+    if crate::game::targeting::parent_chain_referents(state, ability).is_some() {
+        return None;
+    }
+    ability
+        .effect_context_object
+        .as_ref()
+        .filter(|snapshot| snapshot.is_current(state))
+        .map(|snapshot| snapshot.object_id)
+}
+
 /// CR 608.2c: capture a single creature tapped by the parent instruction as the
 /// resolution's anaphoric referent. A multi-permanent tap has no singular "that
 /// creature", so it yields no snapshot (mirroring the sacrifice/move guards).
@@ -32565,11 +32593,15 @@ pub(crate) fn evaluate_condition(
             // an illegal target at resolution tests as unmatched.
             // CR 608.2c + CR 603.2: without a slot, "that creature" / "it" is, in
             // order: the node's own resolution-bound attachment-host recipient;
-            // else the ability's first object target; else — for subject-based
-            // triggers that carry no chosen target — the triggering event's
-            // subject object. The last tier mirrors the `ParentTargetController`
-            // fallback (targeting.rs): when `targets` has no object, resolve the
-            // anaphor against `TriggeringSource` from the current trigger event.
+            // else the ability's first object target; else, in a chain that
+            // declares no referent, the object the preceding instruction
+            // actually acted on (`referentless_chain_instruction_object` —
+            // Marauding Raptor's damage recipient after any redirection,
+            // CR 614.9); else — for subject-based triggers that carry no chosen
+            // target — the triggering event's subject object. The last tier
+            // mirrors the `ParentTargetController` fallback (targeting.rs): when
+            // `targets` has no object, resolve the anaphor against
+            // `TriggeringSource` from the current trigger event.
             let target_id = if let Some(index) = subject_slot {
                 match crate::game::targeting::resolve_live_parent_slot_from_root(
                     state, ability, *index,
@@ -32606,6 +32638,7 @@ pub(crate) fn evaluate_condition(
                         TargetRef::Object(id) => Some(*id),
                         _ => None,
                     })
+                    .or_else(|| referentless_chain_instruction_object(state, ability))
                     .or_else(|| {
                         crate::game::targeting::resolve_event_context_target(
                             state,
@@ -32883,38 +32916,22 @@ pub(crate) fn evaluate_condition(
         // `TargetMatchesFilter` and the rider effects would resolve has an
         // object antecedent. A declared object target is one; a declined
         // variable-count target (CR 601.2c: zero targets announced) is not.
-        // CR 608.2c + CR 603.2: a chain that declares no target slots at all
-        // ("~ deals 2 damage to it" on a subject-triggered rider) resolves its
-        // anaphor from the triggering event (`TargetFilter::TriggeringSource`
-        // — the same fallback tier `TargetMatchesFilter` uses to bind the
-        // anaphor), so the event subject is an antecedent too. This fallback
-        // applies only when the chain names NO referent at all
-        // (`parent_chain_referents` is `None`). A chain whose declared slot
-        // holds a player (CR 115.4: "deals 1 damage to any target" aimed at a
-        // player) names that player, and a chain that declared an "up to N
-        // target ..." slot and was left with zero chosen (CR 115.6) names the
-        // empty set; both keep reading false rather than borrowing an
-        // unrelated event subject (The Black Arrow's ETB source; Faller's
-        // Faithful "destroy up to one other target creature. If that creature
-        // wasn't dealt damage this turn, ..."). Whether damage was actually
-        // dealt is not this conjunct's job: the "dealt damage this way" rider
-        // pairs it with `PreviousEffectAmount`, which reads the
-        // post-prevention amount (CR 615.1a). Marauding Raptor's "If a
-        // Dinosaur is dealt damage this way" reached resolution with empty
-        // `targets` and no declared slots and previously suppressed its pump
-        // rider here.
+        // A chain that declares no target slots at all ("~ deals 2 damage to
+        // it" on a subject-triggered rider) has the object its preceding
+        // instruction actually acted on as antecedent
+        // (`referentless_chain_instruction_object`) — never the trigger
+        // subject merely because the instruction was aimed at it: a
+        // redirection replaced that event, so the damage was dealt to the
+        // other recipient instead (CR 614.6 + CR 614.9). A chain whose
+        // declared slot holds a player (CR 115.4) or an "up to N target ..."
+        // slot left with zero chosen (CR 115.6) keeps reading false (The
+        // Black Arrow aimed at a player; Faller's Faithful).
         AbilityCondition::HasObjectTarget => {
             ability
                 .targets
                 .iter()
                 .any(|t| matches!(t, TargetRef::Object(_)))
-                || crate::game::targeting::parent_chain_referents(state, ability).is_none()
-                    && crate::game::targeting::resolve_event_context_target(
-                        state,
-                        &TargetFilter::TriggeringSource,
-                        ability.source_id,
-                    )
-                    .is_some_and(|t| matches!(t, TargetRef::Object(_)))
+                || referentless_chain_instruction_object(state, ability).is_some()
         }
         // CR 608.2c: Compound condition — all inner conditions must be true.
         AbilityCondition::And { conditions } => conditions

@@ -12,7 +12,7 @@
 //! Dinosaurs but the +2/+0 never applied.
 
 use engine::database::CardDatabase;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -229,5 +229,153 @@ fn raptor_pumps_when_the_damage_to_the_dinosaur_is_partially_prevented() {
         runner.state().objects[&raptor].power,
         Some(4),
         "the Dinosaur was still dealt 1 damage, so Marauding Raptor must be +2/+0"
+    );
+}
+
+/// P0 resolves Harm's Way ("The next 2 damage that a source of your choice
+/// would deal to you and/or permanents you control this turn is dealt to any
+/// target instead.") aimed at `recipient`, choosing Marauding Raptor as the
+/// source (CR 609.7a), then casts `entering`. The Raptor's 2 damage to the
+/// entering creature is redirected to `recipient` (CR 614.9).
+fn cast_under_harms_way(
+    db: &CardDatabase,
+    entering: &str,
+    entering_color: ManaType,
+    opposing_creature: Option<&str>,
+) -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    Option<ObjectId>,
+    Vec<GameEvent>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let raptor = scenario.add_real_card(P0, "Marauding Raptor", Zone::Battlefield, db);
+    let harms_way = scenario.add_real_card(P0, "Harm's Way", Zone::Hand, db);
+    let entering_id = scenario.add_real_card(P0, entering, Zone::Hand, db);
+    let opposing =
+        opposing_creature.map(|name| scenario.add_real_card(P1, name, Zone::Battlefield, db));
+    let mut pool = vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])];
+    pool.extend(cast_pool(entering_color, 2, 6));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+
+    let cast = match opposing {
+        Some(creature) => runner.cast(harms_way).target_objects(&[creature]).resolve(),
+        None => runner.cast(harms_way).target_player(P1).resolve(),
+    };
+    let WaitingFor::DamageSourceChoice { options, .. } = cast.final_waiting_for() else {
+        panic!(
+            "Harm's Way must stop at its source choice, got {:?}",
+            cast.final_waiting_for()
+        );
+    };
+    assert!(
+        options.contains(&raptor),
+        "Marauding Raptor must be offered as the damage source: {options:?}"
+    );
+    runner
+        .act(GameAction::ChooseDamageSource { source: raptor })
+        .expect("P0 chooses Marauding Raptor as Harm's Way's source");
+    assert_eq!(runner.state().objects[&harms_way].zone, Zone::Graveyard);
+
+    let mut events = runner.cast(entering_id).resolve().events().to_vec();
+    drain_stack_collecting_events(&mut runner, &mut events);
+    (runner, raptor, entering_id, opposing, events)
+}
+
+/// CR 614.6 + CR 614.9: when Harm's Way redirects all of the Raptor's damage
+/// to a player, the entering Dinosaur is dealt no damage, so no Dinosaur was
+/// "dealt damage this way" and the Raptor is not pumped — even though the
+/// instruction dealt 2 damage and its intended recipient was a Dinosaur.
+#[test]
+fn raptor_does_not_pump_when_the_damage_is_redirected_to_a_player() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let p1_life = 20;
+    let (runner, raptor, dino, _, events) =
+        cast_under_harms_way(db, ENTERING_DINOSAUR, ManaType::Green, None);
+
+    // Reach guard: the trigger resolved and its 2 damage reached P1 instead.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamageDealt { source_id, target: TargetRef::Player(player), amount: 2, .. }
+                if *source_id == raptor && *player == P1
+        )),
+        "the Raptor's 2 damage must be redirected to P1, got {events:?}"
+    );
+    assert_eq!(runner.life(P1), p1_life - 2);
+    assert_eq!(runner.state().objects[&dino].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&dino].damage_marked,
+        0,
+        "the redirected damage never reached the Dinosaur"
+    );
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(2),
+        "no Dinosaur was dealt damage this way, so Marauding Raptor must not be pumped"
+    );
+}
+
+/// CR 614.9: redirected onto an opponent's non-Dinosaur creature, the damage
+/// was dealt to that creature, not to the entering Dinosaur — no pump.
+#[test]
+fn raptor_does_not_pump_when_the_damage_is_redirected_to_a_non_dinosaur() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let (runner, raptor, dino, bears, _) = cast_under_harms_way(
+        db,
+        ENTERING_DINOSAUR,
+        ManaType::Green,
+        Some("Grizzly Bears"),
+    );
+    let bears = bears.expect("Grizzly Bears is on the battlefield");
+
+    // Reach guard: the redirected 2 damage killed the 2/2 Bears.
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&dino].damage_marked, 0);
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(2),
+        "a non-Dinosaur was dealt the damage, so Marauding Raptor must not be pumped"
+    );
+}
+
+/// CR 614.6 + CR 608.2c: the modified event is what the instruction did. A
+/// non-Dinosaur enters and Harm's Way redirects the Raptor's damage onto an
+/// opponent's Dinosaur — a Dinosaur WAS dealt damage this way, so the Raptor
+/// is pumped although the triggering creature is not a Dinosaur.
+#[test]
+fn raptor_pumps_when_the_damage_is_redirected_onto_a_dinosaur() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let (runner, raptor, dragon, opposing_dino, _) = cast_under_harms_way(
+        db,
+        ENTERING_NON_DINOSAUR,
+        ManaType::Red,
+        Some(ENTERING_DINOSAUR),
+    );
+    let opposing_dino = opposing_dino.expect("P1's Dinosaur is on the battlefield");
+
+    assert_eq!(runner.state().objects[&dragon].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&dragon].damage_marked, 0);
+    assert_eq!(
+        runner.state().objects[&opposing_dino].damage_marked,
+        2,
+        "the Raptor's 2 damage must be redirected onto P1's Dinosaur"
+    );
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(4),
+        "a Dinosaur was dealt damage this way, so Marauding Raptor must be +2/+0"
     );
 }
