@@ -38,9 +38,9 @@ pub(super) fn finalize_trigger_target_selection(
 ) -> WaitingFor {
     let span_start = events.len();
     let placement = place_trigger_targets(state, trigger, ability, events);
-    // CR 603.2e: match the finisher's own span now, before any drain.
-    let held = triggers::hold_construction_span(state, events, span_start, span_owner);
-    let produced = match placement {
+    // CR 603.2e + CR 603.3b: match the finisher's own span now and queue what it triggered before the drain. Those abilities triggered during the placement process under way, so the drain places that process first and then these together with the other abilities that triggered during it.
+    triggers::queue_construction_span(state, events, span_start, span_owner);
+    match placement {
         FinalizedPlacement::Returned(waiting_for) => *waiting_for,
         FinalizedPlacement::OnStack { controller } => {
             priority::clear_priority_passes(state);
@@ -70,10 +70,7 @@ pub(super) fn finalize_trigger_target_selection(
                 }
             }
         }
-    };
-    // CR 603.3b: what triggered during this process waits until the drain returned.
-    triggers::release_construction_span(state, held);
-    produced
+    }
 }
 
 /// Private control flow of the finisher, not a rules or wire enum.

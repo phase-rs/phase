@@ -14368,8 +14368,8 @@ pub(crate) struct TriggeredManaResume {
     pub stage: TriggeredManaStage,
 }
 
-/// CR 603.3b: One controller's group within an in-flight trigger ordering
-/// pass. `ordered = true` once the controller has submitted their permutation
+/// CR 603.3b: One ordering controller's group within one CR 603.3b placement stage
+/// of an in-flight trigger ordering pass. `ordered = true` once the controller has submitted their permutation
 /// (or once the group is single-trigger and trivially in final order, or once
 /// the controller has been eliminated per CR 800.4a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14380,7 +14380,7 @@ pub struct TriggerOrderGroup {
 }
 
 /// CR 603.3b: Engine-internal scheduling state for the per-controller ordering
-/// pass. `groups` are kept in **placement order** (NAP-group first → AP-group
+/// pass of one placement stage. `groups` are kept in **placement order** (NAP-group first → AP-group
 /// last) — the order they will be concatenated into the dispatch queue once
 /// every group is `ordered`. Controllers are *prompted* in choice order
 /// (AP-first per CR 101.4), but each chosen permutation is applied only within
@@ -27337,7 +27337,9 @@ declare_game_state! {
     /// permanent (e.g., two Boggart Pranksters seeing "you attack") must each
     /// reach the stack. Drained in FIFO order by
     /// `triggers::drain_deferred_trigger_queue` after the active
-    /// `pending_trigger` is pushed to the stack.
+    /// `pending_trigger` is pushed to the stack. Abilities of the placement
+    /// process under way are placed before abilities that triggered during it
+    /// (CR 603.3b).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_triggers: Vec<crate::game::triggers::DeferredTrigger>,
 
