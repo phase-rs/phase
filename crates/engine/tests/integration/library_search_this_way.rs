@@ -1,6 +1,6 @@
 //! CR 701.23a + CR 701.24a + CR 608.2c: "If you search your library this way, shuffle."
 //!
-//! The 34 cards of the class (plus three supported peers with the identical chain, Chandra's Firemaw,
+//! The 41 cards of the class (plus three supported peers with the identical chain, Chandra's Firemaw,
 //! Elspeth's Devotee and Chandra's Outburst, whose shuffle the guard must keep) search a zone set that includes the library ("your library and/or
 //! graveyard", "your graveyard, hand, and/or library", ...) and then shuffle only if the library
 //! was searched. A `CantSearchLibrary` effect (printed Mindlock Orb) leaves a graveyard find without
@@ -563,6 +563,95 @@ When this creature enters, search your library and/or graveyard for a card named
         shards: &[ManaCostShard::Green],
         flow: Flow::Cast,
         found: Found::Named("Command Tower"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Jace's Ruse",
+        oracle: r####"Return up to two target creatures to their owner's hand. You may search your library and/or graveyard for a card named Jace, Arcane Strategist, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Sorcery,
+        subtypes: &[],
+        legendary: false,
+        generic: 3,
+        shards: &[ManaCostShard::Blue, ManaCostShard::Blue],
+        flow: Flow::Targets2,
+        found: Found::Named("Jace, Arcane Strategist"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Liberating Combustion",
+        oracle: r####"Liberating Combustion deals 6 damage to target creature. You may search your library and/or graveyard for a card named Chandra, Pyrogenius, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Sorcery,
+        subtypes: &[],
+        legendary: false,
+        generic: 4,
+        shards: &[ManaCostShard::Red],
+        flow: Flow::Targets1,
+        found: Found::Named("Chandra, Pyrogenius"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Raven Clan War-Axe",
+        oracle: r####"When this Equipment enters, you may search your library and/or graveyard for a card named Eivor, Battle-Ready, reveal it, and put it into your hand. If you search your library this way, shuffle.
+Equipped creature gets +2/+0 and has trample.
+Equip {2}"####,
+        kind: Kind::Artifact,
+        subtypes: &["Equipment"],
+        legendary: false,
+        generic: 1,
+        shards: &[ManaCostShard::Red, ManaCostShard::White],
+        flow: Flow::Cast,
+        found: Found::Named("Eivor, Battle-Ready"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Rhythmic Water Vortex",
+        oracle: r####"Return up to two target creatures to their owner's hand.
+Search your library and/or graveyard for a card named Mu Yanling, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Sorcery,
+        subtypes: &[],
+        legendary: false,
+        generic: 3,
+        shards: &[ManaCostShard::Blue, ManaCostShard::Blue],
+        flow: Flow::Targets2,
+        found: Found::Named("Mu Yanling"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Teferi's Wavecaster",
+        oracle: r####"Flash
+When this creature enters, you may search your library and/or graveyard for a card named Teferi, Timeless Voyager, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Creature(3, 3),
+        subtypes: &["Merfolk", "Wizard"],
+        legendary: false,
+        generic: 3,
+        shards: &[ManaCostShard::Blue, ManaCostShard::Blue],
+        flow: Flow::Cast,
+        found: Found::Named("Teferi, Timeless Voyager"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Tezzeret's Betrayal",
+        oracle: r####"Destroy target creature. You may search your library and/or graveyard for a card named Tezzeret, Master of Metal, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Sorcery,
+        subtypes: &[],
+        legendary: false,
+        generic: 3,
+        shards: &[ManaCostShard::Blue, ManaCostShard::Black],
+        flow: Flow::Targets1,
+        found: Found::Named("Tezzeret, Master of Metal"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Yanling's Harbinger",
+        oracle: r####"Flying
+When this creature enters, you may search your library and/or graveyard for a card named Mu Yanling, Celestial Wind, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Creature(2, 4),
+        subtypes: &["Bird"],
+        legendary: false,
+        generic: 3,
+        shards: &[ManaCostShard::Blue, ManaCostShard::Blue],
+        flow: Flow::Cast,
+        found: Found::Named("Mu Yanling, Celestial Wind"),
         variants: &["G", "L", "GM"],
     },
     Spec {
