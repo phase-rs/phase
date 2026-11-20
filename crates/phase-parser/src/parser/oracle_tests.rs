@@ -15,7 +15,8 @@ use crate::types::ability::{
     TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::keywords::CompanionCondition;
+use crate::types::identifiers::TrackedSetId;
+use crate::types::keywords::{CompanionCondition, Keyword};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -3368,7 +3369,7 @@ use crate::types::ability::{
     SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
     TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, WardCost};
+use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, StepEndManaAction};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, ProhibitionScope, StaticMode};
@@ -37236,5 +37237,214 @@ fn each_opponent_with_no_cards_in_hand_guard_stays_scoped() {
     assert!(
         dump.contains("HandSize") && dump.contains("ScopedPlayer"),
         "{dump}"
+    );
+}
+
+/// CR 608.2c + CR 611.2c: Break of Day's ability-word paragraph is a
+/// cross-item rider over the population the first paragraph affected, not a
+/// second independent spell ability whose `ParentTarget` has no referent.
+#[test]
+fn break_of_day_fateful_hour_folds_onto_mass_population() {
+    let parsed = parse(
+        "Creatures you control get +1/+1 until end of turn.\nFateful hour — If you have 5 or less life, those creatures gain indestructible until end of turn.",
+        "Break of Day",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    let root = &parsed.abilities[0];
+    assert!(matches!(&*root.effect, Effect::PumpAll { .. }), "{root:#?}");
+    let rider = root
+        .sub_ability
+        .as_deref()
+        .expect("fateful-hour rider must be chained to the pump");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = rider.effect.as_ref()
+    else {
+        panic!("expected a keyword grant rider, got {rider:#?}");
+    };
+    let [static_def] = static_abilities.as_slice() else {
+        panic!("expected one indestructible static, got {static_abilities:#?}");
+    };
+    assert!(matches!(
+        static_def.affected,
+        Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        })
+    ));
+    assert!(effect_uses_tracked_set(rider.effect.as_ref()));
+    assert!(
+        static_def.condition.is_some(),
+        "fateful-hour guard was dropped"
+    );
+}
+
+/// Kytheon's Tactics is the same cross-line mass-population class with a
+/// different ability word and a different conditional static modification.
+#[test]
+fn kytheons_tactics_spell_mastery_folds_onto_mass_population() {
+    let parsed = parse(
+        "Creatures you control get +2/+1 until end of turn.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, those creatures also gain vigilance until end of turn.",
+        "Kytheon's Tactics",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    let rider = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("spell-mastery rider must be chained to the pump");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = rider.effect.as_ref()
+    else {
+        panic!("expected a vigilance rider, got {rider:#?}");
+    };
+    let [static_def] = static_abilities.as_slice() else {
+        panic!("expected one vigilance static, got {static_abilities:#?}");
+    };
+    assert!(matches!(
+        static_def.affected,
+        Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        })
+    ));
+    assert!(
+        static_def.condition.is_some(),
+        "spell-mastery guard was dropped"
+    );
+    assert!(static_def.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword { keyword } if keyword == &Keyword::Vigilance
+    )));
+}
+
+/// A continuous static grant can also establish the population named by a
+/// later cross-line rider. The addendum must remain attached to that grant.
+#[test]
+fn unbreakable_formation_addendum_folds_onto_continuous_population() {
+    let parsed = parse(
+        "Creatures you control gain indestructible until end of turn.\nAddendum — If you cast this spell during your main phase, put a +1/+1 counter on each of those creatures and they gain vigilance until end of turn.",
+        "Unbreakable Formation",
+        &[Keyword::Indestructible],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    assert!(parsed.abilities[0].sub_ability.is_some(), "{parsed:#?}");
+}
+
+/// A singular anaphor is not the cross-item mass-population class and must
+/// remain independent rather than being widened to the preceding mass filter.
+/// This is a parser-shape negative control: the verified card census for this
+/// class contains plural "those creatures" riders (Break of Day and Kytheon's
+/// Tactics), while the nearest printed singular riders are target-bound rather
+/// than cross-line population consumers. Keeping the synthetic phrase isolates
+/// the singular/plural boundary without claiming a real card has this shape.
+#[test]
+fn singular_cross_line_anaphor_does_not_fold_onto_mass_population() {
+    let parsed = parse(
+        "Creatures you control get +1/+1 until end of turn.\nFateful hour — If you have 5 or less life, that creature gains indestructible until end of turn.",
+        "Singular Population Probe",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 2, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    assert!(matches!(
+        parsed.abilities[1].effect.as_ref(),
+        Effect::GenericEffect { .. }
+    ));
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = parsed.abilities[1].effect.as_ref()
+    else {
+        panic!("expected a generic independent rider: {parsed:#?}");
+    };
+    assert_eq!(static_abilities.len(), 1, "{parsed:#?}");
+    assert!(static_abilities[0].condition.is_some(), "{parsed:#?}");
+}
+
+fn parent_target_grant() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![
+                StaticDefinition::continuous().affected(TargetFilter::ParentTarget)
+            ],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+    )
+}
+
+fn grant_affected_filter(def: &AbilityDefinition) -> &TargetFilter {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected generic grant, got {def:#?}");
+    };
+    static_abilities[0]
+        .affected
+        .as_ref()
+        .expect("grant must have an affected filter")
+}
+
+/// CR 608.2c: the condition on a cross-line rider does not authorize a
+/// `ParentTarget` grant in the false branch of an `Otherwise` clause.
+#[test]
+fn cross_line_population_condition_does_not_rebind_else_branch() {
+    let mut root = parent_target_grant();
+    root.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+    root.else_ability = Some(Box::new(parent_target_grant()));
+
+    rewrite_ability_grant_parent_to_tracked_set(&mut root, &TargetFilter::Any);
+
+    assert!(matches!(
+        grant_affected_filter(&root),
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    ));
+    assert_eq!(
+        grant_affected_filter(root.else_ability.as_deref().unwrap()),
+        &TargetFilter::ParentTarget,
+        "the false branch must not inherit the producer population"
+    );
+}
+
+/// CR 608.2c: a separate-sentence sibling is an independent instruction, so a
+/// conditional population binding cannot leak into its `ParentTarget` grant.
+#[test]
+fn cross_line_population_condition_does_not_rebind_sequential_sibling() {
+    let mut root = parent_target_grant();
+    root.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+    let mut sibling = parent_target_grant();
+    sibling.sub_link = SubAbilityLink::SequentialSibling;
+    root.sub_ability = Some(Box::new(sibling));
+
+    rewrite_ability_grant_parent_to_tracked_set(&mut root, &TargetFilter::Any);
+
+    assert!(matches!(
+        grant_affected_filter(&root),
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    ));
+    let sibling = root.sub_ability.as_deref().unwrap();
+    assert_eq!(sibling.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(
+        grant_affected_filter(sibling),
+        &TargetFilter::ParentTarget,
+        "the independent sibling must not inherit the producer population"
     );
 }

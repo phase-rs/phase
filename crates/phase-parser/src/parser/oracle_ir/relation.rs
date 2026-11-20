@@ -79,6 +79,15 @@ pub(crate) enum DocumentRelationIr {
         /// the selector.
         selector: Option<AbilityCondition>,
     },
+    /// CR 608.2c + CR 611.2c: A separate conditional paragraph whose plural
+    /// subject refers to the population affected by the preceding mass effect.
+    /// The relation keeps the producer and consumer identities explicit so the
+    /// lowering seam can fold the consumer into the producer without rescanning
+    /// a lowered ability vector for a lookalike shape.
+    CrossItemMassPopulationAnaphor {
+        producer: OracleItemId,
+        consumer: OracleItemId,
+    },
     /// CR 607.2d: A "choose a [value]" producer linked to an ability that reads
     /// "the chosen [value]" back. One parameterized relation; `LinkedChoiceKind`
     /// distinguishes the value kind and the consumer surface that reads it.
