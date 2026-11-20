@@ -290,8 +290,10 @@ fn a_land_from_hand_spends_the_drop_before_the_modal_land_back_face() {
 }
 
 /// CR 601.2 + CR 701.18b: the spell front stays independently castable by the
-/// same permission, pays its printed cost and is restricted to its printed
-/// target (a card in P0's graveyard).
+/// same permission and is restricted to its printed target: the legal targets
+/// are exactly the cards in P0's graveyard. The test asserts that legal-target
+/// set; it does not assert the mana spent, and P1's graveyard is empty, so it
+/// does not show that another graveyard is excluded.
 #[test]
 fn the_spell_front_is_castable_and_target_restricted() {
     let Some(b) = board() else { return };
@@ -549,11 +551,14 @@ fn a_cast_only_grant_does_not_admit_the_modal_land_back_face() {
     );
 }
 
-/// Zone fence (CR 116.2a: a land is put onto the battlefield from the zone it
-/// was in): Ark of Hunger's "Mill a card. You may play that card this turn."
-/// puts Bala Ged Recovery into the graveyard with a Play permission. The
+/// Documented current limitation, not a rules fence: Ark of Hunger's "Mill a
+/// card. You may play that card this turn." puts Bala Ged Recovery into the
+/// graveyard with a Play permission. The rules allow a milled modal card's land
+/// face to be played from there (CR 712.12, CR 701.18b), but the engine's
 /// graveyard land scan finds lands by their front face, so the modal land back
-/// is neither offered nor playable from there; only the spell front is castable.
+/// is neither offered nor playable from the graveyard and only the spell front
+/// is castable. This test pins that limitation so a later change to graveyard
+/// discovery is a deliberate one.
 #[test]
 fn a_milled_modal_card_keeps_its_land_back_face_refused_in_the_graveyard() {
     let Some(db) = load_db() else { return };
