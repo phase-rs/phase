@@ -13,6 +13,73 @@ use crate::types::game_state::{
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
+/// Rank printed creature types in the chooser's registered game deck, per copy.
+/// Live objects deliberately do not participate: control, copying, face-down
+/// status, transformations and tokens cannot alter the registered card faces.
+pub fn suggested_creature_types(
+    state: &GameState,
+    player: PlayerId,
+    legal_options: &[String],
+) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) else {
+        return Vec::new();
+    };
+    let legal: BTreeSet<&str> = legal_options.iter().map(String::as_str).collect();
+    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+    // CR 702.139a: revealing a companion moves it out of the pool onto the
+    // player record, so read the revealed card there; an unrevealed one is
+    // still in `current_companion`.
+    let revealed_companion = state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .and_then(|candidate| candidate.companion.as_ref())
+        .map(|companion| &companion.card);
+    let deck = pool
+        .current_main
+        .iter()
+        .chain(pool.current_commander.iter())
+        .chain(pool.current_companion.iter())
+        .chain(revealed_companion)
+        .chain(pool.current_signature_spell.iter())
+        .map(|entry| (&entry.card, entry.count));
+    let brought_in = state
+        .outside_game_cards_brought_in
+        .iter()
+        .filter(|used| used.player == player)
+        .filter_map(|used| {
+            pool.current_sideboard
+                .get(used.sideboard_index)
+                .map(|entry| (&entry.card, used.count))
+        });
+    for (card, count) in deck.chain(brought_in) {
+        // CR 205.3m: creatures and kindreds share creature subtypes. Read the
+        // printed list, without expanding the Changeling ability.
+        if !card.card_type.core_types.iter().any(|kind| {
+            matches!(
+                kind,
+                crate::types::card_type::CoreType::Creature
+                    | crate::types::card_type::CoreType::Kindred
+                    | crate::types::card_type::CoreType::Tribal
+            )
+        }) {
+            continue;
+        }
+        let printed: BTreeSet<&str> = card.card_type.subtypes.iter().map(String::as_str).collect();
+        for subtype in printed.intersection(&legal) {
+            *counts.entry(subtype).or_default() += u64::from(count);
+        }
+    }
+    let mut ranked: Vec<_> = counts.into_iter().filter(|(_, count)| *count > 0).collect();
+    ranked.sort_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.cmp(b)));
+    ranked
+        .into_iter()
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
 /// Choose: present the player with a named set of options (creature type, color, etc.).
 /// CR 700.2: Modal and choice-based spells/abilities require the controller to choose
 /// from available options as part of casting or resolution.

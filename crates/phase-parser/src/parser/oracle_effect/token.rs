@@ -1114,6 +1114,17 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
     }
 }
 
+/// CR 105.1 + CR 105.2: the lowercase "that's all colors" clause that closes a
+/// token description (end of text or a following ", where X is ..."). Shared
+/// by the all-colors strip and the token-name terminator, so a late name
+/// ("named Reliquary Dragon that's all colors") ends before the clause.
+fn token_all_colors_clause(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+    let (i, _) = value((), tag(" all colors")).parse(i)?;
+    let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
+    Ok((i, ()))
+}
+
 /// Strip a trailing "that's all colors" color clause from a token suffix.
 ///
 /// CR 105.1 + CR 105.2: a token that is "all colors" is each of the five
@@ -1128,16 +1139,8 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
 /// Building block for the whole class of "create <token> ... that's all colors"
 /// effects, not just Mechtitan Core.
 fn strip_token_all_colors_suffix(text: &str) -> (&str, bool) {
-    fn all_colors_clause(i: &str) -> OracleResult<'_, ()> {
-        let (i, _) =
-            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
-        let (i, _) = value((), tag(" all colors")).parse(i)?;
-        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
-        Ok((i, ()))
-    }
-
     let lower = text.to_lowercase();
-    if all_colors_clause(&lower).is_ok() {
+    if token_all_colors_clause(&lower).is_ok() {
         return ("", true);
     }
 
@@ -1147,7 +1150,7 @@ fn strip_token_all_colors_suffix(text: &str) -> (&str, bool) {
         }
         let candidate = &text[pos + ch.len_utf8()..];
         let candidate_lower = candidate.to_lowercase();
-        if all_colors_clause(&candidate_lower).is_ok() {
+        if token_all_colors_clause(&candidate_lower).is_ok() {
             return (text[..pos].trim_end(), true);
         }
     }
@@ -1244,6 +1247,9 @@ fn parse_token_name_terminator(input: &str) -> OracleResult<'_, ()> {
         // token clause. For example, `Osgood, Operation Double` is a complete
         // supported token name, while `, where X is …` remains a suffix.
         value((), parse_token_name_comma_clause),
+        // CR 111.4 + CR 105.2: "named Reliquary Dragon that's all colors" —
+        // the color clause closes the descriptor, not the name.
+        value((), preceded(tag(" "), token_all_colors_clause)),
         value((), tag(".")),
         value((), eof),
     ))
@@ -3294,6 +3300,26 @@ mod tests {
 
             assert_eq!(name, "Osgood, Operation Double", "in {text:?}");
             assert_eq!(keywords, vec![Keyword::Flying], "in {text:?}");
+        }
+    }
+
+    /// CR 111.4 + CR 105.2: Dragonbroods' Relic — the token is named "Reliquary Dragon" and
+    /// is all colors; the color clause is not part of the name.
+    #[test]
+    fn all_colors_clause_ends_a_token_name() {
+        let text = "Create a 4/4 Dragon creature token named Reliquary Dragon that's all colors.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("named all-colors token must parse");
+        let Effect::Token { name, colors, .. } = effect else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Reliquary Dragon");
+        assert_eq!(colors, ManaColor::ALL.to_vec());
+        for clause in ["that's all colors", "that is all colors"] {
+            let text = format!("named Reliquary Dragon {clause}");
+            let (name, suffix) = parse_token_name_clause(&text);
+            assert_eq!(name.as_deref(), Some("Reliquary Dragon"), "{clause}");
+            assert_eq!(suffix.as_ref(), clause);
         }
     }
 

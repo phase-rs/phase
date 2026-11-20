@@ -1038,7 +1038,8 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // ControllerChoseLabel reads the controller's per-player anchor state.
         // ControllerMatches reads live per-turn history (damage ledger, life
         // tallies) via the controller's inner PlayerFilter predicate.
-        FilterProp::ControllerChoseLabel { .. }
+        FilterProp::CastThisTurn { .. }
+        | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -2834,6 +2835,11 @@ mod tests {
     /// #5/#6/#14: FilterProp SAFE/POISON partition and combinator propagation.
     #[test]
     fn filterprop_classifier_partition() {
+        assert!(!filterprop_reads_only_candidate_fp(
+            &FilterProp::CastThisTurn {
+                caster: crate::types::ability::ControllerRef::You,
+            }
+        ));
         assert!(filterprop_reads_only_candidate_fp(&FilterProp::Tapped));
         assert!(filterprop_reads_only_candidate_fp(&FilterProp::Named {
             name: "Squirrel".to_string()

@@ -26,6 +26,7 @@ function profile(overrides: Partial<LlmProfile> = {}): LlmProfile {
     temperature: null,
     decisionContext: "selfContained",
     enabled: true,
+    rememberApiKey: false,
     ...overrides,
   };
 }
