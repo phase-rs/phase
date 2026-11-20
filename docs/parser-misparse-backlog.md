@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4473
-- **Total card appearances across root causes:** 4506 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4464
+- **Total card appearances across root causes:** 4496 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -56,13 +56,13 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 718 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 1 | Relative-clause / filter restriction on target dropped | 717 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 561 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 395 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 322 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 223 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
-| 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
+| 7 | Wrong / dropped zone parameters on zone-change effect | 205 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 162 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
@@ -90,7 +90,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (718 cards)
+### 1. Relative-clause / filter restriction on target dropped  (717 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -625,7 +625,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Rooting Moloch
 - Rosheen, Roaring Prophet
 - Rotted Ones, Lay Siege
-- Rowan's Stalwarts
 - Runic Repetition
 - Runner's Bane
 - Rust
@@ -819,7 +818,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (568 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (561 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -939,7 +938,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Debt to the Deathless
 - Deccode-noop
 - Decorated Knight
-- Delivery Moogle
 - Delve too Deep
 - Demonfire
 - Demonic Covenant
@@ -953,7 +951,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Domri, Chaos Bringer
 - Doom Foretold
 - Dose of Dawnglow
-- Dovin's Dismissal
 - Draconic Roar
 - Dragon's Disciple
 - Dragonlord's Prerogative
@@ -1015,11 +1012,9 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Galvanoth
 - Gandalf, Friend of the Shire
 - Gargantuan Gorilla
-- Garruk's Warsteed
 - Getaway Glamer
 - Geyser Drake
 - Ghastly Demise
-- Gideon's Resolve
 - Glacial Dragonhunt
 - Glissa Sunseeker
 - Gloomlance
@@ -1027,10 +1022,8 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Glorious Enforcer
 - Gnoll Hunter
 - Goblin Savant
-- Goldmane Griffin
 - Goliath Hatchery
 - Grab the Prize
-- Grasping Current
 - Greener Pastures
 - Grim Reaper's Sprint
 - Grip of Amnesia
@@ -1354,7 +1347,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Verity Circle
 - Vessel of the All-Consuming
 - Vesuvan Drifter
-- Visage of Bolas
 - Vision, Synthezoid Avenger
 - Visions of Beyond
 - Visions of Villainy
@@ -2759,7 +2751,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 7. Wrong / dropped zone parameters on zone-change effect  (207 cards)
+### 7. Wrong / dropped zone parameters on zone-change effect  (205 cards)
 
 **Signature.** ChangeZone/ChangeZoneAll/Dig uses the wrong origin/destination zone, drops a count, inverts hand↔library, defaults origin to Exile, or omits a graveyard/owner-library routing.
 
@@ -2780,7 +2772,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Argivian Welcome
 - Armored Skyhunter
 - Arthur, Marigold Knight
-- Ashiok's Forerunner
 - Biotransference
 - Bloodbond March
 - Bone Dancer
@@ -2806,7 +2797,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Descent into Madness
 - Desecrator Hag
 - Discover the Impossible
-- Domri's Nodorog
 - Dr. Julius Jumblemorph
 - Durable Coilbug
 - Dwarven Armory
