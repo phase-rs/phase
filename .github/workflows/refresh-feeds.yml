@@ -28,26 +28,39 @@ jobs:
       - name: Build feed-scraper
         run: cargo build --release -p feed-scraper
 
-      - name: Scrape metagame feeds
+      - name: Scrape MTGGoldfish metagame feeds
         run: |
-          cargo run --release -p feed-scraper -- \
+          cargo run --release -p feed-scraper -- mtggoldfish \
             --format standard,modern,pioneer,commander \
             --output-dir client/public/feeds/ \
             --top 10 \
             --delay 1500
 
+      # Runs even when the MTGGoldfish scrape fails, so one source going down
+      # still refreshes the other. Either failure still fails the job.
+      - name: Fetch TopDeck.gg cEDH feed
+        if: ${{ !cancelled() }}
+        env:
+          TOPDECK_API_KEY: ${{ secrets.TOPDECK_API_KEY }}
+        run: |
+          cargo run --release -p feed-scraper -- topdeck \
+            --output client/public/feeds/topdeck-cedh.json
+
       - name: Check for changes
+        if: ${{ !cancelled() }}
         id: diff
         run: |
-          git diff --quiet client/public/feeds/mtggoldfish-*.json && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
+          git diff --quiet client/public/feeds/mtggoldfish-*.json client/public/feeds/topdeck-cedh.json && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create or update feed refresh PR
-        if: steps.diff.outputs.changed == 'true'
+        if: ${{ !cancelled() && steps.diff.outputs.changed == 'true' }}
         uses: ./.github/actions/create-auto-merge-pr
         with:
           token: ${{ secrets.CI_PAT }}
-          add-paths: client/public/feeds/mtggoldfish-*.json
+          add-paths: |
+            client/public/feeds/mtggoldfish-*.json
+            client/public/feeds/topdeck-cedh.json
           commit-message: "chore: refresh metagame feeds"
           branch: chore/refresh-metagame-feeds
           title: "chore: refresh metagame feeds"
-          body: "Automated daily metagame feed refresh from MTGGoldfish."
+          body: "Automated daily metagame feed refresh from MTGGoldfish and TopDeck.gg."

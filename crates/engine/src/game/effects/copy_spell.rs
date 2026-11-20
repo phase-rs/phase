@@ -300,13 +300,13 @@ pub fn resolve(
             crate::game::announcement_triggers::take_inline_trigger_span(state, events, copied_at);
         if !owned.is_empty() {
             crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
-            // CR 603.2c: this occurrence's ordinary observers are now collected;
-            // claim exactly it so the post-action collector, which scans the
-            // same action buffer, does not trigger Magecraft a second time.
-            crate::game::triggers::claim_events_for_ordinary_collection(
+            // CR 603.2c: collected once, here. Claim the occurrence so no later collector of
+            // this action (the priority pass, the CopyRetarget walk) collects it again.
+            crate::game::announcement_triggers::claim_ordinary_collected_span(
                 state,
-                &events[..=copied_at],
+                events,
                 copied_at,
+                copied_at + 1,
             );
         }
     }
