@@ -1837,7 +1837,7 @@ fn choice_for_destination(r: &GameRunner, host: ObjectId, destination: Zone) -> 
         .expect("actual offered replacement keys");
     pending.candidates.iter().position(|key| {
         assert_eq!(key.source, host);
-        let def = &r.state().objects[&key.source].replacement_definitions[key.index];
+        let def = &r.state().objects[&key.source].replacement_definitions[usize::try_from(key.index).expect("definition index fits usize")];
         def.execute.as_deref().is_some_and(|execute| matches!(execute.effect.as_ref(), Effect::ChangeZone { destination: actual, .. } if *actual == destination))
     }).expect("actual definition with the selected execute destination")
 }

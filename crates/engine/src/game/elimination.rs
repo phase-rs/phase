@@ -592,6 +592,13 @@ pub(crate) fn eliminate_players(
         })
         .flatten();
 
+    // CR 800.4a + CR 725.4 (Matt R7-F3): the designation holder AT DEPARTURE,
+    // captured before any `do_eliminate` runs succession. The control-effect
+    // prune below judges a designation-anchored transient by the recipient it
+    // was actually giving control to — reading the live designation after
+    // succession would see the successor and wrongly keep an effect that was
+    // giving the leaver control.
+    let pre_elimination_monarch = state.monarch;
     // CR 603.10a + CR 603.3a: the observers of the departure as they were
     // immediately before it. The leaving players' objects leave the game in the
     // same event that ends their control effects (CR 800.4a); a look-back
@@ -625,7 +632,7 @@ pub(crate) fn eliminate_players(
     // control and exile anything still under a leaver's control. Runs ONCE over
     // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's
     // steal of a survivor's object revert instead of being over-exiled.
-    end_control_effects_for_leaving_players(state, &leaving_set, events);
+    end_control_effects_for_leaving_players(state, &leaving_set, pre_elimination_monarch, events);
 
     // CR 800.4a, third and fourth steps, in the rule's own order: "Then, if that
     // player controlled any objects on the stack not represented by cards, those
@@ -1561,20 +1568,42 @@ fn mark_left_game_departures_simultaneous(
 fn end_control_effects_for_leaving_players(
     state: &mut GameState,
     leaving_set: &HashSet<PlayerId>,
+    pre_elimination_monarch: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) {
-    use crate::types::ability::ContinuousModification;
+    use crate::types::ability::{ContinuousModification, Designation};
     use crate::types::identifiers::ObjectId;
 
-    // CR 800.4a: any effect giving a LEAVING player control of an object ends.
-    // Prune every single-mod ChangeController TCE controlled by any leaver, over
-    // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
-    // steal of a survivor's object reverts rather than being over-exiled.
+    // CR 800.4a: any effect giving a LEAVING player control of an object ends,
+    // over the FULL leaving_set (symmetric with the sweep below), so a
+    // co-leaver's steal of a survivor's object reverts rather than being
+    // over-exiled.
     state.transient_continuous_effects.retain(|e| {
-        !(leaving_set.contains(&e.controller)
+        // Plain steal: the recipient IS the installer, so a leaver-controlled
+        // ChangeController TCE ends with its controller.
+        let plain_steal_gives_leaver_control = leaving_set.contains(&e.controller)
             && e.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::ChangeController)))
+                .any(|m| matches!(m, ContinuousModification::ChangeController));
+        // CR 800.4a + CR 611.2a + CR 725.5 (Matt R7-F3): a
+        // designation-anchored TCE gives control to the LIVE holder (the layer
+        // arm reads the designation, never `e.controller`), so departure
+        // treatment keys on the holder AT DEPARTURE (captured before
+        // succession), not the installer. A surviving holder — or a vacant
+        // throne, which gives nobody control — keeps the transient for its
+        // stated duration; a leaving holder ends it. Whole-TCE prune, matching
+        // the plain-steal half: one effect, one lifetime. Exhaustive over
+        // `Designation`: a future leaf breaks the build here by design.
+        let designation_gives_leaver_control = e.modifications.iter().any(|m| match m {
+            ContinuousModification::ChangeControllerToDesignation { designation } => {
+                let holder = match designation {
+                    Designation::Monarch => pre_elimination_monarch,
+                };
+                holder.is_some_and(|h| leaving_set.contains(&h))
+            }
+            _ => false,
+        });
+        !(plain_steal_gives_leaver_control || designation_gives_leaver_control)
     });
 
     // CR 611.2c + CR 614.1a: a resolved token-controller redirect ("each token
@@ -1894,7 +1923,6 @@ fn do_eliminate(
     // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
-
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
     retire_pending_zone_change_contexts_owned_by(state, player, &owned_after);
     abandon_change_zone_family_for_controller(state, player, leaving_set, events);
@@ -2280,6 +2308,15 @@ fn do_eliminate(
                 player_id: new_monarch,
             });
         }
+        // CR 611.3a + CR 725.4 + CR 725.5: succession (or vacancy, when nobody
+        // is left) can flip live monarch-reading statics — escalate iff any
+        // such static is live. Covers both the `None` and the succession
+        // branches above; the outer `if` already gates on the leaver having
+        // been the monarch.
+        super::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            super::layers::LayerInvalidationDimension::Monarch,
+        );
     }
 
     // CR 726.4: If the player who has the initiative leaves the game,

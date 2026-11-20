@@ -3688,10 +3688,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn emblem_printing(collector: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: "owner".into(),
-            collector_number: collector.into(),
-        })
+        SharedPrinting::new(CardPrinting::owner("owner", collector))
     }
 
     /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
@@ -8251,6 +8248,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }
