@@ -4664,6 +4664,8 @@ export interface UnlessDrawCostView {
 }
 
 export interface DerivedViews {
+  /** Chooser-private printed creature types, ranked by deck frequency. */
+  named_choice_suggestions?: string[];
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;

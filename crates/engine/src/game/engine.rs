@@ -10842,9 +10842,12 @@ fn complete_copy_walk_effect(
     });
     // CR 707.10c + CR 603.2: Copy observers (Magecraft) must drain only after
     // the copy's targets are finalized, not while `CopyRetarget` is still open.
-    if let Some(wf) =
-        triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
-    {
+    // CR 603.2c: the drain's windows run on the action buffer; claim them.
+    if let Some(wf) = triggers::drain_on_action_buffer(
+        state,
+        events,
+        triggers::drain_deferred_triggers_after_stack_object_announcement,
+    ) {
         if let Some(remaining) = paradigm_remaining_offers.filter(|offers| !offers.is_empty()) {
             effects::paradigm::stash_pending_remaining_offers(state, player, remaining);
         }
@@ -17003,9 +17006,13 @@ fn apply_non_priority_pass_action(
                                 !triggers::is_pending_trigger_construction_active(state),
                                 "deferred-trigger drain entered with construction still active",
                             );
-                            if let Some(waiting_for) =
-                                triggers::drain_deferred_trigger_queue(state, &mut events)
-                            {
+                            // CR 603.2c: the drain's windows run on the action
+                            // buffer, so their collected ranges are claimed.
+                            if let Some(waiting_for) = triggers::drain_on_action_buffer(
+                                state,
+                                &mut events,
+                                triggers::drain_deferred_trigger_queue,
+                            ) {
                                 waiting_for
                             } else {
                                 WaitingFor::Priority { player: p }

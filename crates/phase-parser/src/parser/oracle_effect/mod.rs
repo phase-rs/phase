@@ -106,13 +106,14 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    history_clause_subject, parse_anaphoric_target_ref, parse_definite_anaphor,
-    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
-    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
-    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, population_drops_block_history_clause,
-    resolve_singular_exiled_card_target, strip_block_history_clauses, unique_slot_for_anaphor,
-    AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
+    history_clause_subject, parse_anaphoric_target_ref, parse_block_history_clause,
+    parse_definite_anaphor, parse_definite_parent_reference, parse_event_context_ref,
+    parse_fight_target, parse_parent_target_controller_population, parse_target,
+    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    population_drops_block_history_clause, resolve_singular_exiled_card_target,
+    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
+    DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -24867,8 +24868,34 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // continuation context is otherwise blank, and a blank context is not evidence
     // of any antecedent. Same pin the chunk loop applies when a continued
     // instruction named the source (`parsed_clause_targets_self_ref`).
+    // CR 608.2c: when the primary instruction instead introduced a typed object
+    // referent — an announced "target creature …" (CR 115.1d) or a typed chosen
+    // object — that object is the pronoun's antecedent: "tap target creature an
+    // opponent controls and put a stun counter on it" (Grappling Kraken). Pin
+    // `ParentTarget`, the same rung the chunk loop applies across sentences
+    // (`chain_has_prior_typed_referent`). Without it the blank context sends
+    // `resolve_it_pronoun` to its `SelfRef` fallback, and under a typed trigger
+    // subject the anaphor rewrite below never repairs that.
+    //
+    // The pin substitutes for that skipped rewrite and nothing more, so it is
+    // installed only where the rewrite is skipped (a typed trigger subject) and
+    // never where it would reach a block-history clause. The rewrite only
+    // retargets the effect after parsing; a pin installed before parsing would
+    // also bind the clause's bare "it" as an earlier instruction's target
+    // (`resolve_relation_subject`). CR 509.1g + CR 608.2i: the partner of
+    // "all creatures it blocked this turn" is this same instruction's target,
+    // not an earlier instruction's, so the clause declines and the continuation
+    // fails closed (`instruction_drops_block_partner`), exactly as it does on
+    // the rewrite path ("destroy target creature and all creatures it blocked
+    // this turn").
     if uses_parent_target_reference && effect_targets_self_ref(&primary_effect) {
         continuation_ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
+    } else if uses_parent_target_reference
+        && ctx_has_typed_trigger_subject(ctx)
+        && has_typed_target_widened(&primary_effect)
+        && nom_primitives::scan_at_word_boundaries(&sub_lower, parse_block_history_clause).is_none()
+    {
+        continuation_ctx.object_pronoun_ref = Some(TargetFilter::ParentTarget);
     }
 
     // CR 608.2c: when the primary instruction announced an OBJECT target, a
@@ -25216,9 +25243,12 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
-    // CR 608.2k carve-out (issue #319): in typed-trigger-subject context the
-    // pronoun has already been correctly resolved to TriggeringSource by
-    // `resolve_pronoun_target` — preserve that binding instead of clobbering.
+    // Issue #319 carve-out: under a typed trigger subject the continuation keeps
+    // the binding it was parsed with instead of being rewritten to
+    // `ParentTarget` here. The blank continuation context never carries the
+    // trigger subject, so no CR 608.2k `TriggeringSource` binding reaches this
+    // point; a typed primary referent is pinned to `ParentTarget` above instead,
+    // unless the continuation holds a block-history clause (see the pin's guard).
     if uses_parent_target_reference && !ctx_has_typed_trigger_subject(ctx) {
         // CR 608.2c: same fail-closed refusal as the chunk-loop arms —
         // see `anaphor_rewrite_would_drop_this_way_binding`.
@@ -52623,7 +52653,9 @@ fn parse_effect_chain_ir_body(
             // first. A referent established by an EARLIER CLAUSE OF THIS CHAIN wins
             // ("exile target creature. If you do, ... it"), as does the member of the
             // per-member iteration this clause runs under — that is the
-            // `ParentTarget` rung (`chunk_object_referent`). Only when the chain has
+            // `ParentTarget` rung (`chunk_object_referent`). Next comes a source the
+            // previous instruction named via `~` (CR 608.2c; the seed block below
+            // writes it into this slot). Only when the chain has
             // introduced no typed referent of its own does the anaphor reach back to
             // the antecedent the
             // TRIGGER CONDITION introduced (`ParseContext::object_pronoun_ref`, set
@@ -53018,16 +53050,25 @@ fn parse_effect_chain_ir_body(
         } else if !continues_elided_subject {
             carried_player = carried_player.filter(CarriedPlayerSubject::persists_across_sentences);
         }
-        // CR 608.2c: when a carried player subject continues an immediately
-        // preceding instruction that named the source (`~`), its bare object
-        // pronoun refers to that source rather than to an absent parent target
-        // ("that player untaps Karona and gains control of it"). Same antecedent
-        // test as the named-`~` pronoun rewrite below.
-        if inherited_player_subject.is_some()
-            && builder
-                .clauses()
-                .last()
-                .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed))
+        // CR 608.2c + CR 201.5: an instruction that names the source (`~`) makes
+        // it the nearest antecedent of the next instruction's bare object
+        // pronoun. Two outer antecedents would otherwise capture it: the parent
+        // target a carried player subject implies (Karona), and an object the
+        // trigger condition introduced (CR 608.2k pin; the cast spell,
+        // CR 109.2b) or a non-source trigger subject (Norin, Gwenna, Prize Pig,
+        // Mogg Bombers). Chain-local referents (`chunk_object_referent`) and the
+        // compound-owner seed are nearer and keep precedence; when the pronoun
+        // already binds the source the seed is a no-op so the `ParentTarget`
+        // self-recall authority (assembly) keeps its chains.
+        let previous_instruction_named_source = builder
+            .clauses()
+            .last()
+            .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed));
+        let outer_antecedent_is_another_object = chunk_object_referent.is_none()
+            && inherited_compound_owner_seed.is_none()
+            && !matches!(resolve_it_pronoun(ctx), TargetFilter::SelfRef);
+        if previous_instruction_named_source
+            && (inherited_player_subject.is_some() || outer_antecedent_is_another_object)
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }

@@ -709,7 +709,10 @@ fn semantic_slots(state: &GameState) -> Vec<(PlayerId, InteractionSlotKind)> {
     }
 }
 
-fn interaction_submitter_for_owner(state: &GameState, semantic_owner: PlayerId) -> PlayerId {
+pub(crate) fn interaction_submitter_for_owner(
+    state: &GameState,
+    semantic_owner: PlayerId,
+) -> PlayerId {
     let frozen = match &state.waiting_for {
         WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
             turn_control::resolve_all_granted_submitter(state, *epoch, semantic_owner)

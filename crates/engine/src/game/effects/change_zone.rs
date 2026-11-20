@@ -4114,14 +4114,20 @@ pub fn resolve_all(
     // CR 730.2: absorbed cards represent one permanent, not additional
     // permanents that a battlefield-origin mass instruction can select.
     matching.retain(|id| !state.is_absorbed_merge_component(*id));
-    // CR 607.2a + CR 730.3c: the linked return finds every object an exiled merged permanent became.
+    // CR 607.2a + CR 603.7c + CR 730.3c: a linked return, or a delayed return of
+    // the set an earlier instruction moved ("exile ~ … return it"), finds every
+    // object an exiled merged permanent became.
     let matching = match &target_filter {
-        TargetFilter::ExiledBySource => crate::game::merge::expand_returned_merge_components(
-            state,
-            ability,
-            matching,
-            &target_filter,
-        ),
+        TargetFilter::ExiledBySource
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. } => {
+            crate::game::merge::expand_returned_merge_components(
+                state,
+                ability,
+                matching,
+                &target_filter,
+            )
+        }
         _ => matching,
     };
     let matching: Vec<_> = if dest_zone == Zone::Exile {
