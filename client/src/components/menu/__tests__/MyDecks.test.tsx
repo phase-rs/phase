@@ -286,6 +286,22 @@ describe("MyDecks", () => {
     expect(screen.getByRole("button", { name: "Refresh All" })).toBeEnabled();
   });
 
+  it("credits an attributed feed's data provider below the grid only while its decks are listed", async () => {
+    saveDeck("My Own Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
+
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+    await screen.findByText("My Own Deck");
+    expect(screen.queryByRole("link", { name: "TopDeck.gg" })).not.toBeInTheDocument();
+    cleanup();
+
+    saveDeck("Vivi Ornitier (Weekly #1)", { main: [{ name: "Island", count: 99 }], sideboard: [] });
+    saveDeckOrigins({ "Vivi Ornitier (Weekly #1)": "topdeck-cedh" });
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+
+    expect(await screen.findByRole("link", { name: "TopDeck.gg" })).toHaveAttribute("href", "https://topdeck.gg");
+  });
+
   it("checks commander selection context and can reveal incompatible decks on demand", async () => {
     saveDeck("Commander Ready", {
       main: [{ name: "Island", count: 99 }],
