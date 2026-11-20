@@ -20,8 +20,8 @@ use engine::types::zones::Zone;
 const MONKEY: &str = "Whenever a nontoken creature you control dies,\nAugment {2}{G} ({2}{G}, Reveal this card from your hand: Combine it with target host. Augment only as a sorcery.)";
 const ADORABLE_KITTEN: &str =
     "When this creature enters, roll a six-sided die. You gain life equal to the result.";
-const PRIDE_OF_THE_CLOUDS: &str = "Flying\nForecast — {2}{W}{U}, Reveal this creature from your hand: Create a 1/1 white and blue Bird creature token with flying. (Activate only during your upkeep and only once each turn.)";
-const HEIR_TO_DRAGONFIRE: &str = "{2}{R}, Reveal Heir to Dragonfire from your hand: Heir to Dragonfire perpetually becomes a Dragon, gets +3/+3, and gains flying.";
+const PRIDE_OF_THE_CLOUDS: &str = "Flying\nThis creature gets +1/+1 for each other creature on the battlefield with flying.\nForecast — {2}{W}{U}, Reveal this creature from your hand: Create a 1/1 white and blue Bird creature token with flying. (Activate only during your upkeep and only once each turn.)";
+const HEIR_TO_DRAGONFIRE: &str = "{R}: Heir to Dragonfire gets +1/+0 until end of turn.\n{2}{R}, Reveal Heir to Dragonfire from your hand: Heir to Dragonfire perpetually becomes a Dragon, gets +3/+3, and gains flying.";
 const SADISTIC_SKYMARCHER: &str = "As an additional cost to cast this spell, reveal a Vampire card from your hand or pay {1}.\nFlying, lifelink";
 
 fn pool(types: &[ManaType]) -> Vec<ManaUnit> {
@@ -62,12 +62,17 @@ fn revealed(events: &[GameEvent]) -> Vec<Vec<ObjectId>> {
         .collect()
 }
 
-fn cost_ability_index(runner: &GameRunner, source: ObjectId) -> usize {
+fn reveal_ability_index(runner: &GameRunner, source: ObjectId) -> usize {
+    let is_reveal = |c: &AbilityCost| matches!(c, AbilityCost::Reveal { .. });
     runner.state().objects[&source]
         .abilities
         .iter()
-        .position(|a| a.cost.is_some())
-        .expect("activated ability with a cost")
+        .position(|a| match &a.cost {
+            Some(AbilityCost::Composite { costs }) => costs.iter().any(is_reveal),
+            Some(c) => is_reveal(c),
+            None => false,
+        })
+        .expect("activated ability with a reveal cost")
 }
 
 /// Monkey- in hand and Adorable Kitten on P0's battlefield, optionally a Host.
@@ -152,7 +157,7 @@ fn pride_board(with_other_card: bool) -> (GameRunner, ObjectId, Option<ObjectId>
         ]),
     );
     let runner = scenario.build();
-    let index = cost_ability_index(&runner, pride);
+    let index = reveal_ability_index(&runner, pride);
     assert_eq!(
         runner.state().objects[&pride].abilities[index].activation_zone,
         Some(Zone::Hand)
@@ -206,7 +211,7 @@ fn self_name_reveal_functions_from_hand() {
         .add_creature_to_hand_from_oracle(P0, "Heir to Dragonfire", 2, 2, HEIR_TO_DRAGONFIRE)
         .id();
     let runner = scenario.build();
-    let ability = &runner.state().objects[&heir].abilities[cost_ability_index(&runner, heir)];
+    let ability = &runner.state().objects[&heir].abilities[reveal_ability_index(&runner, heir)];
 
     assert_eq!(ability.activation_zone, Some(Zone::Hand));
     let Some(AbilityCost::Composite { costs }) = &ability.cost else {
