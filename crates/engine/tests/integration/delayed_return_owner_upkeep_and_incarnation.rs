@@ -671,7 +671,7 @@ fn avacyn_does_not_return_a_creature_put_back_before_its_trigger_resolves() {
         .expect("the creation referent is pinned");
     assert!(
         !pin.is_current(runner.state()),
-        "the pin names the object the death created, which no longer exists"
+        "the pin must be stale after the graveyard object leaves and returns"
     );
 
     through_end_step(&mut runner);

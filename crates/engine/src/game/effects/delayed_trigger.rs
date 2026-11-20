@@ -666,7 +666,7 @@ pub fn resolve(
         (vec![], Vec::new(), Vec::new())
     };
 
-    // CR 505.1 / CR 608.2c + CR 603.7a: "your next <phase>" binds the trigger
+    // CR 109.5 + CR 608.2c + CR 603.7a: "your next <phase>" binds the trigger
     // to the ability's controller; "that player's next <phase>" binds it to a
     // chained effect's target's OWNER (CR 400.3) instead — The Eternal
     // Wanderer's +1 exiles up to one target ARTIFACT OR CREATURE that may
