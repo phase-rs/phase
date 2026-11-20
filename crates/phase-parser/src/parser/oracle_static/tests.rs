@@ -113,6 +113,49 @@ fn algorithmic_ferocity_static_parse_keeps_dynamic_cmc_pump_and_fight() {
     ));
 }
 
+#[test]
+fn filtered_cmc_compound_pump_preserves_non_unit_multiplier() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    let parsed = parse_oracle_text(
+        "Until end of turn, target creature you control gains indestructible and gets +2/+0 for each card in your hand with mana value 4 or greater.",
+        "Filtered CMC compound pump",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = parsed.abilities[0].effect.as_ref()
+    else {
+        panic!("expected the static grant to lower through GenericEffect");
+    };
+    let [static_ability] = static_abilities.as_slice() else {
+        panic!("expected one static grant, got {static_abilities:?}");
+    };
+    let dynamic_power = static_ability
+        .modifications
+        .iter()
+        .find_map(|modification| match modification {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected dynamic power");
+    assert!(matches!(
+        dynamic_power,
+        QuantityExpr::Multiply { factor: 2, inner }
+            if matches!(inner.as_ref(), QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                    ..
+                }
+            } if properties.contains(&FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }))
+    ));
+}
+
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
 /// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies

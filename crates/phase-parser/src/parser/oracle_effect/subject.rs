@@ -6196,6 +6196,34 @@ fn target_filter_contains_cmc(filter: &TargetFilter) -> bool {
     }
 }
 
+fn quantity_expr_contains_cmc_zone_count(quantity: &QuantityExpr) -> bool {
+    match quantity {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ZoneCardCount {
+                    filter: Some(filter),
+                    ..
+                },
+        } => target_filter_contains_cmc(filter),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_contains_cmc_zone_count(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_contains_cmc_zone_count)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_cmc_zone_count(left)
+                || quantity_expr_contains_cmc_zone_count(right)
+        }
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
+    }
+}
+
 fn dynamic_modifications_include_cmc_zone_count(modifications: &[ContinuousModification]) -> bool {
     modifications.iter().any(|modification| {
         let value = match modification {
@@ -6203,15 +6231,7 @@ fn dynamic_modifications_include_cmc_zone_count(modifications: &[ContinuousModif
             | ContinuousModification::AddDynamicToughness { value } => value,
             _ => return false,
         };
-        matches!(
-            value,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ZoneCardCount {
-                    filter: Some(filter),
-                    ..
-                }
-            } if target_filter_contains_cmc(filter)
-        )
+        quantity_expr_contains_cmc_zone_count(value)
     })
 }
 
@@ -6363,7 +6383,15 @@ fn build_continuous_clause(
                 })
                 .cloned()
                 .collect();
-            if dynamic_modifications_include_cmc_zone_count(&dynamic_modifications) {
+            // CR 611.2b: a stated continuous condition must be rechecked while
+            // the effect exists. GenericEffect evaluates `StaticDefinition::condition`
+            // once at resolution and then clears it, so this fallback must decline
+            // conditional definitions rather than silently changing that duration
+            // semantics. The existing conditional lowering paths remain authoritative.
+            if dynamic_def.condition.is_none()
+                && dynamic_def.per_player_condition.is_none()
+                && dynamic_modifications_include_cmc_zone_count(&dynamic_modifications)
+            {
                 let mut combined = modifications;
                 combined.retain(|modification| {
                     !matches!(
