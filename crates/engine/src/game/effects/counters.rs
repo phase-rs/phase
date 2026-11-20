@@ -1050,6 +1050,7 @@ fn apply_pending_counter_post_action(
                 return true;
             }
             let event = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner,
                 spec,
                 copy: None,
@@ -1190,12 +1191,14 @@ fn apply_pending_counter_post_action(
             owner,
             copy,
             enter_tapped,
+            enter_with_counters,
             remaining_count,
         } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
             state,
             owner,
             copy,
             enter_tapped,
+            enter_with_counters,
             remaining_count,
             events,
         ),

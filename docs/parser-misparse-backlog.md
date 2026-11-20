@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4474
-- **Total card appearances across root causes:** 4507 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4472
+- **Total card appearances across root causes:** 4505 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -43,13 +43,22 @@ The owner/phasing repairs in PR #10635 retain distinct binding authorities:
 
 The full-Oracle controls establish these clauses, not complete support for every ability on those cards. Etrata's conditional game-loss clause remains a separate parser gap under [#10728](https://github.com/phase-rs/phase/issues/10728); Forge of Heroes' conditional dual-counter tail remains unsupported under [#8112](https://github.com/phase-rs/phase/issues/8112). Fblthp, Impossibly Lost is a gendered source-reference parsing control, not a claim that its trigger condition is supported.
 
+Mistcaller/Hallowed Moonlight entry-copy regressions additionally pin the selected copy across
+replacement-ordering pauses: Superior Spider-Man retains its selected graveyard card for the
+exile rider, and a Sculpting Steel token retains its chosen Triskelion values when the model's
+owner concedes. Redirected Saw in Half copies retain their halved power/toughness in both the
+creation snapshot and replay, without battlefield-entry counters (CR 608.2c, CR 707.9b, CR 614.6).
+Saw in Half's Metamorph copies each offer their own copy choice before Moonlight.
+Mycoloth copies can resolve Devour before redirection; Moonlight-first skips Devour.
+Devour counters belong only to that entrant's event, never the next copy's batch seed.
+
 ## Ranked root causes
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 718 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 396 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 3 | Anaphor bound to wrong referent | 395 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 322 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 223 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
@@ -57,7 +66,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 162 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
-| 11 | Replacement / prevention / 'instead' effect mis-modeled | 151 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
+| 11 | Replacement / prevention / 'instead' effect mis-modeled | 150 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 125 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 92 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
@@ -77,7 +86,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2381/4508 ≈ 52.8% of all misparse appearances; the top 10 cover 3357/4508 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2380/4506 ≈ 52.8% of all misparse appearances; the top 10 cover 3356/4506 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -1387,7 +1396,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (396 cards)
+### 3. Anaphor bound to wrong referent  (395 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1547,7 +1556,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Guardian Beast
 - Haakon, Stromgald Scourge Avatar
 - Hall of Mirrors
-- Hallowed Moonlight
 - Harnessed Lightning
 - Heartless Hidetsugu
 - Heat Wave
@@ -3547,7 +3555,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 11. Replacement / prevention / 'instead' effect mis-modeled  (151 cards)
+### 11. Replacement / prevention / 'instead' effect mis-modeled  (150 cards)
 
 **Signature.** A continuous replacement / damage-prevention / redirection clause (CR 614/615) is emitted as a one-shot Spell or unconditional sequential sibling, dropping the 'instead'/replacement semantics or the source/recipient filter.
 
@@ -3637,7 +3645,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Mirri
 - Mirror Strike
 - Mirrormind Crown
-- Mistcaller
 - Moonmist
 - Mount Keralia
 - Mourner's Shield
