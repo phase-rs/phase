@@ -5226,7 +5226,9 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 DocumentRelationIr::CrossItemMassPopulationAnaphor { consumer, .. } => {
                     *consumer == item.id
                 }
-                _ => false,
+                DocumentRelationIr::EtbExileLtbReturn { .. }
+                | DocumentRelationIr::ActivePlayerPunisher { .. }
+                | DocumentRelationIr::LinkedChoice(_) => false,
             })
         })
         .cloned()
