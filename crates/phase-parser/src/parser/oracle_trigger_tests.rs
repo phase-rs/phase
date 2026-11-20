@@ -2374,16 +2374,17 @@ fn parse_jadar_decayed_intervening_if_hoists_keyword_filter() {
 }
 
 #[test]
-fn control_none_intervening_if_declines_incomplete_or_untyped_filters() {
-    assert!(parse_control_none_intervening_if(
-        "if you control no permanents other than this enchantment and have no cards in hand, you win the game."
-    )
-    .is_err());
-    assert!(parse_control_none_intervening_if("if you control no , create a token.").is_err());
-    assert!(parse_control_none_intervening_if(
-        "if you control no creatures and unsupported, create a token."
-    )
-    .is_err());
+fn without_keyword_suffix_preserves_following_clause_delimiter() {
+    let text = "without flying, create a token";
+    let (properties, consumed) =
+        crate::types::text_grammar::parse_without_keyword_suffix(text).expect("keyword suffix");
+    assert!(matches!(
+        properties.as_slice(),
+        [FilterProp::WithoutKeyword {
+            value: Keyword::Flying
+        }]
+    ));
+    assert_eq!(&text[consumed..], ", create a token");
 }
 
 #[test]

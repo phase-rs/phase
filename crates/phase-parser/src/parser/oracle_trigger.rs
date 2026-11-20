@@ -67,7 +67,6 @@ use super::oracle_static::{
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase_folding,
     parse_type_phrase_folding_with_ctx, starts_with_type_list_continuation, starts_with_type_word,
-    target_filter_has_explicit_content,
 };
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
@@ -9404,23 +9403,6 @@ fn extract_if_condition_with_card_name(
         return IfExtraction::hoisted(strip_condition_clause(text, pos, clause_len), condition);
     }
 
-    // CR 603.4 + CR 109.4: The leading "if you control no <type phrase>"
-    // class is an intervening-if on phase triggers.  Run the shared condition
-    // grammar here so keyword-qualified filters such as "creatures with
-    // decayed" are hoisted before the generic effect-chain parser can re-home
-    // them onto `execute.condition`.  Restrict this arm to the leading
-    // position so a post-effect `if` remains a clause-level resolution
-    // condition.
-    if let Some((before, condition, rest)) =
-        scan_preceded(&lower, parse_control_none_intervening_if)
-    {
-        if before.trim().is_empty() {
-            let pos = before.len();
-            let clause_len = lower.len() - before.len() - rest.len();
-            return IfExtraction::hoisted(strip_condition_clause(text, pos, clause_len), condition);
-        }
-    }
-
     match try_extract_intervening(
         &tp,
         &lower,
@@ -9477,41 +9459,6 @@ fn extract_if_condition_with_card_name(
     }
 
     IfExtraction::absent(text)
-}
-
-/// CR 603.4 + CR 109.4: Parse the leading control-presence intervening-if
-/// without taking ownership of a later clause.  The shared condition parser
-/// supplies the complete filter/property grammar and AST lowering; the
-/// remainder is intentionally left for `scan_preceded` to validate as a clause
-/// boundary.
-fn parse_control_none_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
-    let (rest, _) = tag("if ").parse(input)?;
-    let (remainder, condition) = parse_inner_condition(rest)?;
-    let StaticCondition::Not { condition: inner } = condition else {
-        return Err(oracle_err(input));
-    };
-    let StaticCondition::IsPresent {
-        filter: Some(filter),
-    } = inner.as_ref()
-    else {
-        return Err(oracle_err(input));
-    };
-    if !target_filter_has_explicit_content(filter) {
-        return Err(oracle_err(input));
-    }
-    // A connective left after the shared parser means it accepted only the
-    // first conjunct. Leave that shape for the complete generic condition
-    // parser instead of hoisting an incomplete intervening-if.
-    let remainder_trimmed = remainder.trim_start();
-    if alt((tag::<_, _, OracleError<'_>>("and "), tag("or ")))
-        .parse(remainder_trimmed)
-        .is_ok()
-    {
-        return Err(oracle_err(input));
-    }
-    static_condition_to_trigger_condition(&StaticCondition::Not { condition: inner })
-        .map(|condition| (remainder, condition))
-        .ok_or_else(|| oracle_err(input))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
