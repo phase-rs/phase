@@ -346,37 +346,40 @@ fn losing_indestructible_after_deathtouch_damage_does_not_destroy() {
     }
 }
 
-/// E: damage Daunting Defender prevents to 0 raises no `DamageDealt`, so Ohran Viper's trigger does not fire.
+/// E: damage Daunting Defender prevents to 0 raises no `DamageDealt`, so Ohran Viper's trigger does not
+/// fire; against Hill Giant it fires.
 #[test]
 fn damage_prevented_to_zero_raises_no_damage_event() {
     for cleric in [true, false] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let subtypes = if cleric {
-            vec!["Human", "Cleric"]
+        let blocker = if cleric {
+            scenario
+                .add_creature_from_oracle(P0, "Daunting Defender", 3, 3, DAUNTING_DEFENDER)
+                .with_subtypes(vec!["Human", "Cleric"])
+                .id()
         } else {
-            vec!["Human", "Soldier"]
+            scenario
+                .add_creature_from_oracle(P0, "Hill Giant", 3, 3, "")
+                .with_subtypes(vec!["Giant"])
+                .id()
         };
-        let defender = scenario
-            .add_creature_from_oracle(P0, "Daunting Defender", 3, 3, DAUNTING_DEFENDER)
-            .with_subtypes(subtypes)
-            .id();
         let viper = scenario
             .add_creature_from_oracle(P1, "Ohran Viper", 1, 3, OHRAN_VIPER)
             .id();
         let mut runner = scenario.build();
         runner.state_mut().active_player = P1;
-        let outcome = run_combat_with_blocks(&mut runner, viper, P0, defender);
+        let outcome = run_combat_with_blocks(&mut runner, viper, P0, blocker);
         let dealt = damage_dealt_by(&outcome, viper);
         runner.advance_to_end_step();
 
         if cleric {
             assert_eq!(runner.state().objects[&viper].zone, Zone::Graveyard);
             assert!(dealt.is_empty(), "prevented damage raised {dealt:?}");
-            assert_eq!(runner.state().objects[&defender].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&blocker].zone, Zone::Battlefield);
         } else {
             assert_eq!(dealt, vec![1]);
-            assert_eq!(runner.state().objects[&defender].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&blocker].zone, Zone::Graveyard);
         }
     }
 }
