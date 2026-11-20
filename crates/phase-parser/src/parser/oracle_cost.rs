@@ -1494,7 +1494,7 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
         };
     }
 
-    // CR 701.20a + CR 113.6j: "Reveal this card / ~ from your hand" — the source reveals itself.
+    // CR 701.20a: "Reveal this card / ~ from your hand" — the source reveals itself.
     if nom_on_lower(text, &lower, |i| {
         value(
             (),
