@@ -198,6 +198,12 @@ describe("curated basic-land catalog membership", () => {
       token: "plains-m21-260",
     },
     {
+      context: "the deck printing with an empty preference chain",
+      overrides: { artChain: EMPTY_CHAIN, deckPrintings: [{ oracleId, source: { setCode: "M21", collectorNumber: "260" } }] },
+      primary: primaryExact,
+      token: "plains-m21-260",
+    },
+    {
       context: "an image-less selected printing",
       overrides: {
         artChain: NEWEST,
