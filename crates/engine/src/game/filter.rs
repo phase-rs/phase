@@ -540,6 +540,14 @@ pub(crate) fn target_filter_characteristic_reads(filter: &TargetFilter) -> Chara
     target_filter_characteristic_reads_at(filter, CHARACTERISTIC_READ_DEPTH)
 }
 
+/// CR 202.3 + CR 707.9b: whether a single filter property reads the mana-cost characteristic and
+/// nothing else (`Cmc` with a fixed threshold, `ManaValueParity`, `ManaCostIn`, ...). It reuses the
+/// exhaustive per-property classification, so a new property variant is decided at that one seam.
+pub(crate) fn filter_prop_reads_only_mana_cost(prop: &FilterProp) -> bool {
+    filter_prop_characteristic_reads_at(prop, CHARACTERISTIC_READ_DEPTH)
+        == CharacteristicKinds::MANA_COST
+}
+
 pub(crate) fn target_filter_characteristic_reads_at(
     filter: &TargetFilter,
     depth: u32,

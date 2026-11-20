@@ -29267,6 +29267,7 @@ fn target_has_pt_threshold_gate_lowers_to_target_filter() {
             filter: TargetFilter::Typed(tf),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }) = &def.condition
         {
             if let [FilterProp::PtComparison {
@@ -37006,6 +37007,154 @@ fn ltb_return_promotion_keeps_the_actor() {
     assert_eq!(promoted_actor, &actor);
     assert_eq!(*target, TargetFilter::ExiledBySource);
     assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
+}
+
+/// CR 202.3 + CR 608.2c + CR 603.2: the mana-value referent gate of the S2a members, one verbatim
+/// Oracle text per row. Each gate is a `TargetMatchesFilter { Cmc }` whose `subject` names the object
+/// the clause means — the announced target in a resolving spell ("that spell" after "Counter target
+/// spell"; "that permanent" after "Destroy/Exile target ..."), the trigger event's spell in a
+/// triggered ability ("Whenever you cast a creature spell, ... that spell has mana value 5 or
+/// greater"). Grammatical tense sets the `use_lki` hint; CR 608.2h governs the runtime
+/// read. The gate sits on the instruction the printed text conditions and on nothing else.
+#[test]
+fn mana_value_referent_gate_binds_the_object_the_clause_names() {
+    use crate::types::ability::{Comparator, ObjectScope};
+
+    /// `(gated effect, subject, use_lki, comparator, threshold)` of every `Cmc` referent gate
+    /// reachable from `def` (abilities, sub-abilities and trigger bodies).
+    fn gates(def: &AbilityDefinition, out: &mut Vec<(String, ObjectScope, bool, Comparator, i32)>) {
+        if let Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(typed),
+            use_lki,
+            subject_slot: None,
+            subject,
+        }) = &def.condition
+        {
+            if let [FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            }] = typed.properties.as_slice()
+            {
+                let name = format!(
+                    "{:?}",
+                    crate::types::ability::EffectKind::from(&*def.effect)
+                );
+                out.push((name, *subject, *use_lki, *comparator, *value));
+            }
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            gates(sub, out);
+        }
+    }
+    /// Parse `text` as the printed card `name` with printed `type_line` ("Legendary Creature — Human Shaman") and the
+    /// given keywords, and collect its mana-value gates.
+    fn gates_of(
+        text: &str,
+        name: &str,
+        type_line: &str,
+        keywords: &[Keyword],
+    ) -> Vec<(String, ObjectScope, bool, Comparator, i32)> {
+        let (head, subtypes) = type_line.split_once(" — ").unwrap_or((type_line, ""));
+        let types: Vec<&str> = head
+            .split_whitespace()
+            .filter(|w| !matches!(*w, "Legendary" | "Basic" | "Snow"))
+            .collect();
+        let subtypes: Vec<&str> = subtypes.split_whitespace().collect();
+        let r = parse(text, name, keywords, &types, &subtypes);
+        let mut out = Vec::new();
+        for def in r
+            .abilities
+            .iter()
+            .chain(r.triggers.iter().filter_map(|t| t.execute.as_deref()))
+        {
+            gates(def, &mut out);
+        }
+        out
+    }
+
+    // (name, printed type line, keywords, verbatim Oracle text, expected gate). Name, type line and text are the
+    // Scryfall `cards/named?exact=` values (checked by `results/111/scripts/check_printed.py`).
+    for (name, type_line, keywords, text, expected) in [
+        (
+            "Reject Imperfection",
+            "Instant",
+            &[][..],
+            "Counter target spell. If that spell's mana value was 3 or less, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+            ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Sound the Trumpets",
+            "Instant",
+            &[][..],
+            "Counter target spell. If that spell's mana value was 2 or less, recruit. (Draw a card, then discard a card. If you discarded a nonland card, create a 1/1 white Human Soldier creature token.)",
+            ("Draw", ObjectScope::Target, true, Comparator::LE, 2),
+        ),
+        (
+            "Carnivorous Canopy",
+            "Sorcery",
+            &[][..],
+            "Destroy target artifact, enchantment, or creature with flying. If that permanent's mana value was 3 or less, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+            ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Vindictive Triumph",
+            "Instant",
+            &[][..],
+            "Exile target creature or planeswalker. If that permanent's mana value was 3 or less, return it to the battlefield tapped under your control. Exile it at the beginning of the next end step.",
+            ("ChangeZone", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Prismari Apprentice",
+            "Creature — Human Shaman",
+            &[][..],
+            "Magecraft — Whenever you cast or copy an instant or sorcery spell, this creature can't be blocked this turn. If that spell has mana value 5 or greater, put a +1/+1 counter on this creature.",
+            ("PutCounter", ObjectScope::EventSource, false, Comparator::GE, 5),
+        ),
+        (
+            "Herald of Ilharg",
+            "Creature — Boar Beast",
+            &[Keyword::Trample][..],
+            "Trample\nWhenever you cast a creature spell, put two +1/+1 counters on this creature. If that spell has mana value 5 or greater, this creature deals damage equal to the number of counters on it to each opponent.",
+            ("DamageEachPlayer", ObjectScope::EventSource, false, Comparator::GE, 5),
+        ),
+    ] {
+        let found = gates_of(text, name, type_line, keywords);
+        let (effect, subject, use_lki, comparator, threshold) = expected;
+        assert_eq!(
+            found,
+            vec![(effect.to_string(), subject, use_lki, comparator, threshold)],
+            "{name}: exactly one mana-value gate, on the conditioned instruction"
+        );
+    }
+
+    // Claim set: the present-tense possessive "that spell's mana value is N or greater" keeps
+    // its quantity route (it is not claimed by the mana-value noun surface), so the printed
+    // cards that use it stay as they were (Prismari Pianist, Zaffai, Thunder Conductor).
+    for (name, type_line, text) in [
+        (
+            "Prismari Pianist",
+            "Creature — Djinn Bard",
+            "Whenever you cast an instant or sorcery spell, create a 1/1 blue and red Elemental creature token. If that spell's mana value is 5 or greater, create three of those tokens instead.",
+        ),
+        (
+            "Zaffai, Thunder Conductor",
+            "Legendary Creature — Human Shaman",
+            "Magecraft — Whenever you cast or copy an instant or sorcery spell, scry 1. If that spell's mana value is 5 or greater, create a 4/4 blue and red Elemental creature token. If that spell's mana value is 10 or greater, Zaffai deals 10 damage to an opponent chosen at random.",
+        ),
+    ] {
+        assert!(
+            gates_of(text, name, type_line, &[]).is_empty(),
+            "{name}: the present-tense `is` form is not a TargetMatchesFilter mana-value gate"
+        );
+        // Reach guard: the card does parse, with its mana-value clause on the quantity route.
+        let (head, subtypes) = type_line.split_once(" — ").unwrap_or((type_line, ""));
+        let subtypes: Vec<&str> = subtypes.split_whitespace().collect();
+        let parsed = format!("{:?}", parse(text, name, &[], &[head.trim_start_matches("Legendary ")], &subtypes).triggers);
+        assert!(
+            parsed.contains("QuantityCheck") && !parsed.contains("Unimplemented"), // allow-noncombinator: test instrument reading a Debug dump
+            "{name}: reach guard, the mana-value clause parses to a quantity check, got {parsed}"
+        );
+    }
 }
 
 /// CR 109.5 + CR 608.2c (#8751): in "Then if you control eight or more artifacts,

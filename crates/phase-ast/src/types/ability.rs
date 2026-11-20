@@ -39268,6 +39268,21 @@ pub enum AbilityCondition {
         /// this turn") reads slot 0 under most-recent-only chain propagation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_slot: Option<usize>,
+        /// CR 608.2c + CR 603.2: which object the predicate reads. `Target`
+        /// (default) is the node's resolution-bound attachment host, else its
+        /// first object target, else the triggering source. `EventSource` is
+        /// the object the current trigger event names even when the node also
+        /// declares a target ("Whenever you cast a spell, earthbend 1. If that
+        /// spell is a Lesson, ..." reads the spell, not the land). Only these two
+        /// values are produced by the parser; every other `ObjectScope` is
+        /// serde-constructible but has no referent here, so the evaluator treats
+        /// it as unmatched. `subject_slot: Some(_)` is meaningful only with
+        /// `Target`.
+        #[serde(
+            default = "AbilityCondition::default_subject_target",
+            skip_serializing_if = "AbilityCondition::is_subject_target"
+        )]
+        subject: ObjectScope,
     },
     /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
     /// at least one *object* target. Guards reflexive-target riders ("If that
@@ -40177,6 +40192,21 @@ impl AbilityCondition {
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn is_subject_source(value: &ObjectScope) -> bool {
         matches!(value, ObjectScope::Source)
+    }
+
+    /// CR 608.2c: Default `subject` for `TargetMatchesFilter` is `Target` — the
+    /// gated node's resolution-bound host, first object target, or triggering
+    /// source, exactly the reading the variant had before the scope axis existed.
+    pub(crate) fn default_subject_target() -> ObjectScope {
+        ObjectScope::Target
+    }
+
+    /// Skip-serialization predicate: omit `subject` from JSON when it equals the
+    /// default (`Target`), so every previously-serialized `TargetMatchesFilter`
+    /// round-trips byte-identically.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_subject_target(value: &ObjectScope) -> bool {
+        matches!(value, ObjectScope::Target)
     }
 
     /// CR 608.2c: Default `comparator` for `AbilityUseCountThisTurn` is `EQ` —
