@@ -998,8 +998,8 @@ fn handle_replacement_choice_inner(
                     record_parked_land_play_completion(state, object_id);
                 }
                 event @ ProposedEvent::TokenEntry { entry_ref, .. } => {
-                    // CR 616.1c: a prompt the rediscovery after the entrant's own chosen copy raised
-                    // was answered; resume that copy's entry completion.
+                    // Staged copies share the same settlement for ordering
+                    // answers and priority-boundary resumes.
                     if state
                         .liminal_entries
                         .get(&entry_ref)
@@ -1009,11 +1009,8 @@ fn handle_replacement_choice_inner(
                         state.waiting_for = WaitingFor::Priority {
                             player: state.active_player,
                         };
-                    }
-                    if let Some(result) =
-                        resume_token_copy_settlement(state, entry_ref, event.clone(), events)
-                    {
-                        state.waiting_for = result?;
+                        state.waiting_for =
+                            resume_token_copy_settlement(state, entry_ref, event, false, events)?;
                         super::engine::resume_pending_continuation_if_priority(state, events)?;
                         return Ok(state.waiting_for.clone());
                     }
@@ -3368,12 +3365,8 @@ enum SettleStep {
     Paused,
 }
 
-/// CR 616.1c + CR 614.12: the single authority that settles a liminal token entrant's
-/// own as-enters copy before any other entry replacement is discovered. The chosen
-/// copy's characteristics (with the copy effect's own exceptions) are placed on the
-/// stored entrant, and the entry pipeline is re-entered on the same logical `TokenEntry`
-/// (its own copy already applied, nothing else yet). The entrant's own replacement
-/// definitions stay the pre-copy ones: the copy's own are settled by the entry finisher.
+/// CR 707.5 + CR 616.1f: place the chosen copy on the liminal entrant, then
+/// rediscover on the same event. Its applied IDs and the batch seed stay intact.
 fn settle_token_entry_after_copy(
     state: &mut GameState,
     source_id: ObjectId,
@@ -3396,7 +3389,7 @@ fn settle_token_entry_after_copy(
     };
     let original = entry.object.clone();
     let mut staged = original.projected().clone();
-    let own_replacements = staged.replacement_definitions.clone();
+    let superseded = staged.replacement_definitions.clone();
     effects::token::apply_copiable_values_to_liminal_object(
         &mut staged,
         &copy.values,
@@ -3413,7 +3406,15 @@ fn settle_token_entry_after_copy(
             &state.all_creature_types,
         );
     }
-    staged.replacement_definitions = own_replacements;
+    if !staged.replacement_definitions.is_empty() && !superseded.is_empty() {
+        // CR 614.5: the copied definitions must not inherit the already-applied
+        // indices of the superseded body. Only the suffix can apply.
+        staged.replacement_definitions = superseded
+            .iter_all()
+            .chain(staged.replacement_definitions.iter_all())
+            .cloned()
+            .collect();
+    }
     let settlement = Box::new(TokenCopySettlement {
         target_id,
         ability: ability.clone(),
@@ -3426,22 +3427,31 @@ fn settle_token_entry_after_copy(
     });
     if let Some(entry) = state.liminal_entries.get_mut(&source_id) {
         entry.object = LiminalEntrant::Token(TokenProjection::materialize(staged));
+        entry.copy_settlement = Some(settlement);
     }
     // The copy work the pipeline stopped for is being delivered right here.
     state.finish_active_paused_post_replacement_dispatch();
-    match super::replacement::replace_event(state, resume_event, events) {
-        super::replacement::ReplacementResult::Execute(event) => {
+    settle_staged_token_copy(state, source_id, resume_event, true, events)
+}
+
+fn settle_staged_token_copy(
+    state: &mut GameState,
+    source_id: ObjectId,
+    event: ProposedEvent,
+    rediscover: bool,
+    events: &mut Vec<GameEvent>,
+) -> SettleStep {
+    use super::replacement::ReplacementResult;
+    match settle_liminal_token_entry_replacements(state, event, rediscover, events) {
+        ReplacementResult::NeedsChoice(_) => SettleStep::Paused,
+        ReplacementResult::Prevented => SettleStep::Prevented,
+        ReplacementResult::Execute(event) => {
+            let settlement = state
+                .liminal_entries
+                .get_mut(&source_id)
+                .and_then(|entry| entry.copy_settlement.take())
+                .expect("the staged copy owns its settlement");
             SettleStep::Executed(event, settlement)
-        }
-        super::replacement::ReplacementResult::Prevented => SettleStep::Prevented,
-        super::replacement::ReplacementResult::NeedsChoice(player) => {
-            // The staged copy stays and the settlement is held on the entry: the answered prompt
-            // resumes the selected copy's entry completion.
-            if let Some(entry) = state.liminal_entries.get_mut(&source_id) {
-                entry.copy_settlement = Some(settlement);
-            }
-            state.waiting_for = super::replacement::replacement_choice_waiting_for(player, state);
-            SettleStep::Paused
         }
     }
 }
@@ -3466,6 +3476,11 @@ fn conclude_token_copy_settlement(
         return TokenEntrySettlement::Enter(event);
     };
     if redirected {
+        let mut staged = entry.object.projected().clone();
+        staged.replacement_definitions = staged.base_replacement_definitions.clone().into();
+        entry.object = crate::types::game_state::LiminalEntrant::Token(
+            crate::types::game_state::TokenProjection::materialize(staged),
+        );
         entry.name = settlement.staged_name.clone();
         // CR 733: the journaled birth records the token that was actually created — the copy —
         // not the pre-copy entrant. The batch's remaining tokens continue from the continuation
@@ -3556,7 +3571,7 @@ fn complete_token_entry_after_copy(
         SettleStep::Prevented => TokenEntrySettlement::Prevented,
         SettleStep::Paused => return Ok(state.waiting_for.clone()),
     };
-    let resume_event = match outcome {
+    let mut resume_event = match outcome {
         TokenEntrySettlement::Enter(event) => event,
         TokenEntrySettlement::Redirected(event) => {
             // CR 614.6: the copy token was created where the replacement sent it and never
@@ -3582,6 +3597,24 @@ fn complete_token_entry_after_copy(
             token::continue_liminal_copy_token_batch(state, copy_continuation, events);
             return Ok(state.waiting_for.clone());
         }
+    };
+    // CR 122.6: place the event's counters with the copy exceptions after
+    // installing the copy. The continuation above captured the batch seed.
+    let settled_counters = if let (
+        Some(_),
+        ProposedEvent::TokenEntry {
+            enter_with_counters,
+            ..
+        },
+    ) = (&captured, &mut resume_event)
+    {
+        let mut counters = std::mem::take(enter_with_counters);
+        if let Some(entry) = state.liminal_entries.get_mut(&source_id) {
+            counters.append(&mut entry.enter_with_counters);
+        }
+        Some(counters)
+    } else {
+        None
     };
     if !super::effects::token::commit_liminal_token_entry_with_post_actions(
         state,
@@ -3668,15 +3701,22 @@ fn complete_token_entry_after_copy(
             entrants_through_this_entry,
         ));
     }
+    let entry_counters = match settled_counters {
+        Some(counters) => CopyEntryCounters::Settled {
+            exceptions: held_exceptions,
+            counters,
+        },
+        None => CopyEntryCounters::Merged {
+            exceptions: held_exceptions,
+        },
+    };
     if let Some(waiting_for) = finish_copy_target_choice_entry(
         state,
         source_id,
         events,
         counter_pause_post_actions,
         EntryEventReplay::Required,
-        CopyEntryCounters::Merged {
-            exceptions: held_exceptions,
-        },
+        entry_counters,
     )? {
         return Ok(waiting_for);
     }
@@ -3684,30 +3724,22 @@ fn complete_token_entry_after_copy(
     Ok(state.waiting_for.clone())
 }
 
-/// CR 616.1c: the answer to a prompt that the rediscovery after a chosen own copy raised
-/// resumes the held settlement's entry completion. `None` when the entry holds none.
+/// Continue a staged copy after a replacement answer or a paused entry action.
 fn resume_token_copy_settlement(
     state: &mut GameState,
     entry_ref: ObjectId,
     event: ProposedEvent,
+    rediscover: bool,
     events: &mut Vec<GameEvent>,
-) -> Option<Result<WaitingFor, EngineError>> {
-    let settlement = state
-        .liminal_entries
-        .get_mut(&entry_ref)?
+) -> Result<WaitingFor, EngineError> {
+    let settlement = state.liminal_entries[&entry_ref]
         .copy_settlement
-        .take()?;
+        .as_ref()
+        .expect("only a staged copy resumes copy settlement");
     let ability = settlement.ability.clone();
     let held = settlement.held_exceptions.clone();
-    Some(complete_token_entry_after_copy(
-        state,
-        entry_ref,
-        &ability,
-        &held,
-        SettleStep::Executed(event, settlement),
-        false,
-        events,
-    ))
+    let step = settle_staged_token_copy(state, entry_ref, event, rediscover, events);
+    complete_token_entry_after_copy(state, entry_ref, &ability, &held, step, false, events)
 }
 
 fn apply_copy_target_choice(
@@ -4050,7 +4082,6 @@ fn apply_copy_target_choice(
 
 /// CR 614.1c + CR 122.6: how a copy-target-choice entry composes its entry
 /// counters, and therefore who completes the entry after a counter pause.
-#[derive(Clone, Copy)]
 enum CopyEntryCounters<'a> {
     /// Meld: only the entrant's own "enters with" replacement counters.
     /// Its caller's post-actions retain ownership of completing the entry.
@@ -4062,6 +4093,11 @@ enum CopyEntryCounters<'a> {
     /// pause mints `FinishCopyTargetChoiceEntry` to complete the entry.
     Merged {
         exceptions: &'a [crate::types::ability::ContinuousModification],
+    },
+    /// Liminal token: its replacements already ran on the entry proposal.
+    Settled {
+        exceptions: &'a [crate::types::ability::ContinuousModification],
+        counters: Vec<(crate::types::counter::CounterType, u32)>,
     },
 }
 
@@ -4085,6 +4121,17 @@ fn finish_copy_target_choice_entry(
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
+    if matches!(entry_counters, CopyEntryCounters::Settled { .. }) {
+        return finish_copy_target_choice_entry_counters(
+            state,
+            source_id,
+            events,
+            counter_pause_post_actions,
+            replay_entry_events,
+            entry_counters,
+            crate::types::game_state::CopyEntryResumeStage::ReplacementsSettled,
+        );
+    }
     // CR 614.12 + CR 707.5: only a copied roll retained on entry is unsupported
     // on this route; resident effects may remove the printed replacement.
     let rolls = {
@@ -4125,6 +4172,7 @@ fn finish_copy_target_choice_entry(
             exceptions: match entry_counters {
                 CopyEntryCounters::ReplacementsOnly => None,
                 CopyEntryCounters::Merged { exceptions } => Some(exceptions.to_vec()),
+                CopyEntryCounters::Settled { .. } => unreachable!("already settled above"),
             },
             replay_entry_events,
         };
@@ -4173,25 +4221,30 @@ fn finish_copy_target_choice_entry_counters(
     events: &mut Vec<GameEvent>,
     mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
     replay_entry_events: EntryEventReplay,
-    entry_counters: CopyEntryCounters<'_>,
+    mut entry_counters: CopyEntryCounters<'_>,
     resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // CR 614.12 + CR 707.5 + CR 614.1c + CR 122.6: the entrant's acquired "enters with"
     // counters and tap state, and any quantity they count, are read as it enters — with
     // the tokens entering in the same event absent (`replacement::copy_entry_board`), so a
     // co-entering ability remover doesn't strip them and a co-entrant isn't counted.
-    let enter_modifiers = {
+    let counters = if let CopyEntryCounters::Settled { counters, .. } = &mut entry_counters {
+        std::mem::take(counters)
+    } else {
         let board = super::replacement::copy_entry_board(state, source_id);
-        super::replacement::current_self_enter_replacement_modifiers(&board, source_id)
-    };
-    if let Some(tapped) = enter_modifiers.enter_tapped {
-        if let Some(obj) = state.objects.get_mut(&source_id) {
-            obj.tapped = tapped;
+        let modifiers =
+            super::replacement::current_self_enter_replacement_modifiers(&board, source_id);
+        if let Some(tapped) = modifiers.enter_tapped {
+            if let Some(obj) = state.objects.get_mut(&source_id) {
+                obj.tapped = tapped;
+            }
         }
-    }
+        modifiers.counters
+    };
     let (counters, completion_witness) = match entry_counters {
-        CopyEntryCounters::ReplacementsOnly => (enter_modifiers.counters, None),
-        CopyEntryCounters::Merged { exceptions } => {
+        CopyEntryCounters::ReplacementsOnly => (counters, None),
+        CopyEntryCounters::Merged { exceptions }
+        | CopyEntryCounters::Settled { exceptions, .. } => {
             let entrant = state
                 .objects
                 .get(&source_id)
@@ -4222,7 +4275,7 @@ fn finish_copy_target_choice_entry_counters(
                 Vec::new()
             };
             let merged = effects::counters::coalesce_entry_counters(
-                enter_modifiers.counters.into_iter().chain(intrinsic).chain(
+                counters.into_iter().chain(intrinsic).chain(
                     effects::become_copy::entry_exception_counters(
                         state, source_id, controller, source_id, exceptions,
                     ),
@@ -4300,7 +4353,9 @@ pub(crate) fn resume_copy_target_choice_entry(
                 CopyEntryResumeStage::ChoiceSettled,
             )?
         }
-        CopyEntryResumeStage::ChoiceSettled | CopyEntryResumeStage::ChoiceOwedAfterCounters => {
+        CopyEntryResumeStage::ChoiceSettled
+        | CopyEntryResumeStage::ChoiceOwedAfterCounters
+        | CopyEntryResumeStage::ReplacementsSettled => {
             finish_copy_target_choice_entry_after_counters(
                 state,
                 entrant.object_id,
@@ -4422,13 +4477,14 @@ fn finish_copy_target_choice_entry_after_counters(
     // replacement choice acquired from entering as a copy before replaying the entry.
     // CR 707.5: it is read as the entrant enters, with the tokens entering in the same
     // event absent (`replacement::copy_entry_board`).
-    let choice = {
-        let board = super::replacement::copy_entry_board(state, source_id);
-        super::replacement::current_self_enter_replacement_choice(&board, source_id)
-    };
-    if let Some(choice) = choice.filter(|_| {
-        resume_stage == crate::types::game_state::CopyEntryResumeStage::ChoiceOwedAfterCounters
-    }) {
+    let choice = (resume_stage
+        == crate::types::game_state::CopyEntryResumeStage::ChoiceOwedAfterCounters)
+        .then(|| {
+            let board = super::replacement::copy_entry_board(state, source_id);
+            super::replacement::current_self_enter_replacement_choice(&board, source_id)
+        })
+        .flatten();
+    if let Some(choice) = choice {
         if let Some(waiting_for) =
             surface_copy_entry_pause(state, source_id, &counter_pause_post_actions, |state| {
                 apply_post_replacement_effect(
@@ -4448,12 +4504,14 @@ fn finish_copy_target_choice_entry_after_counters(
     }
     // CR 614.12a + CR 707.2: copied entry payments retain the same child and
     // batch custody as copied entry choices.
-    if let Some(waiting_for) =
-        surface_copy_entry_pause(state, source_id, &counter_pause_post_actions, |state| {
-            super::replacement::surface_copied_entry_payment(state, source_id, events)
-        })
-    {
-        return Ok(Some(waiting_for));
+    if resume_stage != crate::types::game_state::CopyEntryResumeStage::ReplacementsSettled {
+        if let Some(waiting_for) =
+            surface_copy_entry_pause(state, source_id, &counter_pause_post_actions, |state| {
+                super::replacement::surface_copied_entry_payment(state, source_id, events)
+            })
+        {
+            return Ok(Some(waiting_for));
+        }
     }
 
     // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters
@@ -6310,12 +6368,8 @@ pub(crate) fn collect_settled_entry_continuation_triggers(state: &mut GameState)
 
 fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&AbilityDefinition> {
     if let Some(entry) = state.liminal_entries.get(&source_id) {
-        return entry
-            .object
-            .projected()
-            .replacement_definitions
-            .iter_all()
-            .filter_map(|replacement| replacement.execute.as_deref())
+        return super::replacement::liminal_entry_replacements(entry)
+            .filter_map(|(_, replacement)| replacement.execute.as_deref())
             .find_map(|effect_def| {
                 super::replacement::EventModifiers::first_non_modifier_ability(Some(effect_def))
                     .filter(|real| matches!(&*real.effect, Effect::BecomeCopy { .. }))
@@ -7676,15 +7730,22 @@ pub(super) fn resume_pending_liminal_token_entry(
     if !is_resumable_token {
         return None;
     }
-    let Some(crate::types::game_state::PendingLiminalEntryResume::Token { event, .. }) =
-        state.pending_liminal_entry_resume.take()
+    let Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+        source_id, event, ..
+    }) = state.pending_liminal_entry_resume.take()
     else {
         unreachable!("the guard above matched a Token resume with a live liminal entry")
     };
 
     // CR 616.1f: the paused selected work has finished. Rediscover on its same
     // event (including applied identities), then use the shared entry completion.
-    if !crate::game::effects::token::resume_liminal_token_entry_and_continue_copy_batch(
+    if state.liminal_entries[&source_id].copy_settlement.is_some() {
+        state.waiting_for = resume_token_copy_settlement(state, source_id, event, true, events)
+            .expect("settling a staged copy resumes its valid copy choice");
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Some(state.waiting_for.clone());
+        }
+    } else if !crate::game::effects::token::resume_liminal_token_entry_and_continue_copy_batch(
         state, event, events,
     ) {
         return Some(state.waiting_for.clone());

@@ -2368,11 +2368,17 @@ fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selecte
         } => {
             assert_eq!(*player, P0);
             assert_eq!(*kind, ReplacementChoiceKind::Order);
+            // CR 707.5 + CR 616.1: the chosen Triskelion's acquired enters-with-counters
+            // replacement orders alongside Root Maze and untapped Archelos.
             assert_eq!(
                 candidates.len(),
-                2,
-                "only Root Maze and untapped Archelos order entry"
+                3,
+                "Root Maze, untapped Archelos and the copied counters order entry"
             );
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == token_id
+                    && candidate.description.contains("three +1/+1 counters")));
             assert!(candidates
                 .iter()
                 .any(|candidate| candidate.source_id == root_maze));
@@ -2441,7 +2447,16 @@ fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selecte
         .act(GameAction::ChooseReplacement {
             index: root_maze_first,
         })
-        .expect("finish entry with Archelos applied last");
+        .expect("apply Root Maze first");
+    if let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for {
+        let counters = candidates
+            .iter()
+            .position(|candidate| candidate.description.contains("three +1/+1 counters"))
+            .expect("the copied counters remain to be ordered");
+        runner
+            .act(GameAction::ChooseReplacement { index: counters })
+            .expect("finish entry with Archelos applied last");
+    }
     assert_settled(runner.state(), "copy entry after its chosen model leaves");
     assert_eq!(
         battlefield_tokens_named(runner.state(), "Triskelion"),
@@ -2978,7 +2993,11 @@ fn saw_metamorph_tokens_each_explicitly_decline_before_moonlight_exile() {
 
 /// CR 702.82a + CR 614.13 + CR 616.1f: selected Devour finishes, including
 /// sacrificing other creatures, before Moonlight can replace the remaining entry.
-fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
+fn feldon_mycoloth_entry_order(
+    copy_via_metamorph: bool,
+    devour_first: bool,
+    sacrifice_bears: bool,
+) {
     let mut scenario = base_scenario();
     scenario.with_mana_pool(
         P0,
@@ -3011,8 +3030,12 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
             shards: vec![ManaCostShard::Green],
         })
         .id();
-    let mycoloth = scenario
-        .add_creature_to_graveyard(P0, "Mycoloth", 4, 4)
+    let mut mycoloth = if copy_via_metamorph {
+        scenario.add_creature(P0, "Mycoloth", 4, 4)
+    } else {
+        scenario.add_creature_to_graveyard(P0, "Mycoloth", 4, 4)
+    };
+    let mycoloth = mycoloth
         .with_subtypes(vec!["Fungus"])
         .with_mana_cost(ManaCost::Cost {
             generic: 3,
@@ -3020,6 +3043,20 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
         })
         .from_oracle_text_with_keywords(&["Devour"], MYCOLOTH)
         .id();
+    let graveyard_target = if copy_via_metamorph {
+        scenario
+            .add_creature_to_graveyard(P0, "Phyrexian Metamorph", 0, 0)
+            .from_oracle_text(PHYREXIAN_METAMORPH)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Phyrexian", "Shapeshifter"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::PhyrexianBlue],
+            })
+            .id()
+    } else {
+        mycoloth
+    };
     let moonlight = scenario
         .add_spell_to_hand_from_oracle(P0, "Hallowed Moonlight", true, HALLOWED_MOONLIGHT)
         .with_mana_cost(ManaCost::Cost {
@@ -3047,6 +3084,7 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
         .events;
     let mut bound_target = false;
     let mut targeted = false;
+    let mut chose_model = false;
     let mut ordered = false;
     let mut moonlight_replacement_source = None;
     let mut selected_sacrifices = false;
@@ -3062,8 +3100,8 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
                     assert_eq!(*source_id, feldon);
                     assert_eq!(
                         ability.targets,
-                        vec![TargetRef::Object(mycoloth)],
-                        "Feldon's committed activation targets the actual graveyard Mycoloth"
+                        vec![TargetRef::Object(graveyard_target)],
+                        "Feldon's committed activation targets the graveyard card"
                     );
                     bound_target = true;
                 }
@@ -3085,10 +3123,10 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
                 assert!(!targeted);
                 assert!(target_slots[selection.current_slot]
                     .legal_targets
-                    .contains(&TargetRef::Object(mycoloth)));
+                    .contains(&TargetRef::Object(graveyard_target)));
                 targeted = true;
                 GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(mycoloth)),
+                    target: Some(TargetRef::Object(graveyard_target)),
                 }
             }
             WaitingFor::ReplacementChoice {
@@ -3096,6 +3134,19 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
             } => {
                 assert_eq!(player, P0);
                 assert!(!ordered, "one ordering decision for this entrant");
+                if copy_via_metamorph && !chose_model {
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.description.contains("enter as a copy"))
+                        .expect("Metamorph offers its own copy before other replacements");
+                    events.extend(
+                        runner
+                            .act(GameAction::ChooseReplacement { index })
+                            .expect("accept Metamorph's copy replacement")
+                            .events,
+                    );
+                    continue;
+                }
                 let devour = candidates
                     .iter()
                     .position(|candidate| candidate.description.contains("Devour 2"))
@@ -3109,6 +3160,19 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
                 ordered = true;
                 GameAction::ChooseReplacement {
                     index: if devour_first { devour } else { moon },
+                }
+            }
+            WaitingFor::CopyTargetChoice {
+                player,
+                valid_targets,
+                ..
+            } => {
+                assert_eq!(player, P0);
+                assert!(copy_via_metamorph && !chose_model && !ordered);
+                assert!(valid_targets.contains(&mycoloth));
+                chose_model = true;
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(mycoloth)),
                 }
             }
             WaitingFor::OptionalEffectChoice { player, .. } => {
@@ -3151,6 +3215,7 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
                 .events,
         );
     }
+    assert_eq!(chose_model, copy_via_metamorph);
     assert!(
         bound_target && ordered,
         "the targeted activation must reach Devour/Moonlight ordering"
@@ -3210,22 +3275,36 @@ fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
         runner.state().objects[&feldon].tapped,
         "Feldon's tap cost was paid"
     );
-    assert_eq!(runner.state().objects[&mycoloth].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&graveyard_target].zone,
+        Zone::Graveyard
+    );
 }
 
 #[test]
 fn mycoloth_devour_sacrifices_before_moonlight_redirects_its_feldon_copy() {
-    feldon_mycoloth_entry_order(true, true);
+    feldon_mycoloth_entry_order(false, true, true);
 }
 
 #[test]
 fn mycoloth_moonlight_first_skips_devour_and_preserves_bears() {
-    feldon_mycoloth_entry_order(false, false);
+    feldon_mycoloth_entry_order(false, false, false);
 }
 
 #[test]
 fn mycoloth_empty_devour_settles_before_moonlight_redirects_its_feldon_copy() {
-    feldon_mycoloth_entry_order(true, false);
+    feldon_mycoloth_entry_order(false, true, false);
+}
+
+/// CR 707.5 + CR 616.1e–f: Metamorph's selected copy adds Devour to the same entry.
+#[test]
+fn metamorph_mycoloth_acquired_devour_sacrifices_before_moonlight() {
+    feldon_mycoloth_entry_order(true, true, true);
+}
+
+#[test]
+fn metamorph_mycoloth_acquired_devour_is_skipped_when_moonlight_is_first() {
+    feldon_mycoloth_entry_order(true, false, false);
 }
 
 /// CR 702.82a + CR 616.1f: Devour counters belong only to the entrant that earned

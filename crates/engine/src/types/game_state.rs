@@ -9595,6 +9595,8 @@ pub enum CopyEntryResumeStage {
     ChoiceSettled,
     /// The acquired choice paused before counter evaluation.
     BeforeCounters(Box<CopyEntryPendingCounters>),
+    /// The liminal proposal settled the copied replacements before entering.
+    ReplacementsSettled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -9769,6 +9769,51 @@ fn legacy_object_replacement_candidates(
     legacy_object_replacement_candidates_on_entry_board(state, event, registry, None)
 }
 
+/// CR 614.5 + CR 707.5: a staged copy keeps superseded definitions only to
+/// reserve their indices on the current event. Only the new body can apply.
+pub(super) fn liminal_entry_replacements(
+    entry: &crate::types::game_state::LiminalEntry,
+) -> impl Iterator<Item = (usize, &ReplacementDefinition)> {
+    let object = entry.object.projected();
+    let definitions = &object.replacement_definitions;
+    let superseded = if entry.copy_settlement.is_some() {
+        definitions
+            .len()
+            .saturating_sub(object.base_replacement_definitions.len())
+    } else {
+        0
+    };
+    definitions.iter_all().enumerate().skip(superseded)
+}
+
+fn liminal_entry_replacement_candidates<'a>(
+    state: &'a GameState,
+    event: &'a ProposedEvent,
+    registry: &'a IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    entry_board: Option<&'a GameState>,
+) -> impl Iterator<Item = ReplacementId> + 'a {
+    liminal_entry_ref(event)
+        .and_then(|source| {
+            state
+                .liminal_entries
+                .get(&source)
+                .map(|entry| (source, entry))
+        })
+        .into_iter()
+        .flat_map(|(source, entry)| {
+            liminal_entry_replacements(entry).map(move |(index, _)| ReplacementId { source, index })
+        })
+        .filter(move |&rid| {
+            object_replacement_candidate_applies_on_entry_board(
+                state,
+                event,
+                registry,
+                rid,
+                entry_board,
+            )
+        })
+}
+
 fn legacy_object_replacement_candidates_on_entry_board(
     state: &GameState,
     event: &ProposedEvent,
@@ -9797,32 +9842,12 @@ fn legacy_object_replacement_candidates_on_entry_board(
             .then_some(rid)
         })
         .collect();
-    if let Some(entry_ref) = liminal_entry_ref(event) {
-        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
-            candidates.extend(
-                entry
-                    .object
-                    .projected()
-                    .replacement_definitions
-                    .iter_all()
-                    .enumerate()
-                    .filter_map(|(index, _)| {
-                        let rid = ReplacementId {
-                            source: entry_ref,
-                            index,
-                        };
-                        object_replacement_candidate_applies_on_entry_board(
-                            state,
-                            event,
-                            registry,
-                            rid,
-                            entry_board,
-                        )
-                        .then_some(rid)
-                    }),
-            );
-        }
-    }
+    candidates.extend(liminal_entry_replacement_candidates(
+        state,
+        event,
+        registry,
+        entry_board,
+    ));
     candidates
 }
 
@@ -9875,32 +9900,12 @@ fn indexed_object_replacement_candidates_from_index_on_entry_board(
         })
         .collect();
 
-    if let Some(entry_ref) = liminal_entry_ref(event) {
-        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
-            candidates.extend(
-                entry
-                    .object
-                    .projected()
-                    .replacement_definitions
-                    .iter_all()
-                    .enumerate()
-                    .filter_map(|(index, _)| {
-                        let rid = ReplacementId {
-                            source: entry_ref,
-                            index,
-                        };
-                        object_replacement_candidate_applies_on_entry_board(
-                            state,
-                            event,
-                            registry,
-                            rid,
-                            entry_board,
-                        )
-                        .then_some(rid)
-                    }),
-            );
-        }
-    }
+    candidates.extend(liminal_entry_replacement_candidates(
+        state,
+        event,
+        registry,
+        entry_board,
+    ));
 
     candidates
 }
@@ -15365,41 +15370,35 @@ pub(crate) fn token_entry_awaits_own_entry_settlement(
         return false;
     };
     state.liminal_entries.get(entry_ref).is_some_and(|entry| {
-        entry
-            .object
-            .projected()
-            .replacement_definitions
-            .iter_all()
-            .enumerate()
-            .any(|(index, def)| {
-                let rid = ReplacementId {
-                    source: *entry_ref,
-                    index,
-                };
-                if !proposed.already_applied(&rid)
-                    || !drain
-                        .applied
-                        .contains(&AppliedReplacementKey::for_event(proposed, rid))
-                {
-                    return false;
+        liminal_entry_replacements(entry).any(|(index, def)| {
+            let rid = ReplacementId {
+                source: *entry_ref,
+                index,
+            };
+            if !proposed.already_applied(&rid)
+                || !drain
+                    .applied
+                    .contains(&AppliedReplacementKey::for_event(proposed, rid))
+            {
+                return false;
+            }
+            match drain.ready_continuation() {
+                Some(PostReplacementContinuation::Template(work)) => {
+                    [def.execute.as_deref(), replacement_mode_decline(&def.mode)]
+                        .into_iter()
+                        .flatten()
+                        .any(|ability| {
+                            ability == work.as_ref()
+                                || EventModifiers::first_non_modifier_ability(Some(ability))
+                                    == Some(work.as_ref())
+                        })
                 }
-                match drain.ready_continuation() {
-                    Some(PostReplacementContinuation::Template(work)) => {
-                        [def.execute.as_deref(), replacement_mode_decline(&def.mode)]
-                            .into_iter()
-                            .flatten()
-                            .any(|ability| {
-                                ability == work.as_ref()
-                                    || EventModifiers::first_non_modifier_ability(Some(ability))
-                                        == Some(work.as_ref())
-                            })
-                    }
-                    Some(PostReplacementContinuation::Resolved(work)) => {
-                        state.replacement_rider(def) == Some(work.as_ref())
-                    }
-                    None => false,
+                Some(PostReplacementContinuation::Resolved(work)) => {
+                    state.replacement_rider(def) == Some(work.as_ref())
                 }
-            })
+                None => false,
+            }
+        })
     })
 }
 
@@ -15434,9 +15433,7 @@ fn pipeline_loop(
             break;
         }
 
-        // CR 614.12 + CR 616.1f: finish the selected entrant's own replacement
-        // before rediscovery. Copy work retains its special settlement authority;
-        // ordinary work rediscoveries converge through the shared entry finisher.
+        // CR 614.12 + CR 616.1f: finish selected own-entry work before rediscovery.
         if token_entry_awaits_own_entry_settlement(state, &proposed) {
             break;
         }

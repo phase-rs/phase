@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CopyEntryResumeStage gains ReplacementsSettled: a liminal token entrant whose chosen as-enters copy was settled through the entry replacement pipeline (including acquired replacements) resumes without repeating copied entry payments; an older build cannot read the new stage and would fail to resume such a state."
+}
