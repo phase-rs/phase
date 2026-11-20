@@ -10456,8 +10456,8 @@ fn is_sentinel_tracked_set(target: &TargetFilter) -> bool {
 }
 
 /// CR 607.2a + CR 607.3 + CR 400.7: the whole linked set moves together. Lowers a sentinel
-/// `ChangeZone` / `ChangeZoneAll` to the set-wide move over `bound`; any other shape is
-/// not a linked-exile return and yields `None`.
+/// `ChangeZone` / `ChangeZoneAll` to the set-wide move over `bound`; any other shape
+/// (no sentinel, or not a zone move) keeps its binding and yields `None`.
 fn lower_set_wide_zone_move(effect: &mut Effect, bound: TargetFilter) -> Option<Effect> {
     match effect {
         Effect::ChangeZone {

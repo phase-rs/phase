@@ -1112,11 +1112,13 @@ pub(crate) fn tracked_set_split_components(
 /// `SetTapState` into `Tap`/`Untap`).
 ///
 /// An unlisted effect may still publish a set through the generic event seam
-/// (`publish_tracked_set_for_resolution`). It never stamps a zone-transition cause, so
-/// `finding_admitted`'s veto rejects any set it contributes to
-/// (`u7_an_unstamped_member_vetoes_the_finding`): the count is never undercounted toward a
-/// wrong finding. The match is exhaustive, so a new `Effect` variant must be classified
-/// here.
+/// (`publish_tracked_set_for_resolution`). It stamps no zone-transition cause, and
+/// `stamp_member_causes` writes nothing for a member without a cause. So a member that only
+/// an unlisted effect contributed carries no stamp, and `finding_admitted`'s veto rejects
+/// the set (`u7_an_unstamped_member_vetoes_the_finding`). A member it re-publishes keeps the
+/// stamp the listed publisher wrote, which still names the action that produced that
+/// member, so the finding the veto admits is unchanged. The match is exhaustive, so a new
+/// `Effect` variant must be classified here.
 fn is_census_publisher(effect: &Effect) -> bool {
     match effect {
         Effect::Destroy { .. }
