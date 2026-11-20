@@ -587,6 +587,24 @@ pub struct ControlledPermanentsConjunct {
     pub source_scope: SourceExclusion,
 }
 
+/// CR 205.2a + CR 110.1: the plural core-type noun that heads a bare plural
+/// permanent population ("creatures", "lands", ..., "permanents"). `None` is the
+/// bare "permanents" (no card-type restriction). Matches the noun only, with no
+/// word-boundary check: callers that need one compose it themselves. Shared by
+/// `parse_controlled_permanents_conjunct` and the counter-removal population
+/// classifier, so the plural-noun list lives in one place.
+pub fn parse_plural_core_type_noun(input: &str) -> OracleResult<'_, Option<CoreType>> {
+    alt((
+        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+        value(Some(CoreType::Creature), tag("creatures")),
+        value(Some(CoreType::Artifact), tag("artifacts")),
+        value(Some(CoreType::Enchantment), tag("enchantments")),
+        value(Some(CoreType::Land), tag("lands")),
+        value(None, tag("permanents")),
+    ))
+    .parse(input)
+}
+
 /// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the controlled-permanent noun
 /// phrase that follows "…to you and " in a compound damage recipient.
 ///
@@ -618,14 +636,7 @@ pub fn parse_controlled_permanents_conjunct(
             (
                 opt(tag("one or more ")),
                 opt(tag("other ")),
-                alt((
-                    value(Some(CoreType::Planeswalker), tag("planeswalkers")),
-                    value(Some(CoreType::Creature), tag("creatures")),
-                    value(Some(CoreType::Artifact), tag("artifacts")),
-                    value(Some(CoreType::Enchantment), tag("enchantments")),
-                    value(Some(CoreType::Land), tag("lands")),
-                    value(None, tag("permanents")),
-                )),
+                parse_plural_core_type_noun,
             ),
             |(_, other, permanent_type)| {
                 (

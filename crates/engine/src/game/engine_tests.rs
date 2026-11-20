@@ -17,6 +17,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::format::FormatConfig;
+use crate::types::game_state::PostReplacementDrainStack;
 use crate::types::game_state::{
     ActionResult, CastPaymentMode, CastingVariant, PendingCast, ProductionOverride,
     TargetSelectionProgress, WaitingFor,
@@ -83,6 +84,7 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
 fn restored_automation_log_entry(seq: u32) -> GameLogEntry {
     GameLogEntry {
         seq,
+        game_number: 1,
         turn: 1,
         phase: Phase::PreCombatMain,
         category: LogCategory::Stack,
@@ -237,6 +239,7 @@ fn cards_revealed_events_are_remembered_publicly() {
         player: PlayerId(1),
         card_ids: vec![card_id],
         card_names: vec!["Known Card".to_string()],
+        occurrences: state.disclosed_occurrences(&[card_id]),
     }];
     let pre_state = state.clone();
 
@@ -3002,6 +3005,7 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -3846,7 +3850,12 @@ fn elimination_restores_session_baseline_before_departing_preferences_are_cleane
     });
 
     let mut events = Vec::new();
-    crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+    crate::game::elimination::eliminate_player(
+        &mut state,
+        PlayerId(0),
+        crate::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(state.stack_resolution_session.is_none());
     assert!(
@@ -5563,29 +5572,51 @@ fn start_game_counts_the_starting_players_first_turn() {
     assert_eq!(state.players[0].turns_taken, 1);
 }
 
+/// CR 103.1: `start_game` ends at the choice; the chooser's answer starts
+/// the game.
 #[test]
-fn start_game_emits_game_started_event() {
+fn start_game_ends_at_the_choice_and_the_answer_starts_the_game() {
     let mut state = new_game(42);
     let result = start_game(&mut state);
 
-    assert!(result
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameStarted)));
+    let WaitingFor::ChooseStartingPlayer {
+        player: chooser, ..
+    } = state.waiting_for
+    else {
+        panic!("the start rests at the CR 103.1 choice");
+    };
+
+    let answer = apply(
+        &mut state,
+        chooser,
+        GameAction::ChooseStartingPlayer { player: chooser },
+    )
+    .expect("the chooser elects to play first");
+    assert!(answer
         .events
         .iter()
         .any(|e| matches!(e, GameEvent::GameStarted)));
 }
 
-// CR 103.1: Regression — `start_game` must randomize the starting player for
-// all match types, not just Bo3. Previously gated on `match_type == Bo3`, which
+// CR 103.1: Regression — `start_game` must randomize the chooser for all
+// match types, not just Bo3. Previously gated on `match_type == Bo3`, which
 // caused every Bo1 (default) game to begin with PlayerId(0).
 #[test]
-fn start_game_randomizes_starting_player_for_default_match_type() {
+fn start_game_randomizes_the_chooser_for_default_match_type() {
     let mut saw_p0 = false;
     let mut saw_p1 = false;
 
     for seed in 0..64u64 {
         let mut state = new_game(seed);
         let _ = start_game(&mut state);
-        match state.current_starting_player {
+        let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+            panic!("the start rests at the CR 103.1 choice");
+        };
+        match player {
             PlayerId(0) => saw_p0 = true,
             PlayerId(1) => saw_p1 = true,
             _ => unreachable!("two-player game can only produce PlayerId(0) or PlayerId(1)"),
@@ -6774,32 +6805,8 @@ fn inline_taps_for_mana_overrides_bind_each_live_trigger_occurrence() {
     let events_before = events.len();
     casting_costs::auto_tap_mana_sources(&mut state, PlayerId(0), &cost, &mut events, None);
 
-    assert_eq!(
-        state.pending_taps_for_mana_overrides.len(),
-        3,
-        "the plan must retain one override per qualifying live occurrence"
-    );
-    let planned_colors = state
-        .pending_taps_for_mana_overrides
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Green)));
-    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Blue)));
-    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Black)));
-    assert!(
-        state
-            .pending_taps_for_mana_overrides
-            .keys()
-            .filter(|definition_ref| definition_ref.source.object_id == duplicate_source)
-            .count()
-            == 2,
-        "the two byte-identical duplicate-source occurrences must retain separate overrides"
-    );
-
+    assert!(state.pending_taps_for_mana_overrides.is_empty());
     let stack_before = state.stack.len();
-    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
-
     assert_eq!(state.players[0].mana_pool.total(), 4);
     assert_eq!(
         state.players[0].mana_pool.count_color(ManaType::Green),
@@ -6822,6 +6829,37 @@ fn inline_taps_for_mana_overrides_bind_each_live_trigger_occurrence() {
         state.pending_taps_for_mana_overrides.is_empty(),
         "the synchronous inline-resolution tail must clear transient overrides"
     );
+    for (source, color, count) in [
+        (forest, ManaType::Green, 1),
+        (second_source, ManaType::Green, 1),
+        (duplicate_source, ManaType::Blue, 1),
+        (duplicate_source, ManaType::Black, 1),
+    ] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+            GameEvent::ManaAdded { source_id, mana_type, .. }
+                if *source_id == source && *mana_type == color))
+                .count(),
+            count
+        );
+    }
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::TappedForMana { source_id, tap_state: crate::types::events::ManaTapState::FromTapTriggersResolved, .. }
+            if *source_id == forest)).count(), 1);
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::ManaAbilityProduced { source_id, trigger_state: crate::types::events::ManaAbilityTriggerState::InlineResolved, .. }
+            if *source_id == forest)).count(), 1);
+    let pool_before = state.players[0].mana_pool.clone();
+    let events_completed = events.clone();
+    for _ in 0..2 {
+        super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
+        assert_eq!(state.players[0].mana_pool, pool_before);
+        assert_eq!(events, events_completed);
+        assert_eq!(state.stack.len(), stack_before);
+        assert!(state.pending_taps_for_mana_overrides.is_empty());
+    }
 }
 
 #[test]
@@ -8081,8 +8119,8 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
 ///
 /// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
 /// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
-/// builds its eligible pool via `FilterContext::from_ability` (source excluded
-/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+/// builds its eligible pool via `FilterContext::from_ability` (no recipient
+/// bound, so `FilterProp::Another` excludes the source).
 ///
 /// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
 /// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets
@@ -9288,6 +9326,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     // `derived` requires the two storage sites to agree. Reproduce that
     // precondition here so the synthetic state matches engine reality.
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
+        alternative_cost_keyword: None,
         object_id: ObjectId(0),
         card_id: CardId(0),
         ability: Box::new(crate::types::ability::ResolvedAbility::new(
@@ -9307,8 +9346,10 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
+        deferred_life_gain_cost: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -9335,6 +9376,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         convoked_creatures: Vec::new(),
         delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
+        deferred_tapped_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
@@ -9738,6 +9780,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
     // Mirror the production precondition: ManaPayment is only entered with
     // `pending_cast` populated (see the drift invariant in `derived`).
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
+        alternative_cost_keyword: None,
         object_id: ObjectId(0),
         card_id: CardId(0),
         ability: Box::new(crate::types::ability::ResolvedAbility::new(
@@ -9757,8 +9800,10 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
+        activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
+        deferred_life_gain_cost: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -9785,6 +9830,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         convoked_creatures: Vec::new(),
         delved_cards: Vec::new(),
         deferred_sacrificed_permanents: Vec::new(),
+        deferred_tapped_permanents: Vec::new(),
         pinned_pool_units: Vec::new(),
         cancel_restore_prepared_source: None,
         payment_mode: crate::types::game_state::CastPaymentMode::Auto,
@@ -11749,6 +11795,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
@@ -12634,6 +12681,11 @@ fn fodder_multiset_frames(
 /// cannot red it); **A-2b** delete the `intrinsic_copiable_values` conjunct ⇒ the
 /// `base_card_types`-differing pair returns `Some((class, 2))`; **A-2c** delete the `.then_some`
 /// reconciliation ⇒ the torn frame returns `Some((class, 1))`. Each ⇒ FAILS.
+///
+/// The double-faced conjunct's rows: A-1b here, and A-2d / A-2e / A-2f in the sibling tests
+/// below. **A-2d/A-2e/A-2f** delete the double-faced conjunct ⇒ `Some((class, 2))`; **A-2f**
+/// checking only the representative ⇒ the second-member order returns `Some`; **A-1b** a raw
+/// `back_face.is_some()` conjunct ⇒ `None`.
 #[test]
 fn derived_fodder_class_is_one_class_multiset_gate() {
     // A-1 (positive) — a homogeneous k=2 period classifies AND reports k.
@@ -12748,6 +12800,390 @@ fn derived_fodder_class_is_one_class_multiset_gate() {
         derived_fodder_class(&torn_before, &torn_after).is_none(),
         "A-2c: a torn frame is refused, not under-counted (delete the `.then_some` \
          reconciliation and this returns Some((class, 1)))"
+    );
+
+    // A-1b (positive, stored-face axis) — token copies of a Room and of a preparation creature
+    // carry their stored face as a copiable value (CR 709.5b, CR 722.2b), and the mint writes it
+    // into every token it makes, so the class is admitted although every member has a
+    // `back_face`. Sources: Bottomless Pool // Locker Room ("Enchantment — Room") and Adventurous
+    // Eater // Have a Bite (a Human Warlock 3/2 whose prepare spell is a sorcery). Each source is
+    // in `before`; `after` mints two copies of one source through the production fodder mint.
+    let mut stored_face_before = GameState::new_two_player(7);
+    let room = create_object(
+        &mut stored_face_before,
+        CardId(5),
+        PlayerId(0),
+        "Bottomless Pool".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = stored_face_before
+            .objects
+            .get_mut(&room)
+            .expect("the Room source exists");
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Room".to_string()],
+        };
+        obj.base_card_types = obj.card_types.clone();
+        obj.back_face = Some(BackFaceData {
+            name: "Locker Room".to_string(),
+            card_types: obj.card_types.clone(),
+            layout_kind: Some(crate::types::card::LayoutKind::Split),
+            ..Default::default()
+        });
+    }
+    let prepare = create_object(
+        &mut stored_face_before,
+        CardId(6),
+        PlayerId(0),
+        "Adventurous Eater".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = stored_face_before
+            .objects
+            .get_mut(&prepare)
+            .expect("the preparation source exists");
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Human".to_string(), "Warlock".to_string()],
+        };
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(3);
+        obj.toughness = Some(2);
+        obj.base_power = Some(3);
+        obj.base_toughness = Some(2);
+        obj.back_face = Some(BackFaceData {
+            name: "Have a Bite".to_string(),
+            card_types: CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Sorcery],
+                subtypes: vec![],
+            },
+            layout_kind: Some(crate::types::card::LayoutKind::Prepare),
+            ..Default::default()
+        });
+    }
+    let copies_of = |source: ObjectId| {
+        let mut after = stored_face_before.clone();
+        let profile =
+            crate::game::printed_cards::intrinsic_copiable_values(&after.objects[&source]);
+        for _ in 0..2 {
+            let mut result = ActionResult::applied(vec![], after.waiting_for.clone());
+            seed_representative_fodder(&mut after, &mut result, PlayerId(0), &profile, false);
+        }
+        let minted = minted_battlefield_ids(&stored_face_before, &after);
+        assert_eq!(
+            minted.len(),
+            2,
+            "A-1b reach-guard: the mint made two copies"
+        );
+        for id in &minted {
+            let member = &after.objects[id];
+            assert!(
+                member.back_face.is_some(),
+                "A-1b reach-guard: the copy carries the stored face, so a raw \
+                 `back_face.is_some()` conjunct would refuse the class"
+            );
+            assert!(
+                crate::game::transform::stored_double_face(member).is_none(),
+                "A-1b reach-guard: the stored face is not an other face"
+            );
+        }
+        derived_fodder_class(&stored_face_before, &after).map(|(_, k)| k)
+    };
+    let (room_class, prepare_class) = (copies_of(room), copies_of(prepare));
+    assert!(
+        room_class == Some(2) && prepare_class == Some(2),
+        "A-1b: Room-copy and prepare-copy classes are admitted with k == 2 (a raw \
+         `back_face.is_some()` conjunct refuses both; dropping the Room gate refuses the Room \
+         class); got Room {room_class:?}, prepare {prepare_class:?}"
+    );
+}
+
+/// One Incubator token from the production `incubate::resolve` (`Effect::Incubate`, the effect
+/// Blighted Burgeoning's "incubate 2" resolves to), then `turn` on it, then a full layer flush.
+/// Returns the new Incubator's id.
+fn add_incubator(
+    state: &mut GameState,
+    count: i32,
+    turn: &impl Fn(&mut GameState, ObjectId),
+) -> ObjectId {
+    let earlier: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+    let mut events = Vec::new();
+    crate::game::effects::incubate::resolve(
+        state,
+        &ResolvedAbility::new(
+            Effect::Incubate {
+                count: QuantityExpr::Fixed { value: count },
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        ),
+        &mut events,
+    )
+    .expect("incubate resolves");
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+    let incubator = *state
+        .battlefield
+        .iter()
+        .find(|id| !earlier.contains(id))
+        .expect("incubate created an Incubator token");
+    turn(state, incubator);
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+    incubator
+}
+
+/// The `turn` that transforms an Incubator token, as its "{2}: Transform this token." does.
+fn transform_incubator(state: &mut GameState, incubator: ObjectId) {
+    let mut events = Vec::new();
+    crate::game::transform::transform_permanent(state, incubator, &mut events)
+        .expect("CR 111.10i: an Incubator token is a double-faced token and can transform");
+}
+
+/// Two Incubator tokens, each made by [`add_incubator`] with `count` +1/+1 counters and then
+/// `turn`, plus the `before` frame they are diffed against. The Incubator counterpart of
+/// [`fodder_multiset_frames`], with the same reach guard.
+fn incubator_fodder_frames(
+    count: i32,
+    turn: impl Fn(&mut GameState, ObjectId),
+) -> (GameState, GameState) {
+    let before = GameState::new_two_player(7);
+    let mut after = before.clone();
+    add_incubator(&mut after, count, &turn);
+    add_incubator(&mut after, count, &turn);
+    assert_eq!(
+        minted_battlefield_ids(&before, &after).len(),
+        2,
+        "reach-guard: the fixture must mint exactly two Incubator tokens"
+    );
+    (before, after)
+}
+
+/// Non-vacuity guard shared by the Incubator rows: the two minted members are equal under both
+/// pre-existing conjuncts, so only the double-faced conjunct can refuse them.
+fn assert_only_the_double_faced_conjunct_can_refuse(
+    row: &str,
+    before: &GameState,
+    after: &GameState,
+) {
+    let minted = minted_battlefield_ids(before, after);
+    let (a, b) = (&after.objects[&minted[0]], &after.objects[&minted[1]]);
+    assert!(
+        crate::analysis::resource::fodder_content_eq(a, b)
+            && crate::game::printed_cards::intrinsic_copiable_values(a)
+                == crate::game::printed_cards::intrinsic_copiable_values(b),
+        "{row} non-vacuity: the members are equal under `fodder_content_eq` and \
+         `intrinsic_copiable_values`"
+    );
+}
+
+/// A-2d, CR 732.2a + CR 111.10i + CR 712.8e: a class of transformed Incubator tokens is refused.
+/// Each member shows its Phyrexian face and stores its Incubator face in `back_face`; the mint
+/// copies only the Phyrexian face's values, so a minted token would be a single-faced 0/0 with
+/// no Incubator face, which is not what performing the loop yields. Nearest printed board:
+/// Blighted Burgeoning's "incubate 2", each token transformed by its own "{2}: Transform this
+/// token."
+///
+/// Revert-failing: delete the double-faced conjunct ⇒ `Some((class, 2))`.
+#[test]
+fn derived_fodder_class_refuses_transformed_incubator_tokens() {
+    let (before, after) = incubator_fodder_frames(2, transform_incubator);
+    for id in minted_battlefield_ids(&before, &after) {
+        let member = &after.objects[&id];
+        assert!(
+            member.transformed,
+            "A-2d reach-guard: the member transformed"
+        );
+        assert_eq!(
+            member.back_face.as_ref().map(|face| face.name.as_str()),
+            Some("Incubator"),
+            "A-2d reach-guard: the stored face is the Incubator face"
+        );
+        assert!(
+            crate::game::transform::stored_double_face(member).is_some(),
+            "A-2d reach-guard: the member is double-faced"
+        );
+    }
+    assert_only_the_double_faced_conjunct_can_refuse("A-2d", &before, &after);
+    let derived = derived_fodder_class(&before, &after).map(|(_, k)| k);
+    assert!(
+        derived.is_none(),
+        "A-2d: transformed Incubator tokens are not a fodder class the mint can reproduce; got \
+         {derived:?}"
+    );
+}
+
+/// A-2e, the deliberate over-refusal recorded in `derived_fodder_class`'s doc: a class of
+/// front-face-up Incubator tokens is refused too, although the predefined-token payload gives
+/// each minted Incubator the same Phyrexian back face. The gate does not ask which mint source
+/// supplies a face; refusing only leaves the loop to be played out (CR 732.2a). Nearest printed
+/// board: Blighted Burgeoning's "incubate 2".
+///
+/// Revert-failing: delete the double-faced conjunct ⇒ `Some((class, 2))`.
+#[test]
+fn derived_fodder_class_refuses_front_face_up_incubator_tokens() {
+    let (before, after) = incubator_fodder_frames(2, |_, _| {});
+    for id in minted_battlefield_ids(&before, &after) {
+        let member = &after.objects[&id];
+        assert!(
+            !member.transformed,
+            "A-2e reach-guard: the member is front face up"
+        );
+        assert_eq!(
+            member.back_face.as_ref().map(|face| face.name.as_str()),
+            Some("Phyrexian Token"),
+            "A-2e reach-guard: the stored face is the Phyrexian face"
+        );
+        assert!(
+            crate::game::transform::stored_double_face(member).is_some(),
+            "A-2e reach-guard: the member is double-faced"
+        );
+    }
+    assert_only_the_double_faced_conjunct_can_refuse("A-2e", &before, &after);
+    let derived = derived_fodder_class(&before, &after).map(|(_, k)| k);
+    assert!(
+        derived.is_none(),
+        "A-2e: a front-face-up Incubator class is refused (the documented fail-closed choice); \
+         got {derived:?}"
+    );
+}
+
+/// A-2f, the "any member" quantifier: `object_content_eq` does not compare `back_face`, so a
+/// pair that differs only in one member's stored other face passes both pre-existing
+/// conjuncts. The face is placed once on the representative and once on the second member.
+/// Synthetic shape: no board at this base gives two members that differ only in `back_face`;
+/// the nearest printed shape is a double-faced token copy of Kessig Prowler // Sinuous Predator
+/// beside a single-faced token with the same front face.
+///
+/// Revert-failing: check only the representative ⇒ the second-member order returns
+/// `Some((class, 2))`; delete the double-faced conjunct ⇒ both orders return `Some`.
+#[test]
+fn derived_fodder_class_refuses_a_double_faced_member_in_either_position() {
+    let verdict_with_face_on = |on_representative: bool| {
+        let (before, after) = fodder_multiset_frames(|state, a, b| {
+            let target = if on_representative { a } else { b };
+            state
+                .objects
+                .get_mut(&target)
+                .expect("fixture member exists")
+                .back_face = Some(BackFaceData {
+                name: "Sinuous Predator".to_string(),
+                layout_kind: Some(crate::types::card::LayoutKind::Transform),
+                ..Default::default()
+            });
+        });
+        let row = if on_representative {
+            "A-2f (representative)"
+        } else {
+            "A-2f (second member)"
+        };
+        let minted = minted_battlefield_ids(&before, &after);
+        let faced = minted
+            .iter()
+            .filter(|id| crate::game::transform::stored_double_face(&after.objects[id]).is_some())
+            .count();
+        assert_eq!(
+            faced, 1,
+            "{row} reach-guard: exactly one member is double-faced"
+        );
+        assert_eq!(
+            after.objects[&minted[0]].back_face.is_some(),
+            on_representative,
+            "{row} reach-guard: the face is on the intended member"
+        );
+        assert_only_the_double_faced_conjunct_can_refuse(row, &before, &after);
+        derived_fodder_class(&before, &after).map(|(_, k)| k)
+    };
+    let (on_representative, on_second) = (verdict_with_face_on(true), verdict_with_face_on(false));
+    assert!(
+        on_representative.is_none() && on_second.is_none(),
+        "A-2f: a double-faced member refuses the class in either position; got representative \
+         {on_representative:?}, second member {on_second:?}"
+    );
+}
+
+/// V2, CR 732.2a at the offer: a period that mints one counterless transformed Incubator token
+/// no longer certifies through the fodder-growth cover, which the base admitted. Each member has
+/// no counters and no abilities, so the cover's inertness check passes it, and only the
+/// double-faced conjunct routes the period to the no-mint cover. The frames are composed without
+/// a state-based-action check; in play the 0/0 members need an anthem such as Sculpted
+/// Perfection ("Phyrexians you control get +1/+1."), and the nearest printed producer is Chrome
+/// Host Seedshark ("Whenever you cast a noncreature spell, incubate X, where X is that spell's
+/// mana value.") with a mana-value-0 noncreature spell such as Lotus Petal.
+///
+/// Positive control in the same test: the same three frames over Saproling tokens certify.
+///
+/// Revert-failing: delete the double-faced conjunct ⇒ the Incubator frames certify
+/// (`FodderGrowth`).
+#[test]
+fn object_growth_offer_refuses_counterless_transformed_incubator_tokens() {
+    fn frames(add: impl Fn(&mut GameState)) -> [GameState; 3] {
+        let s0 = GameState::new_two_player(7);
+        let mut s1 = s0.clone();
+        add(&mut s1);
+        let mut s2 = s1.clone();
+        add(&mut s2);
+        [s0, s1, s2]
+    }
+
+    let [s0, s1, s2] = frames(|state| {
+        let id = create_object(
+            state,
+            CardId(0),
+            PlayerId(0),
+            "Saproling".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("the Saproling exists");
+        obj.is_token = true;
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Saproling".to_string()],
+        };
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        obj.base_power = Some(1);
+        obj.base_toughness = Some(1);
+    });
+    let saprolings = certify_object_growth_frames_for_tests([&s0, &s1, &s2], &[], PlayerId(0));
+    assert!(
+        saprolings.certifies(),
+        "positive control: a Saproling period certifies; got {saprolings:?}"
+    );
+
+    let [s0, s1, s2] = frames(|state| {
+        add_incubator(state, 0, &transform_incubator);
+    });
+    let minted = minted_battlefield_ids(&s0, &s1);
+    assert_eq!(minted.len(), 1, "reach-guard: the period mints one token");
+    let member = &s1.objects[&minted[0]];
+    assert!(
+        member.transformed
+            && member.counters.is_empty()
+            && crate::game::transform::stored_double_face(member).is_some(),
+        "reach-guard: the member is a counterless transformed Incubator token"
+    );
+    let incubators = certify_object_growth_frames_for_tests([&s0, &s1, &s2], &[], PlayerId(0));
+    assert!(
+        !incubators.certifies(),
+        "V2: a counterless transformed Incubator period is not offered as a shortcut; got \
+         {incubators:?}"
+    );
+    // V5: the one-member (k == 1) class is refused, which is what routes the period away from
+    // the fodder-growth cover.
+    let one_member = derived_fodder_class(&s0, &s1).map(|(_, k)| k);
+    assert!(
+        one_member.is_none(),
+        "V5: a lone transformed Incubator token is not a fodder class; got {one_member:?}"
     );
 }
 
@@ -13260,6 +13696,7 @@ fn elide_middle_repetitions_keeps_the_ends_and_each_departure_between() {
     };
     let lost = |seat| GameEvent::PlayerLost {
         player_id: PlayerId(seat),
+        reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::LifeTotal]),
     };
     let left = |seat| GameEvent::PlayerEliminated {
         player_id: PlayerId(seat),
@@ -13440,4 +13877,162 @@ fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_a
         !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
         "CR 101.2: a \"can't play lands\" static refuses the land face"
     );
+}
+
+/// CR 104.1 + CR 118.12: a finished game retires the staged payment before the
+/// match transition moves to sideboarding.
+#[test]
+fn a_finished_match_retires_the_payment_before_the_transition() {
+    use crate::types::game_state::{GameEnd, ResolutionPaymentTransaction};
+    use crate::types::match_config::MatchType;
+
+    let mut state = GameState::new_two_player(7);
+    state.match_config.match_type = MatchType::Bo3;
+    state.waiting_for = WaitingFor::GameOver { winner: Some(P0) };
+    state.game_end = Some(GameEnd { winner: Some(P0) });
+    state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+        wire_version: 1,
+        owner: P0,
+        root: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
+        transcript: Vec::new(),
+        base_waiting_for: WaitingFor::Priority { player: P0 },
+        resolving_trigger_context: None,
+        recovered: None,
+    }));
+    let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
+    super::settle_finished_game(&mut state, &mut result);
+    assert!(
+        state.payment_transaction.is_none(),
+        "the terminal transition sees no live payment descriptor"
+    );
+}
+
+/// Park a copy owner for `source` that already lists `created` and has no
+/// batch left to create.
+fn park_completed_copy_owner(state: &mut GameState, source: ObjectId, created: ObjectId) {
+    state
+        .resolution_stack
+        .push_copy_token(crate::types::game_state::PendingCopyTokenResolution {
+            created_ids: vec![created],
+            remaining: std::collections::VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: source,
+            referent_set: None,
+            offered_batch: crate::types::game_state::OfferedBatchCustody::Settled,
+        });
+}
+
+fn resolution_frame_kinds(state: &GameState) -> Vec<crate::types::resolution::FrameKind> {
+    state
+        .resolution_stack
+        .iter()
+        .map(ResolutionFrame::kind)
+        .collect()
+}
+
+/// The sources of every `EffectResolved{CopyTokenOf}`, in event order.
+fn copy_token_terminals(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::EffectResolved {
+                kind: EffectKind::CopyTokenOf,
+                source_id,
+                ..
+            } => Some(*source_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn battlefield_object(state: &mut GameState, name: &str) -> ObjectId {
+    create_object(
+        state,
+        CardId(1),
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    )
+}
+
+/// U-R1 (CR 117.2e + CR 614.6): a retired post-replacement drain exposes the
+/// copy owner whose creation it replaced. That ability is still resolving, so
+/// the common priority boundary completes the owner in the same call.
+#[test]
+fn priority_boundary_completes_a_copy_owner_a_retired_drain_exposes() {
+    use crate::types::resolution::FrameKind;
+
+    let mut state = GameState::new_two_player(42);
+    let src = battlefield_object(&mut state, "Producer");
+    let a = battlefield_object(&mut state, "Token A");
+    park_completed_copy_owner(&mut state, src, a);
+    state
+        .resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    assert_eq!(
+        resolution_frame_kinds(&state),
+        vec![FrameKind::CopyToken, FrameKind::PostReplacement],
+        "REACH-GUARD: an exhausted drain over the parked copy owner"
+    );
+
+    let mut events = Vec::new();
+    resume_pending_continuation_if_priority(&mut state, &mut events)
+        .expect("the priority boundary resumes");
+
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the exposed owner completes before priority, frames {:?}",
+        resolution_frame_kinds(&state)
+    );
+    assert_eq!(state.last_created_token_ids, vec![a]);
+    assert_eq!(copy_token_terminals(&events), vec![src]);
+}
+
+/// U-R2 (CR 117.2e + CR 614.6): a copy owner over an exhausted drain over the
+/// outer copy owner unwinds in one boundary call, inner owner first.
+#[test]
+fn priority_boundary_unwinds_a_nested_copy_owner_chain() {
+    use crate::types::resolution::FrameKind;
+
+    let mut state = GameState::new_two_player(42);
+    let src_a = battlefield_object(&mut state, "Outer producer");
+    let a = battlefield_object(&mut state, "Token A");
+    let src_b = battlefield_object(&mut state, "Inner producer");
+    let b = battlefield_object(&mut state, "Token B");
+    park_completed_copy_owner(&mut state, src_a, a);
+    state
+        .resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    park_completed_copy_owner(&mut state, src_b, b);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    assert_eq!(
+        resolution_frame_kinds(&state),
+        vec![
+            FrameKind::CopyToken,
+            FrameKind::PostReplacement,
+            FrameKind::CopyToken
+        ],
+        "REACH-GUARD: inner owner, exhausted drain, outer owner"
+    );
+
+    let mut events = Vec::new();
+    resume_pending_continuation_if_priority(&mut state, &mut events)
+        .expect("the priority boundary resumes");
+
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the whole chain completes before priority, frames {:?}",
+        resolution_frame_kinds(&state)
+    );
+    assert_eq!(
+        copy_token_terminals(&events),
+        vec![src_b, src_a],
+        "the inner owner completes before the outer one"
+    );
+    assert_eq!(state.last_created_token_ids, vec![a]);
 }

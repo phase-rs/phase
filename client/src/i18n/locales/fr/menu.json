@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Reprendre la partie",
-      "description": "Continuez le dernier match enregistré à partir de son tour et de son état de plateau actuels."
+      "description": "Continuez le dernier match enregistré à partir de son tour et de son état de plateau actuels.",
+      "viewResult": "Voir le résultat"
     },
     "setup": {
       "title": "Jouer contre l'IA",

@@ -817,7 +817,7 @@ fn momir_emblem_creates_token_in_game_two_of_bo3() {
     state.match_config.match_type = MatchType::Bo3;
     let db = crate::support::install_synthetic_card_db(&mut state, &faces);
     load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
-    let _ = engine::game::engine::start_game(&mut state);
+    let _ = engine::game::engine::start_game_winner_plays_first(&mut state);
 
     let mut runner = GameRunner::from_state(state);
     runner

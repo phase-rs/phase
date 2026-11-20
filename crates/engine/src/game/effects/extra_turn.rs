@@ -22,6 +22,11 @@ pub fn resolve(
         ));
     };
 
+    // CR 603.7a + CR 608.2c: "that turn" names a turn this instruction grants,
+    // never one an earlier instruction granted; an instruction granting none
+    // (no player, count 0) leaves no antecedent.
+    state.last_granted_extra_turn_ids.clear();
+
     // CR 500.7: Resolve the target to a PlayerId.
     let Some(player) = super::resolve_player_for_context_ref(state, ability, target) else {
         return Ok(());
@@ -43,7 +48,8 @@ pub fn resolve(
     // CR 500.7: add multiple extra turns one at a time after the same specified turn.
     let anchor = state.active_player;
     for _ in 0..count {
-        crate::game::turns::enqueue_extra_turn(state, player, anchor, events);
+        let granted = crate::game::turns::enqueue_extra_turn(state, player, anchor, events);
+        state.last_granted_extra_turn_ids.push(granted);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -61,14 +67,27 @@ mod tests {
     use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetFilter, TargetRef};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::ExtraTurn;
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ExtraTurnId, ObjectId};
     use crate::types::player::PlayerId;
 
     fn et(player: u8, anchor: u8) -> ExtraTurn {
         ExtraTurn {
             player: PlayerId(player),
             anchor: PlayerId(anchor),
+            id: ExtraTurnId::default(),
         }
+    }
+
+    /// The queue with each minted identity erased, so a test about queue order
+    /// and recipients does not restate the allocator.
+    fn unminted(turns: &[ExtraTurn]) -> Vec<ExtraTurn> {
+        turns
+            .iter()
+            .map(|turn| ExtraTurn {
+                id: ExtraTurnId::default(),
+                ..turn.clone()
+            })
+            .collect()
     }
 
     fn make_ability_with_count(
@@ -77,6 +96,7 @@ mod tests {
         controller: PlayerId,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -102,6 +122,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -147,11 +168,13 @@ mod tests {
             target_reads: Default::default(),
             entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
@@ -168,7 +191,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![et(0, 0)]);
+        assert_eq!(unminted(&state.extra_turns), vec![et(0, 0)]);
         assert_eq!(
             events,
             vec![
@@ -205,7 +228,7 @@ mod tests {
         let ability_b = make_ability(TargetFilter::Controller, PlayerId(1));
         resolve(&mut state, &ability_b, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![et(0, 0), et(1, 0)]);
+        assert_eq!(unminted(&state.extra_turns), vec![et(0, 0), et(1, 0)]);
 
         // CR 500.7: Pop from end → most recent (Player B) first
         assert_eq!(state.extra_turns.pop().map(|e| e.player), Some(PlayerId(1)));
@@ -221,7 +244,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![et(1, 0)]);
+        assert_eq!(unminted(&state.extra_turns), vec![et(1, 0)]);
     }
 
     #[test]
@@ -236,7 +259,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(
-            state.extra_turns,
+            unminted(&state.extra_turns),
             vec![et(0, 2)],
             "CR 500.7: anchor is the specified (active) turn, not the beneficiary"
         );
@@ -255,7 +278,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![et(0, 0), et(0, 0)]);
+        assert_eq!(unminted(&state.extra_turns), vec![et(0, 0), et(0, 0)]);
         assert_eq!(
             events
                 .iter()
@@ -280,7 +303,10 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![et(0, 1), et(1, 2), et(1, 2)]);
+        assert_eq!(
+            unminted(&state.extra_turns),
+            vec![et(0, 1), et(1, 2), et(1, 2)]
+        );
         assert_eq!(
             events,
             vec![
@@ -311,6 +337,32 @@ mod tests {
             state.extra_turns.pop().map(|turn| turn.player),
             Some(PlayerId(0))
         );
+    }
+
+    /// CR 500.7 + CR 603.7a: each granted turn is minted a distinct nonzero
+    /// identity, and the resolution publishes exactly the ones it granted — a
+    /// later zero-count grant leaves no antecedent for "that turn".
+    #[test]
+    fn each_granted_turn_is_minted_and_published_for_that_turn() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 0);
+        let mut events = Vec::new();
+        let mut ability = make_ability_with_count(
+            TargetFilter::Controller,
+            QuantityExpr::Fixed { value: 2 },
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let queued: Vec<_> = state.extra_turns.iter().map(|turn| turn.id).collect();
+        assert_eq!(queued, vec![ExtraTurnId(1), ExtraTurnId(2)]);
+        assert_eq!(state.last_granted_extra_turn_ids, queued);
+
+        ability.effect = Effect::ExtraTurn {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 0 },
+        };
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.last_granted_extra_turn_ids.is_empty());
     }
 
     #[test]
@@ -351,7 +403,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![et(0, 0), et(0, 0)]);
+        assert_eq!(unminted(&state.extra_turns), vec![et(0, 0), et(0, 0)]);
         assert_eq!(
             events
                 .iter()
@@ -436,6 +488,6 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.extra_turns, vec![et(1, 0)]);
+        assert_eq!(unminted(&state.extra_turns), vec![et(1, 0)]);
     }
 }

@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Reanudar partida",
-      "description": "Continúa la última partida guardada desde su turno y estado del tablero actuales."
+      "description": "Continúa la última partida guardada desde su turno y estado del tablero actuales.",
+      "viewResult": "Ver resultado"
     },
     "setup": {
       "title": "Jugar contra la IA",

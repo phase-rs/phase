@@ -13,7 +13,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 
 use super::resolve_ability_chain;
 
@@ -28,6 +28,8 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
                 .unwrap_or(PlayerId(0)),
             object_id: explorer_id,
             counter_type: CounterType::Plus1Plus1,
+            // CR 614.16: explore's counter is placed by a resolving ability.
+            cause: CounterCause::ResolvingEffect,
         },
         count: 1,
         applied: HashSet::new(),
@@ -39,6 +41,7 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
                 actor,
                 object_id,
                 counter_type,
+                ..
             },
         count,
         ..
@@ -304,6 +307,7 @@ pub(crate) fn resolve_explore_effect(
         .unwrap_or_default();
     events.push(GameEvent::CardsRevealed {
         player: controller,
+        occurrences: state.disclosed_occurrences(&[top_card_id]),
         card_ids: vec![top_card_id],
         card_names: vec![revealed_name],
     });
@@ -328,7 +332,9 @@ pub(crate) fn resolve_explore_effect(
                 crate::types::zones::Zone::Hand,
                 ability.source_id,
             )
-            .performed_by(controller)],
+            .actors(crate::game::zone_pipeline::MoveActors::performer_and_owner(
+                controller,
+            ))],
             Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
             events,
         );
@@ -355,6 +361,9 @@ pub(crate) fn resolve_explore_effect(
             up_to: true,
             kept_destination: Some(crate::types::zones::Zone::Library),
             rest_destination: Some(crate::types::zones::Zone::Graveyard),
+            // CR 701.44a: the printed instruction names both dispositions, so
+            // this is a routed remainder, not a silent one.
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             // CR 701.44a: explore reveals exactly ONE card (the top card of the
             // library) and sends it to one place — hand, graveyard, or left on
             // top. A single card has no remainder to split.

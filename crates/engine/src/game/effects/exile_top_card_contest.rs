@@ -66,8 +66,9 @@ fn exile_round(
             // CR 614.6: route through the zone-change pipeline so exile
             // replacements apply. The library's owner performs "each player
             // exiles".
-            let request =
-                ZoneMoveRequest::effect(card, Zone::Exile, ability.source_id).performed_by(player);
+            let request = ZoneMoveRequest::effect(card, Zone::Exile, ability.source_id).actors(
+                crate::game::zone_pipeline::MoveActors::performer_and_owner(player),
+            );
             if track_exiled_by_source {
                 request.track_exiled_by_source()
             } else {

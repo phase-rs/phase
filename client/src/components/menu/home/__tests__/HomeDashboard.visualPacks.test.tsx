@@ -22,9 +22,11 @@ vi.mock("../../../../hooks/useResumables", () => ({
   useResumables: () => ({
     match: null,
     matchSummary: null,
+    retainedResult: null,
     quickDraft: null,
     pod: null,
     resumeMatch: vi.fn(),
+    viewRetainedResult: vi.fn(),
   }),
 }));
 vi.mock("../../../../stores/cardDataStore", () => ({

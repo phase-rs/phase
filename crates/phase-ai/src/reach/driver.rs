@@ -2,8 +2,8 @@
 //! whether the game ends in the AI's favour.
 //!
 //! The driver answers only the AI's own prompts for the line it is playing —
-//! aim every player target at the opponent, announce the X and pick the mode
-//! the line committed to — and passes priority for the opponent. Anything
+//! aim every player target at the opponent, announce the X, pick the mode and
+//! answer the casting-method menu the line committed to — and passes priority for the opponent. Anything
 //! else (an opponent's choice, an optional trigger, a payment prompt) stops the
 //! drive: a line the driver cannot finish on its own is not certified.
 //!
@@ -13,10 +13,11 @@
 //! cap after earlier steps, say) is never certified.
 
 use engine::ai_support::flat_priority_actions;
+use engine::game::casting::same_cast_option_but_instance;
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastingVariantChoiceOption, GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use super::{issued_counterpart, ActionAdmission, LineStep};
@@ -63,6 +64,7 @@ pub(super) fn drive(
     let mut next = 0;
     let mut mode = None;
     let mut x = None;
+    let mut option: Option<CastingVariantChoiceOption> = None;
     for _ in 0..MAX_DRIVE_ACTIONS {
         let action = match &sim.waiting_for {
             // CR 104.4a: a draw (no winner) is not a win.
@@ -84,6 +86,7 @@ pub(super) fn drive(
                             next += 1;
                             mode = step.mode;
                             x = step.x;
+                            option = step.casting_option.clone();
                             issued
                         }
                         // CR 117.1a: a noninstant step waits for the stack to
@@ -125,6 +128,28 @@ pub(super) fn drive(
             WaitingFor::ChooseXValue { player, max, .. } if *player == ai_player => {
                 GameAction::ChooseX {
                     value: x.take().map_or(*max, |x: u32| x.min(*max)),
+                }
+            }
+            // CR 601.2b + CR 113.2c: the casting option the line priced — one
+            // alternative cost among several instances of its keyword. An
+            // option the menu no longer holds is not certified.
+            WaitingFor::CastingVariantChoice {
+                player, options, ..
+            } if *player == ai_player => {
+                let Some(chosen) = option.take() else {
+                    return DriveOutcome::Stuck;
+                };
+                let index = options
+                    .iter()
+                    .position(|offered| *offered == chosen)
+                    .or_else(|| {
+                        options
+                            .iter()
+                            .position(|offered| same_cast_option_but_instance(offered, &chosen))
+                    });
+                match index {
+                    Some(index) => GameAction::ChooseCastingVariant { index },
+                    None => return DriveOutcome::Stuck,
                 }
             }
             _ => return DriveOutcome::Stuck,

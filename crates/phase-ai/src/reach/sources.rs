@@ -11,13 +11,19 @@ use std::collections::HashSet;
 use std::iter::successors;
 
 use engine::game::ability_utils::modal_spell_mode_ability_refs;
-use engine::game::casting::{effective_spell_cost, spell_objects_available_to_cast};
+use engine::game::casting::{
+    base_auto_cast_option, current_casting_variant_choice_options, default_cast_election,
+    same_cast_option_but_instance, spell_objects_available_to_cast,
+};
 use engine::game::effects::matches_player_scope;
 use engine::game::filter::player_matches_target_filter_in_state;
 use engine::game::game_object::GameObject;
-use engine::game::keywords::object_has_effective_keyword_kind;
+use engine::game::keywords::{
+    has_alternative_cost_instance_choice, object_has_effective_keyword_kind,
+};
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::quantity::try_resolve_quantity_in_source_context;
+use engine::game::restrictions::ability_usage_key;
 use engine::game::static_abilities::player_protection_from;
 use engine::game::targeting::player_is_legal_target;
 use engine::game::{extract_mana_leg, max_x_value};
@@ -27,7 +33,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{CastingVariantChoiceOption, GameState};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -151,23 +157,112 @@ pub(super) struct ReachSource {
 }
 
 impl ReachSource {
-    /// Resolve the mana this source commits, or `None` when the engine says
-    /// the spell can't be cast after all.
+    /// The baseline price of this source, or `None` when the engine says the
+    /// spell can't be cast after all.
+    ///
+    /// **Default-first, add-only invariant**: the first, baseline pass
+    /// preserves the price, source order and budget the reach search had
+    /// before casts announced a keyword instance, and carries the option
+    /// representing that earlier cast's actual auto-selected route
+    /// (`base_auto_cast_option`, else the option of the default election).
+    /// `Some(effective_spell_cost)` is not evidence that no instance menu needs
+    /// answering, and a preparation default absent from the legal option set
+    /// never deletes or strands the baseline source. Other instances' options
+    /// ([`Self::alternatives`]) only extend reach in a second pass; they can
+    /// never displace a baseline line.
     pub(super) fn priced(&self, state: &GameState, ai_player: PlayerId) -> Option<PricedSource> {
-        let mana = match &self.commitment {
+        let (mana, exclusive_object, casting_option) = match &self.commitment {
             ManaCommitment::Cast { object_id, extra } => {
-                effective_spell_cost(state, ai_player, *object_id)?.plus(extra)
+                let election = default_cast_election(state, ai_player, *object_id)?;
+                let route = has_alternative_cost_instance_choice(state, *object_id)
+                    .then(|| {
+                        // Without a single base auto route, fall back to the
+                        // preparation default: it can only certify lines base
+                        // left Stuck at the menu.
+                        base_auto_cast_option(state, ai_player, *object_id).or_else(|| {
+                            current_casting_variant_choice_options(state, ai_player, *object_id)
+                                .into_iter()
+                                .find(|option| {
+                                    option.variant == election.variant
+                                        && option.alternative_cost_keyword
+                                            == election.alternative_cost_keyword
+                                })
+                        })
+                    })
+                    .flatten();
+                (election.mana_cost.plus(extra), Some(*object_id), route)
             }
-            ManaCommitment::Activation(mana) => mana.clone(),
+            ManaCommitment::Activation(mana) => (mana.clone(), None, None),
         };
-        Some(PricedSource {
-            steps: self.steps.clone(),
+        Some(self.with_option(mana, exclusive_object, casting_option))
+    }
+
+    /// The other casting options of a cast whose card has several instances of
+    /// one alternative-cost keyword (CR 113.2c + CR 601.2b), each priced at its
+    /// own engine-authored cost, at most [`MAX_ALTERNATIVES_PER_OBJECT`] of
+    /// them. The baseline route is added too, beyond that cap, when the
+    /// baseline priced it at another method's cost (see [`Self::priced`]).
+    pub(super) fn alternatives(&self, state: &GameState, ai_player: PlayerId) -> Vec<PricedSource> {
+        let ManaCommitment::Cast { object_id, extra } = &self.commitment else {
+            return Vec::new();
+        };
+        if !has_alternative_cost_instance_choice(state, *object_id) {
+            return Vec::new();
+        }
+        let baseline = self.priced(state, ai_player);
+        let route = baseline
+            .as_ref()
+            .and_then(|source| source.steps.first().and_then(|s| s.casting_option.clone()));
+        // CR 118.9a: the baseline is priced at the preparation default's cost,
+        // which can be another method's (an unpayable Escape's) than the
+        // route's. Then the route at its own price is an alternative too, added
+        // outside the cap so it displaces none of the others.
+        let repriced_route = baseline
+            .as_ref()
+            .zip(route.as_ref())
+            .and_then(|(source, option)| {
+                (source.mana != option.mana_cost.plus(extra)).then(|| option.clone())
+            });
+        let others = current_casting_variant_choice_options(state, ai_player, *object_id)
+            .into_iter()
+            .filter(|option| {
+                route
+                    .as_ref()
+                    .is_none_or(|base| !same_cast_option_but_instance(base, option))
+            })
+            .take(MAX_ALTERNATIVES_PER_OBJECT);
+        repriced_route
+            .into_iter()
+            .chain(others)
+            .map(|option| {
+                self.with_option(option.mana_cost.plus(extra), Some(*object_id), Some(option))
+            })
+            .collect()
+    }
+
+    fn with_option(
+        &self,
+        mana: ManaCost,
+        exclusive_object: Option<ObjectId>,
+        casting_option: Option<CastingVariantChoiceOption>,
+    ) -> PricedSource {
+        let mut steps = self.steps.clone();
+        if let Some(first) = steps.first_mut() {
+            first.casting_option = casting_option;
+        }
+        PricedSource {
+            steps,
             loss: self.loss,
             mana,
             order: self.order,
-        })
+            exclusive_object,
+        }
     }
 }
+
+/// Most other casting options of one object a reach search prices beyond its
+/// baseline option.
+const MAX_ALTERNATIVES_PER_OBJECT: usize = 3;
 
 /// A reach source with the mana it commits. `{X}` shards stay symbolic; the
 /// solver sizes X (CR 107.3a).
@@ -177,6 +272,10 @@ pub(super) struct PricedSource {
     pub(super) loss: LifeLoss,
     pub(super) mana: ManaCost,
     pub(super) order: StepOrder,
+    /// The object a cast source casts: two sources casting the same object are
+    /// alternative ways to cast it, never both in one line. `None` for an
+    /// activation, which may be repeated.
+    pub(super) exclusive_object: Option<ObjectId>,
 }
 
 impl PricedSource {
@@ -338,6 +437,7 @@ fn cast_source(
                 action: action.clone(),
                 mode: spell.mode,
                 x: None,
+                casting_option: None,
             }],
             loss: spell.loss,
             commitment: ManaCommitment::Cast {
@@ -360,6 +460,7 @@ fn cast_source(
                 action: action.clone(),
                 mode: None,
                 x: None,
+                casting_option: None,
             },
             LineStep {
                 action: GameAction::ActivateAbility {
@@ -369,6 +470,7 @@ fn cast_source(
                 },
                 mode: None,
                 x: None,
+                casting_option: None,
             },
         ],
         loss: follow_up.loss,
@@ -412,10 +514,11 @@ fn push_activation_sources(
         StepOrder::Activation
     };
     let copies = if is_repeatable(ability) && order != StepOrder::ScalesWithX {
-        let used = state
-            .activated_abilities_this_turn
-            .get(&(source_id, ability_index))
-            .copied()
+        // CR 602.5c: fold the per-acquisition budget; an unresolvable slot
+        // reads a missing entry as count 0.
+        let used = ability_usage_key(state, source_id, ability_index)
+            .as_ref()
+            .and_then(|key| state.activated_abilities_this_turn.get(key).copied())
             .unwrap_or(0);
         MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
             .saturating_sub(used)
@@ -429,6 +532,7 @@ fn push_activation_sources(
                 action: action.clone(),
                 mode: None,
                 x: None,
+                casting_option: None,
             }],
             loss,
             commitment: ManaCommitment::Activation(mana.clone()),
@@ -863,6 +967,7 @@ fn changes_life_unpriced(effect: &Effect) -> bool {
         Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::SetLifeTotal { .. }
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExchangeLifeTotals { .. }

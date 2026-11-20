@@ -123,7 +123,12 @@ fn apply_invalidation(state: &mut GameState, change: Invalidate) {
     match change {
         Invalidate::Leave(p) => state.players[p.0 as usize].is_eliminated = true,
         Invalidate::Eliminate(p) => {
-            engine::game::elimination::eliminate_player(state, p, &mut Vec::new());
+            engine::game::elimination::eliminate_player(
+                state,
+                p,
+                engine::types::events::LossReason::Conceded,
+                &mut Vec::new(),
+            );
         }
         Invalidate::Hexproof(p) => grant_hexproof(state, p),
         Invalidate::Steal { from, to } => {

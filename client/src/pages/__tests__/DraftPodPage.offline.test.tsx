@@ -319,7 +319,7 @@ describe("DraftPodPage offline admission", () => {
     abort.mockRestore();
   });
 
-  it("translates only the stable offline sentinel at both setup error surfaces", () => {
+  it("translates the stable offline sentinel at both setup error surfaces", () => {
     mocks.configError = DRAFT_OFFLINE_ERROR;
     renderPage();
 
@@ -330,6 +330,45 @@ describe("DraftPodPage offline admission", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: /Join a Pod/ }));
     expect(screen.getByText("Starting a multiplayer draft is unavailable while offline. Reconnect or turn off Offline Mode to continue.")).toBeInTheDocument();
+  });
+
+  const hostRecoveryKeys = [
+    ["podError.incompatible", "This draft is incompatible with your protocol version."],
+    ["podError.connection", "Connection Error"],
+  ] as const;
+
+  it.each(hostRecoveryKeys)("translates the stored %s key on the host form", (key, text) => {
+    mocks.configError = key;
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /Host a Pod/ }));
+    expect(screen.getByText("Draft Type")).toBeInTheDocument();
+    expect(screen.queryByText(key)).not.toBeInTheDocument();
+    expect(screen.getByText(text)).toBeInTheDocument();
+  });
+
+  it.each(hostRecoveryKeys)("translates the stored %s key on the join form", (key, text) => {
+    mocks.configError = key;
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /Join a Pod/ }));
+    expect(screen.getByPlaceholderText("Enter room code...")).toBeInTheDocument();
+    expect(screen.queryByText(key)).not.toBeInTheDocument();
+    expect(screen.getByText(text)).toBeInTheDocument();
+  });
+
+  it.each(hostRecoveryKeys)("translates the stored %s key on the offline setup screen", (key, text) => {
+    mocks.configError = key;
+    mocks.state.role = "host";
+    mocks.state.phase = "connecting";
+    renderPage();
+
+    act(() => useConnectivityStore.setState({ forcedOffline: true }));
+
+    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
+    expect(screen.getByText("Reconnect or turn off Offline Mode to host, join, start, or watch a multiplayer draft.")).toBeInTheDocument();
+    expect(screen.queryByText(key)).not.toBeInTheDocument();
+    expect(screen.getByText(text)).toBeInTheDocument();
   });
 
   it("leaves ordinary setup failures verbatim", () => {

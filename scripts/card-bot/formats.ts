@@ -43,6 +43,7 @@ export const FORMATS: readonly LfgFormat[] = [
   { format: "Planechase", label: "Planechase", min_players: 2, max_players: 4 },
   { format: "Limited", label: "Limited", min_players: 2, max_players: 2 },
   { format: "Momir", label: "Momir's Madness", min_players: 2, max_players: 2 },
+  { format: "Horde", label: "Horde", min_players: 2, max_players: 5 },
   { format: "Dandan", label: "Dandân", min_players: 2, max_players: 2 },
 ];
 

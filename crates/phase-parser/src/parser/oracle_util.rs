@@ -1,7 +1,7 @@
 use nom::Parser;
 use std::collections::BTreeSet;
 
-use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::error::{oracle_err, OracleError};
@@ -342,6 +342,40 @@ pub fn strip_reminder_text(text: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+/// CR 207.2a: reminder text has no rules meaning. Mask only balanced spans
+/// crossing lines; preserve byte offsets and physical lines for source anchors.
+/// Single-line reminders remain available to specialized semantic readers.
+pub(crate) fn mask_multiline_reminder_text(text: &str) -> String {
+    let mut view = text.as_bytes().to_vec();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut crosses_line = false;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' => {
+                if depth == 0 {
+                    start = index;
+                    crosses_line = false;
+                }
+                depth += 1;
+            }
+            b'\n' if depth > 0 => crosses_line = true,
+            b')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 && crosses_line {
+                    for masked in &mut view[start..=index] {
+                        if *masked != b'\n' && *masked != b'\r' {
+                            *masked = b' ';
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    String::from_utf8(view).expect("only complete parenthetical spans are blanked")
 }
 
 /// CR 702.148a: How a square-bracketed span in a cleave spell's rules text is
@@ -929,7 +963,14 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
     alt((
         value(CountBinder::EqualTo, tag("equal to ")),
         value(CountBinder::WhereX, tag("where x is ")),
-        value(CountBinder::ForEach, tag("for each ")),
+        // CR 107.1a + CR 608.2c: "for every" is a marker spelling of "for each"
+        // ("draw a card for every five creature types among …" — Sarek). The
+        // quantity after either marker goes to the same for-each authority,
+        // which owns the grouped "N <things>" floor division.
+        value(
+            CountBinder::ForEach,
+            preceded(tag("for "), alt((tag("each "), tag("every ")))),
+        ),
     ))
     .parse(input)
 }
@@ -965,7 +1006,8 @@ pub(crate) fn parse_count_head(text: &str) -> (CountHead, &str) {
 /// then fails closed as `Effect::Unimplemented` — when a binder's quantity does
 /// not parse in full, or when a "a number of" / absent head has no binder and
 /// no caller-bound count (`ParseContext::caller_bound_count`). It never falls
-/// back to a literal.
+/// back to a literal. The where-X binder reads a possessive pronoun ("where X is
+/// its power") against the trigger's "it" antecedent, as the lowering path does.
 pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<CountSlot<'a>> {
     let text = normalize_count_slot_text(text);
     let (head, after_head) = parse_count_head(text);
@@ -1017,11 +1059,20 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
         // CR 107.3c: the where-X clause defines X. The where-X authority binds X
         // inside any composite ("X plus 1"); a bare X falls back to the cda
         // grammar, as the token where-X binder does ("the number of times …").
+        // CR 608.2k: X binds under the characteristic rung only, so "its power"
+        // in a trigger body whose "it" names the event object reads that object,
+        // exactly as the lowering path binds the same tail; the player rungs
+        // stay unthreaded here.
         CountBinder::WhereX => {
             let CountHead::VariableX(count) = head else {
                 return None;
             };
-            let x = super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
+            let owner_rung = PlayerAntecedents::characteristic_owner_only(ctx);
+            let x =
+                super::oracle_effect::lower::parse_where_x_quantity_expression_with_antecedents(
+                    quantity,
+                    &owner_rung,
+                )
                 .or_else(|| {
                     parse_cda_quantity_with_context(quantity, &mut ctx.clone_player_antecedents())
                 })?;
@@ -1034,7 +1085,7 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
             } else {
                 super::oracle_effect::lower::apply_where_x_quantity_expression(
                     count,
-                    Some(quantity),
+                    super::oracle_effect::lower::WhereXBinding::new(Some(quantity), &owner_rung),
                 )?
             };
             (count, Some(x))
@@ -1668,15 +1719,14 @@ pub fn has_unconsumed_conditional(text: &str) -> bool {
 /// CR 201.5c: Some cards refer to themselves by a shortened printed name.
 ///
 /// For comma-form names, the short self-reference is the span before the comma
-/// after removing MTGJSON's structural Alchemy `A-` prefix.
+/// after removing MTGJSON's structural Alchemy `A-` prefix. A single-letter
+/// short name is a real self-reference too ("When Q enters" on Q, Stacking the
+/// Deck; "When X enters" on X, Mystery Racer); callers match a single-word short
+/// name case-sensitively at word boundaries, so it never rewrites prose.
 pub(crate) fn comma_short_self_name(card_name: &str) -> Option<&str> {
     let effective_name = alchemy_effective_name(card_name);
     let (_, (short_name, _)) = nom_primitives::split_once_on(effective_name, ", ").ok()?;
-    if short_name.len() >= 2 {
-        Some(short_name)
-    } else {
-        None
-    }
+    (!short_name.is_empty()).then_some(short_name)
 }
 
 /// Remove MTGJSON's structural Alchemy prefix while accepting either casing.
@@ -1692,14 +1742,26 @@ fn alchemy_effective_name(card_name: &str) -> &str {
 /// multi-word legendary names (for example, "Captain James T. Kirk" →
 /// "Captain Kirk").
 ///
-/// The leading word must be a proper-name/title word, not an article, game
-/// term, keyword, verb, or subtype. This rejects ambiguous prose and flavor
+/// The leading word must be a capitalized proper-name/title word, not an
+/// article, core type, keyword, verb, or subtype. A role noun is allowed only
+/// alongside further proper-name components. This rejects ambiguous prose and flavor
 /// labels such as "The Minstrel's Ballad" for "The Wandering Minstrel"
 /// (CR 207.2c–d) while keeping the rule independent of any individual card.
 fn compound_short_self_name(card_name: &str) -> Option<String> {
-    let effective_name = alchemy_effective_name(card_name);
+    let effective_name =
+        comma_short_self_name(card_name).unwrap_or_else(|| alchemy_effective_name(card_name));
     let words: Vec<&str> = effective_name.split_whitespace().collect();
-    if comma_short_self_name(card_name).is_some() || words.contains(&"//") || words.len() < 3 {
+    // Structural printed-name words, including quoted nicknames, must be proper
+    // name components. A capitalized role noun can lead this multiword form;
+    // the separate single-word fallback keeps its rules-vocabulary exclusions.
+    if words.len() < 3
+        || !words.iter().all(|word| {
+            word.trim_start_matches(['\"', '“'])
+                .chars()
+                .next()
+                .is_some_and(char::is_uppercase)
+        })
+    {
         return None;
     }
     let first = words[0];
@@ -1711,7 +1773,6 @@ fn compound_short_self_name(card_name: &str) -> Option<String> {
             "the" | "a" | "an" | "of" | "in" | "on" | "to" | "for" | "at" | "by"
         )
         || is_core_type_name(&lower_first)
-        || is_non_subtype_subject_name(&lower_first)
         || is_supertype_word(&lower_first)
         || is_rules_vocabulary_word(&lower_first)
         || is_subtype_word(&lower_first)
@@ -3812,6 +3873,15 @@ mod tests {
     fn comma_short_self_name_extracts_comma_prefix() {
         assert_eq!(comma_short_self_name("Mishra, Eminent One"), Some("Mishra"));
         assert_eq!(comma_short_self_name("Gilded Lotus"), None);
+        // CR 201.5c: a one-letter comma short name is still the card's name.
+        assert_eq!(comma_short_self_name("Q, Stacking the Deck"), Some("Q"));
+        assert_eq!(
+            normalize_card_name_refs(
+                "When Q enters, shuffle your library.",
+                "Q, Stacking the Deck"
+            ),
+            "When ~ enters, shuffle your library."
+        );
     }
 
     #[test]
@@ -3925,6 +3995,21 @@ mod tests {
 
     #[test]
     fn normalize_compound_printed_short_names() {
+        for (name, short) in [
+            ("Commander Raffi Musiker", "Commander Musiker"),
+            ("Ensign Harry Kim, Operations", "Ensign Kim"),
+            ("Dr. Leonard \"Bones\" McCoy", "Dr. McCoy"),
+            ("A-Ensign Harry Kim, Operations", "Ensign Kim"),
+        ] {
+            let text = format!("When {short} enters, draw a card.");
+            let normalized = normalize_card_name_refs(&text, name);
+            assert_eq!(normalized, "When ~ enters, draw a card.");
+            assert_eq!(normalize_card_name_refs(&normalized, name), normalized);
+            let named = format!("Create a token named {short}.");
+            assert_eq!(normalize_card_name_refs(&named, name), named);
+            let granted = format!("Creatures you control have \"Sacrifice {short}: Draw a card.\"");
+            assert_eq!(normalize_card_name_refs(&granted, name), format!("Creatures you control have \"Sacrifice {GRANTING_SELF_PLACEHOLDER}: Draw a card.\""));
+        }
         // CR 201.5c: printed shortened names are the same object reference.
         assert_eq!(
             normalize_card_name_refs(
@@ -3966,6 +4051,32 @@ mod tests {
             normalize_card_name_refs("Search Tomorrow for a card.", "Search for Tomorrow"),
             "Search Tomorrow for a card."
         );
+    }
+
+    #[test]
+    fn bones_full_oracle_preserves_deferred_rider_and_self_etb() {
+        let name = "Dr. Leonard \"Bones\" McCoy";
+        let oracle = "Flash\nWhen Dr. McCoy enters, choose one —\n• Return target non-Doctor permanent card from your graveyard to your hand.\n• Choose up to one other target creature. When it dies this turn, return that card to the battlefield under its owner's control with a +1/+1 counter on it at the beginning of the next end step.";
+        let normalized = normalize_card_name_refs(oracle, name);
+        assert_eq!(normalized, oracle.replace("Dr. McCoy", "~"));
+        assert_eq!(normalize_card_name_refs(&normalized, name), normalized);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &["Flash".into()],
+            &["Creature".into()],
+            &["Human".into(), "Doctor".into()],
+        );
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == crate::types::triggers::TriggerMode::ChangesZone)
+            .expect("self ETB remains parsed");
+        assert_eq!(etb.valid_card, Some(TargetFilter::SelfRef));
+        let execute = etb.execute.as_deref().expect("modal body");
+        assert_eq!(execute.mode_abilities.len(), 2);
+        // SHAPE only: the delayed death/return consumer belongs to phase 21.
+        // Its full-card coverage must stay unsupported at final projection.
     }
 
     #[test]
@@ -4923,14 +5034,6 @@ mod tests {
         assert_eq!(parse_rounding_suffix_only("Food tokens, rounded up"), None);
     }
 
-    #[test]
-    fn parse_count_expr_fixed_regression() {
-        // Ensure "3 cards" still returns Fixed, not DivideRounded
-        let (qty, rest) = parse_count_expr("3 cards").unwrap();
-        assert!(matches!(qty, QuantityExpr::Fixed { value: 3 }));
-        assert_eq!(rest, "cards");
-    }
-
     // CR 107.3: Procrastinate — "Put twice X stun counters on it" requires
     // `parse_count_expr` to recognize multiplicative prefixes so counter /
     // draw / mill / damage count positions see `Multiply { factor, inner }`
@@ -5113,6 +5216,22 @@ mod tests {
             ),
             "Flying"
         );
+    }
+
+    #[test]
+    fn multiline_reminder_view_preserves_source_positions_and_unbalanced_text() {
+        let raw = "(Reminder é (nested)\ncontinued.)\nI — Draw two cards.\n(Unmatched\nFlying";
+        let view = mask_multiline_reminder_text(raw);
+        assert_eq!(view.len(), raw.len());
+        assert_eq!(view.lines().nth(2), Some("I — Draw two cards."));
+        assert_eq!(view.lines().nth(3), Some("(Unmatched"));
+        assert_eq!(view.lines().nth(4), Some("Flying"));
+        assert!(view.lines().take(2).all(|line| line.trim().is_empty()));
+        assert_eq!(
+            mask_multiline_reminder_text("Ward {1} (Pay {1}.)"),
+            "Ward {1} (Pay {1}.)"
+        );
+        assert_eq!(mask_multiline_reminder_text(&view), view);
     }
 
     #[test]
@@ -5942,6 +6061,85 @@ mod tests {
                 .unwrap()
                 .where_x,
             None
+        );
+    }
+
+    /// CR 608.2k + CR 107.3: in a trigger body whose "it" names the trigger
+    /// event's object, the count slot's where-X binder reads "its power" off that
+    /// object — both a bare X head (Dying Wish's "you gain X life, where X is its
+    /// power") and the X inside a composite head. "X plus 1 life, where X is its
+    /// power" is a building-block fragment no printed card exercises; the nearest
+    /// printed card is Dying Wish, whose full-text proof is
+    /// `oracle_trigger_tests::where_x_its_characteristic_binds_trigger_event_object`.
+    #[test]
+    fn count_slot_where_x_its_power_reads_trigger_event_object() {
+        let power = |scope| QuantityExpr::Ref {
+            qty: QuantityRef::Power { scope },
+        };
+        let event_subject = || ParseContext {
+            subject: Some(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature(),
+            )),
+            ..Default::default()
+        };
+
+        let bare = parse_count_slot("X life, where X is its power", &mut event_subject()).unwrap();
+        assert_eq!(bare.noun, "life");
+        assert_eq!(bare.count, power(ObjectScope::EventSource));
+        assert_eq!(bare.where_x, Some(power(ObjectScope::EventSource)));
+
+        let composite =
+            parse_count_slot("X plus 1 life, where X is its power", &mut event_subject()).unwrap();
+        assert_eq!(
+            composite.count,
+            QuantityExpr::Offset {
+                inner: Box::new(power(ObjectScope::EventSource)),
+                offset: 1,
+            }
+        );
+        assert_eq!(composite.where_x, Some(power(ObjectScope::EventSource)));
+
+        // Paired controls: with the ability's own object as "it", or with no
+        // context at all, the pronoun keeps reading the source.
+        for (label, mut ctx) in [
+            (
+                "self subject",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+            ),
+            ("no context", ParseContext::default()),
+        ] {
+            let bare = parse_count_slot("X life, where X is its power", &mut ctx).unwrap();
+            assert_eq!(bare.count, power(ObjectScope::Source), "{label}");
+            let composite =
+                parse_count_slot("X plus 1 life, where X is its power", &mut ctx).unwrap();
+            assert_eq!(
+                composite.count,
+                QuantityExpr::Offset {
+                    inner: Box::new(power(ObjectScope::Source)),
+                    offset: 1,
+                },
+                "{label}"
+            );
+        }
+
+        // The rung touches only pronoun characteristics: a count of objects
+        // under the same event subject is unchanged.
+        let creatures = parse_count_slot(
+            "X cards, where X is the number of creatures you control",
+            &mut event_subject(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                creatures.count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "{creatures:?}"
         );
     }
 

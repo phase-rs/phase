@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "ゲームを再開",
-      "description": "現在のターンと盤面から、最後に保存したマッチを続行します。"
+      "description": "現在のターンと盤面から、最後に保存したマッチを続行します。",
+      "viewResult": "結果を見る"
     },
     "setup": {
       "title": "AIと対戦",

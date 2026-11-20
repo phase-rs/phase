@@ -485,7 +485,7 @@ fn push_death(runner: &mut engine::game::scenario::GameRunner, obj: ObjectId) {
 /// this turn the self-granting graveyard cast is legal and the permanent enters
 /// with a +1/+1 counter. The counter==1 assertion is the ENGINE-CHANGE
 /// discriminator: reverting the self-granting reader fallback in
-/// `selected_static_permission_enters_with_counter` makes it absent (0).
+/// `selected_static_permission_entry_riders` makes it absent (0).
 #[test]
 fn undead_sprinter_runtime_gate_and_linked_counter() {
     let (mut scenario, sprinter) = sprinter_in_graveyard();
@@ -508,6 +508,8 @@ fn undead_sprinter_runtime_gate_and_linked_counter() {
         1,
         "the self-granting graveyard cast must enter with a +1/+1 counter (reader fallback)"
     );
+    // CR 110.5b: Undead Sprinter prints no tapped rider, so it enters untapped.
+    assert!(!outcome.is_tapped(sprinter));
 }
 
 /// Test 7(b) — with nothing dead this turn, Undead Sprinter is NOT castable from
@@ -561,4 +563,5 @@ fn undead_sprinter_normal_hand_cast_has_no_counter() {
         0,
         "a normal hand cast must NOT enter with a +1/+1 counter (rides the graveyard cast)"
     );
+    assert!(!outcome.is_tapped(hand_sprinter), "CR 110.5b");
 }

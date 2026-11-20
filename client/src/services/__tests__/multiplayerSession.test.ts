@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { ACTIVE_GAME_CHANGED_EVENT } from "../activeGameChange";
 
 import {
   clearWsSession,
@@ -150,5 +152,65 @@ describe("multiplayer WebSocket session persistence", () => {
     });
 
     expect(() => clearWsSession()).not.toThrow();
+  });
+});
+
+describe("multiplayer WebSocket session change notification", () => {
+  const session = {
+    gameCode: "ABCDE",
+    playerToken: "token",
+    fullKey: { game_code: "ABCDE", generation: 1 },
+    serverUrl: "wss://play.example/ws",
+    timestamp: Date.now(),
+  };
+
+  function countNotifications() {
+    const seen = vi.fn();
+    window.addEventListener(ACTIVE_GAME_CHANGED_EVENT, seen);
+    return { seen, stop: () => window.removeEventListener(ACTIVE_GAME_CHANGED_EVENT, seen) };
+  }
+
+  it("notifies the resume list for every landed save and removal, and only those", () => {
+    const { seen, stop } = countNotifications();
+    saveWsSession(session);
+    expect(seen).toHaveBeenCalledTimes(1);
+
+    // A terminal-only transition for the stored identity lands and notifies.
+    saveWsSession({ ...session, terminalOnly: true }, session);
+    expect(seen).toHaveBeenCalledTimes(2);
+
+    // A write or removal bound to another identity changes nothing.
+    const other = { ...session, playerToken: "another-seat-token" };
+    saveWsSession({ ...other, terminalOnly: true }, other);
+    clearWsSession(other);
+    expect(seen).toHaveBeenCalledTimes(2);
+
+    clearWsSession(session);
+    expect(loadWsSession()).toBeNull();
+    expect(seen).toHaveBeenCalledTimes(3);
+
+    // Clearing an empty store has nothing to report.
+    clearWsSession();
+    expect(seen).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it("notifies for a page-only session when storage writes are blocked", () => {
+    setLocalStorage({
+      getItem: () => null,
+      setItem: () => {
+        throw new Error("quota exceeded");
+      },
+      removeItem: () => undefined,
+    });
+    const { seen, stop } = countNotifications();
+    saveWsSession({ ...session, terminalOnly: true });
+    expect(loadWsSession()).toEqual({ ...session, terminalOnly: true });
+    expect(seen).toHaveBeenCalledTimes(1);
+
+    clearWsSession();
+    expect(loadWsSession()).toBeNull();
+    expect(seen).toHaveBeenCalledTimes(2);
+    stop();
   });
 });

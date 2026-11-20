@@ -614,6 +614,7 @@ fn row_body_chain_face_three_removes_one_loyalty_then_returns_a_cheap_card() {
                 counter_type: Some(CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: engine::types::ability::EffectScope::Single,
             }
         ),
         "{def:#?}"
@@ -665,6 +666,7 @@ fn row_body_chain_faces_four_and_five_deal_damage_then_remove_two_loyalty() {
                 counter_type: Some(CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::SelfRef,
+                scope: engine::types::ability::EffectScope::Single,
             }
         ),
         "{def:#?}"
@@ -1397,7 +1399,8 @@ fn debug_table(run_etb: bool, creation_kind: DebugCardCreationKind) -> Table {
 /// tool enters with his five loyalty counters, so his rows read and change them as
 /// for a cast Comet: face 4 deals 5 to the clicked recipient, then `[−2]` leaves 3;
 /// face 1's `[+2]` leaves 7, with two Squirrels. Rows: the real entry (`run_etb`),
-/// the raw placement, and the token kind.
+/// the raw placement, and the token kind in both modes (the forced token entry
+/// installs the printed counters and drains no trigger).
 ///
 /// Red at base: the created Comet had a loyalty field of 5 but no loyalty counter,
 /// so face 4 dealt 0 damage and left him at 5, and face 1 left him at 2.
@@ -1407,6 +1410,7 @@ fn debug_created_comet_rolls_read_and_change_its_loyalty_counters() {
         (true, DebugCardCreationKind::Card),
         (false, DebugCardCreationKind::Card),
         (true, DebugCardCreationKind::Token),
+        (false, DebugCardCreationKind::Token),
     ] {
         let row = format!("run_etb={run_etb}, {kind:?}");
 

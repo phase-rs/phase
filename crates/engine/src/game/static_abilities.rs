@@ -14,12 +14,14 @@ use crate::types::ability::{
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
     CrewContributionKind, DefendingPlayerAnchorPolarity, ProhibitionScope, StaticMode,
     StaticModeKind,
 };
+use crate::types::zones::Zone;
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -75,7 +77,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 508.1c: The directional attack restriction is a passive rule-modifying
     // marker; enforcement lives in `combat.rs`'s attacker-declaration gate.
     registry.insert(StaticMode::AttackOnlyNeighbor, handle_rule_mod);
-    registry.insert(StaticMode::CantBeTargeted, handle_rule_mod);
+    // CR 702.18a / CR 702.11b / CR 109.5: CantBeTargeted is a data-carrying variant (`who`)
+    // — runtime enforcement is in targeting.rs::is_valid_target(). Coverage support is via is_data_carrying_static().
+    //
     // Note: CantBeCast is a data-carrying variant — runtime enforcement is in
     // casting.rs::is_blocked_by_cant_be_cast(). Coverage support is via is_data_carrying_static().
     //
@@ -425,6 +429,29 @@ pub(crate) fn prohibition_scope_matches_player(
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
+    prohibition_scope_matches_player_anchored(
+        scope,
+        player,
+        source_obj,
+        source_obj.controller,
+        state,
+    )
+}
+
+/// CR 109.5: [`prohibition_scope_matches_player`] with the static's controller
+/// supplied explicitly. "You"/"your" in a static ability refers to that
+/// ability's controller, which for a static granted onto another permanent
+/// (`AddStaticMode`, anchored via `StaticDefinition::source_controller`) is the
+/// granting source's controller, not the carrier's. `source_obj` is the object
+/// that carries the static; it still answers the attachment-relative
+/// `EnchantedCreatureController` scope.
+pub fn prohibition_scope_matches_player_anchored(
+    scope: &ProhibitionScope,
+    player: PlayerId,
+    source_obj: &crate::game::game_object::GameObject,
+    static_controller: PlayerId,
+    state: &GameState,
+) -> bool {
     match scope {
         // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a multiplayer team
         // game (e.g. Two-Headed Giant) a player's opponents are only players NOT on
@@ -434,10 +461,10 @@ pub(crate) fn prohibition_scope_matches_player(
         // `is_opponent` reduces to `!=`, so 2-player and free-for-all behavior is
         // byte-identical. Mirrors the affected-filter fix in `static_filter_matches`.
         ProhibitionScope::Opponents => {
-            crate::game::players::is_opponent(state, source_obj.controller, player)
+            crate::game::players::is_opponent(state, static_controller, player)
         }
         ProhibitionScope::AllPlayers => true,
-        ProhibitionScope::Controller => player == source_obj.controller,
+        ProhibitionScope::Controller => player == static_controller,
         // CR 303.4e: For an Aura attached to an object ("enchanted creature's
         // controller"), the prohibition scopes to that object's current
         // controller. For an Aura attached directly to a player (CR 303.4 +
@@ -973,6 +1000,7 @@ fn static_ability_match_applies(
         if let Some(defended) = def.attack_defended.as_ref() {
             if !super::restrictions::attack_target_matches_defended_scope(
                 state,
+                obj.id,
                 context.attack_target.as_ref(),
                 defended,
                 def.source_controller.unwrap_or(obj.controller),
@@ -1126,6 +1154,58 @@ pub(crate) fn transient_grants_static_mode_to_object(
         }
     }
     false
+}
+
+/// CR 611.2c + CR 613.11 + CR 109.5: True iff a live resolution-created effect
+/// ("creatures you control can't be the targets of spells or abilities your
+/// opponents control this turn", "target creature can't be the target of ...")
+/// prohibits `source_controller` from targeting `obj`.
+///
+/// This is the transient arm of the targeting-prohibition authority: the rule is
+/// read DIRECTLY off the effect and is never grafted onto the object, so an
+/// ability-removal effect ("loses all abilities") cannot clear it. A filter-scoped
+/// `affected` is re-evaluated against the live board at every query (CR 611.2c: a
+/// rule-changing effect can affect objects that weren't affected when it began),
+/// and a recipient-bound effect lapses with its incarnation (CR 400.7, via
+/// `transient_effect_is_live`). "Your" in `who` is the effect's controller
+/// (CR 109.5), which a resolved spell or ability retains.
+pub(crate) fn transient_cant_be_targeted_prohibits(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
+) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        let who = tce.modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeTargeted { who },
+            } => Some(who),
+            _ => None,
+        });
+        let Some(who) = who else {
+            return false;
+        };
+        // CR 109.2: an unzoned card-type description ("creatures you control")
+        // means permanents on the battlefield, so a creature spell on the stack
+        // is outside the rule's scope. A filter naming its own zone, or a
+        // `SpecificObject` pin, is not restricted this way.
+        let in_scope = obj.zone == Zone::Battlefield
+            || !crate::game::filter::filter_denotes_battlefield_permanent(&tce.affected);
+        in_scope
+            && crate::game::layers::transient_effect_is_live(state, tce)
+            && matches_target_filter(
+                state,
+                obj.id,
+                &tce.affected,
+                &FilterContext::from_source_with_controller(tce.source_id, tce.controller),
+            )
+            && prohibition_scope_matches_player_anchored(
+                who,
+                source_controller,
+                obj,
+                tce.controller,
+                state,
+            )
+    })
 }
 
 /// CR 702.26a + CR 101.2 + CR 611.2b: True iff `object_id` currently has an
@@ -1296,8 +1376,7 @@ pub fn player_mana_spend_permission_for_spell_object(
         if obj.controller != player_id {
             continue;
         }
-        let ctx = FilterContext::from_source_with_controller(obj.id, player_id);
-        if matches_target_filter(state, spell_id, filter, &ctx) {
+        if super::casting::spell_matches_cost_filter(state, player_id, spell_id, filter, obj.id) {
             granted = Some(granted.map_or(concession, |g| g.union(concession)));
         }
     }
@@ -1729,6 +1808,93 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
     false
 }
 
+/// CR 702.16b + CR 702.16e + CR 702.16k: Player-bound transient protection.
+///
+/// Scans `state.transient_continuous_effects` for effects whose `affected` pins
+/// this player and whose modifications grant `Protection(quality)` — either as
+/// `AddKeyword { keyword: Protection(quality) }` (the resolution-created form:
+/// Seht's Tiger, Faith's Shield, Eon Frolicker) or as
+/// `AddStaticMode { mode: PlayerProtection(quality) }` (the static-shaped form
+/// installed by the same binding path). The quality is matched against
+/// `source` by `keywords::source_matches_protection_target_for_player`, the
+/// player bearer of the object protection authority, so the two cannot drift.
+/// Honours the transient gates (CR 611.2b + CR 611.3a) exactly as
+/// [`player_has_protection_from_everything`] does.
+fn transient_player_protection_from(
+    state: &GameState,
+    player_id: PlayerId,
+    source: &crate::game::game_object::GameObject,
+) -> bool {
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
+        }
+        for modification in &tce.modifications {
+            let quality = match modification {
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(quality),
+                } => quality,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::PlayerProtection(quality),
+                } => quality,
+                _ => continue,
+            };
+            if crate::game::keywords::source_matches_protection_target_for_player(
+                quality, player_id, source,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// CR 702.11c + CR 702.11d: Whether `player_id` currently has "hexproof from
+/// [quality]" against `source`.
+///
+/// Scans player-bound transient effects for `AddKeyword { HexproofFrom(filter) }`
+/// (Veil of Summer) and matches the filter against the source through
+/// `keywords::source_matches_hexproof_filter`, the same filter authority the
+/// object targeting path uses. There is no `StaticMode` spelling of
+/// hexproof-from, so there is no static arm to mirror.
+pub fn player_has_hexproof_from(
+    state: &GameState,
+    player_id: PlayerId,
+    source: &crate::game::game_object::GameObject,
+) -> bool {
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
+        }
+        let grants_hexproof_from = tce.modifications.iter().any(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(filter),
+            } => crate::game::keywords::source_matches_hexproof_filter(filter, source),
+            _ => false,
+        });
+        if grants_hexproof_from {
+            return true;
+        }
+    }
+    false
+}
+
 /// CR 702.11c: Whether `player_id` currently has hexproof as a player.
 ///
 /// True when a functioning `StaticMode::Hexproof` static's `affected` filter
@@ -1819,6 +1985,18 @@ pub fn player_cannot_be_targeted_by_with_source_name(
     {
         return true;
     }
+    // CR 702.11c + CR 702.11d: "hexproof from [quality]" on a player keeps that
+    // player from being the target of opponents' sources with the matching
+    // quality (Veil of Summer). The opponent gate uses the authoritative
+    // `source_controller`, mirroring the plain-hexproof arm above; CR 702.11e's
+    // IgnoreHexproof carve-out is creature-scoped and does not apply here.
+    if crate::game::players::is_opponent(state, player_id, source_controller) {
+        if let Some(source_obj) = state.objects.get(&source_id) {
+            if player_has_hexproof_from(state, player_id, source_obj) {
+                return true;
+            }
+        }
+    }
     // CR 702.16b + CR 702.16j: protection from the source.
     player_protection_from_with_source_name(state, player_id, Some(source_id), source_name)
 }
@@ -1884,7 +2062,6 @@ pub fn player_protection_from_object_with_source_name(
     source_name: Option<&str>,
 ) -> bool {
     use crate::game::keywords::source_matches_card_type;
-    use crate::types::ability::ControllerRef;
     use crate::types::keywords::ProtectionTarget;
 
     // CR 702.16j: protection from everything covers every source.
@@ -1894,6 +2071,16 @@ pub fn player_protection_from_object_with_source_name(
     let effective_name = source_name.or_else(|| source.map(|o| o.name.as_str()));
     if source.is_none() && effective_name.is_none() {
         return false;
+    }
+    // CR 702.16b + CR 702.16e + CR 702.16c: a resolution-created "you gain
+    // protection from [quality]" (Seht's Tiger, Faith's Shield) or "protection
+    // from that player" (Eon Frolicker) is a player-bound transient effect, not
+    // a battlefield static; read it before the static scan so targeting, damage
+    // prevention and Aura legality all see it through this one authority.
+    if let Some(source_obj) = source {
+        if transient_player_protection_from(state, player_id, source_obj) {
+            return true;
+        }
     }
     let context = StaticCheckContext {
         player_id: Some(player_id),
@@ -1944,35 +2131,24 @@ pub fn player_protection_from_object_with_source_name(
                         crate::game::filter::source_has_chosen_name(source, source_name, chosen)
                     })
                 }
-                // CR 702.16k: "Protection from [a player]" at the player level — the
-                // protected player has protection from each object the specified
-                // player(s) control. "Each of your opponents" (CR 702.16i) → the
-                // `Opponent` scope: any source NOT controlled by the protected
-                // player is an opponent's object in 1v1 and free-for-all. Mirrors the
-                // object-level arm in `game/keywords.rs::source_matches_protection_target`.
-                ProtectionTarget::FromPlayer(scope) => {
-                    source.is_some_and(|source_obj| match scope {
-                        ControllerRef::Opponent => source_obj.controller != player_id,
-                        ControllerRef::You => source_obj.controller == player_id,
-                        // Target/chosen player refs have no static context here —
-                        // fail closed (the parser never emits them for protection).
-                        _ => false,
-                    })
-                }
-                // Truly inert at the player level — no card grants these qualities to
-                // a player; object-level grants of these qualities flow through the
-                // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
-                ProtectionTarget::ChosenColor
-                | ProtectionTarget::ChosenPlayer
-                | ProtectionTarget::Color(_)
-                | ProtectionTarget::Multicolored
-                | ProtectionTarget::Quality(_)
+                // CR 702.16 + CR 702.16k: every concrete quality ("protection
+                // from Salamanders" — Gor Muldrak; "protection from each of your
+                // opponents" — Absolute Virtue) is matched by the same
+                // characteristic authority the object path uses, with this
+                // player as the protected bearer.
+                ProtectionTarget::Color(_)
                 | ProtectionTarget::CardType(_)
-                | ProtectionTarget::Filter(_) => false,
-                // CR 702.16i: no card grants a color-set protection to a player;
-                // inert like the arms above. Object-level sets expand through
-                // `keywords::resolve_granted_protection`.
-                ProtectionTarget::EachColor(_) => false,
+                | ProtectionTarget::Quality(_)
+                | ProtectionTarget::Multicolored
+                | ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
+                | ProtectionTarget::Filter(_)
+                | ProtectionTarget::FromPlayer(_)
+                | ProtectionTarget::EachColor(_) => source.is_some_and(|source_obj| {
+                    crate::game::keywords::source_matches_protection_target_for_player(
+                        target, player_id, source_obj,
+                    )
+                }),
             };
             if protects {
                 return true;
@@ -2126,7 +2302,7 @@ fn transient_grants_other_static_to_context(
     false
 }
 
-fn static_condition_matches_context(
+pub(crate) fn static_condition_matches_context(
     state: &GameState,
     source_id: ObjectId,
     controller: PlayerId,
@@ -3737,6 +3913,65 @@ mod tests {
         );
     }
 
+    /// CR 702.16 + CR 702.16b: A `PlayerProtection(Color(_))` static (the
+    /// printed "You have protection from [quality]" class) is read through the
+    /// shared player matcher: the protected player is protected from sources of
+    /// that color and not from other sources.
+    #[test]
+    fn player_protection_static_color_delegates_to_the_shared_matcher() {
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Protection Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::PlayerProtection(
+                    crate::types::keywords::ProtectionTarget::Color(
+                        crate::types::mana::ManaColor::Red,
+                    ),
+                ))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+
+        let red_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Red Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&red_source).unwrap().color =
+            vec![crate::types::mana::ManaColor::Red];
+        let blue_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Blue Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&blue_source).unwrap().color =
+            vec![crate::types::mana::ManaColor::Blue];
+
+        assert!(
+            player_protection_from(&state, PlayerId(0), Some(red_source)),
+            "CR 702.16b: protection from red covers a red source"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(0), Some(blue_source)),
+            "a blue source is outside protection from red"
+        );
+    }
+
     /// CR 702.16a + CR 702.16e + CR 201.2: A `PlayerProtection(ChosenCardName)`
     /// static (Runed Halo's "You have protection from the chosen card name.")
     /// makes its controller protected from every source whose name matches the
@@ -4040,6 +4275,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
