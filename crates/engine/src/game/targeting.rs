@@ -3849,7 +3849,7 @@ fn add_stack_abilities(
         if entry.id == source_id {
             continue; // Don't target yourself
         }
-        if stack_ability_matches_filter(entry, filter, source_controller) {
+        if stack_ability_matches_filter(state, entry, filter, source_controller, source_id) {
             targets.push(TargetRef::Object(entry.id));
         }
     }
@@ -3910,7 +3910,7 @@ fn stack_entry_matches_filter_with_context(
         | StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::KeywordAction { .. } => {
             filter_targets_stack_abilities(filter)
-                && stack_ability_matches_filter(entry, filter, source_controller)
+                && stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
         }
         // CR 112.1 + CR 113.3b: combat damage on the stack is neither a spell
         // nor an ability, so no filter can name it — not as a target and not as
@@ -3924,9 +3924,11 @@ fn stack_entry_matches_filter_with_context(
 }
 
 fn stack_ability_matches_filter(
+    state: &GameState,
     entry: &StackEntry,
     filter: &TargetFilter,
     source_controller: PlayerId,
+    source_id: ObjectId,
 ) -> bool {
     match filter {
         TargetFilter::StackAbility {
@@ -3986,17 +3988,35 @@ fn stack_ability_matches_filter(
                     })
                 }),
                 FilterProp::InZone { zone } => *zone == Zone::Stack,
+                // CR 115.9b / CR 115.9c: "that targets [only] …" reads the
+                // entry's chosen targets through the shared stack-target authority.
+                FilterProp::Targets { filter } => super::filter::stack_entry_targets_satisfy(
+                    state,
+                    entry.id,
+                    source_id,
+                    Some(source_controller),
+                    filter,
+                    false,
+                ),
+                FilterProp::TargetsOnly { filter } => super::filter::stack_entry_targets_satisfy(
+                    state,
+                    entry.id,
+                    source_id,
+                    Some(source_controller),
+                    filter,
+                    true,
+                ),
                 _ => true,
             })
         }
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
+        TargetFilter::And { filters } => filters.iter().all(|filter| {
+            stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
+        }),
+        TargetFilter::Or { filters } => filters.iter().any(|filter| {
+            stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
+        }),
         TargetFilter::Not { filter } => {
-            !stack_ability_matches_filter(entry, filter, source_controller)
+            !stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
         }
         TargetFilter::Any => true,
         _ => false,
@@ -5020,6 +5040,7 @@ mod tests {
             },
         };
 
+        let state = GameState::new_two_player(42);
         let filter = |id: PlayerId| TargetFilter::StackAbility {
             controller: Some(ControllerRef::SpecificPlayer { id }),
             tag: None,
@@ -5028,12 +5049,12 @@ mod tests {
 
         // The snapshot naming this entry's controller matches...
         assert!(
-            stack_ability_matches_filter(&entry, &filter(controller), other),
+            stack_ability_matches_filter(&state, &entry, &filter(controller), other, ObjectId(0)),
             "a snapshot naming the entry's controller matches"
         );
         // ...and one naming anybody else does not.
         assert!(
-            !stack_ability_matches_filter(&entry, &filter(other), other),
+            !stack_ability_matches_filter(&state, &entry, &filter(other), other, ObjectId(0)),
             "a snapshot naming a different player does not match"
         );
         // Reach guard: the pre-existing scopes are unaffected. The entry is
@@ -5041,6 +5062,7 @@ mod tests {
         // "an opponent controls it".
         assert!(
             stack_ability_matches_filter(
+                &state,
                 &entry,
                 &TargetFilter::StackAbility {
                     controller: Some(ControllerRef::Opponent),
@@ -5048,6 +5070,7 @@ mod tests {
                     kind: None,
                 },
                 other,
+                ObjectId(0),
             ),
             "the Opponent scope still matches"
         );

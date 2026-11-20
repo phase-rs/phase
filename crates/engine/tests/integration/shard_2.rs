@@ -321,6 +321,7 @@ mod counter_quantity_object_forms;
 mod counter_recipient_exact_count;
 mod counter_rider_tail_8762;
 mod counter_rider_time_counters_8795;
+mod counter_spell_or_ability_that_targets;
 mod counter_spell_zone_redirect;
 mod counter_target_spell_ignores_permanent_targeting_keywords;
 mod counters_on_population_quantity;

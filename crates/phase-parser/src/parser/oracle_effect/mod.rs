@@ -2872,9 +2872,7 @@ pub(crate) fn excise_selection_qualifier(clause: &str) -> Option<String> {
 /// order-free comma/"or" disjunction of type-restricted spell legs with ability
 /// legs. Any phrase that grammar recognizes ANYWHERE in the retarget clause now
 /// wins this branch ahead of the `"spell"` + `parse_target` fallback below it in
-/// `try_parse_change_targets`. In particular the "ability or spell" spelling,
-/// which the preceding `"spell or ability"` branch does not cover, now lands
-/// here. What still falls through is exactly what the grammar declines: a
+/// `try_parse_change_targets`. What still falls through is exactly what the grammar declines: a
 /// purely-spell phrase with no ability leg (its documented contract, above).
 ///
 /// NOTE (precision residual): `scan_at_word_boundaries` applies the combinator
@@ -58275,23 +58273,7 @@ fn try_parse_change_targets(lower: &str, ctx: &mut ParseContext) -> Option<Effec
     let spell_phrase_clean = spell_phrase.replace(" with a single target", "");
     let spell_phrase_clean = spell_phrase_clean.trim();
 
-    // Handle "spell or ability" specially since "ability" is not a card type in parse_target.
-    // CR 115.7: "spell or ability" matches any spell or any activated/triggered ability on the stack.
-    let mut target = if scan_contains_phrase(spell_phrase_clean, "spell or ability")
-        || scan_contains_phrase(spell_phrase_clean, "spell and/or ability")
-    {
-        // Both spells and abilities on the stack
-        TargetFilter::Or {
-            filters: vec![
-                TargetFilter::StackSpell,
-                TargetFilter::StackAbility {
-                    controller: None,
-                    tag: None,
-                    kind: None,
-                },
-            ],
-        }
-    } else if let Some(stack_target) = scan_stack_object_target(spell_phrase_clean) {
+    let mut target = if let Some(stack_target) = scan_stack_object_target(spell_phrase_clean) {
         // CR 115.7a + CR 113.3b / CR 113.3c + CR 115.1: a changed target must be
         // another LEGAL target, so the kind spelling defines which stack
         // abilities may be retargeted. Reroute ("Change the target of target
