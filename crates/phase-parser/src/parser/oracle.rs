@@ -2188,8 +2188,7 @@ fn effect_uses_tracked_set(effect: &Effect) -> bool {
     each_target_filter_mut(&mut effect, &mut |filter| {
         uses_tracked_set |= target_filter_uses_tracked_set(filter);
     });
-    uses_tracked_set |= mass_population_filter(&effect)
-        .is_some_and(|filter| target_filter_uses_tracked_set(filter));
+    uses_tracked_set |= mass_population_filter(&effect).is_some_and(target_filter_uses_tracked_set);
     if let Effect::GenericEffect {
         static_abilities, ..
     } = &effect
