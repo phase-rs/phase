@@ -126,6 +126,10 @@ export interface LlmDraftOutcome {
  *
  * `apiKey` lives in this record and is deliberately excluded from backup export
  * and cloud sync — see `LLM_ENDPOINTS_KEY` in `constants/storage.ts`.
+ * `rememberApiKey` is a tab-scoped opt-in preference stored in `sessionStorage`;
+ * when on, the key is copied to `sessionStorage` alongside its destination so it
+ * survives a tab reload while that destination is unchanged. Neither `apiKey`
+ * nor `rememberApiKey` is written to `localStorage`.
  */
 export interface LlmProfile extends LlmEndpointConfig {
   id: string;
@@ -133,6 +137,8 @@ export interface LlmProfile extends LlmEndpointConfig {
   name: string;
   /** Off by default and off after any edit that invalidates the config. */
   enabled: boolean;
+  /** Opt-in: keep the API key in sessionStorage for this tab only. Off by default. */
+  rememberApiKey: boolean;
 }
 
 /** The engine-described endpoint half of a profile, without the UI fields. */
