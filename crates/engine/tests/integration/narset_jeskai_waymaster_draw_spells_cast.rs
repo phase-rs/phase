@@ -3,7 +3,7 @@
 //! Oracle: "At the beginning of your end step, you may discard your hand. If you
 //! do, draw cards equal to the number of spells you've cast this turn."
 //!
-//! `SpellsCastThisTurn { Controller }` was already a recognized quantity ref,
+//! `SpellsCast { Controller }` was already a recognized quantity ref,
 //! but the draw effect-construction path once consulted only
 //! `parse_event_context_quantity`, so this non-event-context count dropped the
 //! whole draw clause to `Unimplemented`. The draw count is now read by the
@@ -50,6 +50,7 @@ fn spell_record(name: &str) -> SpellCastRecord {
         cast_variant: engine::types::game_state::CastingVariant::Normal,
         was_kicked: false,
         spell_object_id: None,
+        from_outside_game: false,
         prepared_copy_source: None,
     }
 }

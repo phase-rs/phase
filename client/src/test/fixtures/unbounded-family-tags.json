@@ -5,6 +5,7 @@
   "Counter": "counters",
   "DamageDealt": "damage",
   "DeathTriggers": "triggers",
+  "Energy": "counters",
   "EtbTriggers": "triggers",
   "ExtraTurns": "turns",
   "LandfallTriggers": "triggers",

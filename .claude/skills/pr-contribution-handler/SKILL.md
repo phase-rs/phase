@@ -46,7 +46,7 @@ This skill lands contributor work, but **only after it meets the maintainer's ba
 
 The bar wants a second, independent look on top of `review-engine-impl` — historically an external bot supplied it for free. **Gemini Code Assist has been sunset**: never post `@gemini-code-assist` (or any Gemini) triggers. The bot no longer answers, so summoning it spends a round-trip and posts dead-noise comments while adding zero coverage.
 
-- **CodeRabbit** is the free external reviewer for this public repo, and it reviews automatically on push — do not trigger it manually. When it has posted a review, treat its findings as the independent pass: confirm-or-refute each against the PR *head* (not the review timestamp — findings are routinely already fixed in later commits) and fold confirmed ones into the gate.
+- **CodeRabbit** is the free external reviewer for this public repo. It reviews a PR automatically and is expected to pause after its first reviewed commit (`reviews.auto_review.auto_pause_after_reviewed_commits` in `.coderabbit.yaml`), so a later head's `CodeRabbit` check reading "Review paused" is expected — do not trigger it manually. When it has posted a review, treat its findings as the independent pass: confirm-or-refute each against the PR *head* (not the review timestamp — findings are routinely already fixed in later commits) and fold confirmed ones into the gate.
 - When **no external review exists** (CodeRabbit not yet run, or not installed) AND the PR trips a risk trigger — hot/shared path, new machinery, or the large-refactor value gate — run a local `/code-review` as the independent pass. Skip it for low-risk PRs an external review already covers: a local pass spends tokens, so scale it to blast radius rather than running it blanket.
 - Any external review — bot or human — may be **stale** (filed against an earlier commit). Always confirm/refute against the current head, never the review timestamp.
 
@@ -199,7 +199,7 @@ gh pr view <N> --json mergeable,mergeStateStatus --jq '{mergeable, mergeStateSta
 git diff --stat origin/main...HEAD
 ```
 
-- `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY` / branch far behind → bring the branch current and resolve textual conflicts when the contributor has been making corrections or the PR is otherwise close to mergeability. This is maintainer shepherding, not a contributor defect; leaving a correcting contributor to repeatedly chase main creates a moving target. If the diff would revert other agents' landed work (token data, deploy config, concurrent integration tests), that is **BLOCK-pending-rebase**, not an inline fix (precedent: #2519 was 53 commits behind and its diff would have reverted ~5,800 unrelated lines; #2520 was 40 behind and bundled two features). On a BLOCK-pending-rebase, release the assignment lock (see *Releasing the Assignment Lock*) — you are handing the PR back, not processing it.
+- `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY` / branch far behind → bring the branch current and resolve textual conflicts when the contributor has been making corrections or the PR is otherwise close to mergeability. Offer maintainer shepherding without treating drift as a contributor defect. Authors remain free to rebase, resolve conflicts and push; maintainer assistance never reserves an exclusive integration lane. Coordinate only a confirmed active edit of the same branch, with a named owner and explicit handoff, rather than inferring ownership from historical comments or unknown private work. If the diff would revert other agents' landed work (token data, deploy config, concurrent integration tests), that is **BLOCK-pending-rebase**, not an inline fix (precedent: #2519 was 53 commits behind and its diff would have reverted ~5,800 unrelated lines; #2520 was 40 behind and bundled two features). On a BLOCK-pending-rebase, release the assignment lock (see *Releasing the Assignment Lock*) — you are handing the PR back, not processing it.
 - Diff touches generated registries (`known-tokens.toml`), stray gitlinks/submodules (`new file mode 160000`), or subsystems unrelated to the stated scope → handle via the Security/Sanity auto-fix classes (strip/revert); if the contamination is load-bearing to the PR's logic, reduce the PR to its real change before review.
 - A PR body claiming "Scope Expansion: None" whose diff is large and cross-cutting is a contradiction to verify, not to trust.
 
@@ -301,15 +301,6 @@ If `origin/main` is already an ancestor and there are no conflicts, skip the mer
 
 **One targeted exception — `baseline_pending` parse-diff.** The parse-diff CI step is merge-base-pinned and immune to branch staleness (see `ci.yml` "Parse-detail diff vs base baseline"), so staleness alone is never a reason to bring-current-and-push. When the sticky parse-diff comment shows *Baseline pending* (packet reason `review_parse_baseline_pending`), the merge-base's R2 baseline has likely aged out of retention and will **never** populate, so one bring-current merge can be the remedy. Do not repeat that remedy when the PR history already contains a maintainer merge-main commit for the same baseline-pending churn. Repeated maintainer merge commits are PR spam: if the current head is otherwise clean and authorized mode would enqueue it after green CI, approve/enqueue now; if it is not clean, hold or review without mutating the branch.
 
-## Requested-Changes Expiry
-
-`pr_review.py` may return `warn_stale_changes_for_handler` or `close_stale_changes_for_handler` for PRs whose current head still has requested changes and no useful contributor follow-up.
-
-- **Warn:** post a comment containing the exact marker from `recommendation.requested_changes_expiry.warning_marker` and clear prose that the PR will be auto-closed if the requested changes are not addressed within `close_after_warning_days` days. Then record an event with `event_type: requested_changes_warning`, `outcome: requested_changes_warning`, the current `head_sha`, and the comment timestamp.
-- **Close:** before closing, live-check the PR head SHA, author comments, and warning marker. If the head changed or the contributor commented after the warning, do not close; route back to review/update-branch as appropriate. If nothing changed and the warning window elapsed, close with a short comment that cites the earlier warning and record `event_type: stale_changes_closed`, `outcome: stale_changes_closed`.
-
-This expiry path is only for contributors not addressing requested changes. It must not close PRs with active correction work, unresolved maintainer-side merge conflicts, queue/CI mechanics, or defects that the handler can fix locally under the small-fixup rule.
-
 ## Review Comment Resolution
 
 **Operational — posting and fetching.** Post every PR comment, review body, and final report through a temp file (`gh pr comment <N> --body-file /tmp/body.md`, `gh pr review <N> --body-file /tmp/review.md`), **never** an inline `--body "…"` string. Inline bodies are mangled by the shell — zsh strips backticked identifiers and code spans, which has silently corrupted the technical claims of a *blocking* review. Write the body to a file, then pass `--body-file`.
@@ -333,6 +324,8 @@ Apply `.claude/agents/pr-review-comment-resolver.md` directly:
 6. Verify that each original comment is actually addressed, not merely made stale by line movement.
 
 Every review body, reply and final-report claim about engine behavior follows [real cards](../engine-implementer/SKILL.md#real-cards).
+
+Formal reviews the handler posts number their findings `F<n>` under 🔴, as [pr-review-loop's Review Comment Format](../pr-review-loop/SKILL.md#review-comment-format) states.
 
 When a comment asks for a questionable design, satisfy the underlying concern while preserving this repo's architecture. If reviewer feedback conflicts with rules-correct engine behavior, document the conflict in the final report and implement the rules-correct path.
 
@@ -378,9 +371,9 @@ Apply the relevant lenses from `review-engine-impl.md`, especially:
 
 **Direct changes to the appropriate location; don't convert campaign churn into contributor burden.**
 - When a PR does something the "old way" in a since-migrated area, the comment names the new authority and where it is documented, framed as routing ("this now goes through X — see skill Y"), not fault. Prefer changes-requested-with-a-precise-pointer, or a maintainer fixup when it is fixup-sized, over a bare block.
-- Diff content outside the contributor's control is the maintainer's to clean, silently: generated-registry dirt (`known-tokens.toml` appears after any local `gen-card-data` run; `oracle-subtypes.json` rewrites after `cargo export-cards` — both are side effects, not author intent), ~20 faces of nondeterministic export noise in coverage/ledger diffs, and stale-base deltas caused by maintainer-side merges (maintainer-caused staleness: we rebase/port).
+- Diff content outside the contributor's control is the maintainer's to clean, silently: generated-registry dirt (`known-tokens.toml` appears after any local `gen-card-data` run; `oracle-subtypes.json` rewrites after `cargo export-cards` — both are side effects, not author intent), ~20 faces of nondeterministic export noise in coverage/ledger diffs, and stale-base deltas caused by maintainer-side merges (offer rebase/port help; authors may also resolve them).
 - Enforcement of migrated-area rules belongs in gates, not review vigilance. A prohibited pattern that reaches review with green CI means the gate has a hole — record the finding, apply the redirect, and file the gate gap as its own task.
-- **Maintainer-caused redness: if our push turned their CI red, we help.** When a PR was authored before — or concurrently with, or just after — a maintainer-side change that its author could not have known about (a new gate, a migrated mechanism, a renamed authority), and that change is what reds its CI, the fix is maintainer work, not a contributor round-trip. Compare the PR's `createdAt` / base against the landing time of the change that introduced the failure (`campaign-hotspots.toml` records landing dates for migrations). Fixup-sized ports (rewire onto the new authority, thread a rename, adapt to a new gate) are done directly on the author's branch via the maintainer-fixup path; larger ports get a comment that names the migration, states plainly that the red is not the author's fault, and either performs the port or schedules it — the contributor is never asked to chase a target that moved after they aimed.
+- **Maintainer-caused redness: if our push turned their CI red, we help.** When a PR was authored before — or concurrently with, or just after — a maintainer-side change that its author could not have known about (a new gate, a migrated mechanism, a renamed authority), and that change is what reds its CI, offer maintainer help and a precise pointer to the replacement authority, without faulting the contributor or preventing them from fixing it themselves. Compare the PR's `createdAt` / base against the landing time of the change that introduced the failure (`campaign-hotspots.toml` records landing dates for migrations). Fixup-sized ports (rewire onto the new authority, thread a rename, adapt to a new gate) are done directly on the author's branch via the maintainer-fixup path; larger ports get a comment that names the migration, states plainly that the red is not the author's fault, and offers either maintainer assistance or a contributor-led port. An author willing to continue may rebase, resolve protocol/integration conflicts and push for fresh review immediately; an unknown or reserved unpublished maintainer workflow is not a reason to make them wait.
 
 ## Inline Fix vs Full Engine Cycle
 
@@ -418,26 +411,11 @@ Search the PR body, comments, commits, and diff for deferrals:
 - "future work"
 - "out of scope"
 
-Default stance: do the deferred work while already in the PR.
+<!-- deferral-rule -->
+A deferral inside the PR's own claimed scope (a case, sibling or outcome the PR claims) is an incomplete claim: the PR delivers it or narrows its claim wherever the claim is made, and it is never left as a follow-up. Narrowing applies only to an incomplete claim: a defect in code the PR adds or changes is cleared only by correcting, removing or fencing that code, and editing the description never clears it. A finding the PR introduces is never a clean residual, at any severity: where a PR is opened with one still open, it is listed as unresolved, no clean review is claimed for it, and the PR is not approved until its fix is verified. A deferral outside the claimed scope is not the PR's obligation: it never blocks the PR and is recorded once as a follow-up. A pre-existing defect may be listed as a disclosed item; it is logged and never blocks.
+<!-- /deferral-rule -->
 
-**ROI calibration based on tier and existing PR investment:**
-
-This calibration runs only after artifact admission and architecture authorization; Tier cannot satisfy either gate or create scope authority.
-
-- **Frontier-tier PR with substantial work + needed architectural extension → finish it.** The contributor's model did the hard part (correct CR interpretation, correct pattern selection, ≥70% of the implementation); the missing piece is a known engine primitive or a parallel handler we would build anyway. The PR is closer to the finish line than a fresh implementation would be — invest the architecture cycle to close it.
-- **Standard-tier PR with the same gap → ROI tips toward leaving a deferral.** The base work is less likely to be reusable as-is and adding architecture on top compounds the integration cost. Finish what is tractable inline; defer the architectural extension with a clear follow-up issue and a recommendation to re-run the architectural piece on a Frontier model.
-- **No-tier (legacy) PR → judge on the diff quality, not the missing tier label.** Apply Frontier-tier ROI rules if the work demonstrates frontier-level fidelity (correct CR annotations, idiomatic combinators, building-block reuse); apply Standard-tier ROI rules otherwise.
-
-Only leave a deferral when it is a significant hurdle, meaning at least one of these is true:
-
-- it is materially larger than the PR itself
-- it requires product/design input not present in the PR
-- it needs a new architecture or full engine-implementer cycle separate from the PR's main change AND the existing PR investment does not warrant carrying it (see ROI calibration above)
-- it crosses unrelated subsystems with high regression risk
-- it cannot be verified in the current environment
-- it depends on external access, data, or a different contributor's unresolved work
-
-If leaving a deferral, make it explicit in the final report with evidence and a concrete follow-up recommendation. Do not accept vague "later" notes for work that can be finished now.
+**Who closes an inside-scope gap.** This comes after artifact admission and architecture authorization; Tier cannot satisfy either gate or create scope authority. When the PR's work is substantial and the gap is a known primitive or a parallel handler we would build anyway, close it in the PR (maintainer fixup or engine-implementer cycle). Otherwise request the change, or for an incomplete claim, a narrowed claim. Prefer narrowing when the gap is materially larger than the PR, needs product or design input, crosses unrelated subsystems with high regression risk, cannot be verified here, or depends on external access or another contributor's unresolved work. Record each narrowed claim and each outside-scope follow-up in the final report, with evidence.
 
 ## Verification
 
@@ -558,11 +536,11 @@ Every item must be satisfied before running `gh pr merge`. Failing any item mean
 - [ ] **Performance checked.** No new per-call allocation/serialization/unbounded scan on a hot path (legal-actions, priority, layer recompute, AI search); hot-path additions are guarded by a cheap early-out.
 - [ ] **Adversarial second pass clean** for hot/shared-path or new-machinery PRs — "would a principal engineer merge this, or request changes?" answered, findings resolved.
 - [ ] **Architecture Review came back clean** (or all findings were resolved inline). No outstanding `class-of-cases-vs-special-case`, `building-block-reuse`, `CR-annotation-correctness`, or `engine/frontend boundary` issues left open.
-- [ ] **All blocking review comments resolved.** Author/reviewer comments tagged as required changes are addressed in commits; non-blocking nits may be deferred.
+- [ ] **No open introduced finding.** Every introduced finding at the current head is cleared at every severity, including late must-fix findings: a defect is corrected, removed or fenced in code, and an incomplete claim is delivered or narrowed. Late notes, Reach notes, Pre-existing entries and refuted external items are the only non-blocking items, and none is deferred work.
 - [ ] **No open finding more severe than the verdict.** If a bot or a reviewer raised an issue you would rate higher than your own verdict, you must confirm-or-refute it against the head with code evidence and resolve it before enqueue. A green "approve" never overrides an unaddressed higher-severity finding from another reviewer — reconcile it explicitly, do not enqueue past it.
 - [ ] **Verification passed.** `cargo fmt` + the relevant Tilt resources (or fallback equivalents) reported green. If the PR touches engine/parser, `card-data` was included.
 - [ ] **No textual merge conflicts with `origin/main`.** Either the PR was already an ancestor descendant, or you merged main in cleanly. The queue can't speculate a rebase through textual conflicts.
-- [ ] **No explicit deferral was left that should have been finished in-PR.** Per "Explicit Deferrals" section ROI calibration — if a Frontier-tier PR left a deferral that ROI says you should have finished, finish it before enqueuing or report and stop.
+- [ ] **No inside-scope deferral remains.** Every case the PR claims is delivered at the current head, or that incomplete claim was narrowed. Outside-scope follow-ups do not block.
 
 ### After enqueue
 

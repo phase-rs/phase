@@ -45,7 +45,7 @@ fn cannot_cast_from_hand_restriction() -> ManaRestriction {
 fn spell_cast_from(zone: Zone) -> SpellMeta {
     SpellMeta {
         types: vec!["Artifact".to_string()],
-        cast_from_zone: Some(zone),
+        cast_origin: Some(engine::types::zones::CastProvenance::Zone(zone)),
         ..SpellMeta::default()
     }
 }

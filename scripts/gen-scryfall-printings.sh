@@ -31,8 +31,9 @@ mkdir -p "$(dirname "$OUTPUT")"
 # otherwise). Each oracle_id maps to an array of PrintingEntry objects
 # sorted by released_at descending (newest first).
 #
-# DFC handling: when top-level image_uris is null, per-face URLs are
-# extracted from card_faces[].image_uris.
+# Face images: a face's own image_uris wins (DFCs), otherwise the card's
+# top-level image_uris (split, adventure, flip and other one-image layouts,
+# whose card_faces carry no image_uris), as in gen-scryfall-images.sh.
 #
 # Reversible cards omit root-level `oracle_id`; group by
 # `card_faces[0].oracle_id` instead (issue #2031).
@@ -41,7 +42,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
 
 jq -c --argjson exclude "$NON_PLAYABLE" '
-  [.[] |
+  [.[] | . as $card |
     (.oracle_id // .card_faces[0].oracle_id) as $oracle_id |
     select($oracle_id != null) |
     select(.layout as $l | $exclude | index($l) | not) |
@@ -59,8 +60,8 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
         full_art: (.full_art // false),
         faces: (if .card_faces then
           [.card_faces[] | {
-            normal: (.image_uris.normal // null),
-            art_crop: (.image_uris.art_crop // null)
+            normal: (.image_uris.normal // $card.image_uris.normal),
+            art_crop: (.image_uris.art_crop // $card.image_uris.art_crop)
           }]
         else
           [{normal: .image_uris.normal, art_crop: .image_uris.art_crop}]

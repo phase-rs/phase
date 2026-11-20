@@ -229,10 +229,27 @@ pub fn resolve(
     // below) without a stack entry, so the inline gate must not swallow it.
     // Single-type echo yields no prompt here and falls through to the normal
     // gate, resolving with no interaction.
-    let echo_pause = crate::game::mana_abilities::echo_body_owes_type_choice(
-        ability,
-        state.current_trigger_event.as_ref(),
-    )
+    // CR 106.12a + CR 608.2d: a preselected echo type is usable only if
+    // the actual event produced it. A stale selection owes the normal choice.
+    let selected_echo =
+        if is_triggered_mana_inline && matches!(produced, ManaProduction::TriggerEventManaType) {
+            match &state.current_triggered_mana_override {
+                Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => state
+                    .current_trigger_event
+                    .as_ref()
+                    .map(crate::game::mana_abilities::echo_distinct_types)
+                    .filter(|options| options.contains(color))
+                    .map(|options| (options, *color)),
+                Some(crate::types::game_state::ProductionOverride::Combination(_)) | None => None,
+            }
+        } else {
+            None
+        };
+    let echo_pause = (selected_echo.is_none()
+        && crate::game::mana_abilities::echo_body_owes_type_choice(
+            ability,
+            state.current_trigger_event.as_ref(),
+        ))
     .then(|| {
         crate::game::mana_abilities::mana_choice_prompt(
             &ability.effect,
@@ -303,7 +320,22 @@ pub fn resolve(
     // (Fertile Ground, Utopia Sprawl AnyOneColor), the auto-tap planner may have
     // stored a `current_triggered_mana_override` so the resolver produces the
     // planned color rather than defaulting to the first listed option.
-    let mana_types = if is_triggered_mana_inline {
+    let mana_types = if let Some((options, color)) = selected_echo {
+        // The public choice-completion authority also owns preselected echoes:
+        // exactly one unit, even when the triggering ability produced G/U.
+        chosen_mana_types_for_prompt(
+            state,
+            count_ability,
+            produced,
+            &ManaChoicePrompt::SingleColor { options },
+            ManaChoice::SingleColor(color),
+        )
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?
+    } else if matches!(produced, ManaProduction::TriggerEventManaType) {
+        // CR 106.5: an absent/invalid selection never manufactures a type.
+        // A multi-type event already paused above; one type resolves normally.
+        resolve_mana_types_with_ability(produced, &*state, count_ability)
+    } else if is_triggered_mana_inline {
         match state.current_triggered_mana_override.clone() {
             Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => {
                 // Resolve the count from the production descriptor, then produce
@@ -1121,6 +1153,30 @@ pub(crate) fn object_colors_for_scope(
     .collect()
 }
 
+/// CR 105.1 + CR 105.2: union borrowed colors once, emitting the five colors
+/// in canonical WUBRG order; colorless contributes no member.
+pub(crate) fn distinct_colors<'a>(
+    colors: impl IntoIterator<Item = &'a ManaColor>,
+) -> Vec<ManaColor> {
+    let mut seen = 0u8;
+    for color in colors {
+        seen |= match color {
+            ManaColor::White => 1,
+            ManaColor::Blue => 2,
+            ManaColor::Black => 4,
+            ManaColor::Red => 8,
+            ManaColor::Green => 16,
+        };
+    }
+    let mut result = Vec::with_capacity(seen.count_ones() as usize);
+    for (index, color) in ManaColor::ALL.into_iter().enumerate() {
+        if seen & (1 << index) != 0 {
+            result.push(color);
+        }
+    }
+    result
+}
+
 pub(crate) fn distinct_colors_among_permanents(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
@@ -1135,30 +1191,13 @@ pub(crate) fn distinct_colors_among_permanents(
     let zone = filter
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let mut seen: std::collections::HashSet<crate::types::mana::ManaColor> =
-        std::collections::HashSet::new();
-    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
-        if !matches_target_filter(state, id, filter, &filter_ctx) {
-            continue;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            for color in &obj.color {
-                seen.insert(*color);
-            }
-        }
-    }
-    // Stable order for determinism (WUBRG).
-    use crate::types::mana::ManaColor;
-    [
-        ManaColor::White,
-        ManaColor::Blue,
-        ManaColor::Black,
-        ManaColor::Red,
-        ManaColor::Green,
-    ]
-    .into_iter()
-    .filter(|c| seen.contains(c))
-    .collect()
+    distinct_colors(
+        crate::game::targeting::zone_object_ids(state, zone)
+            .iter()
+            .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
+            .filter_map(|id| state.objects.get(id))
+            .flat_map(|obj| obj.color.iter()),
+    )
 }
 
 /// CR 605.1a + CR 406.1 + CR 610.3: Resolve the legal `ManaType` set for a
@@ -1394,6 +1433,20 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn distinct_color_reduction_is_bounded_ordered_and_borrowed() {
+        assert!(distinct_colors(std::iter::empty()).is_empty());
+        let colors = [ManaColor::Red, ManaColor::White, ManaColor::Red];
+        assert_eq!(
+            distinct_colors(&colors),
+            vec![ManaColor::White, ManaColor::Red]
+        );
+        assert_eq!(
+            distinct_colors(ManaColor::ALL.iter().rev().chain(&ManaColor::ALL)),
+            ManaColor::ALL.to_vec()
+        );
+    }
 
     fn make_mana_ability(produced: ManaProduction) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -3929,17 +3982,35 @@ mod tests {
                 exiled_id: imprinted,
                 kind: ExileLinkKind::TrackedBySource,
             });
-            let mana_actions =
-                crate::game::mana_sources::activatable_mana_actions_for_player(runner.state(), P0);
-            let tap = mana_actions
-                .into_iter()
-                .find(|action| {
-                    matches!(action, GameAction::TapLandForMana { selection }
-                        | GameAction::ActivateManaSource { selection }
-                        if selection.source.object_id == chamber)
+            let ability_index =
+                crate::game::casting::activated_ability_definitions(runner.state(), chamber)
+                    .into_iter()
+                    .find(|(_, ability)| matches!(&*ability.effect, Effect::Mana { .. }))
+                    .expect("the Chamber offers its printed indexed mana ability")
+                    .0;
+            // The semantic source action preselects an echo type; this test
+            // instead exercises the raw activation's real unresolved choice.
+            let tapped = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: chamber,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
-                .expect("the Chamber can tap for mana");
-            let tapped = runner.act(tap).expect("the tap applies");
+                .expect("the tap applies");
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Green),
+                1,
+                "{mode:?}: reach: the Chamber produced its base G before the echo choice"
+            );
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Blue),
+                1,
+                "{mode:?}: reach: the Chamber produced its base U before the echo choice"
+            );
             assert!(
                 matches!(
                     tapped.waiting_for,

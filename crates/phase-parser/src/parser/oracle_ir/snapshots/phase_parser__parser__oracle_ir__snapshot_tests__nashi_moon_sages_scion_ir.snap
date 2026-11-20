@@ -1,6 +1,6 @@
 ---
 source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1943
+assertion_line: 1974
 expression: "&ir"
 ---
 {
@@ -198,7 +198,8 @@ expression: "&ir"
                     "prefix_delayed_condition": null,
                     "multi_target": null,
                     "where_x_expression": null,
-                    "unless_pay": null
+                    "unless_pay": null,
+                    "head_window": "UntilEndOfTurn"
                   },
                   {
                     "id": 2,

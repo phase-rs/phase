@@ -40,11 +40,14 @@
 //! CR 108.3: The owner of a card is the player who started the game with it — the
 //! anchor for "Target creature's owner … faces a villainous choice".
 
+use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario};
-use engine::types::ability::Effect;
+use engine::types::ability::{Effect, LibraryShuffleMode};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -312,4 +315,203 @@ fn this_is_how_it_ends_prompts_the_target_creatures_owner() {
         p0_life_before,
         "the spell's caster (P0) must not lose life from the villainous choice"
     );
+}
+
+/// The library shuffles each event names, in order.
+fn shuffled_players(events: &[GameEvent]) -> Vec<PlayerId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// P0 casts This Is How It Ends at P1's `target`; P1 also owns `others` on the
+/// battlefield, and `merged_component` (if any) is merged under the first of
+/// them. Returns the runner at P1's villainous choice and the shuffle branch's
+/// index.
+fn this_is_how_it_ends_at_the_choice(
+    others: &[&str],
+    merge_onto_first: bool,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, Option<ObjectId>, usize) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for &pid in &[P0, P1] {
+        scenario.with_library_top(pid, &["Lib A", "Lib B", "Lib C", "Lib D"]);
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "This Is How It Ends", false, THIS_IS_HOW_IT_ENDS_ORACLE)
+        .id();
+    let target = scenario.add_creature(P1, "P1 Creature", 3, 3).id();
+    let other_ids: Vec<ObjectId> = others
+        .iter()
+        .map(|name| scenario.add_creature(P1, name, 2, 2).id())
+        .collect();
+    let component =
+        merge_onto_first.then(|| scenario.add_creature(P1, "Migratory Greathorn", 3, 4).id());
+    let mut runner = scenario.build();
+    if let Some(component) = component {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, other_ids[0], MergeSide::Top, &mut events);
+    }
+    runner.cast(spell).target_object(target).commit();
+    advance_to_choice(&mut runner);
+    let shuffle_index = match &runner.state().waiting_for {
+        WaitingFor::ChooseOneOfBranch {
+            player, branches, ..
+        } => {
+            assert_eq!(*player, P1, "the target creature's owner faces the choice");
+            branches
+                .iter()
+                .position(|b| matches!(&*b.effect, Effect::ChangeZone { .. }))
+                .expect("a 'shuffle another creature' branch must exist")
+        }
+        other => panic!("expected the villainous ChooseOneOfBranch scoped to P1, got {other:?}"),
+    };
+    assert_eq!(runner.state().objects[&target].zone, Zone::Library);
+    (runner, target, other_ids, component, shuffle_index)
+}
+
+/// CR 701.24a + CR 730.3 + CR 608.2c: the shuffle branch ("they shuffle
+/// another creature they own into their library") chooses at resolution. With
+/// a merged creature and another eligible creature, the owner is asked which;
+/// the prompt keeps the move's terminal-shuffle mode, so choosing the merged
+/// creature puts both of its cards into the library and the branch shuffles
+/// the owner's library exactly once.
+#[test]
+fn this_is_how_it_ends_shuffle_branch_of_a_chosen_merged_creature_shuffles_once() {
+    let (mut runner, target, others, component, shuffle_index) =
+        this_is_how_it_ends_at_the_choice(&["Host Creature", "Runeclaw Bear"], true);
+    let (merged, bystander) = (others[0], others[1]);
+    let component = component.expect("merged component");
+
+    let chosen = runner
+        .act(GameAction::ChooseBranch {
+            index: shuffle_index,
+        })
+        .expect("the shuffle branch is chosen");
+    assert!(shuffled_players(&chosen.events).is_empty());
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            library_shuffle,
+            ..
+        } => {
+            assert_eq!(*player, P1, "the creatures' owner chooses");
+            let mut offered = cards.clone();
+            offered.sort_by_key(|id| id.0);
+            assert_eq!(
+                offered,
+                vec![merged, bystander],
+                "another creature they own"
+            );
+            assert!(!cards.contains(&target));
+            assert_eq!(
+                *library_shuffle,
+                LibraryShuffleMode::TerminalShuffle,
+                "the prompt keeps the move's terminal-shuffle mode"
+            );
+        }
+        other => panic!("expected P1's creature choice, got {other:?}"),
+    }
+
+    let answered = runner
+        .act(GameAction::SelectCards {
+            cards: vec![merged],
+        })
+        .expect("the merged creature is chosen");
+    assert_eq!(
+        shuffled_players(&answered.events),
+        vec![P1],
+        "the branch shuffles its owner's library exactly once"
+    );
+    let state = runner.state();
+    assert_eq!(state.objects[&merged].zone, Zone::Library);
+    assert_eq!(
+        state.objects[&component].zone,
+        Zone::Library,
+        "every card of the merged creature is shuffled in (CR 730.3)"
+    );
+    assert_eq!(state.objects[&bystander].zone, Zone::Battlefield);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+}
+
+/// One-eligible control: with a single other creature the branch moves it
+/// without a prompt and still shuffles the owner's library exactly once.
+#[test]
+fn this_is_how_it_ends_shuffle_branch_with_one_eligible_creature_moves_it_without_a_prompt() {
+    let (mut runner, _target, others, _component, shuffle_index) =
+        this_is_how_it_ends_at_the_choice(&["Runeclaw Bear"], false);
+    let only = others[0];
+
+    let chosen = runner
+        .act(GameAction::ChooseBranch {
+            index: shuffle_index,
+        })
+        .expect("the shuffle branch is chosen");
+    assert_eq!(shuffled_players(&chosen.events), vec![P1]);
+    let state = runner.state();
+    assert_eq!(state.objects[&only].zone, Zone::Library);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+}
+
+/// CR 701.24a + CR 730.3 + CR 730.2: with only a merged creature to choose,
+/// the exclusion of its absorbed component leaves one candidate, so the branch
+/// moves the merged permanent without a prompt, both of its cards arrive, and
+/// the owner's library is shuffled exactly once.
+#[test]
+fn this_is_how_it_ends_shuffle_branch_with_only_a_merged_creature_moves_every_card_once() {
+    let (mut runner, _target, others, component, shuffle_index) =
+        this_is_how_it_ends_at_the_choice(&["Host Creature"], true);
+    let merged = others[0];
+    let component = component.expect("merged component");
+
+    let chosen = runner
+        .act(GameAction::ChooseBranch {
+            index: shuffle_index,
+        })
+        .expect("the shuffle branch is chosen");
+
+    assert_eq!(shuffled_players(&chosen.events), vec![P1]);
+    let state = runner.state();
+    assert_eq!(state.objects[&merged].zone, Zone::Library);
+    assert_eq!(state.objects[&component].zone, Zone::Library);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+}
+
+/// Zero-eligible control: the target's owner has no other creature, so the
+/// shuffle branch moves nothing, completes without a prompt, and the library
+/// shuffle the card prints still happens (equal to the merge base).
+#[test]
+fn this_is_how_it_ends_shuffle_branch_with_no_other_creature_completes_without_a_prompt() {
+    let (mut runner, target, _others, _component, shuffle_index) =
+        this_is_how_it_ends_at_the_choice(&[], false);
+
+    let chosen = runner
+        .act(GameAction::ChooseBranch {
+            index: shuffle_index,
+        })
+        .expect("the shuffle branch is chosen");
+
+    assert_eq!(
+        shuffled_players(&chosen.events),
+        vec![P1],
+        "the printed shuffle still happens with nothing to move"
+    );
+    let state = runner.state();
+    assert_eq!(state.objects[&target].zone, Zone::Library);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
 }

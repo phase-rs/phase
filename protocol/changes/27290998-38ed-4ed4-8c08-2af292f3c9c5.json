@@ -1,0 +1,8 @@
+{
+  "surfaces": [
+    "full",
+    "lobby",
+    "wire"
+  ],
+  "reason": "Commander bracket declarations become nullable and estimates travel with the deck (PR #9360): DeckData, PlayerDeckList, PlayerDeckPayload and PlayerDeckPool bracket_tier change from CommanderBracketTier (omitted = Core) to Option<CommanderBracketTier>, where null means undeclared and the engine plays the deck at its estimate; DeckData and PlayerDeckList gain combo_declaration; PlayerDeckPayload and PlayerDeckPool gain estimated_bracket_tier. A previous full-game or P2P peer cannot decode an explicit null bracket_tier in a GameState deck pool or deck payload and reads an omitted one as a declared Core, so first contact must refuse the skew. The lobby carriers CreateGameWithSettings and JoinGameWithPassword change the DeckData field type; LobbyOnly brokers are sent an empty deck with no tier, so MIN_SUPPORTED_LOBBY_PROTOCOL does not move."
+}

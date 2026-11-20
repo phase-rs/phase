@@ -322,6 +322,11 @@ fn static_condition_to_restriction_condition(
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(ParsedCondition::OpponentPoisonAtLeast { count })
         }
+        // CR 122.1f + CR 109.5: "player is poisoned" — no `ParsedCondition`
+        // variant exists for this player-scoped poison check. The trigger-side
+        // bridge handles it via `TriggerCondition::IsPoisoned`, but the
+        // restriction surface (cast/activation gates) has no equivalent.
+        | StaticCondition::PlayerIsPoisoned { .. } => None,
         // CR 122.1: source-counter activation gate — "Activate only if it has no time
         // counters on it" (Temple of Cyclical Time) and the counter-threshold restriction
         // class generally. Adopted from #5677 (the L02 condition lane), which solved this
@@ -992,6 +997,34 @@ mod tests {
         }
     }
 
+    /// CR 701.14a: Boxing Ring's "Activate only if you control a creature that fought
+    /// this turn" — the relative clause rides inside the presence filter.
+    #[test]
+    fn fought_this_turn_presence_condition() {
+        match parse_restriction_condition("you control a creature that fought this turn") {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::FoughtThisTurn));
+            }
+            other => panic!("expected ObjectCount(creature that fought) >= 1, got {other:?}"),
+        }
+        assert_eq!(
+            parse_restriction_condition("you control a creature that fights this turn"),
+            None
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Compound conditions are parsed by the shared grammar, not by string splitting
     // -----------------------------------------------------------------------
@@ -1353,7 +1386,6 @@ mod tests {
     fn legacy_misparses_are_now_honest_gaps() {
         for text in [
             // Dumped the whole qualifier into a stringly-typed subtype no permanent has.
-            "you control a creature that fought this turn",
             "you control two or more green permanents that share an artist",
             "you control an urza's mine, an urza's power-plant, and an urza's tower",
             // Compared "creatures you control" against ITSELF.
@@ -1577,15 +1609,16 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { .. }),
+                                window: crate::types::ability::TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {}
-            other => panic!("expected filtered SpellsCastThisTurn >= 3, got {other:?}"),
+            other => panic!("expected filtered SpellsCast >= 3, got {other:?}"),
         }
     }
 

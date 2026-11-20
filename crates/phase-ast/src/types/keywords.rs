@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -18,6 +19,7 @@ use super::ability::{
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
+use super::text_grammar::{parse_number, OracleError};
 
 pub use super::text_grammar::craft_materials_default;
 
@@ -747,6 +749,9 @@ pub enum ProtectionColorSet {
     /// color identity of the granting effect's controller's commander(s); undefined
     /// (no colors) when that player has no commander.
     OutsideCommanderColorIdentity,
+    /// CR 702.16i + CR 611.3a + CR 109.5: current colors of permanents
+    /// controlled by the granting static ability's current controller.
+    AmongPermanentsYouControl,
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -1448,6 +1453,27 @@ pub enum Keyword {
 
     /// Fallback for unrecognized keywords.
     Unknown(String),
+}
+
+/// The engine's keyword-list representation policy for a newly granted keyword
+/// instance, shared by the battlefield (layer 6) and off-zone keyword paths so
+/// they cannot diverge. It preserves existing battlefield behaviour; the order in
+/// which grants are applied (CR 613.7 timestamps) is the caller's effect
+/// ordering, not decided here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordGrantPolicy {
+    /// Identical instances are kept, each as its own entry (see
+    /// [`Keyword::instances_must_coexist`]): Toxic's total sums them
+    /// (CR 702.164b); Sunburst and Bloodthirst count them per instance.
+    Accumulate,
+    /// The latest applied grant replaces every earlier entry of the same variant
+    /// (see [`Keyword::overrides_same_kind_on_grant`]): Crew, Saddle and Enchant
+    /// are single-value representations.
+    ReplaceSameVariant,
+    /// Distinct keyword values coexist. Preserve the existing representation's
+    /// exact-value deduplication; this does not determine companion-trigger
+    /// multiplicity.
+    DedupeIdentical,
 }
 
 impl Keyword {
@@ -2374,6 +2400,18 @@ impl Keyword {
         )
     }
 
+    /// The single authority for how a newly granted instance of this keyword
+    /// combines with the instances already on a keyword list.
+    pub fn grant_policy(&self) -> KeywordGrantPolicy {
+        if self.instances_must_coexist() {
+            KeywordGrantPolicy::Accumulate
+        } else if self.overrides_same_kind_on_grant() {
+            KeywordGrantPolicy::ReplaceSameVariant
+        } else {
+            KeywordGrantPolicy::DedupeIdentical
+        }
+    }
+
     /// CR 113.2c: The runtime-REALIZED subset of [`Self::instances_function_separately`]
     /// for cast-time spell-keyword grants — keywords whose multiple instances the
     /// cast-time merge (`casting.rs::merge_spell_keyword`) must PRESERVE rather than
@@ -2428,6 +2466,14 @@ fn capitalize_first(s: &str) -> String {
 fn parse_companion_condition(text: &str) -> CompanionCondition {
     let lower = text.to_lowercase();
 
+    if let Ok((_, over)) = parse_companion_deck_size_over(&lower) {
+        return CompanionCondition::MinDeckSizeOver(over);
+    }
+
+    if parse_companion_singleton(&lower).is_ok() {
+        return CompanionCondition::Singleton;
+    }
+
     if lower.contains("even mana value") || lower.contains("even converted mana cost") {
         CompanionCondition::EvenManaValues
     } else if lower.contains("odd mana value") || lower.contains("odd converted mana cost") {
@@ -2440,8 +2486,6 @@ fn parse_companion_condition(text: &str) -> CompanionCondition {
         CompanionCondition::PermanentsHaveActivatedAbilities
     } else if lower.contains("more than one of the same mana symbol") {
         CompanionCondition::NoRepeatedManaSymbols
-    } else if lower.contains("twenty or more cards") || lower.contains("80") {
-        CompanionCondition::MinDeckSizeOver(20)
     } else if lower.contains("mana value 3 or greater") {
         CompanionCondition::MinManaValue(3)
     } else if lower.contains("mana value 2 or less") {
@@ -2454,6 +2498,67 @@ fn parse_companion_condition(text: &str) -> CompanionCondition {
         // Fallback: attempt to identify by partial matching
         CompanionCondition::SharedCardType
     }
+}
+
+/// CR 702.139a + CR 702.139b: the deck-size companion condition, written
+/// "Your starting deck contains at least N cards more than the minimum deck size"
+/// (Yorion, Sky Nomad). Reads the lowercased condition after the keyword name,
+/// tolerating the `Companion—` separator, and yields the surplus `N` over the
+/// format's minimum (the runtime supplies the minimum, so the same parse covers
+/// 60-card Constructed and 40-card Limited). Trailing punctuation and reminder
+/// text are left unconsumed.
+fn parse_companion_deck_size_over(input: &str) -> super::text_grammar::OracleResult<'_, u32> {
+    let (rest, _) = companion_condition_lead(input)?;
+    preceded(
+        tag("your starting deck contains at least "),
+        terminated(parse_number, tag(" cards more than the minimum deck size")),
+    )
+    .parse(rest)
+}
+
+/// CR 702.139a: the `Companion` keyword's separator (em dash, en dash or hyphen)
+/// and its surrounding whitespace, ahead of the condition proper.
+fn companion_condition_lead(input: &str) -> super::text_grammar::OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            multispace0,
+            opt(alt((
+                tag::<_, _, OracleError<'_>>("\u{2014}"),
+                tag("\u{2013}"),
+                tag("-"),
+            ))),
+            multispace0,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 702.139a + CR 702.139b: the singleton companion condition, as Lutri, the
+/// Spellchaser prints it: "Each nonland card in your starting deck has a
+/// different name." The "no two nonland cards ... have the same name" phrasing
+/// names the same condition. Reads the lowercased condition after the keyword
+/// name. The nonland scope is part of the printed condition, so lands never
+/// count toward a repeat (the runtime evaluation skips them).
+fn parse_companion_singleton(input: &str) -> super::text_grammar::OracleResult<'_, ()> {
+    let (rest, _) = companion_condition_lead(input)?;
+    alt((
+        value(
+            (),
+            (
+                tag("each nonland card in your starting deck "),
+                tag("has a different name"),
+            ),
+        ),
+        value(
+            (),
+            (
+                tag("no two nonland cards in your starting deck "),
+                tag("have the same name"),
+            ),
+        ),
+    ))
+    .parse(rest)
 }
 
 /// Extract creature subtypes from Kaheera-style companion condition text.
@@ -3460,6 +3565,12 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
         // CR 702.16: "the chosen player" resolves from the
         // protected permanent's persisted `ChosenAttribute::Player`.
         "the chosen player" | "chosen player" => ProtectionTarget::ChosenPlayer,
+        // CR 702.16k + CR 608.2c: "protection from that player" — the
+        // declared-target anaphor (Eon Frolicker). The quality is not a
+        // characteristic; it names the player targeted by the enclosing
+        // ability, so it carries a player reference and is fixed to that
+        // player when the effect is applied.
+        "that player" => ProtectionTarget::FromPlayer(super::ability::ControllerRef::TargetPlayer),
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
         "everything" => ProtectionTarget::Everything,
         // CR 702.16k: "protection from each of your opponents" (Figure of
@@ -3489,25 +3600,32 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
-/// CR 702.16i + CR 903.4: Parse "each color that's not in your commander's color
-/// identity" (and its "that is not in" / "not in" spellings) into a
-/// `ProtectionColorSet`. One trailing period is tolerated because the keyword
-/// quality splitter can preserve sentence punctuation.
+/// CR 702.16i: Parse a qualified color set, read live from the board or fixed at
+/// game start (a commander's color identity, CR 903.4a). One trailing period is
+/// tolerated because the keyword quality splitter can preserve punctuation.
 fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
     type E<'a> = nom::error::Error<&'a str>;
 
     all_consuming(terminated(
-        value(
-            ProtectionColorSet::OutsideCommanderColorIdentity,
-            (
-                tag::<_, _, E<'_>>("each color "),
-                alt((
-                    tag("that's not in "),
-                    tag("that is not in "),
-                    tag("not in "),
-                )),
-                super::text_grammar::parse_your_commanders_color_identity,
-            ),
+        preceded(
+            tag::<_, _, E<'_>>("each color "),
+            alt((
+                value(
+                    ProtectionColorSet::OutsideCommanderColorIdentity,
+                    (
+                        alt((
+                            tag("that's not in "),
+                            tag("that is not in "),
+                            tag("not in "),
+                        )),
+                        super::text_grammar::parse_your_commanders_color_identity,
+                    ),
+                ),
+                value(
+                    ProtectionColorSet::AmongPermanentsYouControl,
+                    (tag("among "), tag("permanents "), tag("you control")),
+                ),
+            )),
         ),
         opt(tag(".")),
     ))
@@ -4435,6 +4553,30 @@ mod tests {
     use super::test_helpers::{pay_life_cost, payload_bearing_samples};
     use super::*;
 
+    /// CR 702.16k + CR 608.2c: "protection from that player" names the player
+    /// targeted by the enclosing ability, not a card type. The atomic-quality
+    /// classifier emits the typed player reference the resolver fixes to the
+    /// declared target; the neighbouring anaphors keep their own variants.
+    #[test]
+    fn parse_protection_target_player_anaphors() {
+        assert_eq!(
+            parse_protection_target("that player"),
+            ProtectionTarget::FromPlayer(super::super::ability::ControllerRef::TargetPlayer),
+        );
+        assert_eq!(
+            parse_protection_target("the chosen player"),
+            ProtectionTarget::ChosenPlayer,
+        );
+        assert_eq!(
+            parse_protection_target("each of your opponents"),
+            ProtectionTarget::FromPlayer(super::super::ability::ControllerRef::Opponent),
+        );
+        assert_eq!(
+            parse_protection_target("red"),
+            ProtectionTarget::Color(ManaColor::Red),
+        );
+    }
+
     /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
     /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
     #[test]
@@ -5251,6 +5393,51 @@ mod tests {
             .unwrap(),
             serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"})
         );
+    }
+
+    #[test]
+    fn parse_protection_target_among_controlled_permanents_and_serde() {
+        let expected = ProtectionTarget::EachColor(ProtectionColorSet::AmongPermanentsYouControl);
+        for phrase in [
+            "each color among permanents you control",
+            "Each color among permanents you control.",
+        ] {
+            assert_eq!(parse_protection_target(phrase), expected);
+        }
+        assert_eq!(
+            Keyword::from_str("Protection:each color among permanents you control").unwrap(),
+            Keyword::Protection(expected.clone())
+        );
+        for (quality, wire) in [
+            (
+                expected,
+                serde_json::json!({"EachColor": "AmongPermanentsYouControl"}),
+            ),
+            (
+                ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+                serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&quality).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ProtectionTarget>(wire).unwrap(),
+                quality
+            );
+        }
+        assert!(serde_json::from_value::<ProtectionTarget>(
+            serde_json::json!({"EachColor": "UnknownSet"})
+        )
+        .is_err());
+        for phrase in [
+            "each color among permanents you control while attacking",
+            "each color among creatures you control",
+            "each color among permanents your opponents control",
+        ] {
+            assert_eq!(
+                parse_protection_target(phrase),
+                ProtectionTarget::CardType(phrase.into())
+            );
+        }
     }
 
     /// Hostile siblings of the color-set phrase stay untyped card-type strings.

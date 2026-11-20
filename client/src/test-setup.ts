@@ -12,6 +12,18 @@ import settings from "./i18n/locales/en/settings.json";
 import multiplayer from "./i18n/locales/en/multiplayer.json";
 import tournament from "./i18n/locales/en/tournament.json";
 
+if (typeof window !== "undefined" && typeof window.Animation !== "undefined") {
+  const cancel = window.Animation.prototype.cancel;
+  window.Animation.prototype.cancel = function (...args) {
+    // Motion uses onfinish rather than finished. Happy DOM 21 eagerly creates
+    // finished, so observe its expected cancellation rejection before teardown.
+    void this.finished.catch((error: unknown) => {
+      if (!(error instanceof window.DOMException && error.name === "AbortError")) throw error;
+    });
+    return cancel.apply(this, args);
+  };
+}
+
 // Tests only ever assert against English copy, so we register a lean,
 // English-only i18next instance here instead of importing the app's `./i18n`
 // module. That module eager-globs all 7 languages × 7 namespaces (49 catalogs)

@@ -26,10 +26,11 @@ use crate::game::casting::combined_spell_ability_def;
 use crate::game::casting_costs::begin_deferred_target_selection;
 use crate::game::engine::EngineError;
 use crate::game::game_object::GameObject;
-use crate::types::ability::{CastTimingPermission, ResolvedAbility};
+use crate::types::ability::ResolvedAbility;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, DistributionUnit, GameState, PendingCast, WaitingFor,
+    CastPaymentMode, CastTimingRoute, CastingVariant, DistributionUnit, GameState, PendingCast,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -88,16 +89,18 @@ pub(crate) fn begin_offer(
     base_mana_cost: ManaCost,
     casting_variant: CastingVariant,
     casting_permission_index: Option<crate::types::game_state::CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
+    cast_timing_permission: Option<CastTimingRoute>,
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
     player: PlayerId,
     eligible: Vec<ObjectId>,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
 ) -> WaitingFor {
     let mut pending = PendingCast::new(object_id, card_id, ability, mana_cost);
     pending.base_cost = Some(base_mana_cost);
     pending.casting_variant = casting_variant;
+    pending.alternative_cost_keyword = alternative_cost_keyword;
     pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
@@ -169,6 +172,7 @@ pub(crate) fn resolve_offer(
     // CR 702.47a: the card is revealed and stays in hand.
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(&[card]),
         card_ids: vec![card],
         card_names: vec![card_name],
     });

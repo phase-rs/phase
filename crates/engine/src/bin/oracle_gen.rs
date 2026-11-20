@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::thread;
 
 use serde::{Deserialize, Serialize};
 
+use engine::database::card_data_provenance::CardDataProvenance;
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{
-    load_atomic_cards, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
+    load_atomic_cards_from_bytes, load_card_types, AtomicCard, AtomicCardsFile, Ruling, SetCard,
+    SetFile,
 };
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
@@ -17,7 +19,7 @@ use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout,
     prepare_oracle_parser_input, LayoutKind,
 };
-use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
+use engine::database::{set_gating, BracketCardClass, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -376,6 +378,62 @@ fn write_trace_report_atomic(path: &Path, report: &ParserTraceReport) -> io::Res
     result
 }
 
+/// Make a path absolute without requiring the final destination to exist.
+fn absolute_path(path: &Path) -> io::Result<PathBuf> {
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    })
+}
+
+/// Normalize a path lexically for the fallback case where its parent does not
+/// exist yet. Existing parents are canonicalized separately so symlink and
+/// `..` resolution follows the filesystem rather than string spelling.
+fn absolute_lexical_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = absolute_path(path)?;
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+/// Resolve the filesystem destination represented by a path, including
+/// existing symlinks in the final path or its parent directories. If the final
+/// destination does not exist yet, canonicalize the existing parent and retain
+/// the final filename so normal new-file exports remain supported.
+fn destination_identity(path: &Path) -> io::Result<PathBuf> {
+    let absolute = absolute_path(path)?;
+    match std::fs::canonicalize(&absolute) {
+        Ok(canonical) => Ok(canonical),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = absolute.parent().unwrap_or_else(|| Path::new("."));
+            let file_name = absolute.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "output path has no file name")
+            })?;
+            match std::fs::canonicalize(parent) {
+                Ok(canonical_parent) => Ok(canonical_parent.join(file_name)),
+                Err(parent_error) if parent_error.kind() == io::ErrorKind::NotFound => {
+                    absolute_lexical_path(&absolute)
+                }
+                Err(parent_error) => Err(parent_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn output_paths_share_destination(left: &Path, right: &Path) -> io::Result<bool> {
+    Ok(destination_identity(left)? == destination_identity(right)?)
+}
+
 fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
 }
@@ -561,8 +619,62 @@ fn bracket_signals_for_face(
     source: &AtomicCard,
 ) -> BracketSignals {
     let mut signals = lists.signals_for(&face.name);
-    signals.game_changer = source.is_game_changer;
+    // The curated Game Changers list is authoritative when present. A union
+    // with the bundled MTGJSON snapshot could add names but could never express
+    // a later WotC removal.
+    if lists.has(BracketCardClass::GameChangers) {
+        // Game Changers classify cards, not faces. MTGJSON repeats the flag on
+        // both faces of a modal double-faced card, while WotC prints its front
+        // face name. Use that card-level identity so either exported face gets
+        // the same curated signal.
+        let card_name = source
+            .name
+            .split_once(" // ")
+            .map_or(source.name.as_str(), |(front, _)| front);
+        signals.game_changer = lists.signals_for(card_name).game_changer;
+    } else {
+        signals.game_changer = source.is_game_changer;
+    }
     signals
+}
+
+fn report_game_changer_drift(lists: &BracketLists, atomic: &AtomicCardsFile) {
+    let Some(curated) = lists.get(BracketCardClass::GameChangers) else {
+        return;
+    };
+
+    let mtgjson_names: BTreeSet<String> = atomic
+        .data
+        .iter()
+        .filter(|(_, faces)| faces.iter().any(|face| face.is_game_changer))
+        .map(|(name, _)| name.to_lowercase())
+        .collect();
+    let flagged_faces = atomic
+        .data
+        .values()
+        .flat_map(|faces| faces.iter())
+        .filter(|face| face.is_game_changer)
+        .count();
+    let curated_only: Vec<&str> = curated
+        .names
+        .difference(&mtgjson_names)
+        .map(String::as_str)
+        .collect();
+    let mtgjson_only: Vec<&str> = mtgjson_names
+        .difference(&curated.names)
+        .map(String::as_str)
+        .collect();
+
+    eprintln!(
+        "Game Changers drift: curated={} cards; MTGJSON={} cards/{} flagged faces; curated-only={} {:?}; MTGJSON-only={} {:?}",
+        curated.names.len(),
+        mtgjson_names.len(),
+        flagged_faces,
+        curated_only.len(),
+        curated_only,
+        mtgjson_only.len(),
+        mtgjson_only,
+    );
 }
 
 /// Insert a card face under its short-name key, resolving collisions when
@@ -641,6 +753,24 @@ fn insert_face_with_priority(
              ({new_oracle:?}, {new_printings} printings)"
         );
         insert_hidden_multiface(face_index, &key, entry);
+    }
+}
+
+/// CR 707.13 + CR 709.3c: gap every copy-by-name clause whose names the export
+/// cannot materialize as whole single-faced cards (see
+/// `database::name_copy_gate`). A single-faced export entry carries no `layout`.
+fn gate_unmaterializable_name_copies_in_export(face_index: &mut BTreeMap<String, CardExportEntry>) {
+    let single_faced: HashSet<String> = face_index
+        .iter()
+        .filter(|(_, entry)| entry.layout.is_none())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let is_single_faced_card = |name: &str| single_faced.contains(&name.to_lowercase());
+    for entry in face_index.values_mut() {
+        engine::database::name_copy_gate::gate_unmaterializable_name_copies(
+            &mut entry.face,
+            &is_single_faced_card,
+        );
     }
 }
 
@@ -1251,6 +1381,7 @@ fn main() {
     let mut mtgjson_override: Option<PathBuf> = None;
     let mut names_out: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut provenance_out: Option<PathBuf> = None;
     let mut sidecar_dir: Option<PathBuf> = None;
     let mut stats = false;
     let mut write_subtypes = false;
@@ -1284,6 +1415,14 @@ fn main() {
                     process::exit(1);
                 }
                 output = Some(PathBuf::from(&args[i]));
+            }
+            "--provenance-out" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --provenance-out requires a path argument");
+                    process::exit(1);
+                }
+                provenance_out = Some(PathBuf::from(&args[i]));
             }
             "--sidecar-dir" => {
                 i += 1;
@@ -1338,10 +1477,13 @@ fn main() {
             Some(d) => d.join("mtgjson/AtomicCards.json"),
             None => {
                 eprintln!(
-                    "Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>]"
+                    "Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>] [--provenance-out <path>]"
                 );
                 eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
                 eprintln!("  --output <path>  Write the export to a file instead of stdout");
+                eprintln!(
+                    "  --provenance-out <path>  Write the exact source/output hashes for the export"
+                );
                 eprintln!(
                     "  --write-subtypes Regenerate the committed creature-subtype vocabulary\n\
                      \x20                 (crates/phase-ast/data/oracle-subtypes.json). Requires\n\
@@ -1369,7 +1511,13 @@ fn main() {
         process::exit(1);
     }
 
-    let atomic = match load_atomic_cards(&mtgjson_path) {
+    let source_corpus_bytes = std::fs::read(&mtgjson_path).unwrap_or_else(|error| {
+        eprintln!("Error reading {}: {error}", mtgjson_path.display());
+        process::exit(1);
+    });
+    let source_corpus_sha256 = sha256_bytes(&source_corpus_bytes);
+
+    let atomic = match load_atomic_cards_from_bytes(&source_corpus_bytes) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error loading MTGJSON: {e}");
@@ -1423,9 +1571,8 @@ fn main() {
         .map(|d| load_set_catalog(d))
         .unwrap_or_default();
 
-    // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
-    // directly from MTGJSON `isGameChanger`; this file covers policy axes that
-    // MTGJSON does not expose.
+    // Load curated bracket lists for signal stamping. A present Game Changers
+    // list is authoritative; MTGJSON is its fallback when that list is absent.
     let bracket_lists_path = data_dir
         .as_ref()
         .map(|d| d.join("bracket_lists.json"))
@@ -1433,10 +1580,10 @@ fn main() {
     let bracket_lists = if bracket_lists_path.exists() {
         BracketLists::from_json_path(&bracket_lists_path).unwrap_or_else(|e| {
             eprintln!(
-                "warning: failed to load {}: {e}; non-MTGJSON bracket signals will be all-false",
+                "error: failed to load {}: {e}",
                 bracket_lists_path.display()
             );
-            BracketLists::default()
+            process::exit(1)
         })
     } else {
         eprintln!(
@@ -1563,6 +1710,7 @@ fn main() {
             );
         }
     }
+    report_game_changer_drift(&bracket_lists, &atomic);
 
     // Release-gate (hybrid): keep cards available ONLY through gated sets in
     // card-data so they stay browsable, but mark them Banned in every format so
@@ -1593,14 +1741,46 @@ fn main() {
         );
     }
 
-    let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
+    gate_unmaterializable_name_copies_in_export(&mut face_index);
+    let misparses = engine::types::confirmed_misparse::ConfirmedMisparses::committed();
+    let stamped = misparses.stamp_all(
+        face_index
+            .iter_mut()
+            .map(|(key, entry)| (key.as_str(), &mut entry.face)),
+    );
+    eprintln!(
+        "Confirmed misparses: marked {} exported face(s)",
+        stamped.marked
+    );
+    if filter_names.is_empty() && !stamped.unmatched_keys.is_empty() {
+        eprintln!(
+            "Confirmed misparses: {} listed key(s) absent from export; sample: {:?}",
+            stamped.unmatched_keys.len(),
+            &stamped.unmatched_keys[..stamped.unmatched_keys.len().min(10)]
+        );
+    }
+
+    let card_data_bytes = serde_json::to_vec(&face_index).expect("Failed to serialize card data");
+    if let (Some(output), Some(provenance_out)) = (&output, &provenance_out) {
+        match output_paths_share_destination(output, provenance_out) {
+            Ok(true) => {
+                eprintln!("Error: --output and --provenance-out must be different paths");
+                process::exit(2);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Error checking --output/--provenance-out paths: {error}");
+                process::exit(2);
+            }
+        }
+    }
     if let (Some(trace), Some(manifest)) = (&trace_args, trace_manifest) {
         if output.as_ref() == Some(&trace.output) {
             eprintln!("Error: --output and --parser-trace-out must be different paths");
             process::exit(2);
         }
         let report =
-            build_trace_report(&face_index, manifest, json.as_bytes()).unwrap_or_else(|error| {
+            build_trace_report(&face_index, manifest, &card_data_bytes).unwrap_or_else(|error| {
                 eprintln!("Error building parser trace report: {error}");
                 process::exit(2);
             });
@@ -1610,10 +1790,30 @@ fn main() {
         });
     }
     if let Some(ref out_path) = output {
-        std::fs::write(out_path, &json)
+        std::fs::write(out_path, &card_data_bytes)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_path.display()));
     } else {
-        println!("{json}");
+        io::stdout()
+            .write_all(&card_data_bytes)
+            .unwrap_or_else(|e| panic!("Failed to write card data to stdout: {e}"));
+    }
+
+    let provenance_path = match provenance_out {
+        Some(path) => Some(path),
+        None if output.is_none() => data_dir
+            .as_ref()
+            .map(|dir| dir.join("card-data.provenance.json")),
+        None => None,
+    };
+    if let Some(path) = provenance_path {
+        let provenance = CardDataProvenance {
+            source_corpus_sha256,
+            card_data_sha256: sha256_bytes(&card_data_bytes),
+        };
+        provenance.write_atomic(&path).unwrap_or_else(|error| {
+            eprintln!("Error writing {}: {error}", path.display());
+            process::exit(1);
+        });
     }
 
     // Emit per-locale content-i18n sidecars (card-data.<code>.json) into the
@@ -2241,6 +2441,67 @@ mod tests {
     }
 
     #[test]
+    fn curated_game_changers_override_the_mtgjson_flag() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Curated Card"])],
+        );
+
+        let curated_face = CardFace {
+            name: "Curated Card".into(),
+            ..Default::default()
+        };
+        let curated_source = atomic_single("Curated Card", None);
+        assert!(
+            bracket_signals_for_face(&lists, &curated_face, &curated_source).game_changer,
+            "curated membership must add a signal absent from MTGJSON"
+        );
+
+        let mtgjson_face = CardFace {
+            name: "MTGJSON-only Card".into(),
+            ..Default::default()
+        };
+        let mut mtgjson_source = atomic_single("MTGJSON-only Card", None);
+        mtgjson_source.is_game_changer = true;
+        assert!(
+            !bracket_signals_for_face(&lists, &mtgjson_face, &mtgjson_source).game_changer,
+            "curated absence must express a removal from the MTGJSON snapshot"
+        );
+    }
+
+    #[test]
+    fn mtgjson_flag_is_the_fallback_when_no_curated_list() {
+        let face = CardFace {
+            name: "MTGJSON Game Changer".into(),
+            ..Default::default()
+        };
+        let mut source = atomic_single("MTGJSON Game Changer", None);
+        source.is_game_changer = true;
+        assert!(bracket_signals_for_face(&BracketLists::default(), &face, &source).game_changer);
+    }
+
+    #[test]
+    fn curated_game_changer_applies_to_both_faces_of_an_mdfc() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Tergrid, God of Fright"])],
+        );
+        let mut source = atomic_single("Tergrid, God of Fright // Tergrid's Lantern", None);
+        source.is_game_changer = true;
+
+        for name in ["Tergrid, God of Fright", "Tergrid's Lantern"] {
+            let face = CardFace {
+                name: name.into(),
+                ..Default::default()
+            };
+            assert!(
+                bracket_signals_for_face(&lists, &face, &source).game_changer,
+                "card-level curated membership must apply when the deck names {name}"
+            );
+        }
+    }
+
+    #[test]
     fn parser_trace_args_require_a_complete_unique_pair() {
         let args = vec![
             "oracle-gen".to_string(),
@@ -2369,6 +2630,226 @@ mod tests {
             bracket_signals: BracketSignals::default(),
             trace_input: None,
         }
+    }
+
+    /// Interrogation Robot's PRINTED Oracle text (card-data.json), verbatim.
+    const ROBOT_ORACLE: &str = "{T}, Discard a card: Choose a card name that hasn't been chosen among Who, What, When, Where, and Why. Create a copy of the card with the chosen name. You may cast the copy. (You still pay its costs. Who//What//When//Where//Why is a split card from Unhinged.)";
+    /// Garth One-Eye's PRINTED Oracle text (card-data.json), verbatim.
+    const GARTH_ORACLE: &str = "{T}: Choose a card name that hasn't been chosen from among Disenchant, Braingeyser, Terror, Shivan Dragon, Regrowth, and Black Lotus. Create a copy of the card with the chosen name. You may cast the copy. (You still pay its costs.)";
+    const ROBOT_NAMES: [&str; 5] = ["who", "what", "when", "where", "why"];
+    const GARTH_NAMES: [&str; 6] = [
+        "disenchant",
+        "braingeyser",
+        "terror",
+        "shivan dragon",
+        "regrowth",
+        "black lotus",
+    ];
+
+    fn export_face_with(text: &str, name: &str) -> CardFace {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            text,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        CardFace {
+            name: name.to_string(),
+            abilities: parsed.abilities,
+            ..Default::default()
+        }
+    }
+
+    /// Every effect of every ability chain a face carries, in chain order.
+    fn export_chain_effects(face: &CardFace) -> Vec<engine::types::ability::Effect> {
+        let mut out = Vec::new();
+        for ability in &face.abilities {
+            let mut node = Some(ability);
+            while let Some(def) = node {
+                out.push((*def.effect).clone());
+                node = def.sub_ability.as_deref();
+            }
+        }
+        out
+    }
+
+    fn is_name_copy(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::CreateCardCopyByName { .. }
+        )
+    }
+
+    fn is_copy_cast(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::CastFromZone {
+                target: engine::types::ability::TargetFilter::LastCreated,
+                ..
+            }
+        )
+    }
+
+    /// The specific gap the export gate records for a copy clause or its cast.
+    fn is_name_copy_gap(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::Unimplemented { name, .. }
+                if name == engine::database::name_copy_gate::GAP_NAME
+        )
+    }
+
+    /// The whole export-gate regression. `mutate_robot` lets a counter-probe drop a
+    /// Robot node during "parsing"; `robot_names_are_split` makes the Robot's
+    /// domain materializable, so its nodes survive export.
+    ///
+    /// Both Robot nodes (the copy creation and the dependent cast) are asserted
+    /// PRESENT before the gate, so a parser regression that drops either cannot
+    /// leave the post-gate "absent" check vacuously green; after the gate each is
+    /// asserted to be the specific gap, and the full Garth chain must survive.
+    fn check_export_gate(mutate_robot: impl FnOnce(&mut CardFace), robot_names_are_split: bool) {
+        use engine::types::ability::{AbilityCost, ChoiceType, Effect};
+
+        let mut robot = make_entry("o-robot", &["TST"], None);
+        robot.face = export_face_with(ROBOT_ORACLE, "Interrogation Robot");
+        mutate_robot(&mut robot.face);
+        let mut garth = make_entry("o-garth", &["TST"], None);
+        garth.face = export_face_with(GARTH_ORACLE, "Garth One-Eye");
+
+        // The printed activation cost is {T}, Discard a card.
+        let robot_cost = robot
+            .face
+            .abilities
+            .first()
+            .and_then(|ability| ability.cost.as_ref())
+            .expect("the Robot's printed activation has a cost");
+        assert!(
+            matches!(
+                robot_cost,
+                AbilityCost::Composite { costs }
+                    if costs.iter().any(|c| matches!(c, AbilityCost::Tap))
+                        && costs.iter().any(|c| matches!(c, AbilityCost::Discard { .. }))
+            ),
+            "the printed cost is {{T}}, Discard a card: {robot_cost:?}"
+        );
+
+        // Both Robot nodes exist before the gate runs.
+        let robot_before = export_chain_effects(&robot.face);
+        assert_eq!(
+            robot_before.iter().filter(|e| is_name_copy(e)).count(),
+            1,
+            "the Robot parses its copy clause: {robot_before:?}"
+        );
+        assert_eq!(
+            robot_before.iter().filter(|e| is_copy_cast(e)).count(),
+            1,
+            "the Robot parses its dependent cast: {robot_before:?}"
+        );
+        let garth_before = export_chain_effects(&garth.face);
+        assert_eq!(garth_before.iter().filter(|e| is_name_copy(e)).count(), 1);
+        assert_eq!(garth_before.iter().filter(|e| is_copy_cast(e)).count(), 1);
+
+        let robot_layout = robot_names_are_split.then_some("split");
+        let mut face_index = BTreeMap::from([
+            ("interrogation robot".to_string(), robot),
+            ("garth one-eye".to_string(), garth),
+        ]);
+        for name in ROBOT_NAMES {
+            face_index.insert(
+                name.to_string(),
+                make_entry(&format!("o-{name}"), &["TST"], robot_layout),
+            );
+        }
+        for name in GARTH_NAMES {
+            face_index.insert(
+                name.to_string(),
+                make_entry(&format!("o-{name}"), &["TST"], None),
+            );
+        }
+
+        gate_unmaterializable_name_copies_in_export(&mut face_index);
+
+        // CR 707.13 + CR 709.4a: the split-half domain is gapped. The copy clause
+        // and the cast are each the specific gap, and neither original survives.
+        let robot_after = export_chain_effects(&face_index["interrogation robot"].face);
+        assert!(
+            !robot_after
+                .iter()
+                .any(|e| is_name_copy(e) || is_copy_cast(e)),
+            "neither Robot node survives export: {robot_after:?}"
+        );
+        assert_eq!(
+            robot_after.iter().filter(|e| is_name_copy_gap(e)).count(),
+            2,
+            "the copy and its cast are each the specific gap: {robot_after:?}"
+        );
+
+        // A single-faced domain keeps its whole chain: the closed six-name choice,
+        // the copy, and its cast.
+        let garth_after = export_chain_effects(&face_index["garth one-eye"].face);
+        assert_eq!(
+            garth_after, garth_before,
+            "the Garth chain is untouched by the gate"
+        );
+        assert!(
+            garth_after.iter().any(|e| matches!(
+                e,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName { options, .. },
+                    ..
+                } if options.len() == 6
+            )),
+            "Garth keeps its six-name closed domain: {garth_after:?}"
+        );
+        assert!(garth_after.iter().any(is_name_copy));
+        assert!(garth_after.iter().any(is_copy_cast));
+        assert!(!garth_after.iter().any(is_name_copy_gap));
+    }
+
+    /// Replace the Robot's chain node matching `pick` with a stand-in parse gap, as a
+    /// parser regression that stops recognizing that clause would.
+    fn drop_robot_node(face: &mut CardFace, pick: fn(&engine::types::ability::Effect) -> bool) {
+        let mut node = face.abilities.first_mut();
+        while let Some(def) = node {
+            if pick(&def.effect) {
+                *def.effect =
+                    engine::types::ability::Effect::unimplemented("parser_regression", "");
+            }
+            node = def.sub_ability.as_deref_mut();
+        }
+    }
+
+    /// CR 707.13 + CR 709.4a: the export-side gate. A copy-by-name domain that
+    /// names split halves (`layout: Some("split")`) or names the export does
+    /// not hold is gapped, copy clause and cast clause alike; one naming only
+    /// single-faced entries (`layout: None`) is left supported.
+    #[test]
+    fn export_gate_gaps_copy_by_name_of_split_halves_only() {
+        check_export_gate(|_| {}, true);
+    }
+
+    /// Counter-probe: a parser regression that drops the Robot's copy clause fails
+    /// the pre-gate presence check instead of passing vacuously.
+    #[test]
+    #[should_panic(expected = "the Robot parses its copy clause")]
+    fn export_gate_test_fails_when_the_robot_copy_node_is_dropped() {
+        check_export_gate(|face| drop_robot_node(face, is_name_copy), true);
+    }
+
+    /// Counter-probe: likewise for the dependent cast.
+    #[test]
+    #[should_panic(expected = "the Robot parses its dependent cast")]
+    fn export_gate_test_fails_when_the_robot_cast_node_is_dropped() {
+        check_export_gate(|face| drop_robot_node(face, is_copy_cast), true);
+    }
+
+    /// Counter-probe: a Robot whose nodes SURVIVE export (a materializable domain,
+    /// i.e. the gate not gapping them) fails the post-gate check.
+    #[test]
+    #[should_panic(expected = "neither Robot node survives export")]
+    fn export_gate_test_fails_when_the_robot_nodes_survive_export() {
+        check_export_gate(|_| {}, false);
     }
 
     #[test]

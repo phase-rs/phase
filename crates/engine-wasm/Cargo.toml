@@ -36,3 +36,4 @@ js-sys = "0.3"
 # Unit tests place objects with the raw zone API, which is sealed in production
 # builds; dev-dependencies never reach the shipped WASM artifact.
 engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
+flate2 = "1"

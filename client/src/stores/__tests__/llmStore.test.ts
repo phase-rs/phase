@@ -6,12 +6,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { LLM_ENDPOINTS_KEY } from "../../constants/storage";
 import { draftProfile, isMissingApiKey, isProfileUsable, profileForSeat, useLlmStore } from "../llmStore";
+import { useMultiplayerStore } from "../multiplayerStore";
 import type { LlmProfile, LlmProviderCatalogEntry } from "../../services/llm/types";
 
 const CATALOG: readonly LlmProviderCatalogEntry[] = [
-  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
-  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
-  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [] },
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
+  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] },
+  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
 ];
 
 function reset(): void {
@@ -22,6 +23,7 @@ function reset(): void {
     draftEnabled: false,
     draftProfileId: null,
   });
+  sessionStorage.clear();
 }
 
 function addUsable(name: string): string {
@@ -126,7 +128,7 @@ describe("llmStore", () => {
   it("requires a key for OpenRouter like the other hosted providers", () => {
     const catalog: LlmProviderCatalogEntry[] = [
       ...CATALOG,
-      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [] },
+      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
     ];
     const id = useLlmStore.getState().addProfile({ provider: "OpenRouter", model: "openrouter/auto", enabled: true });
     const profile = () => useLlmStore.getState().profiles.find((p) => p.id === id);
@@ -294,6 +296,21 @@ describe("llmStore", () => {
     expect(profile.apiKey).toBe("sk-test");
   });
 
+  it("starts a new profile on self-contained requests and persists an explicit opt-in", () => {
+    const id = useLlmStore.getState().addProfile({ provider: "Anthropic", model: "m" });
+    const stored = () => {
+      const raw = JSON.parse(localStorage.getItem(LLM_ENDPOINTS_KEY) ?? "{}");
+      return raw.state.profiles.find((profile: { id: string }) => profile.id === id);
+    };
+    expect(useLlmStore.getState().profiles[0].decisionContext).toBe("selfContained");
+    expect(stored().decisionContext).toBe("selfContained");
+
+    useLlmStore.getState().updateProfile(id, { decisionContext: "messageThread" });
+
+    expect(useLlmStore.getState().profiles[0].decisionContext).toBe("messageThread");
+    expect(stored().decisionContext).toBe("messageThread");
+  });
+
   it("never writes the API key to persistent storage", () => {
     useLlmStore
       .getState()
@@ -450,5 +467,145 @@ describe("llmStore", () => {
       .updateProfile(id, { baseUrl: "https://proxy.internal/v1", apiKey: "sk-new" });
 
     expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.apiKey).toBe("sk-new");
+  });
+
+  // ── Opt-in sessionStorage persistence (rememberApiKey) ──────────────────────
+
+  it("defaults rememberApiKey to false on new profiles", () => {
+    const id = useLlmStore.getState().addProfile({ model: "gpt-5", apiKey: "sk-test", enabled: true });
+    expect(useLlmStore.getState().profiles.find((p) => p.id === id)?.rememberApiKey).toBe(false);
+  });
+
+  it("stores rememberApiKey in sessionStorage rather than localStorage", () => {
+    const id = useLlmStore.getState().addProfile({ model: "gpt-5", apiKey: "sk-test", enabled: true });
+    useLlmStore.getState().updateProfile(id, { rememberApiKey: true });
+
+    const raw = JSON.parse(localStorage.getItem(LLM_ENDPOINTS_KEY) ?? "{}");
+    const profile = raw.state.profiles.find((p: { id: string }) => p.id === id);
+    expect(profile.rememberApiKey).toBeUndefined();
+
+    const rememberedRaw = sessionStorage.getItem("phase-llm-remember-api-keys");
+    expect(rememberedRaw).not.toBeNull();
+    expect(JSON.parse(rememberedRaw!)).toEqual([id]);
+  });
+
+  it("copies API key and destination to sessionStorage when rememberApiKey is enabled", () => {
+    const id = useLlmStore.getState().addProfile({ model: "gpt-5", apiKey: "sk-test", enabled: true });
+    useLlmStore.getState().updateProfile(id, { rememberApiKey: true });
+
+    const sessionRaw = sessionStorage.getItem("phase-llm-api-keys");
+    expect(sessionRaw).not.toBeNull();
+    const sessionKeys = JSON.parse(sessionRaw!);
+    expect(sessionKeys[id]).toEqual({ apiKey: "sk-test", provider: "OpenAi", endpoint: "" });
+  });
+
+  it("does not write to sessionStorage when rememberApiKey is false", () => {
+    useLlmStore.getState().addProfile({ model: "gpt-5", apiKey: "sk-test", enabled: true });
+    // rememberApiKey defaults to false
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).toBeNull();
+  });
+
+  it("removes key and opt-in from sessionStorage when rememberApiKey is turned off", () => {
+    const id = useLlmStore.getState().addProfile({ model: "gpt-5", apiKey: "sk-test", enabled: true });
+    useLlmStore.getState().updateProfile(id, { rememberApiKey: true });
+    expect(sessionStorage.getItem("phase-llm-api-keys")).not.toBeNull();
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).not.toBeNull();
+
+    useLlmStore.getState().updateProfile(id, { rememberApiKey: false });
+    // When the last key/opt-in is removed, the sessionStorage keys are deleted entirely.
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).toBeNull();
+  });
+
+  it("removes key and opt-in from sessionStorage when profile is removed", () => {
+    const id = useLlmStore.getState().addProfile({ model: "gpt-5", apiKey: "sk-test", enabled: true });
+    useLlmStore.getState().updateProfile(id, { rememberApiKey: true });
+    expect(sessionStorage.getItem("phase-llm-api-keys")).not.toBeNull();
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).not.toBeNull();
+
+    useLlmStore.getState().removeProfile(id);
+    // When the last key/opt-in is removed, the sessionStorage keys are deleted entirely.
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).toBeNull();
+  });
+
+  it("clears sessionStorage key when provider changes", () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "sk-openai", enabled: true, rememberApiKey: true,
+    });
+    expect(sessionStorage.getItem("phase-llm-api-keys")).not.toBeNull();
+
+    useLlmStore.getState().updateProfile(id, { provider: "Anthropic", model: "claude-sonnet-5" });
+    // When the last key is removed, the sessionStorage key is deleted entirely.
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+  });
+
+  it("clears sessionStorage key when endpoint changes", () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "sk-openai", baseUrl: "https://api.openai.com/v1", enabled: true, rememberApiKey: true,
+    });
+    expect(sessionStorage.getItem("phase-llm-api-keys")).not.toBeNull();
+
+    useLlmStore.getState().updateProfile(id, { baseUrl: "https://proxy.internal/v1" });
+    // When the last key is removed, the sessionStorage key is deleted entirely.
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+  });
+
+  it("stores Jev relay origin and clears sessionStorage key when relay changes", () => {
+    useMultiplayerStore.setState({ hostingServer: "wss://relay-a.example" });
+    const id = useLlmStore.getState().addProfile({
+      provider: "Jev", model: "jev-latest", apiKey: "jev-key", enabled: true, rememberApiKey: true,
+    });
+    const sessionKeys = JSON.parse(sessionStorage.getItem("phase-llm-api-keys")!);
+    expect(sessionKeys[id]).toEqual({
+      apiKey: "jev-key",
+      provider: "Jev",
+      endpoint: "https://relay-a.example",
+    });
+
+    useMultiplayerStore.setState({ hostingServer: "wss://relay-b.example" });
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+  });
+
+  it("keeps sessionStorage key when provider and endpoint unchanged", () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "sk-openai", enabled: true, rememberApiKey: true,
+    });
+    expect(sessionStorage.getItem("phase-llm-api-keys")).not.toBeNull();
+
+    useLlmStore.getState().updateProfile(id, { name: "renamed" });
+    const sessionRaw = sessionStorage.getItem("phase-llm-api-keys");
+    expect(sessionRaw).not.toBeNull();
+    const sessionKeys = JSON.parse(sessionRaw!);
+    expect(sessionKeys[id]).toEqual({ apiKey: "sk-openai", provider: "OpenAi", endpoint: "" });
+  });
+
+  it("accepts a new credential supplied with the provider change and stores it", () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "sk-old", enabled: true, rememberApiKey: true,
+    });
+
+    useLlmStore.getState().updateProfile(id, { provider: "Anthropic", apiKey: "sk-new", model: "claude-sonnet-5" });
+    const sessionRaw = sessionStorage.getItem("phase-llm-api-keys");
+    expect(sessionRaw).not.toBeNull();
+    const sessionKeys = JSON.parse(sessionRaw!);
+    expect(sessionKeys[id]).toEqual({ apiKey: "sk-new", provider: "Anthropic", endpoint: "" });
+  });
+
+  it("accepts a new credential supplied with the endpoint change and stores it", () => {
+    const id = useLlmStore.getState().addProfile({
+      provider: "OpenAi", model: "gpt-5", apiKey: "sk-old", baseUrl: "https://api.openai.com/v1", enabled: true, rememberApiKey: true,
+    });
+
+    useLlmStore.getState().updateProfile(id, { baseUrl: "https://proxy.internal/v1", apiKey: "sk-new" });
+    const sessionRaw = sessionStorage.getItem("phase-llm-api-keys");
+    expect(sessionRaw).not.toBeNull();
+    const sessionKeys = JSON.parse(sessionRaw!);
+    expect(sessionKeys[id]).toEqual({
+      apiKey: "sk-new",
+      provider: "OpenAi",
+      endpoint: "https://proxy.internal/v1",
+    });
   });
 });
