@@ -1,6 +1,7 @@
 //! CR 701.23a + CR 701.24a + CR 608.2c: "If you search your library this way, shuffle."
 //!
-//! The 34 cards of the class search a zone set that includes the library ("your library and/or
+//! The 34 cards of the class (plus three supported peers with the identical chain, Chandra's Firemaw,
+//! Elspeth's Devotee and Chandra's Outburst, whose shuffle the guard must keep) search a zone set that includes the library ("your library and/or
 //! graveyard", "your graveyard, hand, and/or library", ...) and then shuffle only if the library
 //! was searched. A `CantSearchLibrary` effect (printed Mindlock Orb) leaves a graveyard find without
 //! a library search, so no shuffle. Every ability-bearing card is built from its verbatim MTGJSON
@@ -544,6 +545,44 @@ When this creature enters, search your library and/or graveyard for a card named
         shards: &[ManaCostShard::Green],
         flow: Flow::Cast,
         found: Found::Named("Command Tower"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Chandra's Firemaw",
+        oracle: r####"Haste
+When this creature enters, you may search your library and/or graveyard for a card named Chandra, Flame's Catalyst, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Creature(4, 2),
+        subtypes: &["Hellion"],
+        legendary: false,
+        generic: 3,
+        shards: &[ManaCostShard::Red, ManaCostShard::Red],
+        flow: Flow::Cast,
+        found: Found::Named("Chandra, Flame's Catalyst"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Elspeth's Devotee",
+        oracle: r####"When this creature enters, you may search your library and/or graveyard for a card named Elspeth, Undaunted Hero, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Creature(3, 3),
+        subtypes: &["Human", "Soldier"],
+        legendary: false,
+        generic: 2,
+        shards: &[ManaCostShard::White, ManaCostShard::White],
+        flow: Flow::Cast,
+        found: Found::Named("Elspeth, Undaunted Hero"),
+        variants: &["G", "L", "GM"],
+    },
+    Spec {
+        name: "Chandra's Outburst",
+        oracle: r####"Chandra's Outburst deals 4 damage to target player or planeswalker.
+Search your library and/or graveyard for a card named Chandra, Bold Pyromancer, reveal it, and put it into your hand. If you search your library this way, shuffle."####,
+        kind: Kind::Sorcery,
+        subtypes: &[],
+        legendary: false,
+        generic: 3,
+        shards: &[ManaCostShard::Red, ManaCostShard::Red],
+        flow: Flow::TargetsPlayer,
+        found: Found::Named("Chandra, Bold Pyromancer"),
         variants: &["G", "L", "GM"],
     },
 ];
