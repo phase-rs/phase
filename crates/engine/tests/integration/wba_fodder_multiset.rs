@@ -544,6 +544,7 @@ fn batched_mint_raises_real_entry_events_per_minted_token() {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
                         destination: Zone::Graveyard,
+                        position: engine::types::ability::LibraryPosition::Top,
                     },
                 )),
         );

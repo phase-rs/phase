@@ -94,13 +94,18 @@ describe("P2PDraftHost public draft code", () => {
     // defect that stopped calling `crypto.getRandomValues` at all could pass the
     // inequality below on two coincidentally-different constants.
     expect(seed).toBe(0xaaaaaaaa);
-    expect(draftCode).toMatch(/^draft-[0-9a-f]{8}$/);
+    expect(draftCode).toMatch(/^[A-Z0-9]{6}$/);
+    // Pinned to the second draw (0xbbbbbbbb) reduced modulo 36^6, base 36.
+    expect(draftCode).toBe((0xbbbbbbbb % 36 ** 6).toString(36).toUpperCase().padStart(6, "0"));
+    // Literal shared with the server contract test
+    // `p2p_backup_store_accepts_client_draft_code_and_rejects_legacy_shape`.
+    expect(draftCode).toBe("G37RUJ");
     expect(drawIndex).toBe(2);
 
-    // THE CLAIM. Restore `draft-${seed.toString(16).padStart(8, "0")}` and both
-    // of these red: the code becomes "draft-aaaaaaaa", which is the seed.
+    // THE CLAIM. A code derived from the seed draw (0xaaaaaaaa) reds both of
+    // these.
+    expect(draftCode).not.toBe((seed % 36 ** 6).toString(36).toUpperCase().padStart(6, "0"));
     expect(draftCode).not.toBe(`draft-${seed.toString(16).padStart(8, "0")}`);
-    expect(parseInt(draftCode.slice("draft-".length), 16)).not.toBe(seed);
   });
 
   it("does not leak the seed through the code under real randomness", async () => {
@@ -111,7 +116,8 @@ describe("P2PDraftHost public draft code", () => {
     vi.restoreAllMocks();
     for (let run = 0; run < 8; run += 1) {
       const { seed, draftCode } = await startAndCapture();
-      expect(parseInt(draftCode.slice("draft-".length), 16)).not.toBe(seed);
+      expect(draftCode).toMatch(/^[A-Z0-9]{6}$/);
+      expect(draftCode).not.toBe((seed % 36 ** 6).toString(36).toUpperCase().padStart(6, "0"));
     }
   });
 });

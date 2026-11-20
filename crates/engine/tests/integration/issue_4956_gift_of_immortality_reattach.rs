@@ -7,15 +7,19 @@ use engine::game::effects::attach::{attach_to, attach_to_player};
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
+use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, DelayedTriggerCondition, Effect, TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, FilterProp,
+    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
+    TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, StackEntryKind, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const GIFT_ORACLE: &str = "Enchant creature\n\
@@ -28,6 +32,10 @@ When enchanted creature dies, you may put a creature card you own with lesser \
 mana value from your hand or from the command zone onto the battlefield. If \
 you do, return this card to the battlefield attached to that creature at the \
 beginning of the next end step.";
+
+const STORMKELD_CURATOR_ORACLE: &str = "When this creature enters, you may put \
+any number of Aura cards from your graveyard and/or hand onto the battlefield \
+attached to it.";
 
 const LYNDE_ORACLE: &str = "Deathtouch\n\
 Whenever a Curse is put into your graveyard from the battlefield, return it to \
@@ -202,11 +210,28 @@ fn drain_priority(runner: &mut GameRunner) -> bool {
     drain_priority_preferring(runner, &[])
 }
 
+/// What a drain observed while it drove the production prompts. Used by the
+/// Next of Kin regressions to prove the optional and card-selection prompts
+/// were actually reached, rather than inferring reach from a post-drain state.
+#[derive(Default)]
+struct DrainObservations {
+    saw_optional: bool,
+    zone_choices: Vec<Vec<engine::types::identifiers::ObjectId>>,
+}
+
 /// Drain priority/resolution prompts, preferring `preferred` object ids when
 /// choosing from EffectZoneChoice / target slots (Cass host, Storm Aura, etc.).
 fn drain_priority_preferring(
     runner: &mut GameRunner,
     preferred: &[engine::types::identifiers::ObjectId],
+) -> bool {
+    drain_priority_preferring_observed(runner, preferred, &mut DrainObservations::default())
+}
+
+fn drain_priority_preferring_observed(
+    runner: &mut GameRunner,
+    preferred: &[engine::types::identifiers::ObjectId],
+    observations: &mut DrainObservations,
 ) -> bool {
     let mut consumed_effect_zone_choice = false;
     for _ in 0..256 {
@@ -247,21 +272,29 @@ fn drain_priority_preferring(
                 engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
             }
             WaitingFor::OptionalEffectChoice { .. } => {
+                observations.saw_optional = true;
                 runner
                     .act(GameAction::DecideOptionalEffect { accept: true })
                     .expect("accept optional");
             }
             WaitingFor::EffectZoneChoice { cards, .. } => {
                 consumed_effect_zone_choice = true;
-                let pick = preferred
-                    .iter()
-                    .copied()
-                    .find(|id| cards.contains(id))
-                    .or_else(|| cards.first().copied())
-                    .expect("zone choice candidate");
-                runner
-                    .act(GameAction::SelectCards { cards: vec![pick] })
-                    .expect("choose zone cards");
+                observations.zone_choices.push(cards.clone());
+                if cards.is_empty() {
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![] })
+                        .expect("decline the empty private-scope choice");
+                } else {
+                    let pick = preferred
+                        .iter()
+                        .copied()
+                        .find(|id| cards.contains(id))
+                        .or_else(|| cards.first().copied())
+                        .expect("zone choice candidate");
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![pick] })
+                        .expect("choose zone cards");
+                }
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
                 if let Some(pref) = preferred.first() {
@@ -436,6 +469,39 @@ fn next_of_kin_delayed_reattach_shape() {
         !effect_is_unimplemented(&execute.effect),
         "Next of Kin must parse supported: {:?}",
         execute.effect
+    );
+    assert!(
+        execute.optional,
+        "the printed \"you may put\" is the optional action the prompt accepts"
+    );
+    assert_eq!(
+        execute.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "a multi-origin put is a resolution choice, not a stack target"
+    );
+    // CR 400.1 + CR 400.7: the printed "from your hand or from the command
+    // zone" is one multi-origin instruction. Its union must live on the target
+    // filter, and `origin` must be None — a single `Zone` here would silently
+    // override the union at resolution.
+    let Effect::ChangeZone { origin, target, .. } = execute.effect.as_ref() else {
+        panic!(
+            "Next of Kin dies trigger must be ChangeZone, got {:?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        origin, &None,
+        "Next of Kin's two origin zones cannot be represented by one origin field"
+    );
+    let TargetFilter::Typed(typed) = target else {
+        panic!("Next of Kin target must be Typed, got {target:?}");
+    };
+    assert!(
+        typed.properties.contains(&FilterProp::InAnyZone {
+            zones: vec![Zone::Hand, Zone::Command],
+        }),
+        "Next of Kin target must name Hand or Command, got {:?}",
+        typed.properties
     );
     let delayed_link = execute
         .sub_ability
@@ -739,6 +805,9 @@ fn next_of_kin_attaches_to_put_creature_not_dying_host() {
             generic: 2,
         })
         .id();
+    scenario
+        .add_creature(P0, "Hand-Entry Watcher", 1, 1)
+        .with_replacement_definition(hand_entry_life_replacement());
     let aura = scenario
         .add_creature(P0, "Next of Kin", 0, 0)
         .as_enchantment()
@@ -767,6 +836,11 @@ fn next_of_kin_attaches_to_put_creature_not_dying_host() {
         "Next of Kin puts the lesser-MV creature"
     );
     assert_eq!(
+        runner.state().players[0].life,
+        21,
+        "hand-origin control: the same replacement must fire for the hand leg"
+    );
+    assert_eq!(
         runner.state().delayed_triggers.len(),
         1,
         "if-you-do delayed reattach installed"
@@ -793,6 +867,1205 @@ fn next_of_kin_attaches_to_put_creature_not_dying_host() {
         Some(AttachTarget::Object(put_b)),
         "hostile: attach to put creature B, not dying host A"
     );
+}
+
+/// CR 400.1 + CR 400.7 + CR 608.2c: Next of Kin's printed "from your hand or
+/// from the command zone" is one instruction over two zones. The command-zone
+/// leg must be offered alongside the hand leg, the chosen card must move from
+/// the zone it actually occupies, and the "If you do" delayed reattachment must
+/// still complete at the next end step.
+#[test]
+fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let hand = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(generic_cost(2))
+        .id();
+    let command = scenario
+        .add_creature_to_hand(P0, "Elite Vanguard", 2, 1)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(command);
+    // Invalid-zone control: a legal lesser-mana-value creature outside the two
+    // named zones must never enter the eligible set.
+    let exiled = scenario
+        .add_creature_to_exile(P0, "Exiled Bears", 2, 2)
+        .with_mana_cost(generic_cost(2))
+        .id();
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    let mut observations = DrainObservations::default();
+    let consumed_choice =
+        drain_priority_preferring_observed(&mut runner, &[command], &mut observations);
+
+    assert!(
+        !matches!(
+            &runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice {
+                privacy_zones: Some(_),
+                ..
+            }
+        ),
+        "answering the multi-origin choice must retire its carried scope"
+    );
+    assert!(
+        observations.saw_optional,
+        "the printed \"you may\" must reach an OptionalEffectChoice prompt"
+    );
+    assert!(
+        consumed_choice,
+        "the two-candidate put must open a card choice"
+    );
+    assert_eq!(
+        observations.zone_choices.len(),
+        1,
+        "one card-selection prompt for the hand/command union"
+    );
+    let offered = &observations.zone_choices[0];
+    assert!(
+        offered.contains(&hand) && offered.contains(&command),
+        "the choice must contain both the hand and command legs; offered {offered:?}"
+    );
+    assert!(
+        !offered.contains(&exiled),
+        "the exile control must not be an eligible choice; offered {offered:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&command].zone,
+        Zone::Battlefield,
+        "Next of Kin must offer and move the command-zone creature"
+    );
+    assert_eq!(
+        runner.state().objects[&hand].zone,
+        Zone::Hand,
+        "the unchosen hand leg stays in hand"
+    );
+    assert_eq!(
+        runner.state().objects[&exiled].zone,
+        Zone::Exile,
+        "a creature in an unnamed zone is not a legal choice"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "choosing the command-zone creature installs the if-you-do delayed reattach"
+    );
+
+    runner.advance_to_end_step();
+    advance_through_delayed_end(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Battlefield,
+        "Next of Kin returns at end step after the command-zone choice"
+    );
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(command)),
+        "the delayed Attach must bind the put command-zone creature"
+    );
+}
+
+/// CR 109.5 + CR 113.8: Next of Kin's "you own" and "your ... command zone"
+/// are scoped to the Aura's controller, even when that player differs from
+/// its owner. Both of the controller's named-zone candidates are eligible;
+/// the Aura owner's candidates are decoys.
+#[test]
+fn next_of_kin_uses_aura_controller_for_owned_zone_union() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let owner_hand_decoy = scenario
+        .add_creature_to_hand(P0, "Aura Owner Hand Decoy", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    let owner_command_decoy = scenario
+        .add_creature_to_hand(P0, "Aura Owner Command Decoy", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(owner_command_decoy);
+    let controller_hand = scenario
+        .add_creature_to_hand(P1, "Aura Controller Hand Candidate", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    let controller_command = scenario
+        .add_creature_to_hand(P1, "Aura Controller Command Candidate", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    scenario.with_commander(controller_command);
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let confiscate = scenario.add_real_card(P1, "Confiscate", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P1,
+        [
+            ManaType::Blue,
+            ManaType::Blue,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, engine::types::identifiers::ObjectId(0), false, vec![]))
+        .collect(),
+    );
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    runner.cast(confiscate).target_object(aura).resolve();
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&aura].owner, P0);
+    assert_eq!(runner.state().objects[&confiscate].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&confiscate].attached_to,
+        Some(AttachTarget::Object(aura))
+    );
+    assert_eq!(runner.state().objects[&aura].controller, P1);
+
+    let mut death_events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut death_events);
+    process_triggers(runner.state_mut(), &death_events);
+    let mut observations = DrainObservations::default();
+    let consumed_choice =
+        drain_priority_preferring_observed(&mut runner, &[controller_command], &mut observations);
+
+    assert!(observations.saw_optional);
+    assert!(
+        consumed_choice,
+        "the controller-owned pair must open a choice"
+    );
+    assert_eq!(observations.zone_choices.len(), 1);
+    let offered = &observations.zone_choices[0];
+    assert!(offered.contains(&controller_hand) && offered.contains(&controller_command));
+    assert!(
+        !offered.contains(&owner_hand_decoy) && !offered.contains(&owner_command_decoy),
+        "eligibility follows the Aura controller's ownership, not its owner's: {offered:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&controller_command].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(runner.state().objects[&controller_hand].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&owner_hand_decoy].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&owner_command_decoy].zone,
+        Zone::Command
+    );
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    runner.advance_to_end_step();
+    advance_through_delayed_end(&mut runner);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(controller_command)),
+        "the delayed Attach must bind the selected controller-owned card"
+    );
+}
+
+/// CR 400.6 + CR 608.2c: Next of Kin's selected-object origin controls the
+/// proposed zone-change event for a singleton from either named zone. The
+/// replacement is a supplementary synthetic seam fixture, not a printed card
+/// or support claim; Next of Kin supplies the real production move.
+#[test]
+fn next_of_kin_singleton_uses_the_selected_origin_for_replacement() {
+    for (origin, name, expected_life) in [
+        (Zone::Hand, "Grizzly Bears", 21),
+        (Zone::Command, "Elite Vanguard", 20),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let host = scenario
+            .add_creature(P0, "Hill Giant", 3, 3)
+            .with_mana_cost(generic_cost(3))
+            .id();
+        let chosen = scenario
+            .add_creature_to_hand(P0, name, 2, 2)
+            .with_mana_cost(generic_cost(1))
+            .id();
+        if origin == Zone::Command {
+            scenario.with_commander(chosen);
+        }
+        scenario
+            .add_creature(P0, "Hand-Entry Watcher", 1, 1)
+            .with_replacement_definition(hand_entry_life_replacement());
+        let aura = scenario
+            .add_creature(P0, "Next of Kin", 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text(NEXT_OF_KIN_ORACLE)
+            .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )))
+            .id();
+
+        let mut runner = scenario.build();
+        assert_eq!(runner.state().objects[&chosen].zone, origin);
+        attach_to(runner.state_mut(), aura, host);
+
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        let mut observations = DrainObservations::default();
+        let consumed_choice =
+            drain_priority_preferring_observed(&mut runner, &[], &mut observations);
+
+        assert!(
+            observations.saw_optional,
+            "Next of Kin's printed \"you may\" must reach the optional prompt"
+        );
+        assert!(
+            !consumed_choice && observations.zone_choices.is_empty(),
+            "one mandatory candidate must auto-resolve without a card-choice prompt"
+        );
+        assert_eq!(
+            runner.state().objects[&chosen].zone,
+            Zone::Battlefield,
+            "Next of Kin must put the singleton from {origin:?}"
+        );
+        assert_eq!(
+            runner.state().players[0].life,
+            expected_life,
+            "the Hand-origin replacement fires only for the Hand case"
+        );
+        assert_eq!(
+            runner.state().delayed_triggers.len(),
+            1,
+            "putting the chosen creature installs Next of Kin's delayed reattach"
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+
+        runner.advance_to_end_step();
+        advance_through_delayed_end(&mut runner);
+
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(AttachTarget::Object(chosen)),
+            "the delayed Attach must bind the creature put from {origin:?}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 608.2d: impossible empty populations complete without a
+/// choice, a singleton resolves immediately, and multiple candidates open a
+/// real card choice through the public action.
+#[test]
+fn next_of_kin_empty_singleton_and_multiple_candidates_schedule_correctly() {
+    let mut empty_scenario = GameScenario::new();
+    empty_scenario.at_phase(Phase::PreCombatMain);
+    let empty_host = empty_scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let empty_aura = empty_scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let mut empty_runner = empty_scenario.build();
+    attach_to(empty_runner.state_mut(), empty_aura, empty_host);
+    let mut death_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        empty_runner.state_mut(),
+        empty_host,
+        Zone::Graveyard,
+        &mut death_events,
+    );
+    process_triggers(empty_runner.state_mut(), &death_events);
+    assert_eq!(empty_runner.state().stack.len(), 1);
+    assert!(matches!(
+        &empty_runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == empty_aura
+    ));
+    let mut empty_observations = DrainObservations::default();
+    let empty_consumed =
+        drain_priority_preferring_observed(&mut empty_runner, &[], &mut empty_observations);
+    assert!(!empty_consumed && empty_observations.zone_choices.is_empty());
+    assert!(matches!(
+        empty_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(empty_runner.state().stack.is_empty());
+    assert!(empty_runner.state().delayed_triggers.is_empty());
+    assert_eq!(
+        empty_runner.state().objects[&empty_host].zone,
+        Zone::Graveyard,
+        "the enchanted creature is outside Next of Kin's eligible origins"
+    );
+    assert_eq!(
+        empty_runner.state().objects[&empty_aura].zone,
+        Zone::Graveyard
+    );
+
+    let mut single_scenario = GameScenario::new();
+    single_scenario.at_phase(Phase::PreCombatMain);
+    let single_host = single_scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let single_candidate = single_scenario
+        .add_creature_to_hand(P0, "Hand Bear", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    let single_aura = single_scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let mut single_runner = single_scenario.build();
+    attach_to(single_runner.state_mut(), single_aura, single_host);
+    let mut single_death_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        single_runner.state_mut(),
+        single_host,
+        Zone::Graveyard,
+        &mut single_death_events,
+    );
+    process_triggers(single_runner.state_mut(), &single_death_events);
+    let mut single_observations = DrainObservations::default();
+    let single_consumed =
+        drain_priority_preferring_observed(&mut single_runner, &[], &mut single_observations);
+    assert!(single_observations.saw_optional);
+    assert!(!single_consumed && single_observations.zone_choices.is_empty());
+    assert_eq!(
+        single_runner.state().objects[&single_candidate].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(single_runner.state().delayed_triggers.len(), 1);
+    assert!(matches!(
+        single_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(single_runner.state().stack.is_empty());
+    single_runner.advance_to_end_step();
+    advance_through_delayed_end(&mut single_runner);
+    assert_eq!(
+        single_runner.state().objects[&single_aura].attached_to,
+        Some(AttachTarget::Object(single_candidate))
+    );
+
+    let mut multiple_runner = open_next_of_kin_choice(1, 1, 1);
+    let WaitingFor::EffectZoneChoice { cards, .. } = &multiple_runner.state().waiting_for else {
+        panic!("multiple eligible creatures must reach the card-choice prompt");
+    };
+    assert_eq!(
+        cards.len(),
+        2,
+        "one Hand and one Command creature are eligible"
+    );
+    let command = cards
+        .iter()
+        .copied()
+        .find(|id| multiple_runner.state().objects[id].zone == Zone::Command)
+        .expect("the command-zone creature is offered");
+    let hand = cards
+        .iter()
+        .copied()
+        .find(|id| multiple_runner.state().objects[id].zone == Zone::Hand)
+        .expect("the hand creature is offered");
+    let multiple_aura = multiple_runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Next of Kin")
+        .map(|object| object.id)
+        .expect("the printed Aura is staged");
+    multiple_runner
+        .act(GameAction::SelectCards { cards: vec![hand] })
+        .expect("the chooser may select the legal hand candidate");
+    multiple_runner.advance_until_stack_empty();
+    assert!(matches!(
+        multiple_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(multiple_runner.state().stack.is_empty());
+    assert_eq!(
+        multiple_runner.state().objects[&hand].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(
+        multiple_runner.state().objects[&command].zone,
+        Zone::Command
+    );
+    assert_eq!(multiple_runner.state().delayed_triggers.len(), 1);
+
+    multiple_runner.advance_to_end_step();
+    advance_through_delayed_end(&mut multiple_runner);
+    assert_eq!(
+        multiple_runner.state().objects[&multiple_aura].attached_to,
+        Some(AttachTarget::Object(hand))
+    );
+}
+
+/// CR 402.3 + CR 608.2c: an empty Stormkeld population completes without a
+/// card prompt; a nonempty optional population still opens a redacted prompt
+/// and can be declined through the public action.
+#[test]
+fn stormkeld_empty_population_finishes_and_nonempty_may_be_declined() {
+    let mut empty_scenario = GameScenario::new();
+    empty_scenario.at_phase(Phase::PreCombatMain);
+    empty_scenario.add_land_to_hand(P0, "Hand Land");
+    let curator = empty_scenario
+        .add_creature_to_hand_from_oracle(P0, "Stormkeld Curator", 6, 6, STORMKELD_CURATOR_ORACLE)
+        .id();
+    let mut empty_runner = empty_scenario.build();
+    let mut enter_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        empty_runner.state_mut(),
+        curator,
+        Zone::Battlefield,
+        &mut enter_events,
+    );
+    process_triggers(empty_runner.state_mut(), &enter_events);
+
+    let mut saw_optional = false;
+    for _ in 0..64 {
+        match empty_runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if empty_runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                empty_runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Stormkeld Curator");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                saw_optional = true;
+                empty_runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Stormkeld Curator's printed may ability");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(
+                    empty_runner.state_mut(),
+                );
+            }
+            WaitingFor::EffectZoneChoice { .. } => {
+                panic!("an empty population must not open a card-choice prompt");
+            }
+            other => panic!("unexpected empty Stormkeld boundary: {other:?}"),
+        }
+    }
+    assert!(
+        saw_optional,
+        "the Stormkeld ETB trigger reached its may prompt"
+    );
+    assert!(matches!(
+        empty_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(empty_runner.state().stack.is_empty());
+    assert_eq!(
+        empty_runner.state().objects[&curator].zone,
+        Zone::Battlefield
+    );
+    assert!(!empty_runner.state().objects.values().any(|object| {
+        object.zone == Zone::Battlefield
+            && object
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+    }));
+
+    let mut runner = open_stormkeld_choice(1, 1, 0);
+    let WaitingFor::EffectZoneChoice {
+        cards,
+        count,
+        min_count,
+        up_to,
+        privacy_zones: Some(privacy),
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("a nonempty optional Aura population must open a card choice");
+    };
+    assert_eq!(cards.len(), 1, "the hand Aura is a legal candidate");
+    assert_eq!((*count, *min_count, *up_to), (1, 0, true));
+    assert!(privacy.contains(&Zone::Hand) && privacy.contains(&Zone::Graveyard));
+
+    let opponent = filter_state_for_viewer(runner.state(), P1);
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards,
+        count: opponent_count,
+        min_count: opponent_min_count,
+        up_to: opponent_up_to,
+        ..
+    } = &opponent.waiting_for
+    else {
+        panic!("the observer must retain the normalized choice envelope");
+    };
+    assert!(opponent_cards.is_empty());
+    assert_eq!(
+        (*opponent_count, *opponent_min_count, *opponent_up_to),
+        (0, 0, true)
+    );
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("the chooser may decline the optional population");
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            privacy_zones: Some(_),
+            ..
+        }
+    ));
+    assert!(!runner.state().objects.values().any(|object| {
+        object.zone == Zone::Battlefield
+            && object
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+    }));
+}
+
+/// Invalid-zone control: a lesser-mana-value creature that is only in exile is
+/// not named by Next of Kin, so the optional trigger must find no legal card,
+/// move nothing, and install no delayed reattachment.
+#[test]
+fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let exiled = scenario
+        .add_creature_to_exile(P0, "Exiled Bears", 2, 2)
+        .with_mana_cost(generic_cost(2))
+        .id();
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(matches!(
+        &runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == aura
+    ));
+    let mut observations = DrainObservations::default();
+    let consumed_choice = drain_priority_preferring_observed(&mut runner, &[], &mut observations);
+
+    assert!(
+        !consumed_choice && observations.zone_choices.is_empty(),
+        "an empty legal population completes without a card-choice prompt"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().objects[&exiled].zone,
+        Zone::Exile,
+        "the exile creature must stay exiled"
+    );
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Graveyard,
+        "no legal choice means the Aura stays in the graveyard"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the if-you-do delayed reattach must not install without a performed put"
+    );
+}
+
+/// Drive Next of Kin's dies trigger through the production optional prompt to
+/// the multi-origin `EffectZoneChoice`, without choosing a card. `eligible`
+/// hand creatures are mana value 2; `lands` filler cards keep the hand size
+/// controllable for the visibility comparison.
+fn open_next_of_kin_choice(
+    eligible_hand_creatures: usize,
+    lands: usize,
+    commanders: usize,
+) -> GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    for index in 0..commanders {
+        let command = scenario
+            .add_creature_to_hand(P0, &format!("Command Vanguard {index}"), 2, 1)
+            .with_mana_cost(generic_cost(1))
+            .id();
+        scenario.with_commander(command);
+    }
+    for index in 0..eligible_hand_creatures {
+        scenario
+            .add_creature_to_hand(P0, &format!("Hand Bear {index}"), 2, 2)
+            .with_mana_cost(generic_cost(2));
+    }
+    for index in 0..lands {
+        scenario.add_land_to_hand(P0, &format!("Hand Land {index}"));
+    }
+    let aura = scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, host);
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+
+    for _ in 0..64 {
+        match &runner.state().waiting_for {
+            WaitingFor::EffectZoneChoice { privacy_zones, .. } => {
+                let zones = privacy_zones
+                    .as_ref()
+                    .expect("the multi-origin scope must be carried on the prompt");
+                assert!(
+                    zones.contains(&Zone::Hand) && zones.contains(&Zone::Command),
+                    "the carried scope must name both Next of Kin legs; got {zones:?}"
+                );
+                return runner;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Next of Kin");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the you-may prompt");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            other => panic!("unexpected prompt before Next of Kin's choice: {other:?}"),
+        }
+    }
+    panic!("Next of Kin's multi-origin choice did not open");
+}
+
+/// CR 402.3: opponent payloads must not reveal how many hidden hand cards are
+/// eligible. Two equal-sized hands with different eligible counts (zero
+/// creatures and two lands vs one creature and one land) must produce the same
+/// opponent view, while the chooser still sees the exact options.
+#[test]
+fn next_of_kin_mixed_choice_redacts_private_eligibility() {
+    // Equal hand size (2), zero vs one eligible hidden card, with two public
+    // command-zone candidates. If the redaction keyed on the current candidate
+    // set, the zero-eligible payload would expose both commanders while the
+    // one-eligible payload would be empty, leaking whether the hand contains a
+    // qualifying card.
+    let zero_eligible = open_next_of_kin_choice(0, 2, 2);
+    let one_eligible = open_next_of_kin_choice(1, 1, 2);
+
+    for (runner, expect_hand) in [(&zero_eligible, false), (&one_eligible, true)] {
+        let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!("the unfiltered choice must be open");
+        };
+        let has_hand = cards.iter().any(|id| {
+            runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Hand)
+        });
+        assert_eq!(
+            has_hand, expect_hand,
+            "reach guard: hand eligibility mismatch; got {cards:?}"
+        );
+        assert_eq!(
+            cards
+                .iter()
+                .filter(|id| runner
+                    .state()
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == Zone::Command))
+                .count(),
+            2,
+            "reach guard: both public command-zone candidates must be offered; got {cards:?}"
+        );
+    }
+
+    let opponent_zero = filter_state_for_viewer(zero_eligible.state(), P1);
+    let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_zero,
+        count: opponent_count_zero,
+        min_count: opponent_min_zero,
+        up_to: opponent_up_to_zero,
+        ..
+    } = &opponent_zero.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_one,
+        count: opponent_count_one,
+        min_count: opponent_min_one,
+        up_to: opponent_up_to_one,
+        ..
+    } = &opponent_one.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    assert!(
+        opponent_cards_zero.is_empty() && opponent_cards_one.is_empty(),
+        "equal-sized hands with different eligible counts must have identical, empty opponent payloads; got {opponent_cards_zero:?} and {opponent_cards_one:?}"
+    );
+    assert_eq!(
+        (
+            *opponent_count_zero,
+            *opponent_min_zero,
+            *opponent_up_to_zero,
+            *opponent_count_one,
+            *opponent_min_one,
+            *opponent_up_to_one,
+        ),
+        (0, 0, true, 0, 0, true),
+        "the full observer envelope must be normalized independently of hidden eligibility"
+    );
+
+    let chooser_zero = filter_state_for_viewer(zero_eligible.state(), P0);
+    let chooser_one = filter_state_for_viewer(one_eligible.state(), P0);
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_zero,
+        ..
+    } = &chooser_zero.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_one,
+        ..
+    } = &chooser_one.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    assert_eq!(
+        chooser_cards_zero.len(),
+        2,
+        "chooser sees both command-zone creatures"
+    );
+    assert_eq!(
+        chooser_cards_one.len(),
+        3,
+        "chooser sees one hand creature plus both command-zone creatures"
+    );
+    assert!(
+        chooser_cards_zero
+            .iter()
+            .chain(chooser_cards_one)
+            .all(|id| *id != engine::types::identifiers::ObjectId(0)),
+        "the chooser must see exact object ids, not redaction placeholders"
+    );
+}
+
+/// A printed public-first mixed scope (Stormkeld Curator's `[Graveyard, Hand]`)
+/// must report Hand in the prompt so a zero-hand-eligible choice is redacted
+/// exactly like a one-hand-eligible one. Equal hand sizes (2) isolate the
+/// hidden eligibility difference.
+#[test]
+fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
+    let zero_eligible = open_stormkeld_choice(0, 2, 1);
+    let one_eligible = open_stormkeld_choice(1, 1, 1);
+
+    for runner in [&zero_eligible, &one_eligible] {
+        let WaitingFor::EffectZoneChoice { zone, cards, .. } = &runner.state().waiting_for else {
+            panic!("Stormkeld Curator's Aura choice must be open");
+        };
+        assert_eq!(
+            *zone,
+            Zone::Hand,
+            "a mixed Graveyard/Hand scope must report its private leg"
+        );
+        assert!(
+            cards.iter().any(|id| runner
+                .state()
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Graveyard)),
+            "reach guard: the graveyard Aura must be offered; got {cards:?}"
+        );
+    }
+
+    let opponent_zero = filter_state_for_viewer(zero_eligible.state(), P1);
+    let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_zero,
+        count: opponent_count_zero,
+        min_count: opponent_min_zero,
+        up_to: opponent_up_to_zero,
+        ..
+    } = &opponent_zero.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards_one,
+        count: opponent_count_one,
+        min_count: opponent_min_one,
+        up_to: opponent_up_to_one,
+        ..
+    } = &opponent_one.waiting_for
+    else {
+        panic!("opponent must still see the redacted choice envelope");
+    };
+    assert!(
+        opponent_cards_zero.is_empty() && opponent_cards_one.is_empty(),
+        "public-first mixed scope: equal hands with different eligible counts may not differ; got {opponent_cards_zero:?} and {opponent_cards_one:?}"
+    );
+    assert_eq!(
+        (
+            *opponent_count_zero,
+            *opponent_min_zero,
+            *opponent_up_to_zero,
+            *opponent_count_one,
+            *opponent_min_one,
+            *opponent_up_to_one
+        ),
+        (0, 0, true, 0, 0, true),
+        "the full observer envelope must be normalized for non-choosers"
+    );
+
+    let chooser_zero = filter_state_for_viewer(zero_eligible.state(), P0);
+    let chooser_one = filter_state_for_viewer(one_eligible.state(), P0);
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_zero,
+        count: chooser_count_zero,
+        ..
+    } = &chooser_zero.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    let WaitingFor::EffectZoneChoice {
+        cards: chooser_cards_one,
+        count: chooser_count_one,
+        ..
+    } = &chooser_one.waiting_for
+    else {
+        panic!("chooser must retain the exact choice");
+    };
+    assert_eq!(
+        chooser_cards_zero.len(),
+        1,
+        "chooser sees only the graveyard Aura"
+    );
+    assert_eq!(
+        chooser_cards_one.len(),
+        2,
+        "chooser sees the graveyard and hand Auras"
+    );
+    assert_eq!(
+        (*chooser_count_zero, *chooser_count_one),
+        (1, 2),
+        "chooser keeps the exact eligible bounds"
+    );
+
+    // CR 402.3: the prompt-owned scope must survive the modern wire, redact
+    // the observer, and leave the chooser a legal answer. A predecessor save
+    // has no prompt field at all; the paused producer must reconstruct the
+    // same private leg after a real decode, with the same chooser control.
+    for (runner, label) in [(&zero_eligible, "zero"), (&one_eligible, "one")] {
+        // Modern wire: actual encode/decode, not an in-memory capture.
+        let live_saved =
+            serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .expect("the live prompt saves");
+        let live_restored = serde_json::from_str::<PersistedGameState>(&live_saved)
+            .expect("the live prompt decodes")
+            .into_game_state()
+            .expect("the live prompt restores");
+        let WaitingFor::EffectZoneChoice {
+            privacy_zones: live_privacy,
+            cards: live_offered,
+            ..
+        } = &live_restored.waiting_for
+        else {
+            panic!("{label}: the serde-restored prompt must be open");
+        };
+        let live_scope = live_privacy
+            .as_deref()
+            .expect("the producer scope must survive serialization");
+        assert!(
+            live_scope.contains(&Zone::Graveyard) && live_scope.contains(&Zone::Hand),
+            "{label}: the saved scope must name both scan zones; got {live_scope:?}"
+        );
+        let live_offered = live_offered.clone();
+        let live_opponent = filter_state_for_viewer(&live_restored, P1);
+        let WaitingFor::EffectZoneChoice {
+            cards: live_cards,
+            count: live_count,
+            min_count: live_min_count,
+            up_to: live_up_to,
+            ..
+        } = &live_opponent.waiting_for
+        else {
+            panic!("{label}: the serde-restored prompt must project");
+        };
+        assert!(
+            live_cards.is_empty(),
+            "{label}: the serde-restored scope must redact hidden ids; got {live_cards:?}"
+        );
+        assert_eq!(
+            (*live_count, *live_min_count, *live_up_to),
+            (0, 0, true),
+            "{label}: the serde-restored scope must normalize the observer envelope"
+        );
+        let mut live_runner = GameRunner::from_state(live_restored);
+        live_runner
+            .act(GameAction::SelectCards {
+                cards: live_offered,
+            })
+            .expect("the serde-restored prompt accepts its offered ids");
+        live_runner.advance_until_stack_empty();
+        assert!(
+            !matches!(
+                live_runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { .. }
+            ),
+            "{label}: the serde-restored prompt settles after its offered ids are submitted"
+        );
+
+        // Predecessor wire: the prompt carries no scope field at all, and the
+        // validation zone is the public first scan zone. The fallback must
+        // reconstruct privacy from the exact paused producer.
+        let mut legacy = runner.state().clone();
+        let WaitingFor::EffectZoneChoice {
+            zone,
+            privacy_zones,
+            ..
+        } = &mut legacy.waiting_for
+        else {
+            panic!("legacy state must hold the choice");
+        };
+        *zone = Zone::Graveyard;
+        *privacy_zones = None;
+        let legacy_saved = serde_json::to_string(&PersistedGameState::capture(legacy))
+            .expect("the predecessor-wire prompt saves");
+        assert!(
+            !legacy_saved.contains("privacy_zones"),
+            "{label}: the missing-field fixture must omit the prompt scope"
+        );
+        let restored = serde_json::from_str::<PersistedGameState>(&legacy_saved)
+            .expect("the predecessor-wire prompt decodes")
+            .into_game_state()
+            .expect("the predecessor-wire prompt restores");
+        let WaitingFor::EffectZoneChoice {
+            zone,
+            cards: offered,
+            privacy_zones,
+            ..
+        } = &restored.waiting_for
+        else {
+            panic!("restored state must retain the choice");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "{label}: the predecessor fixture must exercise the absent-field fallback"
+        );
+        assert_eq!(
+            *zone,
+            Zone::Graveyard,
+            "validation keeps the legacy public zone; privacy is derived from the producer scope"
+        );
+        let offered = offered.clone();
+
+        let opponent = filter_state_for_viewer(&restored, P1);
+        let WaitingFor::EffectZoneChoice {
+            cards: opponent_cards,
+            count: opponent_count,
+            min_count: opponent_min_count,
+            up_to: opponent_up_to,
+            ..
+        } = &opponent.waiting_for
+        else {
+            panic!("restored opponent must see the redacted envelope");
+        };
+        assert!(
+            opponent_cards.is_empty(),
+            "{label}: restored opponent cards must be empty; got {opponent_cards:?}"
+        );
+        assert_eq!(
+            (*opponent_count, *opponent_min_count, *opponent_up_to),
+            (0, 0, true),
+            "{label}: restored observer envelope must be normalized"
+        );
+
+        // Submit exactly the ids the restored prompt offered and settle it.
+        let mut restored_runner = GameRunner::from_state(restored);
+        restored_runner
+            .act(GameAction::SelectCards {
+                cards: offered.clone(),
+            })
+            .expect("restored prompt accepts its originally offered ids");
+        restored_runner.advance_until_stack_empty();
+        assert!(
+            !matches!(
+                restored_runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { .. }
+            ),
+            "{label}: the restored prompt settles after its offered ids are submitted"
+        );
+    }
+}
+/// Drive Stormkeld Curator's ETB to its `EffectZoneChoice` without selecting an
+/// Aura. The parsed target is `InAnyZone [Graveyard, Hand]` — a public-first
+/// mixed scope — so this fixture exercises the producer's private-zone
+/// selection rather than Next of Kin's already-Hand-first order.
+fn open_stormkeld_choice(hand_auras: usize, lands: usize, graveyard_auras: usize) -> GameRunner {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for index in 0..graveyard_auras {
+        scenario
+            .add_creature_to_graveyard(P0, &format!("Grave Aura {index}"), 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"]);
+    }
+    for index in 0..hand_auras {
+        scenario
+            .add_creature_to_hand(P0, &format!("Hand Aura {index}"), 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"]);
+    }
+    for index in 0..lands {
+        scenario.add_land_to_hand(P0, &format!("Hand Land {index}"));
+    }
+    let curator = scenario
+        .add_creature_to_hand(P0, "Stormkeld Curator", 6, 6)
+        .from_oracle_text(STORMKELD_CURATOR_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), curator, Zone::Battlefield, &mut events);
+    process_triggers(runner.state_mut(), &events);
+
+    for _ in 0..64 {
+        match &runner.state().waiting_for {
+            WaitingFor::EffectZoneChoice { .. } => return runner,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Stormkeld Curator");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the you-may prompt");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            other => panic!("unexpected prompt before Stormkeld Curator's choice: {other:?}"),
+        }
+    }
+    panic!("Stormkeld Curator's Aura choice did not open");
+}
+
+/// Generic mana cost for a staged card's mana value.
+fn generic_cost(generic: u32) -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![],
+        generic,
+    }
+}
+
+/// Replacement witness for the proposed-event origin: gain 1 life when a
+/// creature would enter the battlefield from a hand. Used by the lone-command
+/// test to prove the command-zone pick is not proposed as a hand move.
+fn hand_entry_life_replacement() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+        .destination_zone(Zone::Battlefield)
+        .condition(ReplacementCondition::EnteredFromZone {
+            origin_constraint: Some(OriginConstraint::Equals(Zone::Hand)),
+            cast_origin: None,
+        })
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ))
 }
 
 #[test]
@@ -1059,6 +2332,188 @@ fn cass_reattaches_equipment_to_chosen_host_via_pipeline() {
     );
 }
 
+/// CR 614.1a + CR 400.7: the object carries Storm Herald's host-lifetime
+/// leave-the-battlefield replacement (`Moved`, `valid_card: SelfRef`, ends when
+/// the host leaves the battlefield).
+fn assert_has_leave_battlefield_exile_rider(
+    state: &engine::types::game_state::GameState,
+    id: engine::types::identifiers::ObjectId,
+) {
+    assert!(
+        state.objects[&id]
+            .replacement_definitions
+            .as_slice()
+            .iter()
+            .any(|replacement| {
+                replacement.event == engine::types::replacements::ReplacementEvent::Moved
+                    && replacement.valid_card == Some(TargetFilter::SelfRef)
+                    && replacement.expiry == Some(RestrictionExpiry::UntilHostLeavesPlay)
+            }),
+        "the returned Aura must carry the leave-the-battlefield exile replacement; got {:?}",
+        state.objects[&id].replacement_definitions
+    );
+}
+
+/// A Storm Herald whose ETB has resolved: the returned Aura `aura` is attached to
+/// `host`, a bystander Aura `bystander_aura` was already on the battlefield
+/// attached to `bystander_host`, and P0 holds real Disenchant x2 and Boomerang
+/// with mana for all of them.
+struct StormHeraldBoard {
+    runner: GameRunner,
+    aura: engine::types::identifiers::ObjectId,
+    bystander_aura: engine::types::identifiers::ObjectId,
+    disenchant: [engine::types::identifiers::ObjectId; 2],
+    boomerang: engine::types::identifiers::ObjectId,
+}
+
+fn storm_herald_board() -> StormHeraldBoard {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::mana::{ManaType, ManaUnit};
+
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let bystander_host = scenario.add_creature(P1, "Bystander Bears", 2, 2).id();
+    let bystander_aura = scenario
+        .add_creature(P1, "Bystander Pacifism", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let aura = scenario
+        .add_creature_to_graveyard(P0, "Pacifism", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let herald = scenario
+        .add_creature_to_hand(P0, "Storm Herald", 3, 2)
+        .from_oracle_text(STORM_HERALD_ORACLE)
+        .id();
+    let disenchant = [
+        scenario.add_real_card(P0, "Disenchant", Zone::Hand, db),
+        scenario.add_real_card(P0, "Disenchant", Zone::Hand, db),
+    ];
+    let boomerang = scenario.add_real_card(P0, "Boomerang", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Blue,
+            ManaType::Blue,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, engine::types::identifiers::ObjectId(0), false, vec![]))
+        .collect(),
+    );
+
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), bystander_aura, bystander_host);
+    let mut etb_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        herald,
+        Zone::Battlefield,
+        &mut etb_events,
+    );
+    process_triggers(runner.state_mut(), &etb_events);
+    drain_priority_preferring(&mut runner, &[aura, host]);
+
+    // Reach-guards: the ETB returned the Aura onto the creature I control, and the
+    // bystander Aura was never part of that set.
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(host))
+    );
+    assert_has_leave_battlefield_exile_rider(runner.state(), aura);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    StormHeraldBoard {
+        runner,
+        aura,
+        bystander_aura,
+        disenchant,
+        boomerang,
+    }
+}
+
+/// CR 614.1a + CR 614.6: the returned Aura is destroyed before the end step, so
+/// the replacement exiles it instead of putting it into the graveyard. The
+/// bystander Aura (not in the returned set) goes to the graveyard (CR 608.2c:
+/// the rider names only the Auras this ETB returned).
+#[test]
+fn storm_herald_returned_aura_destroyed_before_end_step_is_exiled() {
+    let StormHeraldBoard {
+        mut runner,
+        aura,
+        bystander_aura,
+        disenchant,
+        ..
+    } = storm_herald_board();
+
+    runner.cast(disenchant[0]).target_object(aura).resolve();
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Exile,
+        "destroyed returned Aura must be exiled instead of going to the graveyard"
+    );
+
+    // Multi-authority sibling: the same destruction of an Aura outside the
+    // returned set ends in the graveyard. Reach-guard: the cast resolved and the
+    // returned Aura above is already in exile.
+    runner
+        .cast(disenchant[1])
+        .target_object(bystander_aura)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&bystander_aura].zone,
+        Zone::Graveyard,
+        "an Aura not returned by this ETB is untouched by the rider"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 614.1a: "would leave the battlefield" (not "would die"): bouncing the
+/// returned Aura to hand is replaced by exile as well.
+#[test]
+fn storm_herald_returned_aura_bounced_before_end_step_is_exiled() {
+    let StormHeraldBoard {
+        mut runner,
+        aura,
+        boomerang,
+        ..
+    } = storm_herald_board();
+
+    runner.cast(boomerang).target_object(aura).resolve();
+    assert_eq!(
+        runner.state().objects[&aura].zone,
+        Zone::Exile,
+        "a bounced returned Aura must be exiled instead of returning to hand"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+}
+
 #[test]
 fn storm_herald_exiles_returned_auras_at_end_step_via_pipeline() {
     // CR 603.7 + CR 303.4f: return Aura attached to a creature you control, then
@@ -1134,6 +2589,12 @@ fn storm_herald_exiles_returned_auras_at_end_step_via_pipeline() {
         }
         other => panic!("delayed body must be exile TrackedSet, got {other:?}"),
     }
+
+    // CR 608.2c + CR 614.1a: "If those Auras would leave the battlefield, exile
+    // them instead of putting them anywhere else." The rider names the Auras this
+    // ETB returned, so it is installed on the returned Aura as soon as the ETB
+    // resolves (the reach-guard above proved the Aura is back on the battlefield).
+    assert_has_leave_battlefield_exile_rider(runner.state(), aura);
 
     // CR 603.7: Resolve the installed delayed body through the production
     // effect pipeline (same path end-step firing uses). Turn-gate timing for

@@ -31,6 +31,34 @@ pub enum Zone {
 // A new `Zone` variant must be added to `Zone::ALL`: this is a build failure otherwise.
 const _: () = assert!(Zone::ALL.len() == <Zone as strum::EnumCount>::COUNT);
 
+/// CR 601.2a + CR 707.13 + CR 400.11: where a spell was cast from — a zone, or from outside
+/// the game. "Outside the game is not a zone" (CR 400.11), so a copy created outside the
+/// game (Garth One-Eye, CR 707.13) is cast from NO zone: it satisfies "not from your hand"
+/// and fails "from exile". An unknown origin is modelled as `Option<CastProvenance>::None`,
+/// a distinct third state that satisfies neither polarity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CastProvenance {
+    /// Cast from this zone.
+    Zone(Zone),
+    /// CR 707.13 + CR 400.11: cast from outside the game.
+    OutsideGame,
+}
+
+impl CastProvenance {
+    /// CR 601.2a + CR 707.13 + CR 400.11: "cast from [zone]" holds only for a cast that
+    /// started in that zone; a cast from outside the game started in no zone.
+    pub fn is_from(self, zone: Zone) -> bool {
+        matches!(self, Self::Zone(origin) if origin == zone)
+    }
+
+    /// CR 601.2a + CR 707.13 + CR 400.11: "cast from anywhere other than [zone]" — the
+    /// negation of [`Self::is_from`], so a cast from outside the game (not a zone,
+    /// CR 400.11) satisfies it.
+    pub fn is_not_from(self, zone: Zone) -> bool {
+        !self.is_from(zone)
+    }
+}
+
 impl Zone {
     /// CR 400.1: every game zone, in declaration order. Guarded against drift by a
     /// compile-time count assertion against `strum::EnumCount`.
@@ -56,6 +84,37 @@ impl Zone {
         match self {
             Zone::Battlefield | Zone::Graveyard | Zone::Stack | Zone::Exile | Zone::Command => true,
             Zone::Library | Zone::Hand => false,
+        }
+    }
+
+    /// CR 400.1: whether each player has their own copy of this zone — "Each
+    /// player has their own library, hand, and graveyard. The other zones are
+    /// shared by all players."
+    ///
+    /// Load-bearing in two places that must not drift apart, which is why the
+    /// partition lives on the type rather than in either caller:
+    ///
+    /// * At runtime it is the owner-keyed membership question —
+    ///   `filter::is_owner_scoped_zone` delegates here. A player-scoped query
+    ///   over a per-player zone reads the card's OWNER, because CR 400.3 sends a
+    ///   card to its owner's copy of such a zone.
+    /// * At parse time it governs how a zone LIST's qualifiers reduce. A
+    ///   per-player zone's possessive ("your graveyard") names whose cards the
+    ///   phrase includes; a SHARED zone's unpossessive `Plain` form ("in
+    ///   exile") carries no possessor information and must not be read as a
+    ///   conflicting possessor when a zone list mixes the two ("in exile and in
+    ///   your graveyard"). Shared zones can still be written with a possessor
+    ///   in other positions ("your command zone"), which the grammar encodes
+    ///   directly — this partition only decides whether a list's qualifiers
+    ///   conflict.
+    ///
+    /// Exhaustive rather than a `matches!` so that adding a `Zone` variant is a
+    /// compile error forcing an explicit per-player/shared decision — that is a
+    /// rules question, not a formatting one.
+    pub fn is_per_player(self) -> bool {
+        match self {
+            Zone::Library | Zone::Hand | Zone::Graveyard => true,
+            Zone::Battlefield | Zone::Stack | Zone::Exile | Zone::Command => false,
         }
     }
 
@@ -266,6 +325,28 @@ mod tests {
         assert_eq!(zones.len(), 7);
     }
 
+    /// CR 400.1: "Each player has their own library, hand, and graveyard. The
+    /// other zones are shared by all players." Pinned against the rule text
+    /// because two unrelated readers depend on this exact partition: the runtime
+    /// owner-keyed membership test (`filter::is_owner_scoped_zone`) and the
+    /// parser's zone-possessor grammar, which treats a shared zone's absent
+    /// possessor as carrying no possessor information.
+    #[test]
+    fn per_player_zones_are_exactly_library_hand_and_graveyard() {
+        let per_player: Vec<Zone> = Zone::ALL
+            .into_iter()
+            .filter(|zone| zone.is_per_player())
+            .collect();
+        assert_eq!(
+            per_player,
+            vec![Zone::Library, Zone::Hand, Zone::Graveyard],
+            "CR 400.1 names exactly these three as per-player"
+        );
+        for zone in [Zone::Battlefield, Zone::Stack, Zone::Exile, Zone::Command] {
+            assert!(!zone.is_per_player(), "{zone:?} is shared by all players");
+        }
+    }
+
     #[test]
     fn zone_all_is_exhaustive_and_in_declaration_order() {
         // Exhaustive match: adding a variant is a compile error here.
@@ -291,6 +372,19 @@ mod tests {
         let zone = Zone::Battlefield;
         let json = serde_json::to_value(zone).unwrap();
         assert_eq!(json, "Battlefield");
+    }
+
+    #[test]
+    fn cast_provenance_outside_game_is_from_no_zone() {
+        // CR 400.11: outside the game is not a zone.
+        for zone in Zone::ALL {
+            assert!(!CastProvenance::OutsideGame.is_from(zone));
+            assert!(CastProvenance::OutsideGame.is_not_from(zone));
+            assert!(CastProvenance::Zone(zone).is_from(zone));
+            assert!(!CastProvenance::Zone(zone).is_not_from(zone));
+        }
+        assert!(CastProvenance::Zone(Zone::Exile).is_not_from(Zone::Hand));
+        assert!(!CastProvenance::Zone(Zone::Exile).is_from(Zone::Hand));
     }
 
     #[test]

@@ -25,7 +25,9 @@ const PROFILE: LlmProfile = {
   model: "m",
   maxOutputTokens: null,
   temperature: null,
+  decisionContext: "selfContained",
   enabled: true,
+  rememberApiKey: false,
 };
 
 describe("testLlmEndpoint", () => {

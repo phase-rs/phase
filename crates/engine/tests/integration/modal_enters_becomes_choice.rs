@@ -63,6 +63,7 @@ fn place_and_choose(
 
     let source = crate::support::exact_named_choice_source(runner.state(), obj);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: P0,
         choice_type: ChoiceType::Labeled {

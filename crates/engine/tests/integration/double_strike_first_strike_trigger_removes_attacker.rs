@@ -12,10 +12,13 @@
 //! double striker dealt its regular-sub-step damage too — the player took TWO
 //! hits from a creature that should have been destroyed after the first.
 //!
-//! Fix (`combat_damage.rs`): after the first-strike sub-step puts triggers on the
-//! stack, `resolve_combat_damage` returns `WaitingFor::Priority` (CR 510.3) so the
-//! stack resolves before the mandatory regular sub-step is re-entered via the
-//! empty-stack completeness gate in `priority.rs`.
+//! Fix (`combat_damage.rs`): the window after the first-strike sub-step is
+//! unconditional (CR 510.3): `resolve_combat_damage` returns
+//! `WaitingFor::Priority` after it (unless a prompt must come first). A trigger
+//! on the stack (No Mercy) is one case, an empty stack the other
+//! (`priority_between_combat_damage_steps.rs`). The mandatory regular sub-step
+//! follows via the empty-stack completeness gate in `priority.rs` once
+//! everything is resolved and all players pass.
 //!
 //! CR references (verified against `docs/MagicCompRules.txt`):
 //!   - CR 510.3 / CR 510.3a: after combat damage is dealt, triggered abilities are

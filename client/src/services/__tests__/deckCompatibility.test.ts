@@ -191,3 +191,42 @@ describe("evaluateDeckCompatibility — CR 903.13f(3) draft set codes", () => {
     expect(adapterMock.checkDeckCompatibility).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * CR 100.2b + CR 702.139b: a Cube configures its own minimum deck size, which
+ * Yorion's "twenty cards more than the minimum deck size" reads. The session's
+ * value reaches the engine request and keeps verdicts for different minimums
+ * apart in the cache.
+ */
+describe("evaluateDeckCompatibility — draft session minimum deck size", () => {
+  const LIMITED_DECK: ParsedDeck = {
+    main: [{ name: "Plains", count: 60 }],
+    sideboard: [],
+    companion: "Yorion, Sky Nomad",
+  };
+
+  it("sends the session minimum on the request the adapter receives", async () => {
+    const { evaluateDeckCompatibility } = await loadDeckCompatibility();
+    await evaluateDeckCompatibility(LIMITED_DECK, { selectedFormat: "Limited", minDeckSize: 50 });
+    expect(adapterMock.checkDeckCompatibility).toHaveBeenCalledWith(
+      expect.objectContaining({ min_deck_size: 50, companion: ["Yorion, Sky Nomad"] }),
+    );
+  });
+
+  it("sends no minimum when the caller has none", async () => {
+    const { evaluateDeckCompatibility } = await loadDeckCompatibility();
+    await evaluateDeckCompatibility(LIMITED_DECK, { selectedFormat: "Limited" });
+    expect(adapterMock.checkDeckCompatibility).toHaveBeenCalledWith(
+      expect.objectContaining({ min_deck_size: null }),
+    );
+  });
+
+  it("separates cached verdicts on the session minimum", async () => {
+    const { evaluateDeckCompatibility } = await loadDeckCompatibility();
+    await evaluateDeckCompatibility(LIMITED_DECK, { selectedFormat: "Limited", minDeckSize: 50 });
+    await evaluateDeckCompatibility(LIMITED_DECK, { selectedFormat: "Limited", minDeckSize: 20 });
+    expect(adapterMock.checkDeckCompatibility).toHaveBeenCalledTimes(2);
+    await evaluateDeckCompatibility(LIMITED_DECK, { selectedFormat: "Limited", minDeckSize: 50 });
+    expect(adapterMock.checkDeckCompatibility).toHaveBeenCalledTimes(2);
+  });
+});

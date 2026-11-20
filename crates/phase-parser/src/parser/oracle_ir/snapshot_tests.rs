@@ -666,7 +666,7 @@ fn ability_word_trigger_table_is_ir_native_and_preserves_condition_fallback() {
     ));
 
     let (shoreline_ir, shoreline_lowered) = parse_two_layer(
-        "Delirium — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
+        "Threshold — Whenever this creature deals combat damage to a player, draw a card. Then discard a card unless there are seven or more cards in your graveyard.",
         "Shoreline Looter",
         &["Creature"],
         &["Rat", "Rogue"],
@@ -675,15 +675,26 @@ fn ability_word_trigger_table_is_ir_native_and_preserves_condition_fallback() {
     else {
         panic!("expected a native parsed Shoreline Looter trigger");
     };
+    // CR 608.2c: the "unless" binds to the discard only, so it is neither
+    // hoisted as an intervening-if nor replaced by the positive ability-word
+    // fallback; it gates the discard sub-ability and the draw stays
+    // unconditional.
     assert!(shoreline.partial_def.condition.is_none());
+    assert!(shoreline.modifiers.intervening_if.is_none());
+    let shoreline_trigger = &shoreline_lowered.triggers[0];
     assert!(
-        shoreline.modifiers.intervening_if.is_some(),
-        "parsed intervening-if must suppress the ability-word fallback"
+        shoreline_trigger.condition.is_none(),
+        "a later-instruction unless must not gate the whole trigger"
     );
-    assert!(matches!(
-        shoreline_lowered.triggers[0].condition,
-        Some(TriggerCondition::Not { .. })
-    ));
+    let execute = shoreline_trigger.execute.as_deref().expect("trigger body");
+    assert!(matches!(execute.effect.as_ref(), Effect::Draw { .. }));
+    assert!(execute.condition.is_none());
+    let discard = execute.sub_ability.as_deref().expect("discard clause");
+    assert!(matches!(discard.effect.as_ref(), Effect::Discard { .. }));
+    assert!(
+        discard.condition.is_some(),
+        "the unless gate attaches to the discard"
+    );
 }
 
 /// The table scanner consumes only actual rows. A following ordinary line stays
@@ -3820,4 +3831,100 @@ fn roll_and_choose_header_refuses_honestly() {
         2,
         "both the damage and the Treasure clause must refuse on their result quantity, got {names:?}"
     );
+}
+
+#[test]
+fn essence_burn_ir_and_lowered() {
+    let (ir, lowered) = parse_two_layer(
+        "Essence Burn deals 5 damage to target black or green creature or planeswalker. If that permanent would die this turn, exile it instead.",
+        "Essence Burn",
+        &["Instant"],
+        &[],
+    );
+
+    assert!(
+        ir.diagnostics.is_empty(),
+        "the exact Oracle document must have no parser diagnostics: {:?}",
+        ir.diagnostics
+    );
+    assert_eq!(ir.items.len(), 1, "one printed spell item must parse");
+    assert!(
+        matches!(&ir.items[0].node, OracleNodeIr::Spell(_)),
+        "the document item must be the spell IR: {:?}",
+        ir.items[0].node
+    );
+    assert!(
+        lowered.parse_warnings.is_empty(),
+        "the full document must lower without parser warnings: {:?}",
+        lowered.parse_warnings
+    );
+    let [damage] = lowered.abilities.as_slice() else {
+        panic!(
+            "Essence Burn must lower to one spell ability, got {:?}",
+            lowered.abilities
+        );
+    };
+    let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
+        panic!(
+            "the printed spell ability must deal damage, got {:?}",
+            damage.effect
+        );
+    };
+    assert_eq!(
+        amount,
+        &QuantityExpr::Fixed { value: 5 },
+        "the spell must preserve its five-damage instruction"
+    );
+    let TargetFilter::Or { filters } = target else {
+        panic!("the damage instruction must retain its target alternatives: {target:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        4,
+        "all four color/type target legs must remain"
+    );
+
+    let rider = damage
+        .sub_ability
+        .as_deref()
+        .expect("the die-exile instruction must remain bound to the damage ability");
+    assert!(
+        rider.sub_ability.is_none(),
+        "the document must contain exactly one rider after the damage instruction"
+    );
+    assert!(
+        !ability_has_unimplemented(damage),
+        "neither the damage nor its target-bound rider may be unimplemented: {damage:#?}"
+    );
+    let Effect::AddTargetReplacement { replacement, .. } = rider.effect.as_ref() else {
+        panic!(
+            "the rider must lower to a target replacement, got {:?}",
+            rider.effect
+        );
+    };
+    assert_eq!(
+        replacement.event,
+        crate::types::replacements::ReplacementEvent::Moved
+    );
+    assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        replacement.expiry,
+        Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
+    );
+    let exile = replacement
+        .execute
+        .as_deref()
+        .expect("the replacement must redirect the matching move");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(crate::types::zones::Zone::Battlefield),
+            destination: crate::types::zones::Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+
+    insta::assert_json_snapshot!("essence_burn_ir", &ir);
+    insta::assert_json_snapshot!("essence_burn_lowered", &lowered);
 }

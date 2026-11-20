@@ -22,11 +22,16 @@ import { useState } from "react";
  * commits only the leading numeric run of it, so a typed "20.5" would commit 20
  * while the box still showed 20.5 — the same silent disagreement between the
  * entered and the committed value that this component exists to end.
+ *
+ * An optional `max` bounds the reading from above by the same rule: a reading
+ * past it is rejected, not clamped, so a field backed by a narrow engine type
+ * (a `u8` threshold) never commits a value the engine cannot hold.
  */
 export function IntegerField({
   id,
   value,
   min,
+  max,
   onCommit,
   className,
   ariaLabel,
@@ -35,13 +40,15 @@ export function IntegerField({
   /** The committed value. Shown whenever the box is not being edited. */
   value: number;
   min: number;
-  /** Called only for a reading that is a whole number at or above `min`. */
+  /** Inclusive upper bound; unbounded when omitted. */
+  max?: number;
+  /** Called only for a reading that is a whole number within `min`..=`max`. */
   onCommit: (next: number) => void;
   className?: string;
   ariaLabel?: string;
 }) {
   // `null` = not editing, show `value`. A string = the user's in-progress text,
-  // which may legitimately be empty or below `min` mid-typing.
+  // which may legitimately be empty or outside `min`..=`max` mid-typing.
   const [draft, setDraft] = useState<string | null>(null);
 
   return (
@@ -49,6 +56,7 @@ export function IntegerField({
       id={id}
       type="number"
       min={min}
+      max={max}
       aria-label={ariaLabel}
       value={draft ?? String(value)}
       onChange={(e) => {
@@ -56,7 +64,11 @@ export function IntegerField({
         // `valueAsNumber` is NaN for an empty or unparseable box, which
         // `isSafeInteger` rejects along with every non-whole reading.
         const reading = e.currentTarget.valueAsNumber;
-        if (Number.isSafeInteger(reading) && reading >= min) {
+        if (
+          Number.isSafeInteger(reading)
+          && reading >= min
+          && (max === undefined || reading <= max)
+        ) {
           onCommit(reading);
         }
       }}

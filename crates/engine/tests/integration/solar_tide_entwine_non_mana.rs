@@ -345,7 +345,7 @@ fn solar_tide_entwine_discovers_granted_casualty() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("elect to pay casualty");
 
     assert!(
@@ -613,7 +613,7 @@ fn solar_tide_entwine_with_granted_conspire_taps_and_sacrifices() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("elect to pay conspire");
 
     assert!(
@@ -829,13 +829,13 @@ fn targeted_spell_offers_conspire_after_casualty_queue() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } if !declined_casualty => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .act(GameAction::DecideOptionalCost { index: 1 })
                     .expect("decline casualty");
                 declined_casualty = true;
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("accept conspire");
                 accepted_conspire = true;
             }
@@ -925,7 +925,9 @@ fn cast_capsize_with_citadel_under_terror(pay_buyback: bool) -> (GameRunner, Obj
                 assert!(!buyback_offered, "Buyback must be offered exactly once");
                 buyback_offered = true;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_buyback })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_buyback { 0 } else { 1 },
+                    })
                     .expect("decide Buyback");
             }
             _ => break,

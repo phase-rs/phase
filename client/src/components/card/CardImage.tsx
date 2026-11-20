@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
-import type { FaceDownCause, TokenImageRef } from "../../adapter/types.ts";
+import type { CardPrinting, FaceDownCause, PrintedRef, TokenImageRef } from "../../adapter/types.ts";
 import { faceDownMarkerName, faceDownMarkerRef } from "./faceDownMarker.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
@@ -43,6 +43,9 @@ interface CardImageProps {
    */
   oracleId?: string;
   faceName?: string;
+  /** Engine-delivered printing; the image facade owns the viewer preference. */
+  ownerPrinting?: CardPrinting | null;
+  ownerPrintedRef?: PrintedRef | null;
   /**
    * Oracle text rendered inside the broken-image fallback when the image fails
    * to load. If omitted, the component looks it up via the engine card database.
@@ -66,6 +69,8 @@ export function CardImage({
   tapIndicator = false,
   oracleId,
   faceName,
+  ownerPrinting,
+  ownerPrintedRef,
   oracleText,
 }: CardImageProps) {
   const { t } = useTranslation("game");
@@ -82,6 +87,8 @@ export function CardImage({
     tokenImageRef: faceDown ? (faceDownMarker ?? undefined) : tokenImageRef,
     oracleId: faceDown ? undefined : oracleId,
     faceName: faceDown ? undefined : faceName,
+    ownerPrinting: faceDown ? undefined : ownerPrinting,
+    ownerPrintedRef: faceDown ? undefined : ownerPrintedRef,
   });
   // Only resolve rules text when the art lookup has definitively failed. On the
   // first render `src` is null for every card while useCardImage is loading; an
@@ -100,8 +107,10 @@ export function CardImage({
     ? getBevelBorderStyle(colors)
     : undefined;
 
-  // Genuinely still resolving art — pulse until the async lookup settles.
-  if (!faceDown && isLoading) {
+  // Genuinely still resolving art: pulse until the async lookup settles. A
+  // card re-resolving its art (a reload of the same card elsewhere, a printings
+  // fetch) keeps showing its last good image, which the hook hands back as `src`.
+  if (!faceDown && isLoading && !src) {
     return (
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}

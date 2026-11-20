@@ -177,13 +177,17 @@ fn unprompted_ignored_indices(ignore_rules: &[DieRollIgnoreRule], naturals: &[u8
 }
 
 /// CR 701.52a: Roll a d6 and visit each controlled Attraction whose lights include the result.
+/// Returns the CR 616.1 replacement-ordering prompt when the roll waits for one, else `None`. The
+/// abilities the roll triggers are not put on the stack here (CR 603.3): the caller's boundary places them — the
+/// precombat main phase's first batch for the turn-based action (CR 703.4g + CR 717.4), the resolution's batch for an
+/// effect (Line Cutter, Command Performance).
 pub fn roll_to_visit_attractions(
     state: &mut GameState,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> Option<crate::types::game_state::WaitingFor> {
     if !controls_attraction(state, player) {
-        return;
+        return None;
     }
     // CR 701.52a + CR 614.1a: the roll-to-visit is a die roll like any other, so
     // "if you would roll one or more dice, instead roll that many dice plus one
@@ -223,17 +227,20 @@ pub fn roll_to_visit_attractions(
         declared_player: None,
     }));
     let proposal = roll_die::propose_roll(state, player, 1, 6, events);
-    if !matches!(proposal, roll_die::RollProposal::Suspended) {
-        // Only a suspension needs the parked frame; every other outcome finishes
-        // inline and must not leave a stale instruction behind for an unrelated
-        // later roll to pick up.
-        state.pending_die_roll_instruction = None;
+    if matches!(proposal, roll_die::RollProposal::Suspended) {
+        // CR 616.1: the roller orders the competing replacements first; the parked frame finishes the roll
+        // through `complete_roll_to_visit` once they are ordered.
+        return Some(state.waiting_for.clone());
     }
+    // Only a suspension needs the parked frame; every other outcome finishes inline and must not leave a
+    // stale instruction behind for an unrelated later roll to pick up.
+    state.pending_die_roll_instruction = None;
     complete_roll_to_visit(state, player, proposal, events);
+    None
 }
 
 /// CR 701.52a + CR 706.6: Carry out the roll-to-visit once its replacement
-/// proposal is known.
+/// proposal is known. It emits the roll's events and puts nothing on the stack.
 ///
 /// The single authority shared by the inline path (`roll_to_visit_attractions`)
 /// and the CR 616.1 resume path
@@ -286,6 +293,7 @@ pub(crate) fn complete_roll_to_visit(
             player_id: player,
             sides: 6,
             result: Some(roll),
+            pre_entry_source: None,
         });
     }
 
@@ -298,7 +306,6 @@ pub(crate) fn complete_roll_to_visit(
     if survivors.is_empty() {
         // CR 614.6 / CR 706.6: every roll was ignored — the action produced no
         // result to visit by, so nothing is reported and nothing is visited.
-        super::triggers::process_triggers(state, events);
         return;
     }
     events.push(GameEvent::AttractionsRolledToVisit {
@@ -323,13 +330,15 @@ pub(crate) fn complete_roll_to_visit(
     // `die_result_this_resolution`. The turn-based roll-to-visit is not a
     // spell/ability resolution, so no "equal to the result" effect can read it;
     // stamping would leave stale resolution-scoped state behind.
-    super::triggers::process_triggers(state, events);
 }
 
 /// CR 703.4g + CR 717.4: Turn-based action at the beginning of the precombat main phase.
-pub fn perform_roll_to_visit_turn_based_action(state: &mut GameState, events: &mut Vec<GameEvent>) {
+pub fn perform_roll_to_visit_turn_based_action(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
     let player = state.active_player;
-    roll_to_visit_attractions(state, player, events);
+    roll_to_visit_attractions(state, player, events)
 }
 
 fn controls_attraction(state: &GameState, player: PlayerId) -> bool {
@@ -383,7 +392,8 @@ pub fn resolve_roll_to_visit(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    roll_to_visit_attractions(state, ability.controller, events);
+    // CR 616.1: a suspension is owned by the parked die-roll frame and the resolution's pipeline.
+    let _ = roll_to_visit_attractions(state, ability.controller, events);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RollToVisitAttractions,
         source_id: ability.source_id,

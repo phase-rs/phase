@@ -19,6 +19,34 @@ function KeyboardHarness() {
   return null;
 }
 
+function ClickModeHarness({ sandboxToolsAvailable }: { sandboxToolsAvailable?: boolean }) {
+  useKeyboardShortcuts({ sandboxToolsAvailable });
+  return null;
+}
+
+function seedClickModeCase() {
+  const gameState = buildGameState();
+  act(() => {
+    useUiStore.setState({
+      debugInteractionMode: false,
+      debugContextMenu: null,
+      helpSheetOpen: false,
+    });
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      dispatch: vi.fn().mockResolvedValue([]),
+      stateHistory: [],
+    });
+  });
+}
+
+function pressKey(init: KeyboardEventInit) {
+  act(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", init));
+  });
+}
+
 describe("useKeyboardShortcuts", () => {
   beforeEach(() => {
     act(() => {
@@ -28,6 +56,7 @@ describe("useKeyboardShortcuts", () => {
 
   afterEach(() => {
     cleanup();
+    useUiStore.setState({ helpSheetOpen: false });
   });
 
   it("escape skips an optional trigger target through the engine action", () => {
@@ -48,7 +77,6 @@ describe("useKeyboardShortcuts", () => {
         gameState,
         waitingFor: gameState.waiting_for,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });
@@ -74,7 +102,6 @@ describe("useKeyboardShortcuts", () => {
         gameState,
         waitingFor: gameState.waiting_for,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });
@@ -99,7 +126,6 @@ describe("useKeyboardShortcuts", () => {
         gameState,
         waitingFor: gameState.waiting_for,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });
@@ -148,7 +174,6 @@ describe("useKeyboardShortcuts", () => {
         legalActions: [{ type: "PassPriority" }],
         manaPaymentShortcutActions: shortcutActions,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });
@@ -169,5 +194,55 @@ describe("useKeyboardShortcuts", () => {
 
     expect(dispatch).toHaveBeenCalledTimes(2);
     expect(dispatch).toHaveBeenNthCalledWith(2, shortcutActions[1]);
+  });
+
+  it("k toggles click mode when sandbox tools are available", () => {
+    seedClickModeCase();
+    render(<ClickModeHarness sandboxToolsAvailable />);
+
+    pressKey({ key: "k" });
+    expect(useUiStore.getState().debugInteractionMode).toBe(true);
+
+    pressKey({ key: "K" });
+    expect(useUiStore.getState().debugInteractionMode).toBe(false);
+
+    act(() => {
+      useUiStore.setState({
+        debugInteractionMode: false,
+        debugContextMenu: { objectId: 1, x: 0, y: 0, surface: "game" },
+      });
+    });
+    pressKey({ key: "k" });
+    expect(useUiStore.getState().debugInteractionMode).toBe(true);
+    expect(useUiStore.getState().debugContextMenu).toBeNull();
+  });
+
+  it("k is inert when sandbox tools are unavailable", () => {
+    seedClickModeCase();
+    render(<KeyboardHarness />);
+
+    pressKey({ key: "k" });
+    expect(useUiStore.getState().debugInteractionMode).toBe(false);
+
+    // Reach guard: the same listener handles "?" — dispatched last so the open
+    // help sheet cannot short-circuit the "k" above.
+    pressKey({ key: "?" });
+    expect(useUiStore.getState().helpSheetOpen).toBe(true);
+  });
+
+  it("k ignores Ctrl, Meta and Alt", () => {
+    seedClickModeCase();
+    render(<ClickModeHarness sandboxToolsAvailable />);
+
+    pressKey({ key: "k", ctrlKey: true });
+    expect(useUiStore.getState().debugInteractionMode).toBe(false);
+    pressKey({ key: "k", metaKey: true });
+    expect(useUiStore.getState().debugInteractionMode).toBe(false);
+    pressKey({ key: "k", altKey: true });
+    expect(useUiStore.getState().debugInteractionMode).toBe(false);
+
+    // Reach guard: plain K in the same harness toggles the mode.
+    pressKey({ key: "k" });
+    expect(useUiStore.getState().debugInteractionMode).toBe(true);
   });
 });

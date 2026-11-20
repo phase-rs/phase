@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Effect-form collect evidence (CR 701.59a, PR #10740): WaitingFor::CollectEvidenceChoice gains CollectEvidenceResume::Resolution { source_id } for evidence collected by a resolving ability, whose remaining instructions now wait on the resolution stack behind the prompt; an older peer cannot parse the variant. CancelCast on that prompt is now rejected, and an unaffordable 'you may collect evidence' (CR 701.59b) is no longer offered. Legacy CollectEvidenceResume::Effect prompts still load and resolve their carried tail. Lobby, draft and directory surfaces are unchanged."
+}

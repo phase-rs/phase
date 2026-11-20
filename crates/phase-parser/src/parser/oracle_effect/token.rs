@@ -545,15 +545,8 @@ pub(super) fn parse_bare_graveyard_this_way_token_count(clause: &str) -> Option<
     let (rest, _) = tag::<_, _, OracleError<'_>>("card put into ")
         .parse(clause)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("a graveyard"),
-        tag::<_, _, OracleError<'_>>("your graveyard"),
-        tag::<_, _, OracleError<'_>>("their graveyard"),
-        tag::<_, _, OracleError<'_>>("its owner's graveyard"),
-        tag::<_, _, OracleError<'_>>("their owner's graveyard"),
-    ))
-    .parse(rest)
-    .ok()?;
+    let (rest, _) =
+        crate::parser::oracle_quantity::parse_graveyard_destination_phrase(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" this way").parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
@@ -561,6 +554,7 @@ pub(super) fn parse_bare_graveyard_this_way_token_count(clause: &str) -> Option<
     Some(QuantityRef::FilteredTrackedSetSize {
         filter: Box::new(TargetFilter::Any),
         caused_by: Some(ThisWayCause::PutIntoGraveyard),
+        destination: None,
     })
 }
 
@@ -1120,6 +1114,17 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
     }
 }
 
+/// CR 105.1 + CR 105.2: the lowercase "that's all colors" clause that closes a
+/// token description (end of text or a following ", where X is ..."). Shared
+/// by the all-colors strip and the token-name terminator, so a late name
+/// ("named Reliquary Dragon that's all colors") ends before the clause.
+fn token_all_colors_clause(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+    let (i, _) = value((), tag(" all colors")).parse(i)?;
+    let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
+    Ok((i, ()))
+}
+
 /// Strip a trailing "that's all colors" color clause from a token suffix.
 ///
 /// CR 105.1 + CR 105.2: a token that is "all colors" is each of the five
@@ -1134,16 +1139,8 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
 /// Building block for the whole class of "create <token> ... that's all colors"
 /// effects, not just Mechtitan Core.
 fn strip_token_all_colors_suffix(text: &str) -> (&str, bool) {
-    fn all_colors_clause(i: &str) -> OracleResult<'_, ()> {
-        let (i, _) =
-            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
-        let (i, _) = value((), tag(" all colors")).parse(i)?;
-        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
-        Ok((i, ()))
-    }
-
     let lower = text.to_lowercase();
-    if all_colors_clause(&lower).is_ok() {
+    if token_all_colors_clause(&lower).is_ok() {
         return ("", true);
     }
 
@@ -1153,7 +1150,7 @@ fn strip_token_all_colors_suffix(text: &str) -> (&str, bool) {
         }
         let candidate = &text[pos + ch.len_utf8()..];
         let candidate_lower = candidate.to_lowercase();
-        if all_colors_clause(&candidate_lower).is_ok() {
+        if token_all_colors_clause(&candidate_lower).is_ok() {
             return (text[..pos].trim_end(), true);
         }
     }
@@ -1250,6 +1247,9 @@ fn parse_token_name_terminator(input: &str) -> OracleResult<'_, ()> {
         // token clause. For example, `Osgood, Operation Double` is a complete
         // supported token name, while `, where X is …` remains a suffix.
         value((), parse_token_name_comma_clause),
+        // CR 111.4 + CR 105.2: "named Reliquary Dragon that's all colors" —
+        // the color clause closes the descriptor, not the name.
+        value((), preceded(tag(" "), token_all_colors_clause)),
         value((), tag(".")),
         value((), eof),
     ))
@@ -1746,8 +1746,12 @@ fn known_named_token_identity(
     ))
 }
 
-/// CR 111.4 + CR 111.1: Resolve a named token's `(display name, type strings)`
-/// from the predefined-token registry (`known-tokens.toml`). The type string
+/// CR 111.4 + CR 111.1 + CR 111.11: Resolve a named token's `(name, type strings)`
+/// from the predefined-token registry (`known-tokens.toml`). The returned name
+/// is the Oracle descriptor trimmed of surrounding whitespace — the CR 111.11
+/// card name the effect named — not the catalog `display_name` (which carries
+/// MTGJSON's trailing `" Token"` suffix on some rows, e.g. `"Gingerbrute Token"`).
+/// Types still come from the catalog body. The type string
 /// list follows the parser convention used by [`parse_token_identity`]: core
 /// types first (in catalog order), then subtypes. Returns `None` for names not
 /// present in the catalog, leaving the token unparsed (Unimplemented) as before.
@@ -1765,7 +1769,7 @@ fn known_registry_token_identity(
     for subtype in &body.subtypes {
         push_unique_string(&mut types, subtype);
     }
-    Some((body.display_name.clone(), types))
+    Some((descriptor.trim().to_string(), types))
 }
 
 /// CR 303.7: Role tokens are predefined Enchantment -- Aura Role tokens with
@@ -2312,6 +2316,7 @@ mod tests {
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(TargetFilter::Any),
                     caused_by: Some(ThisWayCause::PutIntoGraveyard),
+                    destination: None,
                 },
             },
             "a bare 'card put into your graveyard this way' token count must bind \
@@ -2542,6 +2547,31 @@ mod tests {
         )
         .expect("existing leading copy-token form must stay supported");
         assert!(tapped && enters_attacking);
+    }
+
+    #[test]
+    fn copy_of_the_blighted_creature_binds_the_blight_choice() {
+        // CR 701.68c: "the blighted creature" is the creature chosen for the
+        // blight, never a new target, and the except clause stays on the token.
+        let txt = "create a tapped and attacking token that's a copy of the blighted creature, \
+                   except it has \"At the beginning of the end step, sacrifice this token.\"";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            tapped,
+            enters_attacking,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf")
+        };
+        assert_eq!(target, TargetFilter::CostPaidObject);
+        assert!(tapped && enters_attacking);
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })));
     }
 
     #[test]
@@ -3270,6 +3300,26 @@ mod tests {
 
             assert_eq!(name, "Osgood, Operation Double", "in {text:?}");
             assert_eq!(keywords, vec![Keyword::Flying], "in {text:?}");
+        }
+    }
+
+    /// CR 111.4 + CR 105.2: Dragonbroods' Relic — the token is named "Reliquary Dragon" and
+    /// is all colors; the color clause is not part of the name.
+    #[test]
+    fn all_colors_clause_ends_a_token_name() {
+        let text = "Create a 4/4 Dragon creature token named Reliquary Dragon that's all colors.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("named all-colors token must parse");
+        let Effect::Token { name, colors, .. } = effect else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Reliquary Dragon");
+        assert_eq!(colors, ManaColor::ALL.to_vec());
+        for clause in ["that's all colors", "that is all colors"] {
+            let text = format!("named Reliquary Dragon {clause}");
+            let (name, suffix) = parse_token_name_clause(&text);
+            assert_eq!(name.as_deref(), Some("Reliquary Dragon"), "{clause}");
+            assert_eq!(suffix.as_ref(), clause);
         }
     }
 
@@ -4287,6 +4337,57 @@ mod tests {
         assert_eq!(power, PtValue::Fixed(2));
         assert_eq!(toughness, PtValue::Fixed(2));
         assert_eq!(colors, vec![ManaColor::White]);
+    }
+
+    /// CR 111.4 + CR 111.1 + CR 111.11 (F1): a registry-defined named token
+    /// whose catalog display name carries MTGJSON's trailing " Token" suffix
+    /// ("Gingerbrute Token") still parses to the bare Oracle descriptor
+    /// ("Gingerbrute") — the CR 111.11 card name the effect named — while
+    /// types, P/T, and keywords keep filling from the catalog body.
+    #[test]
+    fn registry_named_token_with_suffixed_display_name_keeps_oracle_name() {
+        use crate::types::keywords::Keyword;
+
+        let text = "Create a Gingerbrute token.";
+        let mut ctx = ParseContext {
+            card_name: Some("Ginger, Queen of Sweets".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("suffixed-display-name registry token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            keywords,
+            ..
+        } = effect
+        else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        // THE DISCRIMINATOR. Reverting the F1 parser edit returns the catalog
+        // display name ("Gingerbrute Token") and this fails.
+        assert_eq!(name, "Gingerbrute");
+        // Reach-guards: the catalog body still flows through, proving the
+        // registry lookup fired rather than a bare-name fallback.
+        assert!(
+            types.contains(&"Creature".to_string())
+                && types.iter().any(|token_type| token_type == "Food")
+                && types.iter().any(|token_type| token_type == "Golem"),
+            "catalog core type + subtypes must flow through, got {types:?}"
+        );
+        assert_eq!(power, PtValue::Fixed(1));
+        assert_eq!(toughness, PtValue::Fixed(1));
+        assert!(
+            colors.is_empty(),
+            "Gingerbrute is colorless, got {colors:?}"
+        );
+        assert!(
+            keywords.contains(&Keyword::Haste),
+            "catalog haste must flow through, got {keywords:?}"
+        );
     }
 
     #[test]

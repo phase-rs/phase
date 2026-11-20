@@ -172,7 +172,8 @@ vi.mock("../../components/draft/workspace/workspacePreferences", async (importOr
   return { ...actual, setArrivingCardBoardPreferences: arrivingPreferences };
 });
 
-vi.mock("../../stores/draftPodStore", () => ({
+vi.mock("../../stores/draftPodStore", async (importOriginal) => ({
+  isHostedPodRecoveryFailureCurrent: (await importOriginal<typeof import("../../stores/draftPodStore")>()).isHostedPodRecoveryFailureCurrent,
   useDraftPodStore: (selector: (state: Record<string, unknown>) => unknown) =>
     selector({ config: { podSize: 2 }, ...podStore }),
 }));

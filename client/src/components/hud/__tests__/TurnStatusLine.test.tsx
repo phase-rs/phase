@@ -4,7 +4,7 @@
  * asserts on the user-visible English copy, so framing bugs (e.g. "Your
  * priority" shown to a spectator) are caught at the rendered-text level.
  */
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { Phase, StackEntry, WaitingFor } from "../../../adapter/types.ts";
@@ -15,6 +15,7 @@ import { usePriorityAttentionStore } from "../../../stores/priorityAttentionStor
 import {
   buildGameState,
   buildStackEntry,
+  targetSelectionWaitingForFactory,
 } from "../../../test/factories/gameStateFactory.ts";
 import { TurnStatusLine } from "../TurnStatusLine.tsx";
 
@@ -87,6 +88,28 @@ describe("TurnStatusLine", () => {
     );
   });
 
+  it("compact: shows only a dot and the waited-on name, and still announces the sentence", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 1 } }, state: { active_player: 1 } });
+    render(<TurnStatusLine compact />);
+    // The sentence moves to screen-reader text; the visible name is hidden from
+    // assistive tech so the live region does not read the name twice. (The
+    // reason tooltip portals to document.body, outside the region.)
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Waiting for Sorin");
+    expect(within(region).getByText("Sorin", { ignore: ".sr-only *" })).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+  });
+
+  it("compact: names the local player as You on their own decision", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } }, state: { active_player: 0 } });
+    render(<TurnStatusLine compact />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    expect(within(region).getByText("You")).toHaveAttribute("aria-hidden", "true");
+  });
+
   it("never frames the decision as the spectator's own", () => {
     setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } }, spectate: true });
     render(<TurnStatusLine />);
@@ -126,6 +149,35 @@ describe("TurnStatusLine", () => {
     expect(region).not.toHaveClass("priority-attention-glow-escalated");
   });
 
+  it("outlines the local player's own decision, pulsing only while the Glow preference is on", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } } });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    // The border holds for the whole decision, independent of the attention cue.
+    expect(region).toHaveClass("priority-turn-border", "priority-turn-border-pulse");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(false));
+    expect(region).toHaveClass("priority-turn-border");
+    expect(region).not.toHaveClass("priority-turn-border-pulse");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(true));
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 }));
+    expect(region).toHaveClass(
+      "priority-turn-border",
+      "priority-turn-border-pulse",
+      "priority-attention-glow",
+    );
+  });
+
+  it("outlines a non-priority decision of the local player too", () => {
+    setup({ seat: 0, waitingFor: targetSelectionWaitingForFactory.forPlayer(0).build() });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    expect(region).toHaveClass("priority-turn-border");
+  });
+
   it.each([
     { player: 1, spectate: false },
     { player: 0, spectate: true },
@@ -133,7 +185,11 @@ describe("TurnStatusLine", () => {
     setup({ seat: 0, waitingFor: { type: "Priority", data: { player } }, spectate });
     usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 });
     render(<TurnStatusLine />);
-    expect(screen.getByRole("status")).not.toHaveClass("priority-attention-glow");
-    expect(screen.getByRole("status")).not.toHaveClass("priority-attention-glow-escalated");
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent(/Waiting for/);
+    expect(region).not.toHaveClass("priority-attention-glow");
+    expect(region).not.toHaveClass("priority-attention-glow-escalated");
+    expect(region).not.toHaveClass("priority-turn-border");
+    expect(region).not.toHaveClass("priority-turn-border-pulse");
   });
 });

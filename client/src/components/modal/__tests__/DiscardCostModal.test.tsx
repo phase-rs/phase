@@ -66,7 +66,7 @@ const cancellablePrompts: Array<[string, WaitingFor]> = [
         player: 0,
         minimum_mana_value: 1,
         cards: [],
-        resume: {},
+        resume: { type: "Casting", data: {} },
       },
     },
   ],
@@ -174,6 +174,22 @@ describe("Discard cost modal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(dispatchMock).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("offers no cancel for evidence collected by a resolving ability", () => {
+    setWaitingFor({
+      type: "CollectEvidenceChoice",
+      data: {
+        player: 0,
+        minimum_mana_value: 1,
+        cards: [],
+        resume: { type: "Resolution", data: { source_id: 7 } },
+      },
+    });
+
+    render(<CardChoiceModal />);
+
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
   it.each([

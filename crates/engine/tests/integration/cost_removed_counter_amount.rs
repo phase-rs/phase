@@ -2073,6 +2073,7 @@ fn t3_child_execute(battery: ObjectId) -> AbilityDefinition {
             counter_type: None,
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SpecificObject { id: battery },
+            scope: engine::types::ability::EffectScope::Single,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -2096,6 +2097,7 @@ fn t10_child_execute(battery: ObjectId) -> AbilityDefinition {
             counter_type: None,
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SpecificObject { id: battery },
+            scope: engine::types::ability::EffectScope::Single,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -2354,6 +2356,7 @@ fn mill_child_at_its_prompt() -> (GameRunner, ObjectId, ObjectId, i32) {
                     counter_type: Some(counter("charge")),
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SpecificObject { id: battery },
+                    scope: engine::types::ability::EffectScope::Single,
                 },
             )),
         ),
@@ -2648,6 +2651,7 @@ fn a_same_subject_child_removal_is_still_the_roots_child() {
             counter_type: Some(counter("elixir")),
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::SpecificObject { id: bottle },
+            scope: engine::types::ability::EffectScope::Single,
         },
     );
     install_replacement_on_steward(
@@ -3261,6 +3265,7 @@ fn a_queued_child_rider_leaves_the_outer_unless_post_effect_paused() {
                 counter_type: None,
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SpecificObject { id: battery },
+                scope: engine::types::ability::EffectScope::Single,
             },
         )
         .sub_ability(AbilityDefinition::new(AbilityKind::Spell, Effect::Clash).sub_ability(lose(1)))

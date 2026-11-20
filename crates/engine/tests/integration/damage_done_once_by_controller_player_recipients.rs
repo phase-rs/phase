@@ -2,15 +2,23 @@
 //! bind to each damaged player independently.
 
 use engine::game::combat::AttackTarget;
+use engine::game::functioning_abilities::active_trigger_definitions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{
+    ControllerRef, DamageKindFilter, FilterProp, TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -74,17 +82,8 @@ fn drive_until_source_triggers_are_stacked(
         }
 
         match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("passing priority should advance the stack");
-            }
-            WaitingFor::DeclareBlockers { .. } => {
-                runner
-                    .act(GameAction::DeclareBlockers {
-                        assignments: vec![],
-                    })
-                    .expect("defender should be able to declare no blockers");
+            WaitingFor::Priority { .. } | WaitingFor::DeclareBlockers { .. } => {
+                step_unblocked_combat(runner);
             }
             WaitingFor::OrderTriggers { triggers, .. } => {
                 runner
@@ -291,4 +290,270 @@ fn the_thing_keeps_only_hero_damage_in_its_stored_event_context() {
         2,
         "The Thing resolves once from the Hero-only context"
     );
+}
+
+const QUARTZWOOD_ORACLE: &str = "Trample\nWhenever one or more creatures you control with trample deal combat damage to a player, create an X/X green Dinosaur Beast creature token with trample, where X is the amount of damage those creatures dealt to that player.";
+
+fn add_quartzwood(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(P0, "Quartzwood Crasher", 6, 6, QUARTZWOOD_ORACLE)
+        .id()
+}
+
+fn quartzwood_tokens(runner: &GameRunner) -> Vec<ObjectId> {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            let object = &runner.state().objects[&id];
+            object.is_token
+                && object.card_types.subtypes.iter().any(|s| s == "Dinosaur")
+                && object.card_types.subtypes.iter().any(|s| s == "Beast")
+        })
+        .collect()
+}
+
+fn assert_quartzwood_token(runner: &GameRunner, token: ObjectId, damage: i32) {
+    let token = &runner.state().objects[&token];
+    assert_eq!(token.controller, P0);
+    assert_eq!(token.power, Some(damage));
+    assert_eq!(token.toughness, Some(damage));
+    assert_eq!(token.color, [ManaColor::Green]);
+    assert!(token.card_types.core_types.contains(&CoreType::Creature));
+    assert!(token.keywords.contains(&Keyword::Trample));
+}
+
+fn combat_damage_event(event: Option<&GameEvent>) -> (PlayerId, u32, &[(ObjectId, u32)]) {
+    let Some(GameEvent::CombatDamageDealtToPlayer {
+        player_id,
+        total_damage,
+        source_amounts,
+        ..
+    }) = event
+    else {
+        panic!("expected stored player combat damage event, got {event:?}");
+    };
+    (*player_id, *total_damage, source_amounts)
+}
+
+fn step_unblocked_combat(runner: &mut GameRunner) {
+    let action = match &runner.state().waiting_for {
+        WaitingFor::Priority { .. } => GameAction::PassPriority,
+        WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+            assignments: vec![],
+        },
+        other => panic!("unexpected combat prompt: {other:?}"),
+    };
+    runner.act(action).expect("combat should advance");
+}
+
+#[test]
+fn quartzwood_uses_only_matching_sources_in_its_token_stats() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let quartzwood = add_quartzwood(&mut scenario);
+    let trampler = scenario
+        .add_creature_from_oracle(P0, "Argothian Swine", 3, 3, "Trample")
+        .id();
+    let excluded = scenario.add_creature(P0, "Nontrampler", 4, 4).id();
+    let mut runner = scenario.build();
+    let life_before = runner.life(P1);
+
+    drive_to_declare_attackers(&mut runner);
+    runner
+        .declare_attackers(&[
+            (quartzwood, AttackTarget::Player(P1)),
+            (trampler, AttackTarget::Player(P1)),
+            (excluded, AttackTarget::Player(P1)),
+        ])
+        .expect("attackers should be legal");
+    drive_until_source_triggers_are_stacked(&mut runner, quartzwood, 1);
+
+    assert_eq!(runner.life(P1), life_before - 13);
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = &runner.state().stack[0];
+    assert_eq!(entry.source_id, quartzwood);
+    let StackEntryKind::TriggeredAbility { trigger_event, .. } = &entry.kind else {
+        panic!("expected Quartzwood trigger");
+    };
+    let (recipient, total, sources) = combat_damage_event(trigger_event.as_ref());
+    assert_eq!((recipient, total), (P1, 9));
+    assert_eq!(sources.len(), 2);
+    assert!(sources.contains(&(quartzwood, 6)));
+    assert!(sources.contains(&(trampler, 3)));
+
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let [token] = quartzwood_tokens(&runner)
+        .try_into()
+        .expect("Quartzwood must create exactly one Dinosaur Beast token");
+    assert_quartzwood_token(&runner, token, 9);
+}
+
+#[test]
+fn quartzwood_resolves_each_damaged_players_total_in_chosen_order() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let quartzwood = add_quartzwood(&mut scenario);
+    let first = scenario
+        .add_creature_from_oracle(P0, "Argothian Swine", 3, 3, "Trample")
+        .id();
+    let second = scenario
+        .add_creature_from_oracle(P0, "Satyr Rambler", 2, 1, "Trample")
+        .id();
+    let excluded = scenario.add_creature(P0, "Nontrampler", 3, 3).id();
+    let mut runner = scenario.build();
+    let life_before = (runner.life(P1), runner.life(P2));
+
+    drive_to_declare_attackers(&mut runner);
+    runner
+        .declare_attackers(&[
+            (quartzwood, AttackTarget::Player(P1)),
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Player(P2)),
+            (excluded, AttackTarget::Player(P1)),
+        ])
+        .expect("attackers should be legal");
+    for _ in 0..128 {
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            break;
+        }
+        step_unblocked_combat(&mut runner);
+    }
+
+    assert_eq!(
+        (runner.life(P1), runner.life(P2)),
+        (life_before.0 - 12, life_before.1 - 2)
+    );
+    let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for else {
+        panic!("expected Quartzwood trigger-ordering prompt");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(triggers.len(), 2);
+    assert!(triggers
+        .iter()
+        .all(|trigger| trigger.source_id == quartzwood));
+
+    let pending = runner
+        .state()
+        .pending_trigger_order
+        .as_ref()
+        .expect("pending order");
+    let [group] = pending.groups.as_slice() else {
+        panic!("expected one ordering group");
+    };
+    assert_eq!(group.controller, P0);
+    let pending_pairs: Vec<_> = group
+        .triggers
+        .iter()
+        .map(|trigger| {
+            let (player, total, _) = combat_damage_event(trigger.pending.trigger_event.as_ref());
+            (player, total)
+        })
+        .collect();
+    assert!(
+        pending_pairs == [(P1, 9), (P2, 2)] || pending_pairs == [(P2, 2), (P1, 9)],
+        "unexpected occurrences: {pending_pairs:?}"
+    );
+
+    // CR 603.3b: The controller chooses the placement order.
+    runner
+        .act(GameAction::OrderTriggers { order: vec![1, 0] })
+        .expect("reversed order should be legal");
+    let stack_pairs: Vec<_> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry.source_id, quartzwood);
+            let StackEntryKind::TriggeredAbility { trigger_event, .. } = &entry.kind else {
+                panic!("expected Quartzwood trigger");
+            };
+            let (player, total, _) = combat_damage_event(trigger_event.as_ref());
+            (player, total)
+        })
+        .collect();
+    assert_eq!(stack_pairs, [pending_pairs[1], pending_pairs[0]]);
+
+    assert!(quartzwood_tokens(&runner).is_empty());
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1);
+    let [first_token] = quartzwood_tokens(&runner)
+        .try_into()
+        .expect("first firing must create one token");
+    assert_quartzwood_token(&runner, first_token, pending_pairs[0].1 as i32);
+
+    runner.resolve_top();
+    let tokens = quartzwood_tokens(&runner);
+    assert_eq!(tokens.len(), 2);
+    assert!(tokens.contains(&first_token));
+    let second_token = tokens
+        .into_iter()
+        .find(|&id| id != first_token)
+        .expect("second new token");
+    assert_quartzwood_token(&runner, second_token, pending_pairs[1].1 as i32);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn quartzwood_does_not_fire_for_an_empty_source_match() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let quartzwood = add_quartzwood(&mut scenario);
+    let attacker = scenario.add_creature(P0, "Nontrampler", 4, 4).id();
+    let mut runner = scenario.build();
+    let life_before = runner.life(P1);
+
+    let expected_source = Some(TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::WithKeyword {
+                value: Keyword::Trample,
+            }]),
+    ));
+    let state = runner.state();
+    assert!(
+        active_trigger_definitions(state, &state.objects[&quartzwood]).any(|active| {
+            let trigger = active.definition;
+            trigger.mode == TriggerMode::DamageDoneOnceByController
+                && trigger.batched
+                && trigger.damage_kind == DamageKindFilter::CombatOnly
+                && trigger.valid_source == expected_source
+        }),
+        "Quartzwood must have an active batched combat-damage trigger for creatures you control with trample"
+    );
+
+    drive_to_declare_attackers(&mut runner);
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("attacker should be legal");
+    for _ in 0..128 {
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| entry.source_id != quartzwood));
+        if runner.state().phase == Phase::EndCombat {
+            break;
+        }
+        step_unblocked_combat(&mut runner);
+    }
+
+    assert_eq!(runner.life(P1), life_before - 4);
+    assert_eq!(runner.state().phase, Phase::EndCombat);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(quartzwood_tokens(&runner).is_empty());
 }

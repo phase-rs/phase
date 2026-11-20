@@ -235,7 +235,30 @@ fn terminal_result_runs_no_exile_return_while_a_replacement_prompt_owns_the_wait
         runner.state().waiting_for
     );
 
-    let outcome = runner.cast(opt).resolve();
+    let commit = runner.cast(opt).commit();
+    // THE discriminating reach-guard: without a CR 616.1 order choice that was
+    // parked during the action the pass would see `waiting_for == GameOver` and a
+    // `waiting_for`-only guard would block the return for the wrong reason —
+    // exactly the blind spot the sibling row above has. The same state, resolved
+    // without an action boundary, proves the prompt was installed after the
+    // result was recorded.
+    let mut direct = commit.state().clone();
+    engine::game::stack::resolve_top(&mut direct, &mut Vec::new());
+    let reach = "reach-guard: resolved without an action boundary, the same state records \
+                 P1's win and then parks P1's CR 616.1 order choice between its two Rest in \
+                 Peace on Opt's graveyard move, overwriting the GameOver wait";
+    assert_eq!(
+        direct.game_end.as_ref().map(|end| end.winner),
+        Some(Some(P1)),
+        "{reach}"
+    );
+    assert!(
+        matches!(direct.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P1),
+        "{reach}, got {:?}",
+        direct.waiting_for
+    );
+    assert!(direct.pending_replacement.is_some(), "{reach}");
+    let outcome = commit.resolve();
 
     let events = outcome.events();
     let game_over_index = events
@@ -265,14 +288,19 @@ fn terminal_result_runs_no_exile_return_while_a_replacement_prompt_owns_the_wait
         "reach-guard: CR 800.4a must sweep White Auracite off the battlefield \
          before the result is recorded, events = {events:?}"
     );
-    // THE discriminating reach-guard: without a parked CR 616.1 order choice
-    // the pass would see `waiting_for == GameOver` and a `waiting_for`-only
-    // guard would block the return for the wrong reason — exactly the blind
-    // spot the sibling row above has.
+    // The action reached the same parked graveyard move as the twin above.
+    assert_eq!(
+        outcome.state().objects[&opt].zone,
+        Zone::Stack,
+        "the action reached the same parked graveyard move"
+    );
     assert!(
-        outcome.state().pending_replacement.is_some(),
-        "reach-guard: P1's two Rest in Peace must have parked a CR 616.1 order \
-         choice on Opt's graveyard move, overwriting the GameOver wait"
+        !outcome.state().stack.iter().any(|entry| entry.id == opt),
+        "the action reached the same parked graveyard move"
+    );
+    assert!(
+        outcome.state().pending_replacement.is_none(),
+        "CR 104.1: the finished game retires the order choice"
     );
     assert!(
         matches!(

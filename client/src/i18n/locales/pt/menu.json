@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Continuar Jogo",
-      "description": "Continue a última partida salva a partir do turno e do estado de tabuleiro atuais."
+      "description": "Continue a última partida salva a partir do turno e do estado de tabuleiro atuais.",
+      "viewResult": "Ver resultado"
     },
     "setup": {
       "title": "Jogar contra IA",

@@ -6,11 +6,17 @@
 //! > Kain. If they do, you draw that many cards, create that many tapped Treasure
 //! > tokens, then lose that much life.
 
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::combat::AttackTarget;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{DamageKindFilter, Effect, TargetFilter, TargetRef};
+use engine::types::ability::{DamageKindFilter, Effect, EffectKind, TargetFilter, TargetRef};
+use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
+use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use super::rules::run_combat;
 
@@ -18,6 +24,10 @@ const KAIN_ORACLE: &str = "Jump — During your turn, Kain has flying.\n\
 Whenever Kain deals combat damage to a player, that player gains control of Kain. \
 If they do, you draw that many cards, create that many tapped Treasure tokens, \
 then lose that much life.";
+
+const RAY_OF_COMMAND_ORACLE: &str = "Untap target creature an opponent controls and gain control \
+of it until end of turn. That creature gains haste until end of turn. When you lose control of \
+the creature, tap it.";
 
 fn effect_chain_contains<F>(ability: &engine::types::ability::AbilityDefinition, pred: F) -> bool
 where
@@ -400,5 +410,338 @@ fn kain_combat_damage_transfers_control_and_rewards_attacker() {
         p0_life_before - p0_life_after,
         2,
         "attacker should lose life equal to damage dealt"
+    );
+}
+
+/// CR 118.12 + CR 400.7: Kain destroyed in response is a new object, so no
+/// player gains control of it and the "if they do" rider does nothing.
+#[test]
+fn kain_destroyed_before_trigger_resolves_pays_no_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    let kain = scenario
+        .add_creature_from_oracle(P0, "Kain, Traitorous Dragoon", 2, 4, KAIN_ORACLE)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![kain], vec![]);
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let out = runner.cast(murder).target_objects(&[kain]).resolve();
+
+    assert!(
+        out.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+                if *source_id == kain
+        )),
+        "Kain's trigger must resolve its GiveControl"
+    );
+    assert!(
+        !out.events()
+            .iter()
+            .any(|event| matches!(event, GameEvent::ControllerChanged { .. })),
+        "no object may change controller"
+    );
+    assert_eq!(runner.state().objects[&kain].zone, Zone::Graveyard);
+
+    let p0_hand_after = runner.state().players[P0.0 as usize].hand.len();
+    let p0_treasures = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|st| st.eq_ignore_ascii_case("Treasure"))
+        })
+        .count();
+    // (cards drawn, Treasures created, P0 life): only Murder leaves P0's hand.
+    assert_eq!(
+        (
+            p0_hand_after + 1 - p0_hand_before,
+            p0_treasures,
+            runner.state().players[P0.0 as usize].life,
+        ),
+        (0, 0, 20),
+    );
+}
+
+/// CR 118.12 + CR 613.1b: Kain stolen in response still gets a new control effect for that
+/// player, so the "if they do" rider pays out.
+#[test]
+fn kain_stolen_before_trigger_resolves_still_pays_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    let kain = scenario
+        .add_creature_from_oracle(P0, "Kain, Traitorous Dragoon", 2, 4, KAIN_ORACLE)
+        .id();
+    let ray = scenario
+        .add_spell_to_hand_from_oracle(P1, "Ray of Command", true, RAY_OF_COMMAND_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![kain], vec![]);
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let _ = runner.cast(ray).target_objects(&[kain]).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    for _ in 0..10 {
+        if runner.state().stack.len() < 2 {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    // Ray has resolved and P1 controls Kain while Kain's trigger is pending.
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().objects[&ray].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&kain].controller, P1);
+
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+    }
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+                if *source_id == kain
+        )),
+        "Kain's trigger must resolve its GiveControl"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            GameEvent::ControllerChanged { object_id, .. } if *object_id == kain
+        )),
+        "Kain's trigger changes no controller"
+    );
+    assert_eq!(runner.state().objects[&kain].controller, P1);
+
+    let p0_hand_after = runner.state().players[P0.0 as usize].hand.len();
+    let p0_treasures = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|st| st.eq_ignore_ascii_case("Treasure"))
+        })
+        .count();
+    // (cards drawn, Treasures created, P0 life)
+    assert_eq!(
+        (
+            p0_hand_after - p0_hand_before,
+            p0_treasures,
+            runner.state().players[P0.0 as usize].life,
+        ),
+        (2, 2, 18),
+    );
+}
+
+/// Drives Kain's attack on P1 in a three-player game until its trigger is on the
+/// stack, optionally has P1 concede, then resolves the trigger. Returns (Kain's
+/// controller, Kain has a control effect, cards P0 drew, P0's Treasures, P0's life).
+fn kain_three_player(p1_concedes: bool) -> (PlayerId, bool, usize, usize, i32) {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    let kain = scenario
+        .add_creature_from_oracle(P0, "Kain, Traitorous Dragoon", 2, 4, KAIN_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    for _ in 0..30 {
+        if !runner.state().stack.is_empty() {
+            break;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![(kain, AttackTarget::Player(P1))],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            _ => GameAction::PassPriority,
+        };
+        runner.act(action).expect("combat action accepted");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Kain's trigger is on the stack"
+    );
+    assert_eq!(runner.state().players[P1.0 as usize].life, 18);
+
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    if p1_concedes {
+        runner
+            .act(GameAction::Concede { player_id: P1 })
+            .expect("concede accepted");
+        assert!(runner.state().players[P1.0 as usize].is_eliminated);
+        assert!(!runner.state().players[2].is_eliminated);
+        assert_eq!(runner.state().stack.len(), 1);
+    }
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+    }
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+            if *source_id == kain
+    )));
+    (
+        runner.state().objects[&kain].controller,
+        has_control_effect(&runner, kain),
+        runner.state().players[P0.0 as usize].hand.len() - p0_hand_before,
+        p0_treasures(&runner),
+        runner.state().players[P0.0 as usize].life,
+    )
+}
+
+fn has_control_effect(runner: &GameRunner, kain: engine::types::identifiers::ObjectId) -> bool {
+    runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: kain }
+                && effect.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        engine::types::ability::ContinuousModification::ChangeController
+                    )
+                })
+        })
+}
+
+fn p0_treasures(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|st| st.eq_ignore_ascii_case("Treasure"))
+        })
+        .count()
+}
+
+#[test]
+fn kain_three_player_trigger_gives_control_and_pays() {
+    assert_eq!(kain_three_player(false), (P1, true, 2, 2, 18));
+}
+
+/// CR 800.4b + CR 104.3a: Kain never changes to the control of a player who conceded
+/// while its trigger was pending, so the "if they do" rider does nothing.
+#[test]
+fn kain_trigger_gives_a_conceded_player_nothing() {
+    assert_eq!(kain_three_player(true), (P0, false, 0, 0, 20));
+}
+
+const SLIP_OUT_THE_BACK_ORACLE: &str = "Put a +1/+1 counter on target creature. It phases out. \
+(Treat it and anything attached to it as though they don't exist until its controller's next turn.)";
+
+#[test]
+fn kain_phased_out_before_trigger_resolves_pays_no_rider() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    let kain = scenario
+        .add_creature_from_oracle(P0, "Kain, Traitorous Dragoon", 2, 4, KAIN_ORACLE)
+        .id();
+    let slip = scenario
+        .add_spell_to_hand_from_oracle(P0, "Slip Out the Back", true, SLIP_OUT_THE_BACK_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![kain], vec![]);
+    let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let out = runner.cast(slip).target_objects(&[kain]).resolve();
+
+    assert!(
+        out.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::GiveControl, source_id, .. }
+                if *source_id == kain
+        )),
+        "Kain's trigger must resolve its GiveControl"
+    );
+    let obj = &runner.state().objects[&kain];
+    assert!(obj.is_phased_out() && obj.zone == Zone::Battlefield);
+    assert_eq!(
+        obj.counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(1)
+    );
+    assert!(
+        !runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| {
+                effect.affected == TargetFilter::SpecificObject { id: kain }
+                    && effect.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            engine::types::ability::ContinuousModification::ChangeController
+                        )
+                    })
+            }),
+        "no control effect may apply to phased-out Kain"
+    );
+    let p0_hand_after = runner.state().players[P0.0 as usize].hand.len();
+    let p0_treasures = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|st| st.eq_ignore_ascii_case("Treasure"))
+        })
+        .count();
+    assert_eq!(
+        (
+            p0_hand_after + 1 - p0_hand_before,
+            p0_treasures,
+            runner.state().players[P0.0 as usize].life,
+        ),
+        (0, 0, 20),
     );
 }

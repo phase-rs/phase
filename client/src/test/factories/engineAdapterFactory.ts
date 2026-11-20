@@ -40,7 +40,6 @@ export const buildEngineAdapterMock = (
     getAiActionProposal: vi.fn().mockReturnValue(null),
     submitAiActionProposal: vi.fn().mockResolvedValue({ status: "stale", reason: "test" }),
     dispose: vi.fn(),
-    estimateBracket: vi.fn().mockResolvedValue(null),
   } satisfies EngineAdapter;
 
   const merged = Object.assign(adapter, overrides);

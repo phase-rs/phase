@@ -143,6 +143,7 @@ fn install_competing_counter_addition_replacements(state: &mut GameState) {
 
 fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
     ResolvedAbility {
+        coin_branches: None,
         detached_remainder: engine::types::ability::DetachedRemainder::NoProducer,
         effect: Effect::GrantExtraLoyaltyActivations {
             amount: QuantityExpr::Fixed { value: 1 },
@@ -167,6 +168,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         illegal_target_slots: Vec::new(),
         unjudged_target_slots: Vec::new(),
         illegal_local_target_slots: Vec::new(),
+        declared_player_target_slots: Vec::new(),
         targets: vec![],
         declares_chosen_group: None,
         reads_chosen_group: None,
@@ -216,11 +218,13 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         target_reads: Default::default(),
         entry_onset: Default::default(),
         sibling_condition: SiblingCondition::Dependent,
+        instruction_join: engine::types::ability::InstructionJoin::Own,
         modal: None,
         mode_abilities: vec![],
         parent_target_missing_reason: None,
         activation_cost_reduction: None,
         activation_record: None,
+        announced_usage_key: None,
         control_change_instruction: None,
     }
 }
