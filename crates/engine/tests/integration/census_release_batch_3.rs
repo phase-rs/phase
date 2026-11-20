@@ -40,7 +40,8 @@ fn pool() -> Vec<ManaUnit> {
     kinds.extend([ManaType::Black, ManaType::Red, ManaType::Red]);
     kinds.extend([ManaType::White, ManaType::White]);
     kinds.extend([ManaType::Colorless; 4]);
-    kinds.into_iter()
+    kinds
+        .into_iter()
         .enumerate()
         .map(|(i, kind)| ManaUnit::new(kind, ObjectId(9900 + i as u64), false, vec![]))
         .collect()
@@ -57,7 +58,11 @@ fn board<T>(setup: impl FnOnce(&mut GameScenario) -> T) -> (Board, T) {
     let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
     let other = scenario.add_creature(P0, "Other Attacker", 2, 2).id();
     let blockers = (0..3)
-        .map(|i| scenario.add_creature(P1, &format!("Blocker {i}"), 0, 4).id())
+        .map(|i| {
+            scenario
+                .add_creature(P1, &format!("Blocker {i}"), 0, 4)
+                .id()
+        })
         .collect();
     let made = setup(&mut scenario);
     (
@@ -116,7 +121,9 @@ fn to_blockers(runner: &mut GameRunner, attackers: &[ObjectId]) {
         .iter()
         .map(|a| (*a, AttackTarget::Player(P1)))
         .collect();
-    runner.declare_attackers(&attacks).expect("declare attackers");
+    runner
+        .declare_attackers(&attacks)
+        .expect("declare attackers");
     drive_until(runner, "declare blockers", |r| {
         matches!(
             r.state().waiting_for,
@@ -141,10 +148,14 @@ fn assert_control_free(b: &mut Board, card: &str) {
 
 /// "<X> must be blocked if able": at least one creature must block X (CR 509.1c). One blocker is
 /// enough; blocking only the other attacker does not obey it; the remaining blockers stay free.
-fn assert_must_be_blocked(b: &Board, card: &str, required: ObjectId, unrequired: ObjectId) {
+fn assert_must_be_blocked(b: &mut Board, card: &str, required: ObjectId, unrequired: ObjectId) {
     let [b0, b1, ..] = b.blockers[..] else {
         panic!("three blockers")
     };
+    assert!(
+        b.runner.declare_blockers(&[]).is_err(),
+        "{card}: the DeclareBlockers action rejects an empty declaration"
+    );
     assert!(
         !legal(&b.runner, &[]),
         "{card}: an empty declaration disobeys the requirement"
@@ -164,10 +175,14 @@ fn assert_must_be_blocked(b: &Board, card: &str, required: ObjectId, unrequired:
 }
 
 /// "All creatures able to block <X> do so": every able blocker must block X (CR 509.1c).
-fn assert_all_must_block(b: &Board, card: &str, required: ObjectId, unrequired: ObjectId) {
+fn assert_all_must_block(b: &mut Board, card: &str, required: ObjectId, unrequired: ObjectId) {
     let [b0, b1, b2] = b.blockers[..] else {
         panic!("three blockers")
     };
+    assert!(
+        b.runner.declare_blockers(&[]).is_err(),
+        "{card}: the DeclareBlockers action rejects an empty declaration"
+    );
     assert!(
         !legal(&b.runner, &[]),
         "{card}: an empty declaration disobeys the requirement"
@@ -181,7 +196,10 @@ fn assert_all_must_block(b: &Board, card: &str, required: ObjectId, unrequired: 
         "{card}: two of three able blockers leave the third unobeyed"
     );
     assert!(
-        !legal(&b.runner, &[(b0, required), (b1, required), (b2, unrequired)]),
+        !legal(
+            &b.runner,
+            &[(b0, required), (b1, required), (b2, unrequired)]
+        ),
         "{card}: every able blocker must block this attacker, not another one"
     );
     assert!(
@@ -241,7 +259,7 @@ fn spell_target_creature_must_be_blocked_this_turn() {
         b.runner.cast(spell).target_object(b.attacker).resolve();
         let (attacker, other, b0) = (b.attacker, b.other, b.blockers[0]);
         to_blockers(&mut b.runner, &[attacker, other]);
-        assert_must_be_blocked(&b, card, attacker, other);
+        assert_must_be_blocked(&mut b, card, attacker, other);
         assert_expires_with_the_turn(&mut b, card, &[(b0, attacker)], &[attacker, other]);
     }
 }
@@ -327,9 +345,11 @@ fn elemental_uprising_animated_land_must_be_blocked_this_turn() {
     assert_eq!(power_toughness(&b.runner, land), (4, 4));
     let (other, b0) = (b.other, b.blockers[0]);
     to_blockers(&mut b.runner, &[land, other]);
-    assert_must_be_blocked(&b, card, land, other);
+    assert_must_be_blocked(&mut b, card, land, other);
     let turn = b.runner.state().turn_number;
-    b.runner.declare_blockers(&[(b0, land)]).expect("legal block");
+    b.runner
+        .declare_blockers(&[(b0, land)])
+        .expect("legal block");
     drive_until(&mut b.runner, "next own turn", |r| {
         r.state().turn_number > turn + 1
             && matches!(
@@ -360,10 +380,13 @@ fn activated_ability_target_creature_must_be_blocked_this_turn() {
     assert_control_free(&mut control, card);
 
     let (mut b, piper) = board(|s| s.add_real_card(P0, card, Zone::Battlefield, db));
-    b.runner.activate(piper, 0).target_object(b.attacker).resolve();
+    b.runner
+        .activate(piper, 0)
+        .target_object(b.attacker)
+        .resolve();
     let (attacker, other, b0) = (b.attacker, b.other, b.blockers[0]);
     to_blockers(&mut b.runner, &[attacker, other]);
-    assert_must_be_blocked(&b, card, attacker, other);
+    assert_must_be_blocked(&mut b, card, attacker, other);
     assert_expires_with_the_turn(&mut b, card, &[(b0, attacker)], &[attacker, other]);
 }
 
@@ -379,7 +402,7 @@ fn constellation_trigger_target_creature_must_be_blocked_this_turn() {
     b.runner.cast(ox).target_object(b.attacker).resolve();
     let (attacker, other, b0) = (b.attacker, b.other, b.blockers[0]);
     to_blockers(&mut b.runner, &[attacker, other]);
-    assert_must_be_blocked(&b, card, attacker, other);
+    assert_must_be_blocked(&mut b, card, attacker, other);
     assert_expires_with_the_turn(&mut b, card, &[(b0, attacker)], &[attacker, other]);
 }
 
@@ -400,28 +423,25 @@ fn constellation_trigger_fires_for_another_enchantment_you_control_only() {
     b.runner.cast(anthem).target_object(b.attacker).resolve();
     let (attacker, other) = (b.attacker, b.other);
     to_blockers(&mut b.runner, &[attacker, other]);
-    assert_must_be_blocked(&b, "Goldenhide Ox (Glorious Anthem enters)", attacker, other);
+    assert_must_be_blocked(
+        &mut b,
+        "Goldenhide Ox (Glorious Anthem enters)",
+        attacker,
+        other,
+    );
 
     let (mut b, (_, _, bears)) = board(setup);
     b.runner.cast(bears).resolve();
     assert_control_free(&mut b, "Goldenhide Ox (Grizzly Bears enters)");
 
     // The opponent's Glorious Anthem enters on the opponent's own turn.
-    let (mut b, _) = board(|s| {
+    let (mut b, anthem) = board(|s| {
         s.add_real_card(P0, card, Zone::Battlefield, db);
         for _ in 0..3 {
             s.add_basic_land(P1, ManaColor::White);
         }
         s.add_real_card(P1, "Glorious Anthem", Zone::Hand, db)
     });
-    let anthem = b
-        .runner
-        .state()
-        .objects
-        .values()
-        .find(|o| o.name == "Glorious Anthem" && o.zone == Zone::Hand)
-        .expect("the opponent's Glorious Anthem")
-        .id;
     drive_until(&mut b.runner, "opponent's main phase", |r| {
         r.state().active_player == P1
             && r.state().phase == Phase::PreCombatMain
@@ -434,7 +454,8 @@ fn constellation_trigger_fires_for_another_enchantment_you_control_only() {
         "reach: the opponent's enchantment entered"
     );
     assert!(
-        b.runner.state().stack.is_empty() && b.runner.state().transient_continuous_effects.is_empty(),
+        b.runner.state().stack.is_empty()
+            && b.runner.state().transient_continuous_effects.is_empty(),
         "the Ox does not trigger for an enchantment the opponent controls"
     );
 }
@@ -454,7 +475,7 @@ fn self_activated_must_be_blocked_this_turn() {
     b.runner.activate(catoblepas, 0).resolve();
     let (other, b0) = (b.other, b.blockers[0]);
     to_blockers(&mut b.runner, &[catoblepas, other]);
-    assert_must_be_blocked(&b, card, catoblepas, other);
+    assert_must_be_blocked(&mut b, card, catoblepas, other);
     assert_expires_with_the_turn(&mut b, card, &[(b0, catoblepas)], &[catoblepas, other]);
 }
 
@@ -463,7 +484,11 @@ fn self_activated_must_be_blocked_this_turn() {
 #[test]
 fn one_shot_all_creatures_able_to_block_target_creature_do_so() {
     let Some(db) = db() else { return };
-    for card in ["Taunting Challenge", "Declare Dominance", "Roar of Challenge"] {
+    for card in [
+        "Taunting Challenge",
+        "Declare Dominance",
+        "Roar of Challenge",
+    ] {
         let (mut control, _) = board(|s| s.add_real_card(P0, card, Zone::Hand, db));
         assert_control_free(&mut control, card);
 
@@ -472,7 +497,7 @@ fn one_shot_all_creatures_able_to_block_target_creature_do_so() {
         let (attacker, other) = (b.attacker, b.other);
         let blocks: Vec<_> = b.blockers.iter().map(|x| (*x, attacker)).collect();
         to_blockers(&mut b.runner, &[attacker, other]);
-        assert_all_must_block(&b, card, attacker, other);
+        assert_all_must_block(&mut b, card, attacker, other);
         assert_expires_with_the_turn(&mut b, card, &blocks, &[attacker, other]);
     }
 }
@@ -485,7 +510,10 @@ fn channel_all_creatures_able_to_block_target_creature_do_so() {
     assert_control_free(&mut control, card);
 
     let (mut b, shinen) = board(|s| s.add_real_card(P0, card, Zone::Hand, db));
-    b.runner.activate(shinen, 0).target_object(b.attacker).resolve();
+    b.runner
+        .activate(shinen, 0)
+        .target_object(b.attacker)
+        .resolve();
     assert_eq!(
         b.runner.state().objects[&shinen].zone,
         Zone::Graveyard,
@@ -494,7 +522,7 @@ fn channel_all_creatures_able_to_block_target_creature_do_so() {
     let (attacker, other) = (b.attacker, b.other);
     let blocks: Vec<_> = b.blockers.iter().map(|x| (*x, attacker)).collect();
     to_blockers(&mut b.runner, &[attacker, other]);
-    assert_all_must_block(&b, card, attacker, other);
+    assert_all_must_block(&mut b, card, attacker, other);
     assert_expires_with_the_turn(&mut b, card, &blocks, &[attacker, other]);
 }
 
@@ -505,13 +533,23 @@ fn all_able_to_block_spells_other_clauses() {
     let Some(db) = db() else { return };
     let (mut b, spell) = board(|s| s.add_real_card(P0, "Declare Dominance", Zone::Hand, db));
     b.runner.cast(spell).target_object(b.attacker).resolve();
-    assert_eq!(power_toughness(&b.runner, b.attacker), (5, 5), "Declare Dominance +3/+3");
+    assert_eq!(
+        power_toughness(&b.runner, b.attacker),
+        (5, 5),
+        "Declare Dominance +3/+3"
+    );
 
     // (label, controller of the big creature, power, toughness, expect indestructible)
     for (label, owner, power, toughness, expect) in [
         ("no creature with power 4", P0, 3, 3, false),
         ("opponent's power-4 creature", P1, 4, 4, false),
-        ("your creature with power 3 and toughness 6", P0, 3, 6, false),
+        (
+            "your creature with power 3 and toughness 6",
+            P0,
+            3,
+            6,
+            false,
+        ),
         ("your creature with power exactly 4", P0, 4, 1, true),
     ] {
         let (mut b, spell) = board(|s| {
@@ -520,7 +558,8 @@ fn all_able_to_block_spells_other_clauses() {
         });
         b.runner.cast(spell).target_object(b.attacker).resolve();
         let attacker = b.attacker;
-        let has = |r: &GameRunner| r.state().objects[&attacker].has_keyword(&Keyword::Indestructible);
+        let has =
+            |r: &GameRunner| r.state().objects[&attacker].has_keyword(&Keyword::Indestructible);
         assert_eq!(has(&b.runner), expect, "Ferocious with {label}");
         if expect {
             let turn = b.runner.state().turn_number;
@@ -540,7 +579,7 @@ fn static_self_all_creatures_able_to_block_this_creature_do_so() {
         let (mut b, creature) = board(|s| s.add_real_card(P0, card, Zone::Battlefield, db));
         let other = b.other;
         to_blockers(&mut b.runner, &[creature, other]);
-        assert_all_must_block(&b, card, creature, other);
+        assert_all_must_block(&mut b, card, creature, other);
 
         // Control: the same card is not attacking, and the filler that attacks is not required.
         let (mut control, _) = board(|s| s.add_real_card(P0, card, Zone::Battlefield, db));
@@ -555,7 +594,7 @@ fn static_self_must_be_blocked_if_able() {
         let (mut b, creature) = board(|s| s.add_real_card(P0, card, Zone::Battlefield, db));
         let other = b.other;
         to_blockers(&mut b.runner, &[creature, other]);
-        assert_must_be_blocked(&b, card, creature, other);
+        assert_must_be_blocked(&mut b, card, creature, other);
 
         let (mut control, _) = board(|s| s.add_real_card(P0, card, Zone::Battlefield, db));
         assert_control_free(&mut control, card);
@@ -609,7 +648,9 @@ fn raphael_enrage_adds_that_much_red_mana() {
     });
     assert_eq!(b.runner.state().objects[&raphael].damage_marked, 3);
     assert_eq!(
-        b.runner.state().players[0].mana_pool.count_color(ManaType::Red),
+        b.runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Red),
         3,
         "dealt 3 damage: adds {{R}}{{R}}{{R}} and, as steps end, does not lose it"
     );
@@ -627,16 +668,18 @@ fn attached_aura_requirement() {
         let (mut b, aura) = board(|s| s.add_real_card(P0, card, Zone::Hand, db));
         b.runner.cast(aura).target_object(b.attacker).resolve();
         assert_eq!(
-            b.runner.state().objects[&aura].attached_to.and_then(|t| t.as_object()),
+            b.runner.state().objects[&aura]
+                .attached_to
+                .and_then(|t| t.as_object()),
             Some(b.attacker),
             "{card}: reach: the Aura resolved onto the attacker"
         );
         let (attacker, other) = (b.attacker, b.other);
         to_blockers(&mut b.runner, &[attacker, other]);
         if all_able {
-            assert_all_must_block(&b, card, attacker, other);
+            assert_all_must_block(&mut b, card, attacker, other);
         } else {
-            assert_must_be_blocked(&b, card, attacker, other);
+            assert_must_be_blocked(&mut b, card, attacker, other);
         }
     }
 }
@@ -650,13 +693,18 @@ fn equipped_creature_requirement() {
     assert_control_free(&mut control, card);
 
     let (mut b, mask) = board(|s| s.add_real_card(P0, card, Zone::Battlefield, db));
-    b.runner.activate(mask, 0).target_object(b.attacker).resolve();
+    b.runner
+        .activate(mask, 0)
+        .target_object(b.attacker)
+        .resolve();
     assert_eq!(
-        b.runner.state().objects[&mask].attached_to.and_then(|t| t.as_object()),
+        b.runner.state().objects[&mask]
+            .attached_to
+            .and_then(|t| t.as_object()),
         Some(b.attacker),
         "reach: equipped to the attacker"
     );
     let (attacker, other) = (b.attacker, b.other);
     to_blockers(&mut b.runner, &[attacker, other]);
-    assert_all_must_block(&b, card, attacker, other);
+    assert_all_must_block(&mut b, card, attacker, other);
 }
