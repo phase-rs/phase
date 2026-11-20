@@ -4571,16 +4571,6 @@ fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
     }
 }
 
-/// CR 202.3: whether a filter property only compares mana value. The one allow-list the
-/// event-bound `TargetMatchesFilter` narrowing accepts; every other property (power, toughness,
-/// counters, keywords, types, colors, face-down state, ...) keeps the board P/T read.
-fn filter_prop_is_mana_value(prop: &FilterProp) -> bool {
-    matches!(
-        prop,
-        FilterProp::Cmc { .. } | FilterProp::ManaValueParity { .. } | FilterProp::ManaCostIn { .. }
-    )
-}
-
 /// Read an object characteristic at a given scope (§2 read-carrier closure):
 /// Source ⇒ `reads_src`; Recipient ⇒ nothing (read-modify-write); event objects
 /// ⇒ `reads_event_live`; other object scopes ⇒ `reads_board`.
@@ -7451,12 +7441,11 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             } else if matches!(subject, ObjectScope::EventSource)
                 && crate::types::ability::filter_contains_filter_prop(
                     filter,
-                    &filter_prop_is_mana_value,
+                    &crate::game::filter::filter_prop_reads_only_mana_cost,
                 )
-                && !crate::types::ability::filter_contains_filter_prop(
-                    filter,
-                    &|prop| !filter_prop_is_mana_value(prop),
-                )
+                && !crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
+                    !crate::game::filter::filter_prop_reads_only_mana_cost(prop)
+                })
             {
                 // CR 603.2 + CR 608.2h + CR 202.3: an event-bound predicate whose only properties
                 // compare mana value reads the event object, recorded below as `reads_event_live`,

@@ -32152,27 +32152,31 @@ fn resolve_condition_referent(
         ObjectScope::EventSource => {
             let event = state.current_trigger_event.as_ref()?;
             let id = targeting::extract_source_from_event(event)?;
-            let pin = match event {
+            // Only the two spell events need a spell-specific pin; every other event names its own
+            // object's incarnation through the one shared authority, `event_context_incarnation`.
+            let pin = if let GameEvent::SpellCast {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                cast_mana_value: _,
+            } = event
+            {
                 // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
                 // stack for (`triggering_spell_identity`), so a same-id recast cannot answer for it.
-                GameEvent::SpellCast {
-                    card_id: _,
-                    controller: _,
-                    object_id: _,
-                    cast_mana_value: _,
-                } => Some(
+                Some(
                     targeting::triggering_spell_identity(state)
                         .or_else(|| spell_event_incarnation(state, id))?,
-                ),
-                GameEvent::SpellCopied {
-                    card_id: _,
-                    controller: _,
-                    object_id: _,
-                    original_id: _,
-                } => Some(spell_event_incarnation(state, id)?),
-                _ => {
-                    targeting::event_context_incarnation(&TargetFilter::TriggeringSource, event, id)
-                }
+                )
+            } else if let GameEvent::SpellCopied {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                original_id: _,
+            } = event
+            {
+                Some(spell_event_incarnation(state, id)?)
+            } else {
+                targeting::event_context_incarnation(&TargetFilter::TriggeringSource, event, id)
             };
             Some(ConditionReferent {
                 id,
