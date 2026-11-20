@@ -2,14 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { PrintingEntry } from "../../scryfall.ts";
 import type { ArtChainEntry, CardArtOverride } from "../../../stores/preferencesStore.ts";
-import { cardCandidateGroups, decodeCandidateKey, semanticCardCandidateGroups } from "../candidateKeys.ts";
+import { cardCandidateGroups, decodeCandidateKey, encodeCandidateKey, semanticCardCandidateGroups } from "../candidateKeys.ts";
 import { planCuratedMembership } from "../curatedMembership.ts";
 import type { CuratedCardEntry, CuratedMembershipInput } from "../curatedMembership.ts";
 import { packId } from "../types.ts";
 import type { ScryfallAssetDescriptor } from "../browser/descriptors.ts";
 
-// `curated` is not an admissible PackId until the selector lands; the planner
-// takes the pack from its caller, so any existing id exercises it.
 const PACK = packId("complete");
 
 // Oracle ids carry hex LETTERS on purpose: an all-digit UUID makes
@@ -164,6 +162,125 @@ function candidateKinds(descriptor: ScryfallAssetDescriptor): string[] {
 function descriptorMembership(descriptors: readonly ScryfallAssetDescriptor[]): readonly [string, string][] {
   return descriptors.map(({ assetKey, sourceUrl }) => [assetKey, sourceUrl]);
 }
+
+describe("curated basic-land catalog membership", () => {
+  const oracleId = "bc71ebf6-2056-41f7-be35-b2e5c34afa99";
+  const plains = cardEntry(oracleId, "Plains", ["plains"], [imageFace("plains-canonical")]);
+  const m21_260 = printing({
+    id: "4be96696-aff8-4ef9-97dc-8221ef745de9", set: "m21", collector_number: "260",
+    faces: [imageFace("plains-m21-260")],
+  });
+  const m21_261 = printing({
+    id: "0d4e5bc1-f0c3-4ea7-a549-c36d932103b1", set: "m21", collector_number: "261",
+    faces: [imageFace("plains-m21-261")],
+  });
+  const canonical = `asset:v1:canonical_card:${oracleId}`;
+  const primaryExact = `asset:v1:exact_printing:${m21_260.id}`;
+  const alternative = `asset:v1:exact_printing:${m21_261.id}`;
+  const rungs = [["full_card", "normal"], ["full_card", "small"], ["art_crop", "art_crop"]] as const;
+
+  function landInput(overrides: Partial<CuratedMembershipInput> = {}): CuratedMembershipInput {
+    return input({
+      packId: packId("curated"),
+      cards: { [oracleId]: plains },
+      printings: { [oracleId]: [m21_260, m21_261] },
+      artChain: EMPTY_CHAIN,
+      ...overrides,
+    });
+  }
+
+  it.each([
+    { context: "canonical", overrides: {}, primary: canonical, token: "plains-canonical" },
+    {
+      context: "newest with the same deck printing",
+      overrides: { artChain: NEWEST, deckPrintings: [{ oracleId, source: { setCode: "M21", collectorNumber: "260" } }] },
+      primary: primaryExact,
+      token: "plains-m21-260",
+    },
+    {
+      context: "an image-less selected printing",
+      overrides: {
+        artChain: NEWEST,
+        printings: { [oracleId]: [{ ...m21_260, faces: [NO_IMAGE_FACE] }, m21_261] },
+      },
+      primary: canonical,
+      token: "plains-canonical",
+    },
+  ])("keeps $context primary and catalog additions exact-only", async ({ overrides, primary, token }) => {
+    const { descriptors } = await planCuratedMembership(landInput(overrides));
+    const pairs = descriptorMembership(descriptors);
+    const expected = rungs.flatMap(([variant, rung]) => [
+      [`${primary}-0-${variant}-${rung}`, url(token, rung)],
+      [`${alternative}-0-${variant}-${rung}`, url("plains-m21-261", rung)],
+      ...(primary === canonical && !("printings" in overrides)
+        ? [[`${primaryExact}-0-${variant}-${rung}`, url("plains-m21-260", rung)]]
+        : []),
+    ]);
+    expect(pairs).toHaveLength(expected.length);
+    expect(pairs).toEqual(expect.arrayContaining(expected));
+
+    for (const [variant, rung] of rungs) {
+      const primaryKey = `${primary}-0-${variant}-${rung}`;
+      const alternativeKey = `${alternative}-0-${variant}-${rung}`;
+      const visual = [0, variant, rung];
+      for (const broad of [
+        encodeCandidateKey("oracle", [oracleId, ...visual]),
+        encodeCandidateKey("oracle_alias", ["plains", ...visual]),
+        encodeCandidateKey("oracle_face", [oracleId, "plains", variant, rung]),
+        encodeCandidateKey("name_face", ["plains", "plains", variant, rung]),
+      ]) {
+        expect(keysOf(descriptors.filter((value) => value.candidateKeys.includes(broad)))).toEqual([primaryKey]);
+      }
+      const supplemental = descriptors.find((value) => value.assetKey === alternativeKey)!;
+      expect(supplemental.candidateKeys).toEqual(expect.arrayContaining([
+        encodeCandidateKey("english_printing", [m21_261.id, ...visual]),
+        encodeCandidateKey("source_printing", ["m21", "261", "plains", variant, rung]),
+      ]));
+      expect(new Set(candidateKinds(supplemental))).toEqual(new Set(["english_printing", "source_printing"]));
+      if (primary === primaryExact) {
+        expect(descriptors.find((value) => value.assetKey === primaryKey)?.candidateKeys)
+          .toContain(encodeCandidateKey("english_alias", ["plains", ...visual]));
+      }
+    }
+  });
+
+  it.each([
+    [],
+    [{ ...m21_261, id: BOLT_NEW.id }],
+    [{ ...m21_261, set: "m20" }],
+    [{ ...m21_261, collector_number: "262" }],
+  ].map((rows, index) => ({
+    caseName: ["missing row in the Oracle bucket", "same tuple with another ID", "wrong set", "wrong collector"][index],
+    rows,
+  })))("skips $caseName and keeps the available crop and ordinary art", async ({ rows }) => {
+    const { descriptors } = await planCuratedMembership(landInput({
+      printings: {
+        [oracleId]: [{ ...m21_260, faces: [{ ...NO_IMAGE_FACE, art_crop: url("plains-m21-260", "art_crop") }] }, ...rows],
+        [BOLT]: [m21_261],
+      },
+    }));
+    expect(new Set(descriptorMembership(descriptors).map(([key, source]) => `${key} ${source}`))).toEqual(new Set([
+      ...rungs.map(([variant, rung]) => `${canonical}-0-${variant}-${rung} ${url("plains-canonical", rung)}`),
+      `${primaryExact}-0-art_crop-art_crop ${url("plains-m21-260", "art_crop")}`,
+    ]));
+  });
+
+  it("limits supplemental membership to curated packs and catalog Oracle IDs", async () => {
+    const fixture = landInput({
+      cards: { [oracleId]: plains, [BOLT]: BOLT_ENTRY },
+      printings: { [oracleId]: [m21_260, m21_261], [BOLT]: [BOLT_NEW] },
+      includedOracleIds: new Set([oracleId, BOLT]),
+    });
+    const curated = await planCuratedMembership(fixture);
+    const deckLibrary = await planCuratedMembership({ ...fixture, packId: packId("deck_library") });
+    expect(exactPrintingIds(curated.descriptors)).toEqual(new Set([m21_260.id, m21_261.id]));
+    expect(exactPrintingIds(deckLibrary.descriptors)).toEqual(new Set());
+    for (const { descriptors } of [curated, deckLibrary]) {
+      expect(keysOf(descriptors)).toContain(`${canonical}-0-full_card-normal`);
+      expect(keysOf(descriptors)).toContain(`asset:v1:canonical_card:${BOLT}-0-full_card-normal`);
+    }
+  });
+});
 
 describe("planCuratedMembership", () => {
   it("emits one printing per card across all three rungs", async () => {
