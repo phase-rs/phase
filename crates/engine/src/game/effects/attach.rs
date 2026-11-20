@@ -1845,7 +1845,7 @@ fn resolve_parent_target_attachment_from_trigger(
 }
 
 /// The object an enters trigger `event` put onto the battlefield.
-fn entering_object(event: &GameEvent) -> Option<ObjectId> {
+pub(in crate::game) fn entering_object(event: &GameEvent) -> Option<ObjectId> {
     let GameEvent::ZoneChanged {
         object_id,
         to: Zone::Battlefield,
@@ -1855,22 +1855,6 @@ fn entering_object(event: &GameEvent) -> Option<ObjectId> {
         return None;
     };
     Some(*object_id)
-}
-
-/// CR 400.7 + CR 701.3a: the entering object an `Attach` effect's untargeted
-/// attachment operand (`slot`) reads from the trigger `event` (this module's
-/// role), for the trigger seeder to pin. `None` for any other effect or operand.
-pub(in crate::game) fn event_parent_attachment(
-    effect: &Effect,
-    slot: &TargetFilter,
-    event: &GameEvent,
-) -> Option<ObjectId> {
-    let Effect::Attach { attachment, .. } = effect else {
-        return None;
-    };
-    std::ptr::eq(attachment, slot)
-        .then(|| entering_object(event))
-        .flatten()
 }
 
 /// CR 400.7 + CR 608.2b: whether an attachment operand that resolved to nothing names a
