@@ -12532,8 +12532,8 @@ pub(crate) enum WhereXSlot {
     /// result themselves (CR 107.1b); CR 107.1b exempts effects that set P/T.
     #[default]
     Amount,
-    /// The signed amount a "gets ±X/±X" modification adds (CR 613.4c), where a
-    /// negative X would reach the game unclamped.
+    /// The signed amount a "gets ±X/±X" modification adds (CR 613.4c); a
+    /// negative X is clamped to 0 here (CR 107.1b).
     PtAdjustment,
 }
 
@@ -12585,46 +12585,28 @@ impl<'a> WhereXBinding<'a> {
     /// site goes through here so the expression and the antecedents it is read
     /// under cannot drift apart at a call site. `expression` is passed rather
     /// than read from `self` because some seams rewrite the tail (licensing,
-    /// nested owners) before the count is resolved. A `PtAdjustment` slot gets the
-    /// CR 107.1b clamp when the characteristic rung bound X
-    /// (`clamp_rung_bound_pt_adjustment`).
+    /// nested owners) before the count is resolved. The slot then binds X
+    /// ([`WhereXSlot::bind`]).
     pub(crate) fn resolve_quantity(&self, expression: &str) -> Option<QuantityExpr> {
         let antecedents = self.antecedents_or_empty();
         let x = parse_where_x_quantity_expression_with_antecedents(expression, &antecedents)?;
-        Some(match self.slot {
-            WhereXSlot::Amount => x,
-            WhereXSlot::PtAdjustment => clamp_rung_bound_pt_adjustment(x, expression, &antecedents),
-        })
+        Some(self.slot.bind(x))
     }
 }
 
-/// CR 107.1b + CR 608.2k: when the antecedent rung bound X to the trigger event
-/// object's characteristic, a negative characteristic gives X = 0 (Arahbo, Roar
-/// of the World ruling: "If the attacking Cat's power is negative at that time,
-/// X is 0."). Scoped to the rung binding: X is rung-bound when the same
-/// expression read without the rung differs.
-fn clamp_rung_bound_pt_adjustment(
-    x: QuantityExpr,
-    expression: &str,
-    antecedents: &PlayerAntecedents,
-) -> QuantityExpr {
-    let rung_bound = antecedents.characteristic_pronoun_owner.is_some()
-        && parse_where_x_quantity_expression_with_antecedents(
-            expression,
-            &PlayerAntecedents {
-                characteristic_pronoun_owner: None,
-                ..antecedents.clone()
+impl WhereXSlot {
+    /// CR 107.1b: a negative X feeding a signed P/T adjustment is 0.
+    pub(crate) fn bind(self, x: QuantityExpr) -> QuantityExpr {
+        match self {
+            WhereXSlot::Amount => x,
+            WhereXSlot::PtAdjustment => match x {
+                QuantityExpr::ClampMin { minimum, .. } if minimum >= 0 => x,
+                x => QuantityExpr::ClampMin {
+                    inner: Box::new(x),
+                    minimum: 0,
+                },
             },
-        )
-        .as_ref()
-            != Some(&x);
-    if rung_bound {
-        QuantityExpr::ClampMin {
-            inner: Box::new(x),
-            minimum: 0,
         }
-    } else {
-        x
     }
 }
 
@@ -17452,7 +17434,9 @@ mod tests {
 }
 #[cfg(test)]
 mod where_x_tests {
-    use super::{parse_where_x_quantity_expression, strip_trailing_duration, WhereXBinding};
+    use super::{
+        parse_where_x_quantity_expression, strip_trailing_duration, WhereXBinding, WhereXSlot,
+    };
     use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
@@ -18423,10 +18407,13 @@ mod where_x_tests {
             WhereXBinding::bare(Some("that creature's power")),
         );
 
-        let expected = PtValue::Quantity(QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Target,
-            },
+        let expected = PtValue::Quantity(QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            }),
+            minimum: 0,
         });
         let Effect::Pump {
             power, toughness, ..
@@ -18809,18 +18796,17 @@ mod where_x_tests {
         );
     }
 
-    /// CR 107.1b + CR 613.4c: a signed P/T adjustment whose X the characteristic
-    /// rung bound is clamped at zero (Arahbo, Roar of the World ruling: a
-    /// negative attacking Cat gives X = 0); a count slot, an unbound rung, a
-    /// non-pronoun count and an explicit self-reference are not.
+    /// CR 107.1b + CR 613.4c: every X feeding a signed P/T adjustment is clamped
+    /// at zero, whatever bound it; a count slot keeps the bare reading.
     #[test]
-    fn where_x_pt_adjustment_clamps_only_rung_bound_x() {
+    fn where_x_pt_adjustment_clamps_every_x() {
         use crate::types::ability::PtValue;
-        let rung = event_object_rung();
-        let clamped = QuantityExpr::ClampMin {
-            inner: Box::new(power(ObjectScope::EventSource)),
+        let clamp = |inner: QuantityExpr| QuantityExpr::ClampMin {
+            inner: Box::new(inner),
             minimum: 0,
         };
+        let rung = event_object_rung();
+        let clamped = clamp(power(ObjectScope::EventSource));
         let adjustment = WhereXBinding::new(Some("its power"), &rung).as_pt_adjustment();
         assert_eq!(
             adjustment.resolve_quantity("its power"),
@@ -18830,7 +18816,7 @@ mod where_x_tests {
             super::apply_where_x_expression(PtValue::Variable("-X".to_string()), adjustment),
             Some(PtValue::Quantity(QuantityExpr::Multiply {
                 factor: -1,
-                inner: Box::new(clamped),
+                inner: Box::new(clamped.clone()),
             }))
         );
 
@@ -18839,24 +18825,21 @@ mod where_x_tests {
             WhereXBinding::new(Some("its power"), &rung).resolve_quantity("its power"),
             Some(power(ObjectScope::EventSource))
         );
-        // No rung in scope: nothing to clamp.
         let empty = Default::default();
         assert_eq!(
             WhereXBinding::new(Some("its power"), &empty)
                 .as_pt_adjustment()
                 .resolve_quantity("its power"),
-            Some(power(ObjectScope::Source))
+            Some(clamp(power(ObjectScope::Source)))
         );
-        // The rung did not bind a non-pronoun count or an explicit self-reference.
         let creatures = WhereXBinding::new(Some("the number of creatures you control"), &rung)
             .as_pt_adjustment()
             .resolve_quantity("the number of creatures you control");
         assert!(
             matches!(
-                creatures,
-                Some(QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCount { .. }
-                })
+                &creatures,
+                Some(QuantityExpr::ClampMin { inner, minimum: 0 })
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
             ),
             "{creatures:?}"
         );
@@ -18864,15 +18847,16 @@ mod where_x_tests {
             WhereXBinding::new(Some("~'s power"), &rung)
                 .as_pt_adjustment()
                 .resolve_quantity("~'s power"),
-            Some(power(ObjectScope::Source))
+            Some(clamp(power(ObjectScope::Source)))
         );
+        // An already-floored X is not wrapped twice.
+        assert_eq!(WhereXSlot::PtAdjustment.bind(clamped.clone()), clamped);
     }
 
     /// CR 613.4c + CR 107.1b + CR 608.2k: the pump-clause consumer marks its X
-    /// as a signed adjustment, so under a trigger subject whose "it" is the
-    /// event object, "its power" is clamped at zero, while an explicit
-    /// self-reference ("~'s power") and a context-free clause keep the bare
-    /// `Source` reading.
+    /// as a signed adjustment, so every reading is clamped at zero; under a
+    /// trigger subject "its power" reads the event object, while an explicit
+    /// self-reference ("~'s power") and a context-free clause read `Source`.
     #[test]
     fn where_x_pump_clause_marks_signed_adjustment_under_event_subject() {
         use crate::parser::oracle_ir::context::ParseContext;
@@ -18902,14 +18886,20 @@ mod where_x_tests {
                 "gets +X/+X until end of turn, where X is ~'s power",
                 &event_subject
             ),
-            PtValue::Quantity(power(ObjectScope::Source))
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(power(ObjectScope::Source)),
+                minimum: 0,
+            })
         );
         assert_eq!(
             pump(
                 "gets +X/+X until end of turn, where X is its power",
                 &ParseContext::default()
             ),
-            PtValue::Quantity(power(ObjectScope::Source))
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(power(ObjectScope::Source)),
+                minimum: 0,
+            })
         );
     }
 }

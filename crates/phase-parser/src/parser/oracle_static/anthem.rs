@@ -1386,8 +1386,12 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // applied to both axes; a "+X/+Y" pump whose clause reads "where X is <A> and
     // Y is <B>" (Aspect of Wolf) binds each axis to its own quantity, so the
     // clause is split on " and y is " and each half is parsed independently.
-    let resolve_quantity =
-        |wx: &str| parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx));
+    // CR 107.1b: X is clamped at 0 before the sign applies, so -X never adds.
+    let resolve_quantity = |wx: &str| {
+        parse_cda_quantity(wx)
+            .or_else(|| parse_event_context_quantity(wx))
+            .map(|x| super::oracle_effect::WhereXSlot::PtAdjustment.bind(x))
+    };
     let (p_quantity, t_quantity) = if is_distinct_xy {
         // Require the paired binding; a "+X/+Y" without it is unsupported.
         let (x_expr, y_expr) = split_x_and_y_where_clause(where_x_expression?)?;

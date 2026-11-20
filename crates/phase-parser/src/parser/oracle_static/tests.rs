@@ -20226,7 +20226,10 @@ fn dynamic_pt_in_text_x_over_0_with_where_clause_still_uses_where_clause() {
             _ => None,
         })
         .expect("expected AddDynamicPower");
-    match dyn_pow {
+    let QuantityExpr::ClampMin { inner, minimum: 0 } = dyn_pow else {
+        panic!("expected a floored where-X, got {dyn_pow:?}");
+    };
+    match inner.as_ref() {
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => match filter {
@@ -20990,11 +20993,14 @@ fn static_self_ref_exact_base_power_object_count_filter() {
         })
         .expect("expected AddDynamicPower for the X scaling");
 
+    let QuantityExpr::ClampMin { inner, minimum: 0 } = dyn_pow else {
+        panic!("expected a floored where-X, got {dyn_pow:?}");
+    };
     let QuantityExpr::Ref {
         qty: QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(typed),
         },
-    } = dyn_pow
+    } = inner.as_ref()
     else {
         panic!("expected ObjectCount over Typed filter, got {dyn_pow:?}");
     };
@@ -37510,10 +37516,13 @@ fn training_grounds_standalone_line_stays_static_no_transient_effect() {
 /// scope: Source }`, which `game::quantity` evaluates at runtime.
 #[test]
 fn dynamic_pt_pump_scales_by_source_intensity() {
-    let intensity = QuantityExpr::Ref {
-        qty: QuantityRef::Intensity {
-            scope: ObjectScope::Source,
-        },
+    let intensity = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Intensity {
+                scope: ObjectScope::Source,
+            },
+        }),
+        minimum: 0,
     };
 
     // +X/+0: power scales by intensity, toughness untouched.
@@ -37625,22 +37634,24 @@ fn dynamic_pt_pump_binds_x_and_y_axes_to_distinct_quantities() {
     assert!(
         matches!(
             power,
-            Some(QuantityExpr::DivideRounded {
-                divisor: 2,
-                rounding: RoundingMode::Down,
-                ..
-            })
+            Some(QuantityExpr::ClampMin { inner, minimum: 0 })
+                if matches!(**inner, QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Down,
+                    ..
+                })
         ),
         "power axis must be half rounded DOWN, got {power:?}"
     );
     assert!(
         matches!(
             toughness,
-            Some(QuantityExpr::DivideRounded {
-                divisor: 2,
-                rounding: RoundingMode::Up,
-                ..
-            })
+            Some(QuantityExpr::ClampMin { inner, minimum: 0 })
+                if matches!(**inner, QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Up,
+                    ..
+                })
         ),
         "toughness axis must be half rounded UP, got {toughness:?}"
     );

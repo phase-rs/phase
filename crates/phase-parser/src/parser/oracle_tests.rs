@@ -7635,8 +7635,11 @@ fn hammer_helper_die_result_pump_parses_dynamic_power_no_warning() {
     let mods = &static_abilities[0].modifications;
     assert!(
         mods.contains(&ContinuousModification::AddDynamicPower {
-            value: QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
+            value: QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+                minimum: 0,
             },
         }),
         "expected AddDynamicPower(EventContextAmount), got {mods:?}"

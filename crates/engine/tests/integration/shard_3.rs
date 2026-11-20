@@ -399,6 +399,7 @@ mod issue_10401_off_zone_ability_cost_reduction;
 mod issue_10431_resumed_batch_terminal_completion;
 mod issue_1092_chthonian_nightmare;
 mod issue_11040_darksteel_colossus_mill;
+mod issue_11133_where_x_pt_clamp;
 mod issue_1120_warden_of_the_grove;
 mod issue_1128_elrond_scry_counter;
 mod issue_1135_ents_fury_fight;
