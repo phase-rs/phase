@@ -7287,10 +7287,10 @@ mod tests {
             .expect("the chooser picks which held decision to make first");
     }
 
-    /// CR 101.4c + CR 101.4d + CR 616.1: publish the next of `held` (the
-    /// members whose decisions `player` still holds, in announcement order),
-    /// making them in announcement order. With two or more held, `player`
-    /// first chooses which to make (the order restarts after every answer);
+    /// CR 101.4c + CR 616.1: publish the next of `held` (the members whose
+    /// decisions `player` still holds, in announcement order), making them in
+    /// announcement order. With two or more held, `player` first chooses which
+    /// to make (and chooses again after every answer);
     /// the last one is published without a selection. Either way the
     /// published choice is about that member.
     fn publish_next_held_decision(
@@ -16242,7 +16242,7 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // CR 101.4c + CR 101.4d: the sweep consulted all three shocks; P0 holds
+        // CR 101.4c: the sweep consulted all three shocks; P0 holds
         // every decision and orders them (announcement order) before each
         // answer while two or more remain.
         let mut held = vec![s1, s2, s3];
@@ -16334,7 +16334,7 @@ mod tests {
 
         // Each shock pauses on its `Moved` replacement; decline (index 1) so it
         // still enters the battlefield (tapped) — i.e. it reaches the destination.
-        // CR 101.4c + CR 101.4d: the sweep consulted all three, and P0 orders
+        // CR 101.4c: the sweep consulted all three, and P0 orders
         // its held decisions (announcement order) while two or more remain.
         let mut held = vec![s1, s2, s3];
         for _ in 0..3 {
@@ -16441,7 +16441,7 @@ mod tests {
         // until the staged returns finish, including across a save.
         let mut events = Vec::new();
         crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
-        // CR 101.4c + CR 101.4d: the sweep consulted all three returns and P0
+        // CR 101.4c: the sweep consulted all three returns and P0
         // holds every decision; P0 makes them in announcement order, choosing
         // the order while two or more remain.
         let mut held = vec![s1, s2, s3];

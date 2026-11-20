@@ -12156,7 +12156,7 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
         "the chosen redirect suppresses the original bottom placement"
     );
     // The suffix re-pauses: P0 still holds both later placements, so it orders
-    // them again (CR 101.4d) and makes the next announced one first.
+    // them again (CR 101.4c) and makes the next announced one first.
     assert!(
         matches!(
             redirected.waiting_for,

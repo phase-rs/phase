@@ -2881,7 +2881,9 @@ fn staged_decision_is_published(state: &GameState) -> bool {
 /// in announcement order, and a member whose consultation parks a decision is
 /// held while the sweep goes on; finally the scheduler asks the outstanding
 /// decisions in APNAP order (CR 101.4), letting one player order their own
-/// (CR 101.4c), and starts that order again after every answer (CR 101.4d).
+/// (CR 101.4c). It asks again after every answer, so a choice that a
+/// nonactive player's answer exposes for an earlier seat is asked first
+/// (CR 101.4d).
 fn drive_staged_approval(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,

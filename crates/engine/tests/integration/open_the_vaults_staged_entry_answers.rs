@@ -71,10 +71,10 @@ fn assert_settled(runner: &GameRunner) {
     );
 }
 
-/// CR 101.4c + CR 101.4d + CR 616.1: the staged population's sweep consults
-/// every entrant before any prompt, and the order restarts after every answer
-/// (an answer that re-parks the same member holds that decision again). While
-/// P0 holds two or more decisions, it first chooses which to make; make
+/// CR 101.4c + CR 616.1: the staged population's sweep consults every entrant
+/// before any prompt, and the scheduler asks again after every answer (an
+/// answer that re-parks the same member holds that decision again). While P0
+/// holds two or more decisions, it first chooses which to make; make
 /// `subject`'s first. `held` is every member that holds a decision, in
 /// announcement order. Returns whether P0 was asked to order.
 fn make_decision_first(runner: &mut GameRunner, held: &[ObjectId], subject: ObjectId) -> bool {
@@ -182,8 +182,8 @@ fn open_the_vaults_mox_diamond_orders_root_maze_against_archelos() {
         "P0 holds both entrants' orderings after the sweep"
     );
     choose_source(&mut runner, mox, 3);
-    // CR 101.4d: the answer re-parks the Mox on its own optional discard, so
-    // the order restarts and P0 again chooses which held decision to make.
+    // CR 101.4c: the answer re-parks the Mox on its own optional discard, so
+    // P0 again holds two decisions and again chooses which to make first.
     assert!(
         make_decision_first(&mut runner, &[mox, thopter], mox),
         "the Mox's re-parked optional discard is held and the order restarts"
@@ -208,8 +208,8 @@ fn open_the_vaults_mox_diamond_orders_root_maze_against_archelos() {
             cards: vec![forest],
         })
         .expect("pay Mox discard");
-    // CR 101.4d: paying the discard re-parks the Mox on the Root Maze /
-    // Archelos ordering, so the order restarts once more.
+    // CR 101.4c: paying the discard re-parks the Mox on the Root Maze /
+    // Archelos ordering, so P0 again chooses which held decision to make.
     assert!(
         make_decision_first(&mut runner, &[mox, thopter], mox),
         "the Mox's re-parked entry ordering is held and the order restarts"

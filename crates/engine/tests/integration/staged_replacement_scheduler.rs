@@ -2,8 +2,9 @@
 //! scheduler. Every member is consulted once; a member whose consultation parks
 //! a decision holds it; the outstanding decisions are asked in APNAP order
 //! (CR 101.4); a player with several chooses which comes first (CR 101.4c); and
-//! the order restarts after every answer (CR 101.4d). Printed Oracle text is
-//! quoted from the card data.
+//! the scheduler asks again after every answer, so APNAP order restarts when a
+//! nonactive player's answer exposes an earlier seat's choice (CR 101.4d).
+//! Printed Oracle text is quoted from the card data.
 //!
 //! Infrastructure exception: Auras are attached and control is changed by
 //! setting the objects directly, instead of casting them; every destruction
