@@ -52,7 +52,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 | 3 | Anaphor bound to wrong referent | 396 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 322 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 224 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 223 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -2514,7 +2514,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (224 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (223 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2690,7 +2690,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Sarah's Wings
 - Sarkhan the Masterless
 - Savai Triome
-- Sawback Manticore
 - Scarred Puma
 - Sea Troll
 - Search the Premises

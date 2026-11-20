@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingDamagePostCounter (a wither/infect -1/-1 placement paused on a counter-replacement order) replaces loyalty_before/defense_before with a required excess computed before the counters are placed (CR 120.4a). A previous-version snapshot holding that stash is refused at restore instead of resuming with zero excess, and an older peer drops excess and cannot redirect the excess of an excess-redirect rider (Ram Through)."
+}
