@@ -10516,6 +10516,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) 
         protection_does_not_remove,
         room_door,
         granting_object,
+        bound_actor,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -10530,6 +10531,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) 
         && protection_does_not_remove.is_none()
         && room_door.is_none()
         && granting_object.is_none()
+        && bound_actor.is_none()
 }
 
 /// CR 608.2c: the one object class a static ability granted by a
@@ -10886,6 +10888,7 @@ fn condition_reads_filter_population(
         | AbilityCondition::HasObjectTarget
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
@@ -11961,6 +11964,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -12282,6 +12286,7 @@ fn static_definition_reads_filter_population(
         protection_does_not_remove: _,
         room_door: _,
         granting_object: _,
+        bound_actor: _,
     } = static_def;
     affected
         .as_ref()
@@ -12816,6 +12821,7 @@ fn continuous_modification_reads_filter_population(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -13765,6 +13771,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. }
+            // CR 508.6: a live game-state gate, not a decline-alternative
+            // selector — declining the optional effect does not pick an
+            // "attacked you" branch.
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::EffectOutcome {
                 signal:
                     EffectOutcomeSignal::CurrentScopeSucceeded
@@ -17443,6 +17453,14 @@ fn affected_objects_from_events(
         // action and no priority intervene between the resolver and this
         // publish.
         Effect::PumpAll { target, .. } if is_sole_chain_producer(state, ability) => {
+            pump::pump_all_affected_objects(state, ability, target)
+        }
+        // CR 701.10a + CR 611.2c (Matt R7-F4): doubling establishes the same
+        // mass population a pump does — the resolver selects through the
+        // shared authority, so publish that same population for a following
+        // "They"/"those creatures" consumer. Without this arm the fallback
+        // below harvests only zone changes and the grant binds nothing.
+        Effect::DoublePTAll { target, .. } if is_sole_chain_producer(state, ability) => {
             pump::pump_all_affected_objects(state, ability, target)
         }
         // CR 701.15a: the creatures actually goaded.
@@ -23382,6 +23400,12 @@ fn player_scope_sacrifice_step(
                 obj.controller == player
                     && !obj.is_emblem
                     && crate::game::filter::matches_target_filter(state, *id, target, &ctx)
+                    // CR 608.2d: same candidate legality as the ordinary
+                    // sacrifice-effect pool — a permanent its chooser is
+                    // barred from sacrificing is not offered.
+                    && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *id,
+                    )
                     && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
                         state, &scoped, *id, player,
                     )
@@ -23492,6 +23516,12 @@ fn perform_player_scope_sacrifices(
                         &events[events_before_card..],
                     );
                     emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+                }
+                // CR 609.3: a mid-resolution bar means the instruction can't
+                // move this object — skip it so terminal bookkeeping derives
+                // from actual departures, not attempts.
+                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                    completion.announced.retain(|&id| id != card);
                 }
                 crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     let completed = record_sacrifice_batch_events(
@@ -33382,6 +33412,57 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ScopedPlayerMatches { filter } => {
             let candidate = ability.scoped_player.unwrap_or(ability.controller);
             scoped_player_matches_filter(state, ability, candidate, filter)
+        }
+        // CR 508.6 + CR 608.2c: retrospective this-turn player-pair attack
+        // test ("if they didn't attack you that turn" — Faramir, Prince of
+        // Ithilien, wrapped in `Not`). Both endpoints resolve via the widened
+        // `resolve_single_player_scope` (`Target` = first `TargetRef::Player`
+        // in `ability.targets` — the stamped chosen player); the printed
+        // controller anchors `original_controller` fallback exactly like the
+        // quantity path. An unresolvable scope fails closed to `false`
+        // (duration-timing-only `AnyTurn`/`SpecificPlayer` are rejected
+        // before the scope resolver's `unreachable!()`); card-level `Not`
+        // composes above it. Reads the UNCOLLAPSED direct-attack ledger
+        // (Faramir ruling 2023-06-16), never the collapsed `has_attacked`.
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => {
+            if attacker.duration_timing_only() || defender.duration_timing_only() {
+                return false;
+            }
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let ctx = crate::game::quantity::QuantityContext {
+                entering: None,
+                source: ability.source_id,
+                trigger_source: ability.trigger_source.clone(),
+                recipient: None,
+                scoped_player: ability.scoped_player,
+                damage_source: None,
+                // No spell scope at a condition gate; a resolving ability is
+                // in scope, so no stamped granter is carried either.
+                spell: None,
+                event_amount: None,
+                granting_object: None,
+            };
+            let (Some(attacker_id), Some(defender_id)) = (
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    attacker,
+                    controller,
+                    ctx.clone(),
+                    &ability.targets,
+                    Some(ability),
+                ),
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    defender,
+                    controller,
+                    ctx,
+                    &ability.targets,
+                    Some(ability),
+                ),
+            ) else {
+                return false;
+            };
+            state.has_attacked_player_directly_this_turn(attacker_id, defender_id)
         }
     }
 }
@@ -71583,6 +71664,105 @@ mod tests {
             "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
              read the 2 actually removed — not the 7 the relay asked for"
         );
+    }
+    /// CR 508.6 + CR 608.2c: unit matrix for the retrospective this-turn
+    /// player-pair attack predicate (phase 5a, Verification Matrix row 5).
+    /// Endpoints resolve via `resolve_single_player_scope` (`Target` = first
+    /// `TargetRef::Player` — the stamped chosen player); every negative below
+    /// is paired with a positive cell proving the path resolves. Revert-
+    /// discriminating: dropping the ledger read (e.g. collapsing to the
+    /// collapsed `has_attacked` gate) flips cell 1; dropping the fail-closed
+    /// arms flips cells 5-7.
+    #[test]
+    fn player_attacked_player_predicate_matrix() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        fn ability_with_targets(targets: Vec<TargetRef>) -> ResolvedAbility {
+            let effect: Effect = serde_json::from_str(
+                r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+            )
+            .expect("draw effect must parse");
+            ResolvedAbility::new(effect, targets, ObjectId(1), PlayerId(0))
+        }
+        fn seeded(attacker: PlayerId, defender: PlayerId) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state
+                .attacked_players_directly_this_turn
+                .entry(attacker)
+                .or_default()
+                .insert(defender);
+            state
+        }
+        let cond = |attacker: PlayerScope, defender: PlayerScope| {
+            AbilityCondition::PlayerAttackedPlayer { attacker, defender }
+        };
+        let empty = GameState::new_two_player(42);
+        // 1. Chosen (Target=P1) attacked you (Controller=P0): ledger P1->P0.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 2. Same scopes, empty ledger: no attack recorded.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 3. Controller attacked chosen: ledger P0->P1.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Target),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 4. Controller vs controller, empty ledger: nobody attacked themselves.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![]),
+        ));
+        // 5. Target with no stamped player target: unresolvable fails closed.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![]),
+        ));
+        // 6-7. Duration-timing-only scopes never reach the resolver: false
+        // even with a matching ledger entry.
+        assert!(!evaluate_condition(
+            &cond(
+                PlayerScope::SpecificPlayer { id: p1 },
+                PlayerScope::Controller,
+            ),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::AnyTurn, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 8. Ordered pairs: only P0->P1 seeded, query P1->P0 is false.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 9. Card-level Not composes above the leaf in both polarities.
+        let leaf = cond(PlayerScope::Target, PlayerScope::Controller);
+        let not = |inner: AbilityCondition| AbilityCondition::Not {
+            condition: Box::new(inner),
+        };
+        assert!(!evaluate_condition(
+            &not(leaf.clone()),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(evaluate_condition(
+            &not(leaf),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
     }
 
     /// CR 701.26a + CR 608.2c: a tap instruction stamps `Tapped`; untap stays unstamped.

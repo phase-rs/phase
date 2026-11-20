@@ -106,7 +106,10 @@ pub fn apply_resolved_library_shuffle(
     // CR 401.5 + CR 611.3a: the changed top card can alter a live static
     // ability. This mark is derived cache state, rebuilt from the installed
     // order rather than stored as an independent command operand.
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+    );
 
     // CR 701.20d: If cards in a player's library are shuffled or otherwise
     // reordered, any revealed cards that are reordered stop being revealed

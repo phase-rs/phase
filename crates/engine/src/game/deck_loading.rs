@@ -1,7 +1,8 @@
 use crate::types::game_state::RandomDraw;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::num::NonZeroU8;
+use std::sync::{Arc, OnceLock};
 
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use crate::types::card_printing::{
     deck_face_identity, CardPrinting, DeckFaceLookupName, DeckPrinting, DeckPrintingRecord,
     DeckSection, SharedPrinting,
 };
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::display_only::DisplayOnly;
 use crate::types::format::CompanionSlot;
 use crate::types::game_state::{GameState, OutsideGameCardUse, PlayerDeckPool};
@@ -560,6 +561,7 @@ fn bind_printing_rows<'a>(
         row.count = u64::from(row.count).min(budget.remaining) as u32;
         if row.count != 0 {
             budget.remaining -= u64::from(row.count);
+            row.printing.automatic_art_catalog_version = None;
             payload.printings.push(row);
         }
     }
@@ -1605,9 +1607,9 @@ fn load_player_attraction_deck(
     payload: &PlayerDeckPayload,
     owner: PlayerId,
 ) {
-    for copy in shuffled_entry_copies(state, payload, DeckSection::AttractionDeck, None) {
+    for copy in shuffled_entry_copies(state, payload, DeckSection::AttractionDeck) {
         let id = create_attraction_deck_card(state, copy.face, owner);
-        stamp_created_card(state, id, copy.printing);
+        stamp_created_card(state, id, copy.printing.as_deref());
     }
 }
 
@@ -1632,9 +1634,9 @@ pub fn create_planar_deck_card(
 
 fn load_shared_planar_deck(state: &mut GameState, payload: &PlayerDeckPayload, owner: PlayerId) {
     state.planar_deck.clear();
-    for copy in shuffled_entry_copies(state, payload, DeckSection::PlanarDeck, None) {
+    for copy in shuffled_entry_copies(state, payload, DeckSection::PlanarDeck) {
         let id = create_planar_deck_card(state, copy.face, owner);
-        stamp_created_card(state, id, copy.printing);
+        stamp_created_card(state, id, copy.printing.as_deref());
     }
     state.planar_controller = Some(owner);
     crate::game::planechase::restamp_planar_objects_to_controller(state);
@@ -1661,9 +1663,9 @@ pub fn create_scheme_deck_card(
 
 fn load_shared_scheme_deck(state: &mut GameState, payload: &PlayerDeckPayload, owner: PlayerId) {
     state.scheme_deck.clear();
-    for copy in shuffled_entry_copies(state, payload, DeckSection::SchemeDeck, None) {
+    for copy in shuffled_entry_copies(state, payload, DeckSection::SchemeDeck) {
         let id = create_scheme_deck_card(state, copy.face, owner);
-        stamp_created_card(state, id, copy.printing);
+        stamp_created_card(state, id, copy.printing.as_deref());
     }
     state.archenemy = Some(owner);
 }
@@ -1697,9 +1699,9 @@ fn load_player_contraption_deck(
     payload: &PlayerDeckPayload,
     owner: PlayerId,
 ) {
-    for copy in shuffled_entry_copies(state, payload, DeckSection::ContraptionDeck, None) {
+    for copy in shuffled_entry_copies(state, payload, DeckSection::ContraptionDeck) {
         let id = create_contraption_deck_card(state, copy.face, owner);
-        stamp_created_card(state, id, copy.printing);
+        stamp_created_card(state, id, copy.printing.as_deref());
     }
 }
 
@@ -2155,7 +2157,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
                 match placement {
                     CommandZonePlacement::Commander => {
                         let id = create_commander_from_card_face(state, copy.face, owner);
-                        stamp_created_card(state, id, copy.printing);
+                        stamp_created_card(state, id, copy.printing.as_deref());
                     }
                     CommandZonePlacement::NonCommanderLimited => {
                         // CR 905: only Conspiracy cards start in a Limited command zone.
@@ -2168,7 +2170,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
                             create_command_zone_card_from_card_face(
                                 state,
                                 copy.face,
-                                copy.printing,
+                                copy.printing.as_deref(),
                                 owner,
                             );
                         }
@@ -2216,7 +2218,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             for copy in entry_copies(deck, DeckSection::SignatureSpell, None) {
                 let id =
                     create_signature_spell_from_card_face(state, copy.face, PlayerId(seat as u8));
-                stamp_created_card(state, id, copy.printing);
+                stamp_created_card(state, id, copy.printing.as_deref());
             }
         }
     }
@@ -2411,9 +2413,17 @@ fn load_player_library(
     retained: &[DeckEntry],
     owner: PlayerId,
 ) {
-    for copy in shuffled_entry_copies(state, payload, DeckSection::MainDeck, Some(retained)) {
+    let mut copies = entry_copies(payload, DeckSection::MainDeck, Some(retained));
+    assign_basic_land_art(&mut copies);
+    shuffle_copy_placement(state, &mut copies);
+    for copy in copies {
         let id = create_object_from_card_face(state, copy.face, owner);
-        stamp_created_card(state, id, copy.printing);
+        stamp_created_card_shared(
+            state,
+            id,
+            copy.printing
+                .map(|printing| SharedPrinting::new(printing.into_owned())),
+        );
     }
 }
 
@@ -2424,16 +2434,130 @@ fn shuffled_entry_copies<'a>(
     state: &mut GameState,
     payload: &'a PlayerDeckPayload,
     section: DeckSection,
-    retained: Option<&[DeckEntry]>,
 ) -> Vec<DeckCardCopy<'a>> {
-    let mut copies = entry_copies(payload, section, retained);
-    copies.shuffle(state.rng.draw(RandomDraw::Placement));
+    let mut copies = entry_copies(payload, section, None);
+    shuffle_copy_placement(state, &mut copies);
     copies
 }
 
 struct DeckCardCopy<'a> {
     face: &'a CardFace,
-    printing: Option<&'a CardPrinting>,
+    printing: Option<Cow<'a, CardPrinting>>,
+}
+
+fn shuffle_copy_placement(state: &mut GameState, copies: &mut [DeckCardCopy<'_>]) {
+    copies.shuffle(state.rng.draw(RandomDraw::Placement));
+}
+
+#[derive(Deserialize)]
+struct BasicLandArtCatalog {
+    version: NonZeroU8,
+    lands: HashMap<String, BasicLandArt>,
+}
+
+#[derive(Deserialize)]
+struct BasicLandArt {
+    choices: Vec<BasicLandArtChoice>,
+    aliases: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct BasicLandArtChoice {
+    illustration_id: String,
+    #[serde(rename = "set")]
+    set_code: String,
+    collector_number: String,
+}
+
+impl BasicLandArt {
+    fn illustration(&self, printing: &CardPrinting) -> Option<&str> {
+        let set = printing.set_code.to_ascii_lowercase();
+        let collector = printing.collector_number.as_str();
+        self.choices
+            .iter()
+            .find(|choice| choice.set_code == set && choice.collector_number == collector)
+            .map(|choice| choice.illustration_id.as_str())
+            .or_else(|| {
+                self.aliases
+                    .get(&format!("{set}/{collector}"))
+                    .map(String::as_str)
+            })
+    }
+}
+
+#[derive(Default)]
+struct BasicLandArtRotation<'a> {
+    occupied: HashSet<&'a str>,
+    choices: Vec<&'a BasicLandArtChoice>,
+    next: usize,
+}
+
+fn basic_land_art_identity(face: &CardFace) -> Option<&str> {
+    // CR 205.4c: the Basic supertype is distinct from a basic land subtype.
+    if face.card_type.supertypes.contains(&Supertype::Basic)
+        && face.card_type.core_types.contains(&CoreType::Land)
+    {
+        face.scryfall_oracle_id.as_deref()
+    } else {
+        None
+    }
+}
+
+/// CR 203.1 + CR 206.1: assign display art after owner binding and netting,
+/// before placement. All retained owner choices reserve illustrations before
+/// the first vacancy is filled.
+fn assign_basic_land_art(copies: &mut [DeckCardCopy<'_>]) {
+    static CATALOG: OnceLock<BasicLandArtCatalog> = OnceLock::new();
+    let catalog = CATALOG.get_or_init(|| {
+        serde_json::from_str(include_str!("../../data/basic-land-art-v1.json"))
+            .expect("embedded basic-land art catalog must be valid")
+    });
+
+    let mut rotations: HashMap<&str, BasicLandArtRotation<'_>> = HashMap::new();
+    for copy in copies.iter() {
+        let Some(identity) = basic_land_art_identity(copy.face) else {
+            continue;
+        };
+        let Some(art) = catalog.lands.get(identity) else {
+            continue;
+        };
+        let rotation = rotations.entry(identity).or_default();
+        if let Some(illustration) = copy
+            .printing
+            .as_deref()
+            .and_then(|row| art.illustration(row))
+        {
+            rotation.occupied.insert(illustration);
+        }
+    }
+
+    for (identity, rotation) in &mut rotations {
+        let (used, unused): (Vec<_>, Vec<_>) = catalog.lands[*identity]
+            .choices
+            .iter()
+            .partition(|choice| rotation.occupied.contains(choice.illustration_id.as_str()));
+        rotation.choices = unused;
+        rotation.choices.extend(used);
+        assert!(
+            !rotation.choices.is_empty(),
+            "covered basic land must have art choices"
+        );
+    }
+
+    for copy in copies.iter_mut().filter(|copy| copy.printing.is_none()) {
+        let Some(rotation) =
+            basic_land_art_identity(copy.face).and_then(|identity| rotations.get_mut(identity))
+        else {
+            continue;
+        };
+        let choice = rotation.choices[rotation.next];
+        copy.printing = Some(Cow::Owned(CardPrinting {
+            set_code: choice.set_code.clone(),
+            collector_number: choice.collector_number.clone(),
+            automatic_art_catalog_version: Some(catalog.version),
+        }));
+        rotation.next = (rotation.next + 1) % rotation.choices.len();
+    }
 }
 
 /// CR 203.1 + CR 206.1: the display-only record a seat's pool retains: the payload's
@@ -2625,7 +2749,7 @@ fn entry_copies<'a>(
             if ordinal >= removed {
                 copies.push(DeckCardCopy {
                     face: &entry.card,
-                    printing,
+                    printing: printing.map(Cow::Borrowed),
                 });
             }
         }
@@ -4338,10 +4462,7 @@ mod tests {
             section: DeckSection::MainDeck,
             name: name.to_string(),
             count,
-            printing: CardPrinting {
-                set_code: tag.to_string(),
-                collector_number: "1".to_string(),
-            },
+            printing: CardPrinting::owner(tag, "1"),
         }
     }
 
@@ -4377,6 +4498,7 @@ mod tests {
             ],
             ..Default::default()
         };
+        payload.printings[0].printing.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
         normalize_deck_printings(&db, &mut payload);
         assert_eq!(
             payload.printings,
@@ -4386,8 +4508,12 @@ mod tests {
             ],
             "reach: each homonym's clamp is its own copies"
         );
+        let mut forged_retained = payload.clone();
+        forged_retained.printings[0]
+            .printing
+            .automatic_art_catalog_version = std::num::NonZeroU8::new(1);
         let pool = PlayerDeckPool {
-            printings: retained_printing_record(&payload),
+            printings: retained_printing_record(&forged_retained),
             ..Default::default()
         };
 
