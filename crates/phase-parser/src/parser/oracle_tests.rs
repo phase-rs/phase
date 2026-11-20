@@ -2961,6 +2961,72 @@ fn parsed_has_unimplemented(r: &ParsedAbilities) -> bool {
             .any(def_chain_has_unimplemented)
 }
 
+/// CR 603.7a + CR 608.2c + CR 108.3: Phytotitan's dies trigger creates a
+/// delayed return bound to its owner's next upkeep, instead of returning it
+/// immediately with the timing dropped.
+#[test]
+fn phytotitan_dies_return_waits_for_owners_next_upkeep() {
+    let parsed = parse(
+        "When this creature dies, return it to the battlefield tapped under its owner's control at the beginning of their next upkeep.",
+        "Phytotitan",
+        &[],
+        &["Creature"],
+        &["Plant", "Elemental"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "no Unimplemented: {parsed:#?}"
+    );
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let execute = trigger.execute.as_deref().expect("dies trigger executes");
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase: crate::types::phase::Phase::Upkeep,
+            player: crate::types::player::PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
+        }
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enter_tapped,
+        enters_under,
+        ..
+    } = effect.effect.as_ref()
+    else {
+        panic!("expected a delayed ChangeZone, got {:?}", effect.effect);
+    };
+    assert_eq!(*origin, None);
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(
+        *enter_tapped,
+        crate::types::zones::EtbTapState::Tapped,
+        "it returns tapped"
+    );
+    assert_eq!(*enters_under, None, "under its owner's control (CR 110.2a)");
+    // CR 400.7e + CR 608.2c: the delayed body's "it" is the parent referent the
+    // delayed-trigger snapshot binds (the dying card), as for Ivory Gargoyle.
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "full payload: {:#?}",
+        effect
+    );
+}
+
 #[test]
 fn altair_ibn_la_ahad_for_each_exile_memory_counter_copy_parses() {
     let parsed = parse(

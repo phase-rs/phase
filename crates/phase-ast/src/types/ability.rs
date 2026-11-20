@@ -6384,7 +6384,9 @@ pub enum DelayedTriggerPlayerBinding {
     /// step" — the exiled permanent may belong to any player, so "that
     /// player" (its owner, CR 400.3) is resolved from the parent target, or
     /// else the object the parent moved, at delayed-trigger creation, not
-    /// assumed to be the controller.
+    /// assumed to be the controller. Phytotitan's "their next upkeep" after
+    /// "under its owner's control" has neither, so the owner is read from the
+    /// payload's creation referent: the object its creation event moved.
     ParentTargetOwner,
 }
 

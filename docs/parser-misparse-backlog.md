@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4475
-- **Total card appearances across root causes:** 4508 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4474
+- **Total card appearances across root causes:** 4507 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -71,7 +71,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 | 23 | Effect modeled with structurally wrong variant / ability class | 49 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 35 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 19 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
-| 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
+| 26 | Delayed / future-phase trigger flattened to immediate effect | 19 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 11 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
@@ -4830,7 +4830,7 @@ are outside the detector's class.
 
 </details>
 
-### 26. Delayed / future-phase trigger flattened to immediate effect  (20 cards)
+### 26. Delayed / future-phase trigger flattened to immediate effect  (19 cards)
 
 **Signature.** An effect that should be a delayed triggered ability (next combat/end/draw step) is emitted as an immediate effect with no CreateDelayedTrigger wrapper (CR 603.7).
 
@@ -4857,7 +4857,6 @@ are outside the detector's class.
 - Nafs Asp
 - Okoye, Mighty and Adored
 - Perilous Iteration
-- Phytotitan
 
 </details>
 
