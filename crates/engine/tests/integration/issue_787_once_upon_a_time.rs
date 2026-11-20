@@ -83,14 +83,9 @@ fn once_upon_a_time_free_as_first_spell_of_game() {
         matches!(
             result.waiting_for,
             WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(
-                    AbilityCost::Mana {
-                        cost: ManaCost::NoCost
-                    },
-                    _
-                ),
+                cost: AdditionalCost::Choice(ref costs),
                 ..
-            }
+            } if costs.len() == 2 && matches!(costs[0], AbilityCost::Mana { cost: ManaCost::NoCost })
         ),
         "expected a free-vs-printed cost choice, got {:?}",
         result.waiting_for
