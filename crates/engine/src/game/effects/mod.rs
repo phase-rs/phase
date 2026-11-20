@@ -19842,11 +19842,22 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 
 /// What the steps of "you may <A> and <B>" before a conjunct have done to the
 /// pools a later conjunct draws from: the objects they move away, and the
-/// zones they may add objects to.
+/// zones they may add objects to. `funded` carries the state the head's mana
+/// funding leaves when that funding could itself have changed those pools
+/// (CR 608.2g); see [`optional_conjunction_head`].
 struct ConjunctionPrefix {
     departed: Vec<ObjectId>,
     graveyard_may_grow: bool,
     hand_may_grow: bool,
+    /// CR 608.2g + CR 605.3a + CR 605.3b + CR 614.6: the payer's state
+    /// simulated after funding a `PayCost { Mana }` head (mana abilities
+    /// activated to pay it resolve inline, and a replacement effect standing
+    /// on their resolution events can rewrite the pools a later conjunct
+    /// reads — Nefarious Lich turns Pristine Talisman's "You gain 1 life"
+    /// into a draw). `None` when funding could not change the hand the walk
+    /// reads, or could not be simulated (unannounced X, CR 605.3b pause) and
+    /// the option is offered outright.
+    funded: Option<GameState>,
 }
 
 impl ConjunctionPrefix {
@@ -19872,6 +19883,7 @@ fn optional_conjunction_head(
         departed: Vec::new(),
         graveyard_may_grow: false,
         hand_may_grow: false,
+        funded: None,
     };
     match &ability.effect {
         Effect::ChangeZone {
@@ -19893,15 +19905,67 @@ fn optional_conjunction_head(
         } => Some(prefix),
         // CR 118.12 + CR 605.3a: "you may pay {N} and <B>" moves no object
         // itself, but a mana ability activated to pay it may sacrifice a
-        // permanent into the graveyard. The hand is read as it is now, the
-        // same pool the resolution payment authority's pre-gate reads for a
-        // conjoined discard cost (`costs::can_pay` on `Composite`).
+        // permanent into the graveyard (CR 605.3b: it resolves immediately),
+        // and CR 608.2g lets the payer activate mana abilities before paying,
+        // so its resolution events meet the replacement pipeline: funding can
+        // change what later conjuncts read — Nefarious Lich replaces
+        // Pristine Talisman's "You gain 1 life" with a draw while the {1} is
+        // funded. The hand is therefore read as the live payment's funding
+        // plan leaves it ([`crate::game::casting::effect_mana_funding_probe`]);
+        // an unannounced X (the payer picks it at the payment, pay.rs) or a
+        // funding pause is undecided — the option is offered and the payment
+        // authority adjudicates it.
         Effect::PayCost {
-            cost: AbilityCost::Mana { .. },
+            cost: AbilityCost::Mana { cost },
             scale: None,
+            payer,
             ..
         } => {
             prefix.graveyard_may_grow = true;
+            let payer = crate::game::targeting::resolve_effect_player_ref(state, ability, payer);
+            let hand_len = |state: &GameState, payer: Option<PlayerId>| {
+                payer.and_then(|payer| {
+                    state
+                        .players
+                        .iter()
+                        .find(|p| p.id == payer)
+                        .map(|p| p.hand.len())
+                })
+            };
+            match (payer, crate::game::casting_costs::cost_has_x(cost)) {
+                // CR 107.3a: an unannounced X is chosen at the payment (pay.rs
+                // PayAmountChoice), so the funding is undecided — offer.
+                (_, true)
+                // An unresolvable payer falls to the PayCost affordability arm
+                // of [`optional_effect_is_infeasible`].
+                | (None, _) => prefix.hand_may_grow = true,
+                (Some(payer), false) => {
+                    match crate::game::casting::effect_mana_funding_probe(
+                        state,
+                        payer,
+                        ability.source_id,
+                        cost,
+                    ) {
+                        Some(funded) => {
+                            if hand_len(&funded, Some(payer)) != hand_len(state, Some(payer)) {
+                                if hand_len(&funded, Some(payer))
+                                    < hand_len(state, Some(payer))
+                                {
+                                    // CR 118.3: funding that spends cards from
+                                    // the hand leaves later conjuncts fewer to
+                                    // discard from; judge them in the funded
+                                    // state.
+                                    prefix.funded = Some(funded);
+                                } else {
+                                    prefix.hand_may_grow = true;
+                                }
+                            }
+                        }
+                        // CR 605.3b + CR 616.1: a funding pause is undecided.
+                        None => prefix.hand_may_grow = true,
+                    }
+                }
+            }
             Some(prefix)
         }
         _ => None,
@@ -19916,8 +19980,9 @@ fn optional_conjunction_head(
 /// evidence for its own trigger; CR 701.59b). The walk models only heads and
 /// steps whose effect on later pools it knows ([`optional_conjunction_head`],
 /// [`ConjunctionPrefix`]): a referent move, whose movers depart, and a mana
-/// or life payment. A conjunct whose pool an earlier step may have added to,
-/// or any other step, answers `false` and the option is offered.
+/// or life payment, whose funding is simulated as the live payment funds it
+/// (CR 608.2g). A conjunct whose pool an earlier step may have added to, or
+/// any other step, answers `false` and the option is offered.
 ///
 /// Covered heads: "you may exile it and collect evidence N" (Lamplight
 /// Phoenix), "you may pay {1} and discard a card" (Banon, the Returners'
@@ -19968,10 +20033,14 @@ fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbili
             // from the hand the earlier steps leave makes the whole option
             // impossible. Earlier departures only shrink that hand, so a
             // shortfall now is a shortfall then. The discarded cards then join
-            // the graveyard.
+            // the graveyard. CR 608.2g: when the head's mana funding could
+            // change the hand, the hand is read as the funding plan leaves it
+            // — a draw the funding's own resolution met through a replacement
+            // (Nefarious Lich) counts, a card the funding spent does not.
             Effect::Discard { .. } if !prefix.hand_may_grow => {
-                let effective = hydrate_event_context_targets(state, step);
-                if discard::optional_discard_is_infeasible(state, effective.as_ref()) {
+                let judged_state = prefix.funded.as_ref().unwrap_or(state);
+                let effective = hydrate_event_context_targets(judged_state, step);
+                if discard::optional_discard_is_infeasible(judged_state, effective.as_ref()) {
                     return true;
                 }
                 prefix.graveyard_may_grow = true;

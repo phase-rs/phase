@@ -371,3 +371,101 @@ fn timothar_with_the_vampire_in_the_graveyard_is_offered_and_completes() {
     assert_eq!(runner.state().objects[&vampire].zone, Zone::Exile);
     assert_eq!(tokens_controlled_by(&runner, P0), 1, "the Bat was created");
 }
+
+const PRISTINE_TALISMAN: &str = "{T}: Add {C}. You gain 1 life.";
+
+const NEFARIOUS_LICH: &str = "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.";
+
+/// Review F1 on this fix (CR 608.2g + CR 605.3b + CR 614.6): with an empty
+/// hand, funding the {1} can still grow the hand, because mana abilities
+/// activated to pay it resolve inline and their resolution events meet the
+/// replacement pipeline. Pristine Talisman's "You gain 1 life" is replaced by
+/// Nefarious Lich's "draw that many cards instead", so the conjoined discard
+/// is payable from that draw and the option is offered — and completing it
+/// pays the {1}, discards the drawn land and runs the "If you do" rider.
+#[test]
+fn conspiracy_theorist_funding_draw_offers_and_completes_the_conjunction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theorist = scenario
+        .add_creature(P0, "Conspiracy Theorist", 2, 2)
+        .from_oracle_text(CONSPIRACY_THEORIST)
+        .id();
+    let talisman = scenario
+        .add_artifact_from_oracle(P0, "Pristine Talisman", PRISTINE_TALISMAN)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    // Draw order (the last card added to the library top is drawn first): the
+    // Lich draw (from funding) takes the land, which the conjoined discard
+    // then discards — a land, so the Theorist's separate "whenever you discard
+    // one or more nonland cards" trigger does not interfere; the "If you do"
+    // rider draw takes the spell underneath it.
+    let rider_draw = scenario
+        .add_spell_to_library_top(P0, "Library Card", false)
+        .id();
+    let funded_draw = scenario.add_land_to_library_top(P0, "Forest").id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].hand.is_empty(),
+        "reach: the hand is empty"
+    );
+    let life_before = runner.life(P0);
+
+    attack_with(&mut runner, theorist, None);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "a conjunction funding can complete is offered; got {:?}",
+        runner.state().waiting_for
+    );
+    accept_and_finish(&mut runner);
+
+    assert!(
+        runner.state().objects[&talisman].tapped,
+        "the {{1}} was paid from the Talisman"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "the gain was replaced by the draw"
+    );
+    assert_eq!(
+        runner.state().objects[&funded_draw].zone,
+        Zone::Graveyard,
+        "the funding draw was discarded"
+    );
+    assert_eq!(
+        runner.state().objects[&rider_draw].zone,
+        Zone::Hand,
+        "the \"If you do\" draw happened"
+    );
+}
+
+/// Control for the funding probe: Pristine Talisman with NO gain-life
+/// replacement on the battlefield cannot grow the hand, so the empty-hand
+/// option is still impossible and auto-declines without spending resources.
+#[test]
+fn conspiracy_theorist_empty_hand_with_only_life_gaining_funding_is_still_not_offered() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theorist = scenario
+        .add_creature(P0, "Conspiracy Theorist", 2, 2)
+        .from_oracle_text(CONSPIRACY_THEORIST)
+        .id();
+    let talisman = scenario
+        .add_artifact_from_oracle(P0, "Pristine Talisman", PRISTINE_TALISMAN)
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+
+    attack_with(&mut runner, theorist, None);
+
+    assert_resolved_as_declined(&runner);
+    assert!(
+        !runner.state().objects[&talisman].tapped,
+        "the {{1}} is not paid alone"
+    );
+    assert_eq!(runner.life(P0), life_before, "no funding happened");
+}

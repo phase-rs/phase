@@ -25400,6 +25400,37 @@ fn effect_payment_permissions(
     super::static_abilities::build_cost_permission_context(simulated, player, mana_spend_permission)
 }
 
+/// CR 608.2g + CR 605.3a + CR 605.3b + CR 614.6: The state a resolution-time
+/// effect's later instructions resolve in once its `PayCost { Mana }` head's
+/// cost has been funded, judged by the live payment's own funding pipeline —
+/// the effect-context auto-tap pass with every activated mana ability resolved
+/// immediately (CR 605.3b). Mana abilities activated to pay for an effect
+/// resolve inline, so events their own resolution produces (Pristine
+/// Talisman's "You gain 1 life") meet the standing replacement pipeline and a
+/// replacement can rewrite what the outer effect's later instructions read
+/// (Nefarious Lich: "If you would gain life, draw that many cards instead."
+/// adds the drawn cards to the hand during the outer resolution —
+/// Conspiracy Theorist's conjoined "discard a card" is then payable from that
+/// draw). Cost feasibility itself is not judged here; callers that need it use
+/// [`can_pay_effect_mana_cost_after_auto_tap`].
+///
+/// `None` when the simulated funding paused for a choice (a mana-source cost
+/// move or a payment-replacement choice — CR 605.3b + CR 616.1), in which case
+/// the caller cannot decide and must offer the option.
+pub(super) fn effect_mana_funding_probe(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> Option<GameState> {
+    let mut simulated = effect_payment_probe_state(state);
+    let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
+    if run_effect_auto_tap_pass(&mut simulated, payer, source_id, cost, &mut tap_events) {
+        return None;
+    }
+    Some(simulated)
+}
+
 /// CR 118.1 + CR 605.3a + CR 605.4a + CR 106.12b: The mana a resolution-time
 /// effect payment of `cost_at(n)` could really draw on, measured by running the
 /// same effect-context auto-tap and inline-trigger pipeline as
