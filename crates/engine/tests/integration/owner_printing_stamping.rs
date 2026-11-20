@@ -3811,6 +3811,7 @@ fn basic_art_preserves_rules_rng_and_real_land_mana() {
             let id = *runner.state().players[0].hand.front().unwrap();
             let card_id = runner.state().objects[&id].card_id;
             let stamp = runner.state().objects[&id].printing.clone();
+            let base_stamp = runner.state().objects[&id].base_printing.clone();
             let result = runner
                 .act(GameAction::PlayLand {
                     object_id: id,
@@ -3829,7 +3830,9 @@ fn basic_art_preserves_rules_rng_and_real_land_mana() {
             assert_eq!(land.name, name);
             assert_eq!(land.zone, Zone::Battlefield);
             assert_eq!(land.card_id, card_id);
-            assert_eq!(land.printing, stamp);
+            // DisplayOnly equality ignores contents, so compare what each carrier holds.
+            assert_eq!(land.printing.get(), stamp.get());
+            assert_eq!(land.base_printing.get(), base_stamp.get());
             if name == "Wastes" {
                 assert!(land.card_types.subtypes.is_empty());
             }
