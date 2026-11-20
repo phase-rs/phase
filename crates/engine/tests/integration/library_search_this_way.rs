@@ -684,27 +684,26 @@ fn variant_name(w: &WaitingFor) -> String {
 
 fn count_events(obs: &mut Obs, events: &[GameEvent], found: ObjectId) {
     for e in events {
-        match e {
-            GameEvent::PlayerPerformedAction {
-                player_id: P0,
-                action: PlayerActionKind::ShuffledLibrary,
-                ..
-            } => obs.shuffles += 1,
-            GameEvent::PlayerPerformedAction {
-                player_id: P0,
-                action: PlayerActionKind::SearchedLibrary,
-                ..
-            } => obs.searched += 1,
-            GameEvent::ZoneChanged {
-                object_id,
-                from,
-                to,
-                ..
-            } if *object_id == found => {
+        if let GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } = e
+        {
+            if *player_id == P0 && *action == PlayerActionKind::ShuffledLibrary {
+                obs.shuffles += 1;
+            } else if *player_id == P0 && *action == PlayerActionKind::SearchedLibrary {
+                obs.searched += 1;
+            }
+        } else if let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            ..
+        } = e
+        {
+            if *object_id == found {
                 obs.moves_of_found += 1;
                 obs.moves.push(format!("{from:?}->{to:?}"));
             }
-            _ => {}
         }
     }
 }
@@ -857,7 +856,13 @@ fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
                     tapped_target = Some(t);
                     (vec![t], false)
                 }
-                _ => (vec![], false),
+                Flow::Cast => (vec![], false),
+                Flow::PW1
+                | Flow::Gate
+                | Flow::Supplicant
+                | Flow::Sanctum
+                | Flow::LastLight
+                | Flow::Spinner => unreachable!("started below, not cast"),
             };
             (id, Start::Cast { targets, player })
         }
