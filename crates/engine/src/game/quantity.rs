@@ -9103,7 +9103,7 @@ where
         // up to one other target creature" clause's own target, which may
         // still be alive if the destroy was replaced or prevented) is rebound
         // the same way, via `try_parse_amass`'s
-        // `rebind_cost_paid_object_pt_to_target` call. `CostPaidObject` stays
+        // `rebind_pt_scope_to_target` call. `CostPaidObject` stays
         // the specific cost/trigger/effect-context object (Greater Good,
         // sacrifice-cost and trigger-event power refs depend on this).
         ObjectScope::CostPaidObject => ability
