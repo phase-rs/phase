@@ -17,6 +17,7 @@ import {
 } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, StackDisplayGroup, StackEntry as StackEntryType, StackEntryDisplay } from "../../adapter/types.ts";
 import { getStackCardSize } from "../board/boardSizing.ts";
+import { printingComparison } from "../../services/cardImageLookup.ts";
 import { DraggableWidget } from "../flexlayout/DraggableWidget.tsx";
 
 const EMPTY_STACK: StackEntryType[] = [];
@@ -31,9 +32,7 @@ interface DisplayStackEntry {
 }
 
 function ownerArtKey(details: StackEntryDisplay | undefined): string {
-  const p = details?.printing;
-  const ref = details?.printed_ref;
-  return JSON.stringify(p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null);
+  return JSON.stringify(printingComparison(details?.printing, details?.printed_ref));
 }
 
 /** A missing details row is missing comparison authority, not an absent printing. */
