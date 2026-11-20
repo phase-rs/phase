@@ -8024,7 +8024,7 @@ fn replacement_condition_from_static(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -16286,6 +16286,10 @@ fn parse_damage_prevention_replacement_with_provenance(
             crate::parser::oracle_static::parse_affected_scoped_static_condition(
                 clause,
                 valid_card_filter.as_ref(),
+                // A prevention shield's host line is not a static's printed
+                // subject; only the plural "they" rewrite needs the source
+                // named alone, and that arm does not apply here.
+                crate::parser::oracle_static::PrintedSubject::Other,
             )
             .and_then(|condition| {
                 replacement_condition_from_static(condition, GatePolarity::OnlyIf)

@@ -13630,6 +13630,8 @@ mod tests {
                         amount: 3,
                     },
                 ]),
+                staged_gains: Vec::new(),
+                awaiting_staged_gain: false,
                 batch_events: vec![GameEvent::ZoneChanged {
                     object_id: hidden,
                     from: Some(Zone::Library),

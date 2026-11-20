@@ -2147,6 +2147,11 @@ fn do_eliminate(
         } else {
             super::replacement::abandon_post_replacement_continuation(state);
         }
+        // The abandoned choice may be a combat lifelink gain being staged; no
+        // answer will arrive for it, so the batch must not wait to claim one.
+        if let Some(record) = state.pending_combat_lifelink.as_mut() {
+            record.awaiting_staged_gain = false;
+        }
     }
 
     // A leaving player gains no life: they are no longer a player in the game, so
@@ -2175,8 +2180,15 @@ fn do_eliminate(
     // `resume_pending_combat_lifelink`. (An earlier revision of this comment claimed the batch
     // "can no longer complete at all" and that `turns::enter_phase` owned that case; both
     // halves are false now that the discharge exists.)
+    //
+    // The seat's owed gains live in four places: the tail queue, the gains
+    // already staged (on the record, or on the Phase C remnant while a later
+    // leg's prompt is open), and the remnant's not-yet-staged per-source sums
+    // with their legs' markers. Left behind, a staged gain would settle for a
+    // departed seat (a life change and `LifeChanged` event for it).
     if let Some(record) = state.pending_combat_lifelink.as_mut() {
         record.remaining.retain(|gain| gain.controller != player);
+        record.staged_gains.retain(|gain| gain.controller != player);
         // CR 616.1: a batch parked earlier, in its replacement pass, has not
         // computed its gains yet — Phase C derives them from each entry's
         // lifelink controller. Drop that seat's the same way, per entry; its
@@ -2185,6 +2197,19 @@ fn do_eliminate(
             for entry in &mut parked.entries {
                 if entry.lifelink_controller == Some(player) {
                     entry.lifelink_controller = None;
+                }
+            }
+        }
+        if let Some(remnant) = record.phase_c_remnant.as_mut() {
+            remnant
+                .staged_gains
+                .retain(|gain| gain.controller != player);
+            remnant
+                .lifelink_by_source
+                .retain(|(_, controller, _)| *controller != player);
+            for leg in remnant.remaining.iter_mut() {
+                if leg.lifelink_controller == Some(player) {
+                    leg.lifelink_controller = None;
                 }
             }
         }
@@ -3163,6 +3188,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5089,6 +5115,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5240,6 +5267,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5303,6 +5331,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5358,6 +5387,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5443,6 +5473,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
