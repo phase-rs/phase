@@ -40145,26 +40145,79 @@ impl AbilityCondition {
     /// an earlier instruction of the same chain performed ("if you search your library this
     /// way")?
     pub fn reads_performed_action_this_way(&self) -> bool {
-        if let AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } = self {
-            return conditions
-                .iter()
-                .any(AbilityCondition::reads_performed_action_this_way);
-        }
-        if let AbilityCondition::Not { condition } = self {
-            return condition.reads_performed_action_this_way();
-        }
-        if let AbilityCondition::ConditionInstead { inner } = self {
-            return inner.reads_performed_action_this_way();
-        }
-        matches!(
-            self,
-            AbilityCondition::ScopedPlayerMatches {
-                filter: PlayerFilter::PerformedActionThisWay {
+        match self {
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(AbilityCondition::reads_performed_action_this_way)
+            }
+            AbilityCondition::Not { condition } => condition.reads_performed_action_this_way(),
+            AbilityCondition::ConditionInstead { inner } => inner.reads_performed_action_this_way(),
+            AbilityCondition::ScopedPlayerMatches { filter } => matches!(
+                filter,
+                PlayerFilter::PerformedActionThisWay {
                     relation: _,
                     action: _
                 }
-            }
-        )
+            ),
+            // Exhaustive, no wildcard: a new `AbilityCondition` variant that nests a condition
+            // must be classified here deliberately, or the stamp would silently never be taken.
+            AbilityCondition::WhenYouDo
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::DiscardedCardMatchesFilter { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::QuantityQuality { .. }
+            | AbilityCondition::PreviousEffectAmount { .. }
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::TargetMatchesFilter { .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+            | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+            | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::ZoneChangedThisWay { .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. } => false,
+        }
     }
 
     /// CR 608.2d + CR 101.4: `Not(OptionalEffectPerformed)` — the "if no one
