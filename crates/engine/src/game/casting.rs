@@ -25416,21 +25416,48 @@ pub(crate) enum EffectManaFunding {
     ActivatingFirst(ObjectId),
 }
 
+/// The most [`EffectManaFunding::ActivatingFirst`] fundings
+/// [`effect_mana_funding_candidates`] admits. A search over more is
+/// [`EffectManaFundingCandidates::exhausted`] and decides nothing.
+pub const EFFECT_MANA_FUNDING_PROBE_BUDGET: usize = 16;
+
+/// The fundings a resolution-time effect mana payment is judged under.
+pub(crate) struct EffectManaFundingCandidates {
+    /// The planner's own funding first, then at most
+    /// [`EFFECT_MANA_FUNDING_PROBE_BUDGET`] activations, in the planner's
+    /// preference order.
+    pub fundings: Vec<EffectManaFunding>,
+    /// More permanents could fund the payment than the budget admits, so a
+    /// search that finds no funding performable has not shown that none is.
+    pub exhausted: bool,
+}
+
 /// CR 608.2g + CR 605.3a: The fundings a resolution-time effect mana payment
 /// is judged under: the planner's own, then one per permanent whose mana
-/// ability the payer may activate first. The modeled space is at most one
-/// activation beyond the planner's choice.
+/// ability the payer may activate first and whose activation can do more than
+/// add mana ([`super::casting_costs::auto_tap_sources_beyond_mana`]). Tapping
+/// any other source first leaves the same state as the planner's funding apart
+/// from the mana pool, so it decides nothing the planner's funding does not.
+/// The modeled space is at most one activation beyond the planner's choice,
+/// and at most [`EFFECT_MANA_FUNDING_PROBE_BUDGET`] such activations.
 pub(super) fn effect_mana_funding_candidates(
     state: &GameState,
     payer: PlayerId,
-) -> Vec<EffectManaFunding> {
-    std::iter::once(EffectManaFunding::Planned)
+) -> EffectManaFundingCandidates {
+    let sources = super::casting_costs::auto_tap_sources_beyond_mana(state, payer);
+    let exhausted = sources.len() > EFFECT_MANA_FUNDING_PROBE_BUDGET;
+    let fundings = std::iter::once(EffectManaFunding::Planned)
         .chain(
-            super::casting_costs::auto_tap_source_ids(state, payer)
+            sources
                 .into_iter()
+                .take(EFFECT_MANA_FUNDING_PROBE_BUDGET)
                 .map(EffectManaFunding::ActivatingFirst),
         )
-        .collect()
+        .collect();
+    EffectManaFundingCandidates {
+        fundings,
+        exhausted,
+    }
 }
 
 /// What one [`EffectManaFunding`] of a resolution-time effect mana payment
@@ -25468,6 +25495,8 @@ pub(super) fn effect_mana_funding_probe(
     cost: &crate::types::mana::ManaCost,
     funding: EffectManaFunding,
 ) -> EffectManaFundingProbe {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_effect_mana_funding_probe();
     let mut simulated = effect_payment_probe_state(state);
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     if let EffectManaFunding::ActivatingFirst(mana_source) = funding {

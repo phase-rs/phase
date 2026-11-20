@@ -19974,8 +19974,10 @@ enum ConjunctionVerdict {
 /// funding (CR 608.2g: the payer may activate any mana ability before paying,
 /// so the automatic planner's choice of sources is not the only payment);
 /// the option is impossible only when none of them leaves the conjuncts
-/// performable. A conjunct whose pool an earlier step may have added to, or
-/// any other step, is not decided and the option is offered.
+/// performable. The fundings probed are bounded
+/// ([`crate::game::casting::effect_mana_funding_candidates`]): a search the
+/// budget cuts short is not decided, like a conjunct whose pool an earlier
+/// step may have added to, or any other step, and the option is offered.
 ///
 /// Covered heads: "you may exile it and collect evidence N" (Lamplight
 /// Phoenix), "you may pay {1} and discard a card" (Banon, the Returners'
@@ -19984,9 +19986,10 @@ enum ConjunctionVerdict {
 /// {1} / 2 life and exile it" (Timothar, Baron of Bats; Kinzu of the Bleak
 /// Coven — ruling: "If you can't exile the card, … you can't pay {1}").
 ///
-/// COUPLING: `resolve_chain_body` routes an impossible conjunction to the
-/// optional-decline authority for every head, so an impossible conjunct is
-/// declined rather than its head being performed alone; the accepted head's
+/// COUPLING: `resolve_chain_body` routes an impossible conjunction
+/// ([`OptionalInfeasibility::Conjunction`]) to the optional-decline authority
+/// for every head, so an impossible conjunct is declined rather than its head
+/// being performed alone; the accepted head's
 /// payment (`pay.rs`) funds itself through [`conjunction_head_funding`], so it
 /// funds the way this verdict found performable.
 fn optional_conjunction_verdict(
@@ -20019,8 +20022,12 @@ fn optional_conjunction_verdict(
             }
         }
         ConjunctionHeadFunding::Mana { payer, cost } => {
-            let mut any_undecided = false;
-            for candidate in crate::game::casting::effect_mana_funding_candidates(state, payer) {
+            let candidates = crate::game::casting::effect_mana_funding_candidates(state, payer);
+            // A search cut short by the probe budget has not shown that no
+            // funding is performable, so it leaves the option offered and the
+            // real payment decides.
+            let mut any_undecided = candidates.exhausted;
+            for candidate in candidates.fundings {
                 match crate::game::casting::effect_mana_funding_probe(
                     state,
                     payer,
@@ -20168,6 +20175,26 @@ fn conjunct_steps_are_infeasible(
 /// ([`optional_conjunction_is_infeasible`]). Suppressing the prompt lets the
 /// effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    optional_effect_infeasibility(state, ability).is_some()
+}
+
+/// Why an optional instruction can't be chosen
+/// ([`optional_effect_infeasibility`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptionalInfeasibility {
+    /// CR 118.12 + CR 118.3: a conjoined step of "you may <A> and <B>" can't
+    /// be performed in full ([`optional_conjunction_verdict`]).
+    Conjunction,
+    /// The instruction itself can't be performed.
+    Instruction,
+}
+
+/// [`optional_effect_is_infeasible`] with the reason, so a caller that routes
+/// on it judges the conjunction once.
+fn optional_effect_infeasibility(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<OptionalInfeasibility> {
     // CR 603.5 + CR 608.2d: an optional instruction on the source's
     // "enchanted/equipped X" is decided as it resolves; with no live host to
     // act on ("you may have that player gain control of equipped creature" on
@@ -20176,12 +20203,19 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         crate::game::targeting::ResolutionHostBinding::NotApplicable
         | crate::game::targeting::ResolutionHostBinding::Bound(_) => {}
         crate::game::targeting::ResolutionHostBinding::Absent
-        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => return true,
+        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => {
+            return Some(OptionalInfeasibility::Instruction)
+        }
     }
     // CR 608.2d + CR 118.3: every conjoined step of the option must be performable.
     if optional_conjunction_is_infeasible(state, ability) {
-        return true;
+        return Some(OptionalInfeasibility::Conjunction);
     }
+    optional_instruction_is_infeasible(state, ability).then_some(OptionalInfeasibility::Instruction)
+}
+
+/// The instruction-level arms of [`optional_effect_is_infeasible`].
+fn optional_instruction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
         Effect::PutChosenCounter {
@@ -27428,9 +27462,11 @@ fn resolve_chain_body(
     // Per-iteration optionality must reach the rebound singleton ability before
     // feasibility is decided. In particular, the root's first member can have
     // no committable counter move while a later member remains offerable.
-    let optional_is_infeasible = ability.optional
-        && !optionality_is_per_iteration(state, ability)
-        && optional_effect_is_infeasible(state, ability);
+    let optional_infeasibility = (ability.optional
+        && !optionality_is_per_iteration(state, ability))
+    .then(|| optional_effect_infeasibility(state, ability))
+    .flatten();
+    let optional_is_infeasible = optional_infeasibility.is_some();
 
     // CR 608.2c + CR 608.2d: An infeasible optional instruction in this
     // dispatch does not happen. Route each outcome through the existing
@@ -27491,7 +27527,7 @@ fn resolve_chain_body(
     if optional_is_infeasible
         && (auto_decline_infeasible_optional
             || host_effect_impossible
-            || optional_conjunction_is_infeasible(state, ability))
+            || optional_infeasibility == Some(OptionalInfeasibility::Conjunction))
     {
         return resolve_optional_effect_decision_step(
             state,

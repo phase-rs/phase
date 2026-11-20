@@ -10,6 +10,7 @@
 //! triggered ability started resolving, you can't pay {1} and won't create a
 //! token."
 
+use engine::game::perf_counters;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::process_triggers;
@@ -683,4 +684,196 @@ fn conspiracy_theorist_with_floating_mana_and_no_lich_is_not_offered() {
         assert_eq!(runner.state().objects[&first_draw].zone, Zone::Library);
         assert_eq!(runner.state().objects[&second_draw].zone, Zone::Library);
     }
+}
+
+/// Review F1 on the funding search (CR 608.2d + CR 608.2g): the conjunction
+/// verdict probes fundings with a bounded amount of work. Builds Conspiracy
+/// Theorist with an empty hand, `lands` untapped basic lands and `talismans`
+/// Pristine Talismans (optionally beside Nefarious Lich), a land drawn first
+/// and a spell drawn second, then declares the attack and stops with the
+/// trigger waiting on the stack. Returns the runner, the Theorist's lands and
+/// Talismans, and the two library cards.
+struct LargeBoard {
+    runner: GameRunner,
+    lands: Vec<ObjectId>,
+    talismans: Vec<ObjectId>,
+    first_draw: ObjectId,
+    second_draw: ObjectId,
+}
+
+fn large_board(lands: usize, talismans: usize, with_lich: bool) -> LargeBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theorist = scenario
+        .add_creature(P0, "Conspiracy Theorist", 2, 2)
+        .from_oracle_text(CONSPIRACY_THEORIST)
+        .id();
+    let land_ids: Vec<ObjectId> = (0..lands)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::Red))
+        .collect();
+    let talisman_ids: Vec<ObjectId> = (0..talismans)
+        .map(|_| {
+            scenario
+                .add_artifact_from_oracle(P0, "Pristine Talisman", PRISTINE_TALISMAN)
+                .id()
+        })
+        .collect();
+    if with_lich {
+        scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    }
+    let second_draw = scenario
+        .add_spell_to_library_top(P0, "Library Card", false)
+        .id();
+    let first_draw = scenario.add_land_to_library_top(P0, "Forest").id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].hand.is_empty(),
+        "reach: the hand is empty"
+    );
+    attack_and_hold_priority(&mut runner, theorist);
+    LargeBoard {
+        runner,
+        lands: land_ids,
+        talismans: talisman_ids,
+        first_draw,
+        second_draw,
+    }
+}
+
+/// Resolves the waiting attack trigger and returns how many funding probes
+/// its resolution ran.
+fn resolve_trigger_counting_probes(runner: &mut GameRunner) -> u64 {
+    perf_counters::reset();
+    runner.act(GameAction::PassPriority).expect("pass priority");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    perf_counters::effect_mana_funding_probe_snapshot().probes
+}
+
+/// Tapping a basic land only adds mana, so activating one first decides
+/// nothing the planner's own funding does not: the verdict runs one probe
+/// however many lands there are. On a 2-land and a 60-land board alike the
+/// empty-hand option is still impossible and auto-declines without tapping a
+/// land or drawing.
+#[test]
+fn conspiracy_theorist_funding_probes_do_not_grow_with_plain_lands() {
+    let mut probes = Vec::new();
+    for lands in [2, 60] {
+        let mut board = large_board(lands, 0, false);
+        probes.push(resolve_trigger_counting_probes(&mut board.runner));
+
+        assert_resolved_as_declined(&board.runner);
+        assert_eq!(
+            untapped_lands(&board.runner, &board.lands),
+            lands,
+            "the {{1}} is not paid alone"
+        );
+        assert_eq!(
+            board.runner.state().objects[&board.first_draw].zone,
+            Zone::Library
+        );
+        assert_eq!(
+            board.runner.state().objects[&board.second_draw].zone,
+            Zone::Library
+        );
+    }
+    assert_eq!(
+        probes,
+        vec![1, 1],
+        "only the planner's own funding is probed, once per resolution"
+    );
+}
+
+/// A Talisman's activation does more than add mana, so each is a funding to
+/// probe — up to the budget. Below it, the empty-hand option without Nefarious
+/// Lich is proved impossible and auto-declines. Past it, the probes stop at the
+/// budget and the search, cut short, decides nothing: the option is offered
+/// (as the reservation search's exhaustion is) and declining it pays nothing.
+#[test]
+fn conspiracy_theorist_funding_probes_stop_at_the_budget() {
+    use engine::game::casting::EFFECT_MANA_FUNDING_PROBE_BUDGET;
+
+    let few = EFFECT_MANA_FUNDING_PROBE_BUDGET / 4;
+    let mut board = large_board(0, few, false);
+    let probes = resolve_trigger_counting_probes(&mut board.runner);
+    assert_eq!(
+        probes,
+        1 + few as u64,
+        "the planner's funding and each Talisman"
+    );
+    assert_resolved_as_declined(&board.runner);
+    assert_eq!(untapped_lands(&board.runner, &board.talismans), few);
+
+    let many = EFFECT_MANA_FUNDING_PROBE_BUDGET * 3;
+    let mut board = large_board(0, many, false);
+    let life_before = board.runner.life(P0);
+    let probes = resolve_trigger_counting_probes(&mut board.runner);
+    assert_eq!(
+        probes,
+        1 + EFFECT_MANA_FUNDING_PROBE_BUDGET as u64,
+        "the probes stop at the budget"
+    );
+    assert!(
+        matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "an exhausted search leaves the option offered; got {:?}",
+        board.runner.state().waiting_for
+    );
+    board
+        .runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("decline the option");
+    assert!(board.runner.state().stack.is_empty());
+    assert_eq!(
+        untapped_lands(&board.runner, &board.talismans),
+        many,
+        "declining pays nothing"
+    );
+    assert_eq!(board.runner.life(P0), life_before);
+    assert_eq!(
+        board.runner.state().objects[&board.second_draw].zone,
+        Zone::Library
+    );
+}
+
+/// The bound keeps the Talisman/Lich witness: beside 60 basic lands the
+/// Talisman is the only funding probed past the planner's own, so the
+/// conjunction its Lich draw completes is offered and completes.
+#[test]
+fn conspiracy_theorist_large_land_board_still_offers_the_talisman_draw() {
+    let mut board = large_board(60, 1, true);
+    let life_before = board.runner.life(P0);
+    let probes = resolve_trigger_counting_probes(&mut board.runner);
+    assert!(
+        probes <= 2,
+        "at most the planner's funding and the Talisman's; got {probes}"
+    );
+    assert!(
+        matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the conjunction a Talisman activation completes is offered; got {:?}",
+        board.runner.state().waiting_for
+    );
+    accept_and_finish(&mut board.runner);
+
+    let talisman = board.talismans[0];
+    assert_talisman_lich_conjunction_completed(
+        &board.runner,
+        [
+            ObjectId(0),
+            talisman,
+            ObjectId(0),
+            board.first_draw,
+            board.second_draw,
+        ],
+        life_before,
+    );
+    assert_eq!(
+        untapped_lands(&board.runner, &board.lands),
+        60,
+        "the Talisman's {{C}} paid the {{1}}"
+    );
 }
