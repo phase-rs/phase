@@ -1127,3 +1127,113 @@ fn risky_move_gain_side_control_trigger_parses_and_card_is_supported() {
         }
     );
 }
+
+/// Coverage details show a token-creation count iff it is not exactly one.
+mod token_creation_details_render_every_non_unit_count {
+    use super::oracle_face_for;
+    use engine::game::coverage::{build_parse_details_for_face, ParsedItem};
+
+    fn token_creation_details(
+        name: &str,
+        text: &str,
+        types: &[&str],
+    ) -> Vec<Vec<(String, String)>> {
+        fn walk(items: &[ParsedItem], out: &mut Vec<Vec<(String, String)>>) {
+            for item in items {
+                if item.label == "Token" || item.label == "CopyTokenOf" {
+                    out.push(item.details.clone());
+                }
+                walk(&item.children, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &build_parse_details_for_face(&oracle_face_for(name, text, types, &[])),
+            &mut out,
+        );
+        assert_eq!(out.len(), 1, "{name}: {out:?}");
+        out
+    }
+
+    fn detail(name: &str, text: &str, key: &str) -> Option<String> {
+        token_creation_details(name, text, &["Instant"])[0]
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn multiply_count_renders() {
+        let rows = token_creation_details(
+            "Pest Infestation",
+            "Destroy up to X target artifacts and/or enchantments. Create twice X 1/1 black and green Pest creature tokens with \"When this token dies, you gain 1 life.\"",
+            &["Sorcery"],
+        );
+        assert_eq!(
+            rows[0]
+                .iter()
+                .find(|(k, _)| k == "token")
+                .map(|(_, v)| v.as_str()),
+            Some("2*X× +1/+1 Black/Green Pest (Creature Pest)")
+        );
+    }
+
+    #[test]
+    fn fixed_count_renders() {
+        assert_eq!(
+            detail(
+                "Raise the Alarm",
+                "Create two 1/1 white Soldier creature tokens.",
+                "token"
+            )
+            .as_deref(),
+            Some("2× +1/+1 White Soldier (Creature Soldier)")
+        );
+    }
+
+    #[test]
+    fn ref_count_renders() {
+        assert_eq!(
+            detail(
+                "Secure the Wastes",
+                "Create X 1/1 white Warrior creature tokens.",
+                "token"
+            )
+            .as_deref(),
+            Some("X× +1/+1 White Warrior (Creature Warrior)")
+        );
+    }
+
+    #[test]
+    fn unit_count_is_omitted() {
+        assert_eq!(
+            detail(
+                "Beast Within",
+                "Destroy target permanent. Its controller creates a 3/3 green Beast creature token.",
+                "token",
+            )
+            .as_deref(),
+            Some("+3/+3 Green Beast (Creature Beast)")
+        );
+    }
+
+    #[test]
+    fn copy_token_fixed_count_renders() {
+        assert_eq!(
+            detail(
+                "Saw in Half",
+                "Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time.",
+                "count",
+            )
+            .as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn copy_token_unit_count_is_omitted() {
+        let text = "Create a token that's a copy of target creature you control.\nFlashback {5}{U}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+        assert!(detail("Cackling Counterpart", text, "copies").is_some());
+        assert_eq!(detail("Cackling Counterpart", text, "count"), None);
+    }
+}

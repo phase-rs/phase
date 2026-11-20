@@ -194,6 +194,7 @@ mod federation_creature_type_count;
 mod feed_the_machine_self_branch;
 mod felisa_fang_of_silverquill;
 mod feral_ghoul_dies_rad_counters;
+mod fertile_imagination_token_multiplier_9844;
 mod fertile_thicket_reveal_to_top_2349;
 mod festival_of_embers_graveyard_additional_cost;
 mod fevered_visions;
