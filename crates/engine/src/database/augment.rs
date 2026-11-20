@@ -227,6 +227,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
                     filter: augment_card_filter(),
                     use_lki: false,
                     subject_slot: None,
+                    subject: crate::types::ability::ObjectScope::Target,
                 })
                 .with_else_ability(AbilityDefinition::new(
                     AbilityKind::Spell,
