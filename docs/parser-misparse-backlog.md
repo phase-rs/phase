@@ -473,7 +473,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Loyal Unicorn
 - Lumbering Lightshield
 - Luminesce
-- Lure
 - Magewright's Stone
 - Magic Designer
 - Main Event Horizon
