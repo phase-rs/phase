@@ -353,6 +353,39 @@ describe("curated basic-land catalog membership", () => {
     }
   });
 
+  it("changes the Deck Library digest when broad keys move between cached printings", async () => {
+    const forestId = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+    const m21 = printing({ id: "3279314f-d639-4489-b2ab-3621bb3ca64b", set: "m21", collector_number: "272" });
+    const c15 = printing({ id: "69557258-2441-4ca5-993a-8d7afb51ad3d", set: "c15", collector_number: "340" });
+    const fixture = landInput({
+      packId: packId("deck_library"),
+      cards: { [forestId]: cardEntry(forestId, "Forest", ["forest"]) },
+      printings: { [forestId]: [m21, c15] },
+      includedOracleIds: new Set([forestId]),
+      deckPrintings: [m21, c15].map(({ set, collector_number }) => ({
+        oracleId: forestId,
+        source: { setCode: set.toUpperCase(), collectorNumber: collector_number },
+      })),
+    });
+    const planForSet = (setCode: string) => planCuratedMembership({
+      ...fixture,
+      artChain: [{ type: "set", setCode, label: setCode.toUpperCase() }],
+    });
+    const first = await planForSet("m21");
+    const next = await planForSet("c15");
+
+    expect(exactPrintingIds(first.descriptors)).toEqual(new Set([m21.id, c15.id]));
+    expect(descriptorMembership(next.descriptors)).toEqual(descriptorMembership(first.descriptors));
+    for (const [variant, rung] of rungs) {
+      const broad = encodeCandidateKey("oracle_face", [forestId, "forest", variant, rung]);
+      for (const [plan, printing] of [[first, m21], [next, c15]] as const) {
+        expect(keysOf(plan.descriptors.filter(({ candidateKeys }) => candidateKeys.includes(broad))))
+          .toEqual([`asset:v1:exact_printing:${printing.id}-0-${variant}-${rung}`]);
+      }
+    }
+    expect(next.membershipDigest).not.toBe(first.membershipDigest);
+  });
+
   it("limits supplemental membership to curated packs and catalog Oracle IDs", async () => {
     const fixture = landInput({
       cards: { [oracleId]: plains, [BOLT]: BOLT_ENTRY },
@@ -418,7 +451,7 @@ describe("planCuratedMembership", () => {
     const membership = await planCuratedMembership(input({ includedOracleIds: new Set() }));
 
     expect(membership.descriptors).toEqual([]);
-    expect(membership.membershipDigest).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    expect(membership.membershipDigest).toBe("4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945");
   });
 
   it("skips token: keys entirely", async () => {

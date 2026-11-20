@@ -247,15 +247,16 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 /**
- * Plan ordinary art under the user's preferences and deck contexts, with
- * exact catalog alternatives and deck submission printings for the curated pack.
+ * Plan ordinary art under the user's preferences and deck contexts.
+ * Include exact deck-submission printings in both pack types and exact
+ * catalog alternatives in curated packs.
  *
  * The digest covers each descriptor's source URL as well as its asset key. A
  * `canonical_card` key names no printing, so the bytes behind it are whatever
  * `scryfall-data.json` currently supplies — a pipeline regeneration can move
  * the URL under an unchanged key. Digesting keys alone would leave that
- * invisible and pin stale art with no path to a refresh. For curated packs
- * the digest also identifies installed lookup metadata, so changing which
+ * invisible and pin stale art with no path to a refresh. The digest also
+ * identifies installed lookup metadata for every pack, so changing which
  * image answers a candidate can refresh the pack with cached bytes.
  */
 export async function planCuratedMembership(
@@ -296,9 +297,7 @@ export async function planCuratedMembership(
 
   const descriptors = [...byAssetKey.values()].sort((a, b) =>
     a.assetKey < b.assetKey ? -1 : a.assetKey > b.assetKey ? 1 : 0);
-  const digestInput = input.packId === CURATED_PACK
-    ? JSON.stringify(descriptors.map(({ assetKey, sourceUrl, candidateKeys }) =>
-      [assetKey, sourceUrl, [...new Set(candidateKeys)].sort()]))
-    : descriptors.map(({ assetKey, sourceUrl }) => `${assetKey}\t${sourceUrl}\n`).join("");
+  const digestInput = JSON.stringify(descriptors.map(({ assetKey, sourceUrl, candidateKeys }) =>
+    [assetKey, sourceUrl, [...new Set(candidateKeys)].sort()]));
   return { descriptors, membershipDigest: catalogRoot(await sha256Hex(digestInput)) };
 }

@@ -215,6 +215,9 @@ const fetchStub = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit): P
   if (source === BULK_INDEX_URL) return jsonResponse({ data: [BULK_RECORD] });
   if (source === "/scryfall-data.json") return jsonResponse(CARDS);
   if (source === "/scryfall-printings.json") return jsonResponse(PRINTINGS);
+  if (source === "/decks.json") return jsonResponse({
+    fixture: { code: "TST", name: "Fixture precon", type: "Commander", coveragePct: 100, mainBoard: [] },
+  });
   // The card back, served with the SAME bytes as Bolt's newest normal rung.
   // Content addressing then gives both packs one cache entry, so "an image
   // another pack still uses" is a real shared path rather than a claim about
@@ -1115,6 +1118,74 @@ describe("curated delta install", () => {
       await expectPrintingLookup(backend, refreshed.digest, m21_260, "exact");
       await expectPrintingLookup(backend, refreshed.digest, m21_261, "exact");
     });
+  });
+
+  it("reconciles Deck Library lookup metadata after a preference switch without downloading images", async () => {
+    const forest = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+    const m21 = { ...printing("3279314f-d639-4489-b2ab-3621bb3ca64b", "m21", "2020-07-03"), collector_number: "272" };
+    const c15 = { ...printing("69557258-2441-4ca5-993a-8d7afb51ad3d", "c15", "2015-11-13"), collector_number: "340" };
+    const [cards, printings] = await Promise.all([loadScryfallData(), loadPrintingsData()]);
+    if (!cards || !printings) throw new Error("card or printing data unavailable");
+    cards.forest = cardEntry(forest, "Forest", "forest");
+    printings[forest] = [m21, c15];
+
+    try {
+      for (const source of [m21, c15]) {
+        saveDeck(`Forest ${source.set}`, [{
+          count: 1, name: "Forest",
+          sourcePrinting: { setCode: source.set.toUpperCase(), collectorNumber: source.collector_number },
+        }]);
+      }
+      vi.stubGlobal("navigator", {
+        locks: { request: async (_name: string, _options: LockOptions, run: () => Promise<unknown>) => run() },
+      });
+      usePreferencesStore.setState({ artChain: [{ type: "set", setCode: "m21", label: "Core Set 2021" }] });
+      const backend = await ScryfallBrowserVisualPackBackend.create();
+      const selector = await backend.deckLibrarySelector();
+      const initial = await backend.start({ kind: "install", selector, objectEstimate: 6 });
+      if (initial.status !== "started") throw new Error("Deck Library install did not start");
+      await settle(backend, initial.operationId);
+
+      const expectLookups = async (root: CatalogRoot, primary: PrintingEntry) => {
+        const lookups = [
+          { key: encodeCandidateKey("oracle_face", [forest, "forest", "full_card", "normal"]), printing: primary },
+          { key: encodeCandidateKey("name_face", ["forest", "forest", "full_card", "normal"]), printing: primary },
+          ...[m21, c15].flatMap((printing) => [
+            { key: encodeCandidateKey("english_printing", [printing.id, 0, "full_card", "normal"]), printing },
+            { key: encodeCandidateKey("source_printing", [
+              printing.set, printing.collector_number, "forest", "full_card", "normal",
+            ]), printing },
+          ]),
+        ];
+        const { entries } = await backend.resolve(lookups.map(({ key }) => ({ kind: "candidate", key })));
+        expect(entries).toHaveLength(lookups.length);
+        for (const [index, { printing }] of lookups.entries()) {
+          const { matches } = entries[index];
+          expect(matches).toHaveLength(1);
+          expect(matches[0]).toMatchObject({
+            assetKey: `asset:v1:exact_printing:${printing.id}-0-full_card-normal`,
+            catalogRoot: root,
+            packId: packId("deck_library"),
+          });
+          expect(cachedText(matches[0].url)).toBe(url(printing.id, "normal"));
+        }
+      };
+      await expectLookups(selector.membershipDigest, m21);
+
+      usePreferencesStore.setState({ artChain: [{ type: "set", setCode: "c15", label: "Commander 2015" }] });
+      const next = await backend.deckLibrarySelector();
+      await backend.setDeckLibraryBackgroundPaused(false);
+      requested = [];
+      await backend.reconcileDeckLibrary();
+
+      await expectLookups(next.membershipDigest, c15);
+      expect(next.membershipDigest).not.toBe(selector.membershipDigest);
+      expect(imageRequests()).toEqual([]);
+    } finally {
+      delete cards.forest;
+      delete printings[forest];
+      for (const source of [m21, c15]) localStorage.removeItem(STORAGE_KEY_PREFIX + `Forest ${source.set}`);
+    }
   });
 
   // --- what the SAVED DECKS contribute to a membership ----------------------
