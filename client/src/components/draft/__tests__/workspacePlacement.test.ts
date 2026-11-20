@@ -9,6 +9,7 @@ import {
   createDraftWorkspaceState,
   moveWorkspaceInstance,
   placeArrivingPoolCards,
+  resolveWorkspacePickPlacement,
   rebuildWorkspaceZone,
   reconcileWorkspaceState,
   updateWorkspacePlacement,
@@ -85,6 +86,40 @@ describe("workspace placement", () => {
       expect(columns).toEqual({
         white: 0, blue: 1, black: 2, red: 3, green: 4, multicolor: 5, colorless: 5,
       });
+    });
+
+    it("sends_later_picks_to_the_merged_column_after_a_six_column_sort", () => {
+      const COLORS: Record<string, string[]> = {
+        white: ["W"], blue: ["U"], black: ["B"], red: ["R"], green: ["G"],
+        multicolor: ["W", "U"], colorless: [],
+      };
+      const pool = COLOR_KINDS.map((kind) => ({ ...card(kind, kind), colors: COLORS[kind] }));
+      const colorGroups: DraftPoolGroups["color_groups"] = pool.map((entry, index) => ({
+        kind: COLOR_KINDS[index],
+        total: 1,
+        cards: [{ card: entry, count: 1, instance_ids: [entry.instance_id] }],
+      }));
+      const poolGroups = { ...groups(), color_groups: colorGroups };
+      const preferences: DraftBoardPreferences = {
+        sort: "color", columnCount: 6, rows: "one", showHeaders: true,
+      };
+      const state: DraftWorkspaceState = {
+        ...createDraftWorkspaceState(),
+        placements: Object.fromEntries(
+          pool.map((entry) => [entry.instance_id, { zone: "sideboard", row: 0, column: 0, order: 0 }]),
+        ),
+      };
+      const rebuilt = rebuildWorkspaceZone(state, "sideboard", pool, poolGroups, preferences);
+      const place = (instanceId: string) => resolveWorkspacePickPlacement(
+        pool.find((entry) => entry.instance_id === instanceId)!,
+        "sideboard", pool, poolGroups, rebuilt, preferences,
+      ).column;
+
+      // Multicolor and colorless join their shared column; white and blue stay apart.
+      expect(place("multicolor")).toBe(5);
+      expect(place("colorless")).toBe(5);
+      expect(place("white")).toBe(0);
+      expect(place("blue")).toBe(1);
     });
 
     it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {

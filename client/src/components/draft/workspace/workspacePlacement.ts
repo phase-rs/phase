@@ -1089,7 +1089,13 @@ export function resolveWorkspaceSortColumn(
         ? [descriptor.groupKind]
         : []
     ));
-    return sortGroupKinds.length === 1 && sortGroupKinds[0] === groupKind;
+    // The allocator's catch-all column (multicolor and colorless sharing one
+    // column when groups outnumber columns) is a valid destination for each
+    // group it holds. Any other mixed column stays rejected so a pick is never
+    // folded into, say, a white-and-red header.
+    return sortGroupKinds.includes(groupKind)
+      && (sortGroupKinds.length === 1
+        || sortGroupKinds.every((kind) => kind === "multicolor" || kind === "colorless"));
   });
   // A column already holding the group wins over an empty one merely reserved for it.
   const matchingColumn = matches.find((column) => column.count > 0) ?? matches[0];
