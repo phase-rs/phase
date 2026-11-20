@@ -315,6 +315,44 @@ describe("curated basic-land catalog membership", () => {
     expect(withImport.membershipDigest).not.toBe(samePrinting.membershipDigest);
   });
 
+  it("packs the Forest submission picks past a stale pin, in every pack", async () => {
+    const forestId = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+    const other = printing({ id: "3279314f-d639-4489-b2ab-3621bb3ca64b", set: "m21", collector_number: "272" });
+    const chosen = printing({ id: "69557258-2441-4ca5-993a-8d7afb51ad3d", set: "c15", collector_number: "340" });
+    const fixture = landInput({
+      cards: { [forestId]: cardEntry(forestId, "Forest", ["forest"]) },
+      printings: { [forestId]: [other, chosen] },
+      artChain: [{ type: "set", setCode: "c15", label: "Commander 2015" }],
+      artOverrides: {
+        [forestId]: { scryfallId: "00000000-0000-4000-8000-000000000000", setCode: "zzz", collectorNumber: "1" },
+      },
+    });
+    for (const pack of [packId("curated"), packId("deck_library")]) {
+      const membership = await planCuratedMembership({ ...fixture, packId: pack });
+      expect(exactPrintingIds(membership.descriptors).has(chosen.id)).toBe(true);
+    }
+  });
+
+  it("packs a basic's submitted import in Deck Library packs without the catalog choices", async () => {
+    const forestId = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+    const preferred = printing({ id: "3279314f-d639-4489-b2ab-3621bb3ca64b", set: "m21", collector_number: "272" });
+    const imported = printing({ id: "69557258-2441-4ca5-993a-8d7afb51ad3d", set: "c15", collector_number: "340" });
+    const fixture = landInput({
+      packId: packId("deck_library"),
+      cards: { [forestId]: cardEntry(forestId, "Forest", ["forest"]) },
+      printings: { [forestId]: [preferred, imported] },
+      artChain: [{ type: "set", setCode: "m21", label: "Core Set 2021" }],
+      deckPrintings: [{ oracleId: forestId, source: { setCode: "C15", collectorNumber: "340" } }],
+    });
+    const membership = await planCuratedMembership(fixture);
+    expect(exactPrintingIds(membership.descriptors)).toEqual(new Set([preferred.id, imported.id]));
+    for (const [variant, rung] of rungs) {
+      const broad = encodeCandidateKey("oracle_face", [forestId, "forest", variant, rung]);
+      expect(keysOf(membership.descriptors.filter(({ candidateKeys }) => candidateKeys.includes(broad))))
+        .toEqual([`asset:v1:exact_printing:${preferred.id}-0-${variant}-${rung}`]);
+    }
+  });
+
   it("limits supplemental membership to curated packs and catalog Oracle IDs", async () => {
     const fixture = landInput({
       cards: { [oracleId]: plains, [BOLT]: BOLT_ENTRY },

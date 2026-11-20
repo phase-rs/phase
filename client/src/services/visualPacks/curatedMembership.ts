@@ -215,9 +215,7 @@ function cardDescriptors(
   }
 
   const lands = basicLandArtCatalog.lands;
-  if (input.packId !== CURATED_PACK || !Object.prototype.hasOwnProperty.call(lands, candidateOracleId)) {
-    return descriptors;
-  }
+  if (!Object.prototype.hasOwnProperty.call(lands, candidateOracleId)) return descriptors;
 
   // Keep keys on any printing already supplied by a selected context.
   const seen = new Set(selected.filter((value) => value.descriptors.length > 0).map(({ printing }) => printing.id));
@@ -226,10 +224,14 @@ function cardDescriptors(
     seen.add(printing.id);
     descriptors.push(...describePrinting(printing).map((value) => withoutBroadSemanticCandidates(value, "exact_only")));
   };
-  for (const source of sources) {
+  // Submission can bind a basic to a printing ordinary rendering does not
+  // select (an import over a general preference, or a preference past a stale
+  // pin), so every pack carries it for exact lookups.
+  for (const source of [undefined, ...sources]) {
     const printing = selectSubmissionPrinting(oracleId, printings, input.artChain, input.artOverrides, source);
     if (printing) addExactPrinting(printing);
   }
+  if (input.packId !== CURATED_PACK) return descriptors;
   for (const choice of lands[candidateOracleId as keyof typeof lands].choices) {
     if (seen.has(choice.scryfall_id)) continue;
     const printing = printings.find((row) =>
