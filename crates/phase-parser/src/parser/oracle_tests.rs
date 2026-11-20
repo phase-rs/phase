@@ -37126,6 +37126,7 @@ fn break_of_day_fateful_hour_folds_onto_mass_population() {
             id: TrackedSetId(0)
         })
     ));
+    assert!(effect_uses_tracked_set(rider.effect.as_ref()));
     assert!(
         static_def.condition.is_some(),
         "fateful-hour guard was dropped"
@@ -37220,4 +37221,81 @@ fn singular_cross_line_anaphor_does_not_fold_onto_mass_population() {
     };
     assert_eq!(static_abilities.len(), 1, "{parsed:#?}");
     assert!(static_abilities[0].condition.is_some(), "{parsed:#?}");
+}
+
+fn parent_target_grant() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![
+                StaticDefinition::continuous().affected(TargetFilter::ParentTarget)
+            ],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+    )
+}
+
+fn grant_affected_filter(def: &AbilityDefinition) -> &TargetFilter {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected generic grant, got {def:#?}");
+    };
+    static_abilities[0]
+        .affected
+        .as_ref()
+        .expect("grant must have an affected filter")
+}
+
+/// CR 608.2c: the condition on a cross-line rider does not authorize a
+/// `ParentTarget` grant in the false branch of an `Otherwise` clause.
+#[test]
+fn cross_line_population_condition_does_not_rebind_else_branch() {
+    let mut root = parent_target_grant();
+    root.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+    root.else_ability = Some(Box::new(parent_target_grant()));
+
+    rewrite_ability_grant_parent_to_tracked_set(&mut root, &TargetFilter::Any);
+
+    assert!(matches!(
+        grant_affected_filter(&root),
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    ));
+    assert_eq!(
+        grant_affected_filter(root.else_ability.as_deref().unwrap()),
+        &TargetFilter::ParentTarget,
+        "the false branch must not inherit the producer population"
+    );
+}
+
+/// CR 608.2c: a separate-sentence sibling is an independent instruction, so a
+/// conditional population binding cannot leak into its `ParentTarget` grant.
+#[test]
+fn cross_line_population_condition_does_not_rebind_sequential_sibling() {
+    let mut root = parent_target_grant();
+    root.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+    let mut sibling = parent_target_grant();
+    sibling.sub_link = SubAbilityLink::SequentialSibling;
+    root.sub_ability = Some(Box::new(sibling));
+
+    rewrite_ability_grant_parent_to_tracked_set(&mut root, &TargetFilter::Any);
+
+    assert!(matches!(
+        grant_affected_filter(&root),
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    ));
+    let sibling = root.sub_ability.as_deref().unwrap();
+    assert_eq!(sibling.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(
+        grant_affected_filter(sibling),
+        &TargetFilter::ParentTarget,
+        "the independent sibling must not inherit the producer population"
+    );
 }

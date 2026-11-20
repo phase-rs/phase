@@ -11,18 +11,19 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
-    rebind_chosen_parity_to_source, retarget_chosen_card_type_to_creature_type, AbilityCondition,
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    ActivationRestriction, AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric,
-    CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
-    ContinuousModification, ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    filter_contains, filter_contains_filter_prop, graveyard_destination_rider,
+    is_graveyard_exile_rider_subability, rebind_chosen_parity_to_source,
+    retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
+    AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric, CastTimingPermission,
+    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
+    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
     DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
     ManaProduction, ModalChoice, ParitySource, ParsedCondition, PermissionGrantee, PlayerFilter,
     QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolutionCastWindow,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
-    VoteSubject,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, visit_direct_effect_ability_payloads,
@@ -1902,11 +1903,21 @@ fn ability_has_conditional_mass_population_grant(
         return true;
     }
 
-    if def.sub_ability.as_deref().is_some_and(|child| {
-        ability_has_conditional_mass_population_grant(child, condition_in_scope)
-    }) || def.else_ability.as_deref().is_some_and(|child| {
-        ability_has_conditional_mass_population_grant(child, condition_in_scope)
-    }) || def
+    if let Some(child) = def.sub_ability.as_deref() {
+        let child_condition = match child.sub_link {
+            SubAbilityLink::ContinuationStep => condition_in_scope,
+            SubAbilityLink::SequentialSibling => false,
+        };
+        if ability_has_conditional_mass_population_grant(child, child_condition) {
+            return true;
+        }
+    }
+    if let Some(child) = def.else_ability.as_deref() {
+        if ability_has_conditional_mass_population_grant(child, false) {
+            return true;
+        }
+    }
+    if def
         .mode_abilities
         .iter()
         .any(|child| ability_has_conditional_mass_population_grant(child, condition_in_scope))
@@ -2115,9 +2126,13 @@ fn rewrite_ability_grant_parent_to_tracked_set_in_scope(
     let descendant_uses_tracked_set = ancestor_uses_tracked_set || effect_uses_tracked_set;
 
     if let Some(child) = def.sub_ability.as_deref_mut() {
+        let child_condition = match child.sub_link {
+            SubAbilityLink::ContinuationStep => condition_in_scope,
+            SubAbilityLink::SequentialSibling => false,
+        };
         rewrite_ability_grant_parent_to_tracked_set_in_scope(
             child,
-            condition_in_scope,
+            child_condition,
             descendant_uses_tracked_set,
             population,
         );
@@ -2125,7 +2140,7 @@ fn rewrite_ability_grant_parent_to_tracked_set_in_scope(
     if let Some(child) = def.else_ability.as_deref_mut() {
         rewrite_ability_grant_parent_to_tracked_set_in_scope(
             child,
-            condition_in_scope,
+            false,
             descendant_uses_tracked_set,
             population,
         );
@@ -2171,18 +2186,31 @@ fn effect_uses_tracked_set(effect: &Effect) -> bool {
     let mut effect = effect.clone();
     let mut uses_tracked_set = false;
     each_target_filter_mut(&mut effect, &mut |filter| {
-        uses_tracked_set |= matches!(
-            filter,
-            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-        );
+        uses_tracked_set |= target_filter_uses_tracked_set(filter);
     });
-    uses_tracked_set |= mass_population_filter(&effect).is_some_and(|filter| {
+    uses_tracked_set |= mass_population_filter(&effect)
+        .is_some_and(|filter| target_filter_uses_tracked_set(filter));
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &effect
+    {
+        uses_tracked_set |= static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(target_filter_uses_tracked_set)
+        });
+    }
+    uses_tracked_set
+}
+
+fn target_filter_uses_tracked_set(filter: &TargetFilter) -> bool {
+    filter_contains(filter, &|filter| {
         matches!(
             filter,
             TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
         )
-    });
-    uses_tracked_set
+    })
 }
 
 // --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------
