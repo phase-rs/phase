@@ -786,7 +786,6 @@ face = [
   { key = "feral encounter", class = "wrong_count", clauses = ["You may exile a creature card from among them.", "Put the rest on the bottom of your library in a random order.", "At the beginning of the next combat phase this turn, target creature you control deals damage equal to its power to up to one target creature you don't control."] },
   { key = "feral throwback", class = "wrong_count", clauses = ["Amplify 2"] },
   { key = "ferris wheel", class = "wrong_duration", clauses = ["Visit — Choose target creature that hasn't been phased out with this Attraction.", "That creature phases out until you roll a 3 or less while rolling to visit your Attractions."] },
-  { key = "fertile imagination", class = "wrong_count", clauses = ["Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way."] },
   { key = "fervent mastery", class = "wrong_player", clauses = ["If the {2}{R}{R} cost was paid, an opponent discards any number of cards, then draws that many cards."] },
   { key = "festival of the guildpact", class = "wrong_count", clauses = ["Prevent the next X damage that would be dealt to you this turn."] },
   { key = "fetch quest", class = "wrong_count", clauses = ["Then put a creature, enchantment, or land card from among the milled cards onto the battlefield."] },

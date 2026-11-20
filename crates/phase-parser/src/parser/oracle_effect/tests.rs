@@ -11589,6 +11589,74 @@ fn effect_token_for_each_this_way_produces_graveyard_destination_card_count() {
     }
 }
 
+/// CR 608.2c: "<N> … tokens for each X" creates N per X (Fertile Imagination);
+/// an "a … token" head stays the bare for-each count (Waste Management).
+#[test]
+fn effect_token_for_each_keeps_fixed_count_multiplier() {
+    let token_count = |text: &str| match parse_effect(text) {
+        Effect::Token { count, .. } => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    assert_eq!(
+        token_count(
+            "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way."
+        ),
+        QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::IsChosenCardType])
+                    )),
+                    caused_by: None,
+                    destination: None,
+                }
+            }),
+        }
+    );
+    assert_eq!(
+        token_count(
+            "Create a 2/2 black Rogue creature token for each creature card exiled this way."
+        ),
+        QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                caused_by: Some(ThisWayCause::Exiled),
+                destination: None,
+            }
+        }
+    );
+}
+
+/// CR 608.2c: the token parser's own "for each" rider multiplies a numeric
+/// count head rather than replacing it.
+#[test]
+fn token_rider_count_keeps_fixed_count_multiplier() {
+    let rider_count = |text: &str| match try_parse_token(
+        &text.to_lowercase(),
+        text,
+        &mut ParseContext::default(),
+    ) {
+        Some(Effect::Token { count, .. }) => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    let fertile = rider_count(
+        "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way.",
+    );
+    assert!(
+        matches!(fertile, QuantityExpr::Multiply { factor: 2, .. }),
+        "{fertile:?}"
+    );
+    assert_eq!(
+        rider_count("create a Treasure token for each opponent dealt damage"),
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            }
+        }
+    );
+}
+
 #[test]
 fn full_pump_parser_declines_a_discarded_for_each_color_chooser() {
     // Synthetic grammar control, not an authenticated printed-card claim.
