@@ -11589,6 +11589,74 @@ fn effect_token_for_each_this_way_produces_graveyard_destination_card_count() {
     }
 }
 
+/// CR 608.2c: "<N> … tokens for each X" creates N per X (Fertile Imagination);
+/// an "a … token" head stays the bare for-each count (Waste Management).
+#[test]
+fn effect_token_for_each_keeps_fixed_count_multiplier() {
+    let token_count = |text: &str| match parse_effect(text) {
+        Effect::Token { count, .. } => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    assert_eq!(
+        token_count(
+            "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way."
+        ),
+        QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::IsChosenCardType])
+                    )),
+                    caused_by: None,
+                    destination: None,
+                }
+            }),
+        }
+    );
+    assert_eq!(
+        token_count(
+            "Create a 2/2 black Rogue creature token for each creature card exiled this way."
+        ),
+        QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                caused_by: Some(ThisWayCause::Exiled),
+                destination: None,
+            }
+        }
+    );
+}
+
+/// CR 608.2c: the token parser's own "for each" rider multiplies a numeric
+/// count head rather than replacing it.
+#[test]
+fn token_rider_count_keeps_fixed_count_multiplier() {
+    let rider_count = |text: &str| match try_parse_token(
+        &text.to_lowercase(),
+        text,
+        &mut ParseContext::default(),
+    ) {
+        Some(Effect::Token { count, .. }) => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    let fertile = rider_count(
+        "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way.",
+    );
+    assert!(
+        matches!(fertile, QuantityExpr::Multiply { factor: 2, .. }),
+        "{fertile:?}"
+    );
+    assert_eq!(
+        rider_count("create a Treasure token for each opponent dealt damage"),
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            }
+        }
+    );
+}
+
 #[test]
 fn full_pump_parser_declines_a_discarded_for_each_color_chooser() {
     // Synthetic grammar control, not an authenticated printed-card claim.
@@ -22277,6 +22345,107 @@ fn compound_tap_and_put_counter_lowercase_trigger_context() {
         "sub should stay ParentTarget through effect-chain parsing, got {:?}",
         sub.effect
     );
+}
+
+/// CR 608.2c: in a targeted compound's anaphoric continuation, a bare "it"
+/// names the object the primary instruction announced (CR 115.1d), not the
+/// trigger subject or the ability's source. Grappling Kraken (landfall, a typed
+/// land subject), Fear of Sleep Paralysis (eerie, an `Or{SelfRef, Typed}`
+/// subject) and Mjölnir, Storm Hammer ("equipped creature", `AttachedTo`) all
+/// print this clause under a typed trigger subject. Reverting the typed-referent
+/// continuation pin in `try_split_targeted_compound` makes the sub `SelfRef`.
+#[test]
+fn compound_tap_and_put_counter_binds_parent_target_under_typed_trigger_subject() {
+    for subject in [
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+        TargetFilter::AttachedTo,
+    ] {
+        let clause = parse_effect_clause(
+            "tap target creature an opponent controls and put a stun counter on it",
+            &mut ParseContext {
+                subject: Some(subject.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "primary should tap the announced typed target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Stun,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "stun counter should go on the tapped target under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
+}
+
+/// Synthetic boundary probe: no printed card has this targeted compound under
+/// a typed trigger subject. The nearest printed card is Defiant Vanguard:
+/// "When this creature blocks, at end of combat, destroy it and all creatures
+/// it blocked this turn." This probe checks preservation of the existing
+/// fail-closed boundary.
+///
+/// CR 509.1g + CR 608.2i: the typed-referent continuation pin never reaches a
+/// block-history clause. "it" in "all creatures it blocked this turn" names this
+/// same instruction's target, not an earlier instruction's, so the clause
+/// declines and the continuation fails closed under a typed trigger subject
+/// exactly as it does without one (where the post-parse anaphor rewrite, not
+/// the pin, handles the continuation). Reverting the history-clause guard on
+/// the pin in `try_split_targeted_compound` binds the clause instead and the
+/// typed-subject row's sub becomes a `DestroyAll`.
+#[test]
+fn compound_typed_referent_pin_does_not_bind_block_history_clause() {
+    for subject in [
+        None,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )),
+    ] {
+        let clause = parse_effect_clause(
+            "destroy target creature and all creatures it blocked this turn",
+            &mut ParseContext {
+                subject: subject.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reach guard: the primary destroys the announced target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "the history continuation must fail closed under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
 }
 
 #[test]
@@ -104959,4 +105128,103 @@ fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
         "{:?}",
         otherwise.effect
     );
+}
+
+/// CR 603.2b + CR 608.2c + CR 611.2a + CR 702.1d: the shared-predicate
+/// condition and the "same is true" continuation must remain typed all the way
+/// through the real card parser. The class census was generated with:
+/// `jq -c '[.data | to_entries[] | .value[] | select((.text // "") | ascii_downcase |
+/// test("(gains|gain) [^\\n.]* until end of turn if [^\\n.]*\\. the same is true for")) |
+/// {name:.name,text:.text}] | sort_by(.name)' data/mtgjson/AtomicCards.json`
+/// against MTGJSON 5.3.0+20261118; the normalized output SHA-256 is
+/// `5369ed6bbd8d9efc01435743bb7a94268060fd547cbf6feff8734e974a4bdf6d6`.
+#[test]
+fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, Sproutwatch Dryad gains flying until end of turn if a creature you control or a card in your hand has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Sproutwatch Dryad",
+        &[],
+        &["Creature".to_string()],
+        &["Dryad".to_string()],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("begin-combat trigger must have an effect");
+    assert_eq!(parsed.triggers[0].phase, Some(Phase::BeginCombat));
+
+    let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected GenericEffect, got {:?}", execute.effect);
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(static_abilities.len(), 12);
+
+    let expected_keywords = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Haste,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Lifelink,
+        Keyword::Menace,
+        Keyword::Reach,
+        Keyword::Trample,
+        Keyword::Vigilance,
+    ];
+    for (static_ability, expected_keyword) in static_abilities.iter().zip(expected_keywords.iter())
+    {
+        assert_eq!(
+            static_ability.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: expected_keyword.clone(),
+            }]
+        );
+        assert_eq!(
+            static_ability.condition.as_ref(),
+            Some(&StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::card()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone { zone: Zone::Hand },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                    ],
+                }),
+            })
+        );
+        assert!(static_ability
+            .description
+            .as_deref()
+            .is_none_or(|description| !description.contains(" if ")));
+    }
 }
