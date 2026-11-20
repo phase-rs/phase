@@ -752,6 +752,56 @@ fn countered_spell_zone_redirect_is_only_instead_marker(
     parse_countered_spell_redirect_shape(sentence).is_ok() && instead_sentences.next().is_none()
 }
 
+/// CR 120.4a: discharge only whole rider sentences with distinct matching
+/// typed damage carriers. A carrier cannot account for two printed riders.
+fn strip_represented_excess_riders(cleaned: &str, parsed: &ParsedAbilities) -> String {
+    let mut carriers = Vec::new();
+    let mut collect = |effect: &Effect| {
+        if let Effect::DealDamage {
+            excess:
+                Some(crate::types::ability::ExcessRecipient::TargetController { source_keyword }),
+            ..
+        } = effect
+        {
+            carriers.push(*source_keyword);
+        }
+        ControlFlow::<()>::Continue(())
+    };
+    for def in &parsed.abilities {
+        let _ = visit_ability_def(def, &mut collect);
+    }
+    for trigger in &parsed.triggers {
+        let _ = visit_trigger(trigger, &mut collect);
+    }
+    for replacement in &parsed.replacements {
+        let _ = visit_replacement(replacement, &mut collect);
+    }
+    for static_def in &parsed.statics {
+        let _ = visit_static(static_def, &mut collect);
+    }
+    if carriers.is_empty() {
+        return cleaned.to_owned();
+    }
+    split_sentence_units(cleaned)
+        .into_iter()
+        .filter(|sentence| {
+            let Ok((_, keyword)) =
+                super::oracle_effect::sequence::parse_excess_damage_to_controller_rider(
+                    sentence.trim(),
+                )
+            else {
+                return true;
+            };
+            let Some(index) = carriers.iter().position(|carrier| *carrier == keyword) else {
+                return true;
+            };
+            carriers.remove(index);
+            false
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ── Detector A: Replacement_Instead ─────────────────────────────────────
 
 /// CR 614: "if X would Y, [do Z] instead" — every "instead" phrase outside of
@@ -764,6 +814,8 @@ fn detect_replacement_instead(
     parsed: &ParsedAbilities,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
+    let remaining = strip_represented_excess_riders(cleaned, parsed);
+    let cleaned = remaining.as_str();
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains(" instead") {
         return;
@@ -4930,7 +4982,8 @@ fn detect_condition_if(
     //               mana-payment alternative is encoded as a replacement
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
-    let stripped = strip_cr_implicit_if_phrases(cleaned);
+    let stripped = strip_represented_excess_riders(cleaned, parsed);
+    let stripped = strip_cr_implicit_if_phrases(&stripped);
     // CR 614.1a: strip sentences that are structurally a *represented*
     // replacement antecedent ("if [subject] would [event], ... instead").
     // See `strip_represented_replacement_instead_sentences` doc comment for
@@ -18959,5 +19012,118 @@ mod distributed_x_cost_if_exemption_tests {
         let with_second_if = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy if you control an artifact.";
         assert!(condition_if_fires(with_second_if, FOLDED));
         assert!(condition_if_fires(VAZI_LINE, FOLDED));
+    }
+}
+
+#[cfg(test)]
+mod excess_rider_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ExcessRecipient;
+    use crate::types::keywords::KeywordKind;
+
+    fn has_warning(warnings: &[OracleDiagnostic], label: &str) -> bool {
+        warnings.iter().any(|warning| {
+            matches!(warning,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == label)
+        })
+    }
+
+    fn change_carrier(def: &mut AbilityDefinition, keyword: Option<KeywordKind>, remove: bool) {
+        if let Effect::DealDamage { excess, .. } = &mut *def.effect {
+            *excess = if remove {
+                None
+            } else {
+                Some(ExcessRecipient::TargetController {
+                    source_keyword: keyword,
+                })
+            };
+        }
+        if let Some(sub) = &mut def.sub_ability {
+            change_carrier(sub, keyword, remove);
+        }
+        if let Some(other) = &mut def.else_ability {
+            change_carrier(other, keyword, remove);
+        }
+        for mode in &mut def.mode_abilities {
+            change_carrier(mode, keyword, remove);
+        }
+    }
+
+    #[test]
+    fn excess_rider_carriers_discharge_only_their_own_markers() {
+        let cards = [
+            ("Ram Through", "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead."),
+            ("Flame Spill", "Flame Spill deals 4 damage to target creature. Excess damage is dealt to that creature's controller instead."),
+            ("Gandalf's Sanction", "Gandalf's Sanction deals X damage to target creature, where X is the number of instant and sorcery cards in your graveyard. Excess damage is dealt to that creature's controller instead."),
+            ("Pigment Storm", "Pigment Storm deals 5 damage to target creature. Excess damage is dealt to that creature's controller instead."),
+            ("Ravenous Tyrannosaurus", "Devour 3 (As this creature enters, you may sacrifice any number of creatures. It enters with three times that many +1/+1 counters on it.)\nWhenever this creature attacks, it deals damage equal to its power to up to one other target creature. Excess damage is dealt to that creature's controller instead."),
+        ];
+        for (name, text) in cards {
+            let types: Vec<String> = if name == "Ravenous Tyrannosaurus" {
+                vec!["Creature".into()]
+            } else {
+                vec!["Instant".into()]
+            };
+            let subtypes: Vec<String> = if name == "Ravenous Tyrannosaurus" {
+                vec!["Dinosaur".into()]
+            } else {
+                Vec::new()
+            };
+            let keywords: Vec<String> = if name == "Ravenous Tyrannosaurus" {
+                vec!["Devour".into()]
+            } else {
+                Vec::new()
+            };
+            let parsed = parse_oracle_text(text, name, &keywords, &types, &subtypes);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: parse reaches audit"
+            );
+            let cleaned = text.to_ascii_lowercase();
+            assert_ne!(
+                strip_represented_excess_riders(&cleaned, &parsed),
+                cleaned,
+                "{name}: typed carrier"
+            );
+            for label in ["Replacement_Instead", "Condition_If"] {
+                assert!(
+                    !has_warning(&parsed.parse_warnings, label),
+                    "{name}: {label}: {:?}",
+                    parsed.parse_warnings
+                );
+            }
+        }
+        let (name, text) = cards[0];
+        let parsed = parse_oracle_text(text, name, &[], &["Instant".into()], &[]);
+        for (keyword, remove) in [(None, true), (Some(KeywordKind::Flying), false)] {
+            let mut hostile = parsed.clone();
+            for def in &mut hostile.abilities {
+                change_carrier(def, keyword, remove);
+            }
+            assert!(!any_ability_has_unimplemented(&hostile));
+            audit_hostile(text, &hostile);
+        }
+        let rider = "If the creature you control has trample, excess damage is dealt to that creature's controller instead.";
+        audit_hostile(&format!("{text} {rider}"), &parsed);
+        audit_hostile(
+            &format!("{text} Draw a card if you control a Mountain instead."),
+            &parsed,
+        );
+    }
+
+    fn audit_hostile(text: &str, parsed: &ParsedAbilities) {
+        assert!(
+            !any_ability_has_unimplemented(parsed),
+            "hostile fixture reaches detectors"
+        );
+        let cleaned = text.to_ascii_lowercase();
+        let evidence = UnitEvidence::from_json_for_test("{}");
+        let mut warnings = Vec::new();
+        detect_replacement_instead(&cleaned, text, parsed, &mut warnings);
+        detect_condition_if(&cleaned, text, &evidence, parsed, &mut warnings);
+        for label in ["Replacement_Instead", "Condition_If"] {
+            assert!(has_warning(&warnings, label), "{label}: {warnings:?}");
+        }
     }
 }
