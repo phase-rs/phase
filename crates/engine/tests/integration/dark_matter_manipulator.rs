@@ -77,6 +77,17 @@ fn effective_pt(runner: &GameRunner, id: ObjectId) -> (i32, i32) {
     )
 }
 
+fn graveyard_len(runner: &GameRunner, player: PlayerId) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|state| state.id == player)
+        .expect("player exists")
+        .graveyard
+        .len()
+}
+
 #[test]
 fn dark_matter_manipulator_counts_its_controller_graveyard_thresholds() {
     // The opponent always has 14 cards. The 0/6 rows distinguish the
@@ -142,7 +153,7 @@ fn dark_matter_manipulator_updates_after_public_mill_and_cremate_actions() {
     for card in milled_cards {
         assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
     }
-    assert_eq!(runner.graveyard_count(P0), 7, "the ETB mill reaches seven");
+    assert_eq!(graveyard_len(&runner, P0), 7, "the ETB mill reaches seven");
     assert_eq!(effective_pt(&runner, manipulator), (3, 2));
     assert!(runner.state().stack.is_empty(), "the ETB trigger resolved");
     assert_eq!(runner.state().priority_player, P0);
@@ -157,7 +168,7 @@ fn dark_matter_manipulator_updates_after_public_mill_and_cremate_actions() {
         .target_object(milled_cards[0])
         .resolve();
     assert_eq!(runner.state().objects[&milled_cards[0]].zone, Zone::Exile);
-    assert_eq!(runner.graveyard_count(P0), 6);
+    assert_eq!(graveyard_len(&runner, P0), 6);
     assert_eq!(effective_pt(&runner, manipulator), (1, 2));
     cremate_outcome.assert_hand_drawn(P1, 1);
     assert!(runner.state().stack.is_empty());
