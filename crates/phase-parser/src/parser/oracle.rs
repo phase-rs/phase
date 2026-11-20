@@ -25,8 +25,8 @@ use crate::types::ability::{
     VoteSubject,
 };
 use crate::types::ability_visit::{
-    granter_symbols, nodes_mut, visit_ability_def_scoped, visit_direct_effect_ability_payloads,
-    DefinitionNode, DefinitionNodeMut, ResolutionScope,
+    granter_symbols, visit_ability_def_scoped, visit_direct_effect_ability_payloads,
+    DefinitionNode, ResolutionScope,
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
@@ -85,8 +85,8 @@ use super::oracle_effect::{
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
     parse_effect_chain_with_context_and_provenance, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword,
-    rewrite_grant_parent_to_filter, rewrite_grant_parent_to_tracked_set,
-    target_filter_controller_ref, try_parse_temporal_delayed_trigger_ability,
+    rewrite_conditional_grant_parent_to_filter, target_filter_controller_ref,
+    try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::{ParseContext, ResolvedChainRoot, SpellAnaphorBinding};
@@ -2090,34 +2090,34 @@ fn rewrite_ability_grant_parent_to_tracked_set(
     def: &mut AbilityDefinition,
     population: &TargetFilter,
 ) {
-    if !effect_uses_tracked_set(&def.effect) {
-        let _ = nodes_mut::visit_ability_def(def, &mut |node| {
-            if let DefinitionNodeMut::Ability(ability) = node {
-                rewrite_grant_parent_to_tracked_set(&mut ability.effect);
-            }
-            ControlFlow::Continue(())
-        });
-    } else {
-        rewrite_ability_grant_parent_to_tracked_set_in_scope(def, false, population);
-    }
+    rewrite_ability_grant_parent_to_tracked_set_in_scope(def, false, false, population);
 }
 
 fn rewrite_ability_grant_parent_to_tracked_set_in_scope(
     def: &mut AbilityDefinition,
+    inherited_condition: bool,
     ancestor_uses_tracked_set: bool,
     population: &TargetFilter,
 ) {
+    let condition_in_scope = inherited_condition || def.condition.is_some();
+    let effect_uses_tracked_set = effect_uses_tracked_set(&def.effect);
     if ancestor_uses_tracked_set {
-        rewrite_grant_parent_to_filter(&mut def.effect, population);
-    } else if !effect_uses_tracked_set(&def.effect) {
-        rewrite_grant_parent_to_tracked_set(&mut def.effect);
+        rewrite_conditional_grant_parent_to_filter(&mut def.effect, population, condition_in_scope);
+    } else if !effect_uses_tracked_set {
+        rewrite_conditional_grant_parent_to_filter(
+            &mut def.effect,
+            &TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+            condition_in_scope,
+        );
     }
-    let descendant_uses_tracked_set =
-        ancestor_uses_tracked_set || effect_uses_tracked_set(&def.effect);
+    let descendant_uses_tracked_set = ancestor_uses_tracked_set || effect_uses_tracked_set;
 
     if let Some(child) = def.sub_ability.as_deref_mut() {
         rewrite_ability_grant_parent_to_tracked_set_in_scope(
             child,
+            condition_in_scope,
             descendant_uses_tracked_set,
             population,
         );
@@ -2125,6 +2125,7 @@ fn rewrite_ability_grant_parent_to_tracked_set_in_scope(
     if let Some(child) = def.else_ability.as_deref_mut() {
         rewrite_ability_grant_parent_to_tracked_set_in_scope(
             child,
+            condition_in_scope,
             descendant_uses_tracked_set,
             population,
         );
@@ -2132,9 +2133,37 @@ fn rewrite_ability_grant_parent_to_tracked_set_in_scope(
     for child in &mut def.mode_abilities {
         rewrite_ability_grant_parent_to_tracked_set_in_scope(
             child,
+            condition_in_scope,
             descendant_uses_tracked_set,
             population,
         );
+    }
+
+    def.effect.for_each_nested_definition_mut(&mut |_, child| {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            condition_in_scope,
+            descendant_uses_tracked_set,
+            population,
+        );
+    });
+
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = def.effect.as_mut()
+    {
+        for static_def in static_abilities {
+            for modification in &mut static_def.modifications {
+                if let ContinuousModification::GrantAbility { definition } = modification {
+                    rewrite_ability_grant_parent_to_tracked_set_in_scope(
+                        definition,
+                        condition_in_scope,
+                        descendant_uses_tracked_set,
+                        population,
+                    );
+                }
+            }
+        }
     }
 }
 

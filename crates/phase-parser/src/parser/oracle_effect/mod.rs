@@ -43625,6 +43625,9 @@ pub(crate) fn contains_mass_population_anaphor(lower: &str) -> bool {
             alt((
                 tag::<_, _, OracleError<'_>>("those creatures"),
                 tag("those permanents"),
+                tag("those tokens"),
+                tag("those auras"),
+                tag("those enchantments"),
             )),
         )
         .parse(input)
@@ -43972,23 +43975,40 @@ pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &
     }
 }
 
-/// CR 608.2c: Re-anchor a cross-item plural grant to the producer's frozen
-/// tracked population. Unlike [`rewrite_grant_parent_to_filter`], this binding
-/// must not re-evaluate the producer's live broadcast filter after the producer
-/// changes control or another characteristic of its affected objects.
-pub(crate) fn rewrite_grant_parent_to_tracked_set(effect: &mut Effect) {
-    if let Effect::GenericEffect {
+/// CR 608.2c: Re-anchor only the `ParentTarget` grant proven to be conditional
+/// on this ability path. A whole-tree rewrite is unsound here: a consumer can
+/// contain a singular or sibling `ParentTarget` grant that has no relationship
+/// to the preceding mass population.
+pub(super) fn rewrite_conditional_grant_parent_to_filter(
+    effect: &mut Effect,
+    replacement: &TargetFilter,
+    condition_in_scope: bool,
+) {
+    let Effect::GenericEffect {
         target,
         static_abilities,
         ..
     } = effect
-    {
+    else {
+        return;
+    };
+
+    if condition_in_scope {
         if let Some(target) = target {
-            rewrite_filter_parent_to_tracked_set(target);
+            if matches!(target, TargetFilter::ParentTarget) {
+                rewrite_filter_parent_to(target, replacement);
+            }
         }
-        for static_def in static_abilities {
+    }
+    for static_def in static_abilities {
+        if static_def
+            .affected
+            .as_ref()
+            .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+            && (condition_in_scope || static_def.condition.is_some())
+        {
             if let Some(affected) = &mut static_def.affected {
-                rewrite_filter_parent_to_tracked_set(affected);
+                rewrite_filter_parent_to(affected, replacement);
             }
         }
     }
@@ -63888,5 +63908,24 @@ mod population_walk_destination_tests {
             vec![Some(TargetFilter::ParentTarget)],
             "a declined producer's grant keeps the bare anaphor"
         );
+    }
+
+    /// CR 608.2c: every plural object noun in the mass-population anaphor axis
+    /// is recognized by the same boundary-safe nom combinator. Singular
+    /// references do not enter this cross-item relation.
+    #[test]
+    fn mass_population_anaphor_covers_plural_object_vocabulary() {
+        for phrase in [
+            "those creatures gain flying",
+            "those permanents gain flying",
+            "those tokens gain flying",
+            "those auras gain flying",
+            "those enchantments gain flying",
+        ] {
+            assert!(contains_mass_population_anaphor(phrase), "{phrase}");
+        }
+        assert!(!contains_mass_population_anaphor(
+            "that creature gains flying"
+        ));
     }
 }

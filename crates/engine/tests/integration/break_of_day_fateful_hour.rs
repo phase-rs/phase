@@ -12,6 +12,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::Effect;
+use engine::types::ability_visit::ability_tree_any;
 use engine::types::counter::CounterType;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
@@ -53,15 +54,9 @@ fn cast_break_of_day(
 }
 
 fn ability_contains_unimplemented(def: &engine::types::ability::AbilityDefinition) -> bool {
-    matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
-        || def
-            .sub_ability
-            .as_deref()
-            .is_some_and(ability_contains_unimplemented)
-        || def
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_contains_unimplemented)
+    ability_tree_any(def, &|candidate| {
+        matches!(candidate.effect.as_ref(), Effect::Unimplemented { .. })
+    })
 }
 
 /// CR 608.2c + CR 611.2a: at exactly five life, the ability-word rider
