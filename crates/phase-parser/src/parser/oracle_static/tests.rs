@@ -189,6 +189,137 @@ fn dynamic_for_each_pump_recovers_trailing_quoted_ability() {
     );
 }
 
+/// CR 107.1a + CR 608.2c + CR 613.4c: "for every N" counts complete groups
+/// before the printed P/T coefficient is applied, and shares the grammar with
+/// the established "for each N" spelling.
+#[test]
+fn dynamic_for_every_pt_counts_complete_groups() {
+    let expected = QuantityExpr::Multiply {
+        factor: 3,
+        inner: Box::new(QuantityExpr::DivideRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Land],
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+            divisor: 2,
+            rounding: RoundingMode::Down,
+        }),
+    };
+
+    for marker in ["every", "each"] {
+        let line =
+            format!("This creature gets +3/+0 for {marker} two land cards in your graveyard.");
+        let defs = parse_static_line_multi(&line);
+        assert_eq!(defs.len(), 1, "one self-static must parse: {line}");
+        assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef), "{line}");
+        assert_eq!(
+            defs[0].modifications,
+            vec![ContinuousModification::AddDynamicPower {
+                value: expected.clone(),
+            }],
+            "must count complete groups, then apply +3 power: {line}"
+        );
+    }
+}
+
+/// CR 107.1a + CR 613.4c: repeated P/T terms may use either marker and retain
+/// their own count expressions and source order.
+#[test]
+fn dynamic_for_each_and_for_every_pt_terms_keep_order() {
+    let defs = parse_static_line_multi(
+        "This creature gets +1/+0 for every three cards in your graveyard and +2/+0 for each land card in your graveyard.",
+    );
+    assert_eq!(defs.len(), 1, "one self-static must parse");
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+
+    let power_values: Vec<_> = defs[0]
+        .modifications
+        .iter()
+        .filter_map(|modification| match modification {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(power_values.len(), 2, "both dynamic terms must survive");
+    assert_eq!(
+        power_values[0],
+        &QuantityExpr::DivideRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+            divisor: 3,
+            rounding: RoundingMode::Down,
+        },
+        "the leading for-every term counts full groups of three cards"
+    );
+    assert_eq!(
+        power_values[1],
+        &QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Land],
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+        },
+        "the second for-each term keeps its +2 coefficient and land filter"
+    );
+}
+
+/// CR 613.4c: a quoted activated ability owns its inner "for every" marker. It
+/// must not turn a fixed outer pump into a dynamic graveyard count.
+#[test]
+fn fixed_pt_keeps_quoted_for_every_count_inside_granted_ability() {
+    let defs = parse_static_line_multi(
+        r#"This creature gets +2/+0 and has "{T}: Draw a card for every seven cards in your graveyard."."#,
+    );
+    assert_eq!(defs.len(), 1, "the outer self-static must parse");
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert!(
+        defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "the outer +2 power must remain fixed: {:?}",
+        defs[0].modifications
+    );
+    assert!(
+        defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 0 }),
+        "the outer +0 toughness must remain fixed: {:?}",
+        defs[0].modifications
+    );
+    assert!(
+        !defs[0].modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddDynamicPower { .. }
+                | ContinuousModification::AddDynamicToughness { .. }
+        )),
+        "the quoted marker must not become an outer dynamic pump: {:?}",
+        defs[0].modifications
+    );
+    assert!(
+        defs[0].modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::GrantAbility { .. }
+        )),
+        "the quoted activated ability must remain present: {:?}",
+        defs[0].modifications
+    );
+}
+
 /// #5681: `classify_quoted_inner` is the single boundary every quoted-ability
 /// grant funnels through. Oracle's punctuation convention carries the enclosing
 /// sentence's COMMA INSIDE the closing quote when a clause follows ("...until end

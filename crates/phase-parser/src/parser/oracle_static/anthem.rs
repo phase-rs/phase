@@ -1076,7 +1076,7 @@ pub(crate) fn parse_continuous_gets_has(
 
     // CR 613.4c: Handle repeated dynamic pump terms — "gets +N/+M for each X and
     // +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
-    // by its own count. Try this before the single-"for each" path so the second
+    // by its own count. Either term may also use "for every". Try this before the single-count path so the second
     // term isn't silently dropped and the pump collapsed to a fixed value.
     if let Some(modifications) = parse_repeated_for_each_pt_modifications(text) {
         return Some(
@@ -1087,10 +1087,10 @@ pub(crate) fn parse_continuous_gets_has(
         );
     }
 
-    // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
-    if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
-        let pt_text = before_for_each.original.trim();
-        let raw_for_each = after_for_each.lower.trim_end_matches('.');
+    // CR 613.4c: Handle "gets +N/+M for each/for every [clause]" — dynamic P/T.
+    if let Some((pt_text, after_for_each)) = split_for_each_marker(&lower) {
+        let pt_text = pt_text.trim();
+        let raw_for_each = after_for_each.trim_end_matches('.');
         // Strip a trailing keyword clause (" and has flying", " and gains haste",
         // etc.) so the for-each filter parser sees only its own clause. The
         // trailing keywords are picked up separately via `extract_keyword_clause`
@@ -1194,12 +1194,7 @@ fn parse_dynamic_for_each_pt_term(
     verb: PumpTermVerb,
 ) -> Option<Vec<ContinuousModification>> {
     let lower = text.to_lowercase();
-    let (for_each_with_marker, pt_text) = take_until::<_, _, OracleError<'_>>("for each ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (for_each_clause, _) = tag::<_, _, OracleError<'_>>("for each ")
-        .parse(for_each_with_marker)
-        .ok()?;
+    let (pt_text, for_each_clause) = split_for_each_marker(&lower)?;
     let pt_text = pt_text.trim();
     let (pt_source, subject_number) = match (parse_pump_verb(pt_text), verb) {
         (Ok((rest, number)), _) => (rest, Some(number)),
@@ -1217,10 +1212,24 @@ fn parse_dynamic_for_each_pt_term(
     (!modifications.is_empty()).then_some(modifications)
 }
 
+/// Split a lowercased predicate at its first outer "for each" / "for every"
+/// marker. Quoted granted abilities keep their own quantity clauses; masking
+/// them preserves byte offsets so both slices can come from the original lower
+/// view without exposing quoted markers to the static P/T dispatcher.
+fn split_for_each_marker(lower: &str) -> Option<(&str, &str)> {
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(lower);
+    let (prefix, _, remainder) =
+        nom_primitives::scan_preceded(masked.as_ref(), nom_quantity::parse_for_each_marker)?;
+    let prefix_len = prefix.len();
+    let remainder_start = lower.len() - remainder.len();
+    Some((&lower[..prefix_len], &lower[remainder_start..]))
+}
+
 /// CR 613.4c: A compound of repeated dynamic pump terms — "gets +N/+M for each X
 /// and +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
-/// by its own count. Splits on the " and " that introduces another "+n/+m for
-/// each" pump term (so a single term's embedded "for each A and B" count-list
+/// by its own count. Either term may also use "for every". Splits on the " and "
+/// that introduces another "+n/+m for each/for every" pump term (so a single
+/// term's embedded "for each A and B" count-list
 /// stays with the single-term path) and accumulates every term's dynamic
 /// modifications. Returns `None` unless at least two whole pump terms parse, so
 /// the single-term path keeps ownership of every non-repeated case.
@@ -1278,7 +1287,7 @@ fn split_on_and(s: &str) -> Vec<&str> {
 /// `input` (already lowercased), with the grammatical number its agreement
 /// gives the static's subject: "gets" follows a singular subject ("Each
 /// creature you control gets", "Enchanted creature gets"), "get" a plural one
-/// ("Creatures you control get"). A census pronoun in the "for each" tail must
+/// ("Creatures you control get"). A census pronoun in the "for each" / "for every" tail must
 /// agree with that number to name the subject's object(s)
 /// (`parse_for_each_clause_deferred`).
 fn parse_pump_verb(input: &str) -> OracleResult<'_, AnaphorNumber> {
@@ -1289,13 +1298,17 @@ fn parse_pump_verb(input: &str) -> OracleResult<'_, AnaphorNumber> {
     .parse(input)
 }
 
-/// True iff `segment` (already lowercased) begins a "+N/+M for each …" pump term:
-/// an optional "gets"/"get" verb, a P/T modifier, then " for each ". Used to tell
-/// a repeated-pump term boundary apart from an " and " inside a count clause.
+/// True iff `segment` (already lowercased) begins a "+N/+M for each …" or
+/// "+N/+M for every …" pump term: an optional "gets"/"get" verb, a P/T
+/// modifier, then the shared marker. Used to tell a repeated-pump term boundary
+/// apart from an " and " inside a count clause.
 fn segment_starts_pump_term(segment: &str) -> bool {
     preceded(
         opt(parse_pump_verb),
-        preceded(nom_primitives::parse_pt_modifier, tag(" for each ")),
+        preceded(
+            nom_primitives::parse_pt_modifier,
+            preceded(tag(" "), nom_quantity::parse_for_each_marker),
+        ),
     )
     .parse(segment.trim_start())
     .is_ok()

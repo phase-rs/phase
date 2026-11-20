@@ -511,7 +511,6 @@ face = [
   { key = "dargo, the shipwrecker", class = "cost_wrong", clauses = ["This spell costs {2} less to cast for each permanent sacrificed this way and {2} less to cast for each other artifact or creature you've sacrificed this turn."] },
   { key = "daring waverider", class = "other", clauses = ["If that spell would be put into your graveyard, exile it instead."] },
   { key = "dark dabbling", class = "wrong_count", clauses = ["Spell mastery — If there are two or more instant and/or sorcery cards in your graveyard, also regenerate each other creature you control."] },
-  { key = "dark matter manipulator", class = "wrong_count", clauses = ["This creature gets +2/+0 for every seven cards in your graveyard."] },
   { key = "dark salvation", class = "missing_effect", clauses = ["Target player creates X 2/2 black Zombie creature tokens", "then up to one target creature gets -1/-1 until end of turn for each Zombie that player controls."] },
   { key = "dark supplicant", class = "condition_wrong", clauses = ["If you search your library this way, shuffle."] },
   { key = "dark tutor", class = "wrong_zone", clauses = ["put it into your hand or graveyard"] },
