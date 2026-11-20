@@ -25,8 +25,8 @@ use crate::types::ability::{
     VoteSubject,
 };
 use crate::types::ability_visit::{
-    ability_tree_any, granter_symbols, nodes_mut, visit_ability_def_scoped, DefinitionNode,
-    DefinitionNodeMut, ResolutionScope,
+    granter_symbols, nodes_mut, visit_ability_def_scoped, visit_direct_effect_ability_payloads,
+    DefinitionNode, DefinitionNodeMut, ResolutionScope,
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
@@ -80,13 +80,13 @@ use super::oracle_effect::imperative::{
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, append_to_deepest_sub_ability,
-    contains_mass_population_anaphor, continuous_grant_population, lower_ability_ir,
-    mass_population_filter, parse_ability_ir_standalone, parse_ability_ir_with_context,
-    parse_additional_cost_instead_condition_fragment,
+    contains_mass_population_anaphor, continuous_grant_population, each_target_filter_mut,
+    lower_ability_ir, mass_population_filter, parse_ability_ir_standalone,
+    parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
     parse_effect_chain_with_context_and_provenance, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword,
-    rewrite_grant_parent_to_filter, target_filter_controller_ref,
-    try_parse_temporal_delayed_trigger_ability,
+    rewrite_grant_parent_to_filter, rewrite_grant_parent_to_tracked_set,
+    target_filter_controller_ref, try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::{ParseContext, ResolvedChainRoot, SpellAnaphorBinding};
@@ -1881,44 +1881,65 @@ fn detect_cross_item_mass_population_anaphors(
 }
 
 /// The consumer-side proof shared by document-relation discovery and
-/// application. A condition may be carried on the ability or on a static grant
-/// after normal condition lowering, and the grant may be a nested continuation
-/// of a tracked-set-producing effect such as `PutCounterAll`.
+/// application. A condition may be carried on the ability or on the same static
+/// grant after normal condition lowering, and the grant may be a nested
+/// continuation of a tracked-set-producing effect such as `PutCounterAll`.
 fn ability_is_conditional_mass_population_grant(def: &AbilityDefinition) -> bool {
-    let has_parent_target_grant = ability_tree_any(def, &|candidate| {
-        let Effect::GenericEffect {
-            target,
-            static_abilities,
-            ..
-        } = candidate.effect.as_ref()
-        else {
-            return false;
-        };
-        target
-            .as_ref()
-            .is_some_and(|target| matches!(target, TargetFilter::ParentTarget))
-            || static_abilities.iter().any(|static_def| {
-                static_def
-                    .affected
-                    .as_ref()
-                    .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
-            })
-    });
-    if !has_parent_target_grant {
-        return false;
+    ability_has_conditional_mass_population_grant(def, false)
+}
+
+/// Keep the grant and its guard on one definition path. A condition on an
+/// ability definition is inherited by its own continuation and direct effect
+/// payloads, but a condition on one sibling branch must not prove a grant in a
+/// different sibling branch. This is the scoped counterpart to a tree-wide
+/// `any(grant) && any(condition)` test.
+fn ability_has_conditional_mass_population_grant(
+    def: &AbilityDefinition,
+    inherited_condition: bool,
+) -> bool {
+    let condition_in_scope = inherited_condition || def.condition.is_some();
+    if effect_has_conditional_mass_population_grant(&def.effect, condition_in_scope) {
+        return true;
     }
 
-    // A condition on the consumer root gates every nested continuation (the
-    // Addendum shape), while a condition on a nested static/ability is already
-    // attached to the grant itself (the Fateful hour/Spell mastery shape).
-    def.condition.is_some()
-        || ability_tree_any(def, &|candidate| {
-            candidate.condition.is_some()
-                || matches!(
-                    candidate.effect.as_ref(),
-                    Effect::GenericEffect { static_abilities, .. }
-                        if static_abilities.iter().any(|static_def| static_def.condition.is_some())
-                )
+    if def.sub_ability.as_deref().is_some_and(|child| {
+        ability_has_conditional_mass_population_grant(child, condition_in_scope)
+    }) || def.else_ability.as_deref().is_some_and(|child| {
+        ability_has_conditional_mass_population_grant(child, condition_in_scope)
+    }) || def
+        .mode_abilities
+        .iter()
+        .any(|child| ability_has_conditional_mass_population_grant(child, condition_in_scope))
+    {
+        return true;
+    }
+
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |_, child| {
+        found |= ability_has_conditional_mass_population_grant(child, condition_in_scope);
+    });
+    found
+}
+
+fn effect_has_conditional_mass_population_grant(effect: &Effect, condition_in_scope: bool) -> bool {
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+
+    target
+        .as_ref()
+        .is_some_and(|target| condition_in_scope && matches!(target, TargetFilter::ParentTarget))
+        || static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+                && (condition_in_scope || static_def.condition.is_some())
         })
 }
 
@@ -2048,7 +2069,7 @@ fn apply_cross_item_mass_population_anaphor(
 
         let mut consumer_def = result.abilities.remove(consumer_pos);
         ability_ids.remove(consumer_pos);
-        rewrite_ability_grant_parent_to_filter(&mut consumer_def, &population);
+        rewrite_ability_grant_parent_to_tracked_set(&mut consumer_def, &population);
         append_to_deepest_sub_ability(
             &mut result.abilities[producer_pos],
             Some(Box::new(consumer_def)),
@@ -2059,16 +2080,80 @@ fn apply_cross_item_mass_population_anaphor(
     }
 }
 
-/// Re-anchor every grant in a consumer ability tree. A tracked-set producer can
-/// put the anaphoric grant behind a `sub_ability`, so rewriting only the root
-/// effect would leave its `ParentTarget` unresolved.
-fn rewrite_ability_grant_parent_to_filter(def: &mut AbilityDefinition, replacement: &TargetFilter) {
-    let _ = nodes_mut::visit_ability_def(def, &mut |node| {
-        if let DefinitionNodeMut::Ability(ability) = node {
-            rewrite_grant_parent_to_filter(&mut ability.effect, replacement);
-        }
-        ControlFlow::Continue(())
+/// Re-anchor grants in a consumer ability tree. A direct cross-item grant reads
+/// the producer's frozen tracked set. Once a consumer definition already reads
+/// that set (for example, Unbreakable Formation's counter instruction), its
+/// later same-item continuation is kept on the concrete population filter so
+/// the engine's existing chain publisher remains the sole antecedent; that
+/// continuation is not the cross-item binding itself.
+fn rewrite_ability_grant_parent_to_tracked_set(
+    def: &mut AbilityDefinition,
+    population: &TargetFilter,
+) {
+    if !effect_uses_tracked_set(&def.effect) {
+        let _ = nodes_mut::visit_ability_def(def, &mut |node| {
+            if let DefinitionNodeMut::Ability(ability) = node {
+                rewrite_grant_parent_to_tracked_set(&mut ability.effect);
+            }
+            ControlFlow::Continue(())
+        });
+    } else {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(def, false, population);
+    }
+}
+
+fn rewrite_ability_grant_parent_to_tracked_set_in_scope(
+    def: &mut AbilityDefinition,
+    ancestor_uses_tracked_set: bool,
+    population: &TargetFilter,
+) {
+    if ancestor_uses_tracked_set {
+        rewrite_grant_parent_to_filter(&mut def.effect, population);
+    } else if !effect_uses_tracked_set(&def.effect) {
+        rewrite_grant_parent_to_tracked_set(&mut def.effect);
+    }
+    let descendant_uses_tracked_set =
+        ancestor_uses_tracked_set || effect_uses_tracked_set(&def.effect);
+
+    if let Some(child) = def.sub_ability.as_deref_mut() {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            descendant_uses_tracked_set,
+            population,
+        );
+    }
+    if let Some(child) = def.else_ability.as_deref_mut() {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            descendant_uses_tracked_set,
+            population,
+        );
+    }
+    for child in &mut def.mode_abilities {
+        rewrite_ability_grant_parent_to_tracked_set_in_scope(
+            child,
+            descendant_uses_tracked_set,
+            population,
+        );
+    }
+}
+
+fn effect_uses_tracked_set(effect: &Effect) -> bool {
+    let mut effect = effect.clone();
+    let mut uses_tracked_set = false;
+    each_target_filter_mut(&mut effect, &mut |filter| {
+        uses_tracked_set |= matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        );
     });
+    uses_tracked_set |= mass_population_filter(&effect).is_some_and(|filter| {
+        matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+    });
+    uses_tracked_set
 }
 
 // --- CR 607.2d + CR 614.1c: enters-choice → chosen-dependent ETB counter ------

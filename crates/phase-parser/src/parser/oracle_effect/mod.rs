@@ -43972,6 +43972,28 @@ pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &
     }
 }
 
+/// CR 608.2c: Re-anchor a cross-item plural grant to the producer's frozen
+/// tracked population. Unlike [`rewrite_grant_parent_to_filter`], this binding
+/// must not re-evaluate the producer's live broadcast filter after the producer
+/// changes control or another characteristic of its affected objects.
+pub(crate) fn rewrite_grant_parent_to_tracked_set(effect: &mut Effect) {
+    if let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    {
+        if let Some(target) = target {
+            rewrite_filter_parent_to_tracked_set(target);
+        }
+        for static_def in static_abilities {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to_tracked_set(affected);
+            }
+        }
+    }
+}
+
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {

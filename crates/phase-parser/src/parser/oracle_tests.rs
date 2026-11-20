@@ -15,6 +15,7 @@ use crate::types::ability::{
     TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::{CompanionCondition, Keyword};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
@@ -37119,11 +37120,12 @@ fn break_of_day_fateful_hour_folds_onto_mass_population() {
     let [static_def] = static_abilities.as_slice() else {
         panic!("expected one indestructible static, got {static_abilities:#?}");
     };
-    let Some(TargetFilter::Typed(affected)) = static_def.affected.as_ref() else {
-        panic!("rider must be bound to the producer population: {static_def:#?}");
-    };
-    assert_eq!(affected.controller, Some(ControllerRef::You));
-    assert!(affected.type_filters.contains(&TypeFilter::Creature));
+    assert!(matches!(
+        static_def.affected,
+        Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        })
+    ));
     assert!(
         static_def.condition.is_some(),
         "fateful-hour guard was dropped"
@@ -37156,11 +37158,12 @@ fn kytheons_tactics_spell_mastery_folds_onto_mass_population() {
     let [static_def] = static_abilities.as_slice() else {
         panic!("expected one vigilance static, got {static_abilities:#?}");
     };
-    let Some(TargetFilter::Typed(affected)) = static_def.affected.as_ref() else {
-        panic!("rider must be bound to the producer population: {static_def:#?}");
-    };
-    assert_eq!(affected.controller, Some(ControllerRef::You));
-    assert!(affected.type_filters.contains(&TypeFilter::Creature));
+    assert!(matches!(
+        static_def.affected,
+        Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        })
+    ));
     assert!(
         static_def.condition.is_some(),
         "spell-mastery guard was dropped"
