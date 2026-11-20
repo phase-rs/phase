@@ -5,8 +5,10 @@
 //! sacrificed, whether as an activation cost or as a spell's additional cost.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::game_state::WaitingFor;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -23,6 +25,75 @@ fn hand_size(runner: &GameRunner) -> usize {
         .values()
         .filter(|obj| obj.owner == P0 && obj.zone == Zone::Hand)
         .count()
+}
+
+/// Activate Viscera Seer, assert the sacrifice prompt offers `paid`, and pay with it. Then
+/// assert the boundary right after payment: P0 has priority, with Midnight Reaper's trigger
+/// above the Seer's ability.
+fn sacrifice_to_seer(runner: &mut GameRunner, seer: ObjectId, reaper: ObjectId, paid: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: seer,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Viscera Seer's ability can be activated");
+    let WaitingFor::PayCost {
+        player, choices, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the sacrifice cost asks for a creature, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert!(
+        choices.contains(&paid),
+        "{paid:?} can be sacrificed; choices were {choices:?}"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![paid] })
+        .expect("sacrificing the chosen creature pays the cost");
+    assert_trigger_above(runner, reaper, seer);
+}
+
+/// P0 has priority, and the stack holds exactly the Reaper's trigger on top of the entry
+/// from `below_source`.
+fn assert_trigger_above(runner: &GameRunner, reaper: ObjectId, below_source: ObjectId) {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "P0 has priority after paying, got {:?}",
+        runner.state().waiting_for
+    );
+    let sources: Vec<ObjectId> = runner
+        .state()
+        .stack
+        .iter()
+        .map(|entry| entry.source_id)
+        .collect();
+    assert_eq!(
+        sources,
+        vec![below_source, reaper],
+        "Midnight Reaper's trigger goes on the stack above it (bottom to top)"
+    );
+}
+
+/// Resolve the stack, keeping the scried card on top when Viscera Seer's ability asks
+/// (CR 701.22a).
+fn resolve_all(runner: &mut GameRunner) {
+    for _ in 0..8 {
+        runner.advance_until_stack_empty();
+        let WaitingFor::ScryChoice { cards, .. } = runner.state().waiting_for.clone() else {
+            return;
+        };
+        runner
+            .act(GameAction::SelectCards { cards })
+            .expect("keeping the scried card on top is legal");
+    }
 }
 
 fn assert_settled(runner: &GameRunner) {
@@ -60,8 +131,8 @@ fn reaper_sacrificed_as_an_activation_cost_triggers_itself() {
     let life = runner.life(P0);
     let hand = hand_size(&runner);
 
-    runner.activate(seer, 0).pay_with(&[reaper]).resolve();
-    runner.advance_until_stack_empty();
+    sacrifice_to_seer(&mut runner, seer, reaper, reaper);
+    resolve_all(&mut runner);
 
     assert_eq!(runner.state().objects[&reaper].zone, Zone::Graveyard);
     assert_eq!(runner.life(P0), life - 1, "the Reaper deals 1 damage to P0");
@@ -77,8 +148,8 @@ fn another_creature_sacrificed_as_a_cost_triggers_the_reaper() {
     let life = runner.life(P0);
     let hand = hand_size(&runner);
 
-    runner.activate(seer, 0).pay_with(&[bears]).resolve();
-    runner.advance_until_stack_empty();
+    sacrifice_to_seer(&mut runner, seer, reaper, bears);
+    resolve_all(&mut runner);
 
     assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&reaper].zone, Zone::Battlefield);
@@ -94,13 +165,22 @@ fn reaper_sacrificed_as_a_spells_additional_cost_triggers_itself() {
     let (mut scenario, reaper, _, _) = board();
     let rites = scenario
         .add_spell_to_hand_from_oracle(P0, "Village Rites", true, VILLAGE_RITES)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
         .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
     let mut runner = scenario.build();
     let life = runner.life(P0);
     let hand = hand_size(&runner);
 
-    runner.cast(rites).sacrifice_with(&[reaper]).resolve();
-    runner.advance_until_stack_empty();
+    runner.cast(rites).sacrifice_with(&[reaper]).commit();
+    assert_trigger_above(&runner, reaper, rites);
+    resolve_all(&mut runner);
 
     assert_eq!(runner.state().objects[&reaper].zone, Zone::Graveyard);
     assert_eq!(runner.life(P0), life - 1, "the Reaper deals 1 damage to P0");
