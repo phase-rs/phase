@@ -6547,6 +6547,72 @@ fn entry_filter_matches_staged(
     )
 }
 
+/// CR 614.12: an entry replacement of ANOTHER source (Hallowed Moonlight, Containment
+/// Priest) applies according to the entrant as it would exist on the battlefield, with the
+/// continuous effects that already exist applied (Opalescence makes an Enchantment token a
+/// creature). The single authority for that reading of a token entry: a liminal `TokenEntry`
+/// is projected on the board without the tokens entering in the same event, and a `CreateToken`
+/// batch view on the board as it is. Every other entry, a reference to the replacement's own
+/// source, and every entry replacement of the entrant's own (whose retention is checked through
+/// the same projection) read [`matches_target_filter_on_battlefield_entry`] unchanged.
+pub(crate) fn matches_target_filter_on_projected_battlefield_entry(
+    state: &GameState,
+    event: &ProposedEvent,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if matches!(filter, TargetFilter::SelfRef) {
+        return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
+    }
+    match event {
+        // CR 614.12 + CR 614.4: every token entering in the same event is absent from the board
+        // (Clone Legion ruling: the tokens enter at the same time), the resolution's earlier
+        // batches included — the same authority the entrant's own-replacement retention reads.
+        ProposedEvent::TokenEntry { entry_ref, .. }
+            if state.liminal_entries.contains_key(entry_ref) =>
+        {
+            let co_entrants =
+                crate::game::effects::token_copy::entering_token_co_entrants(state, *entry_ref);
+            if let Some(projection) =
+                BattlefieldEntrantProjection::for_liminal_token(state, *entry_ref, &co_entrants)
+            {
+                return projection.matches(filter, ctx);
+            }
+        }
+        ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            ..
+        } => {
+            // CR 707.2 + CR 614.12: a copy batch's entrant is its complete copy body — the
+            // copied statics and mana cost included — not the flattened characteristics of
+            // the replacement-matching spec.
+            let obj = match copy.as_deref() {
+                Some(copy) => {
+                    build_battlefield_entry_copy_object(state, *owner, copy, *enter_tapped)
+                }
+                None => build_battlefield_entry_token_object(*owner, spec, *enter_tapped),
+            };
+            // CR 614.12 + CR 614.4: the resolution's earlier batches enter in the same event.
+            let co_entrants = crate::game::effects::token_copy::copy_token_co_entrants(
+                state,
+                ObjectId(u64::MAX),
+                &[],
+            );
+            if let Some(projection) = BattlefieldEntrantProjection::token_on_pre_entry_board(
+                pre_entry_board(state, &co_entrants),
+                &obj,
+            ) {
+                return projection.matches(filter, ctx);
+            }
+        }
+        _ => {}
+    }
+    matches_target_filter_on_battlefield_entry(state, event, filter, ctx)
+}
+
 pub fn matches_target_filter_on_battlefield_entry(
     state: &GameState,
     event: &ProposedEvent,
@@ -8297,6 +8363,42 @@ fn filter_inner_for_object(
 /// the filter is read for; unbound, nothing is.
 fn is_stamped_granter(obj: &GameObject, granting_object: Option<ObjectIncarnationRef>) -> bool {
     granting_object.is_some_and(|granter| ObjectIncarnationRef::from_object(obj) == granter)
+}
+
+/// CR 707.2 + CR 707.9b: the body of a copy-token batch's entrant, built by the single
+/// copy-body authority (`token::materialize_token_copy_body`), as the batch's entrants will
+/// exist before any continuous effect applies.
+fn build_battlefield_entry_copy_object(
+    state: &GameState,
+    owner: PlayerId,
+    copy: &crate::types::proposed_event::CopyTokenSpec,
+    enter_tapped: EtbTapState,
+) -> GameObject {
+    let mut obj = GameObject::new(
+        ObjectId(u64::MAX),
+        CardId(0),
+        owner,
+        copy.values.name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = owner;
+    let modifications = if copy.additional_modifications.is_empty() {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::NoExceptions
+    } else {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::Folded {
+            modifications: copy.additional_modifications.clone(),
+            all_creature_types: state.all_creature_types.clone(),
+        }
+    };
+    crate::game::effects::token::materialize_token_copy_body(
+        &mut obj,
+        copy,
+        &modifications,
+        state.turn_number,
+        0,
+        enter_tapped.resolve(copy.tapped),
+    );
+    obj
 }
 
 /// Build a synthetic `GameObject` from a `TokenSpec` for filter evaluation
