@@ -959,7 +959,7 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
     if controller.is_none() && properties.is_empty() {
         return Ok((rest, legs));
     }
-    // CR 115.1 + CR 115.9b + CR 113.8: a trailing controller phrase and/or
+    // CR 115.1 + CR 115.9b + CR 113.8 / CR 405.4: a trailing controller phrase and/or
     // "that targets …" clause restricts every leg; each leg stays a top-level
     // `Or` branch because legal-target enumeration dispatches per branch.
     let qualifier = TargetFilter::Typed(TypedFilter {
