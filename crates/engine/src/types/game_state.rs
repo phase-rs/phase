@@ -36398,20 +36398,9 @@ impl GameState {
         owner: PendingBatchDeliveries,
         boundary: ChildStackDepth,
     ) {
-        match self
-            .resolution_stack
-            .capture_child_boundary()
-            .cmp(&boundary)
-        {
-            std::cmp::Ordering::Greater => self
-                .resolution_stack
-                .insert_batch_owner_at_child_boundary(owner, boundary)
-                .expect("re-parked staged batch inserts below its delivery child stack"),
-            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => self
-                .resolution_stack
-                .park_batch_owner(owner)
-                .expect("staged batch re-parks its exact owner"),
-        }
+        self.resolution_stack
+            .park_batch_owner_below_children(owner, boundary)
+            .expect("staged batch re-parks its exact owner below its delivery children");
     }
 
     /// CR 608.2c: retire the ChangeZone marker frame that awaits

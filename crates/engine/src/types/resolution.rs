@@ -2392,24 +2392,6 @@ impl ResolutionStack {
         }
     }
 
-    /// Insert a batch owner at a captured child boundary and
-    /// flip its marker Parked.
-    pub(crate) fn insert_batch_owner_at_child_boundary(
-        &mut self,
-        owner: PendingBatchDeliveries,
-        depth: ChildStackDepth,
-    ) -> Result<(), ResolutionStackError> {
-        let group = owner.logical_zone_change_group.logical_group_id;
-        self.insert_parent_at_child_boundary(
-            ResolutionFrame::BatchDelivery(Box::new(owner)),
-            depth,
-        )?;
-        let slot = self.frames.slot_at_captured_depth(depth);
-        let candidate = slot.and_then(|slot| self.frames.below(slot));
-        self.flip_batch_marker_from(group, candidate, BatchMarkerResidency::Parked);
-        Ok(())
-    }
-
     /// Capture the stack boundary and active drain length before consulting.
     pub(crate) fn consult_drain_point(&self) -> (ChildStackDepth, Option<usize>) {
         let depth = self.frames.capture_depth();
@@ -2947,6 +2929,17 @@ impl ResolutionStack {
             .map(|_| ())
     }
 
+    /// Park a detached staged owner beneath all children raised by its run.
+    pub(crate) fn park_batch_owner_below_children(
+        &mut self,
+        pending: PendingBatchDeliveries,
+        boundary: ChildStackDepth,
+    ) -> Result<(), ResolutionStackError> {
+        let depth = self.capture_child_boundary();
+        self.park_checked_batch_owner(pending, None, (depth > boundary).then_some(boundary))
+            .map(|_| ())
+    }
+
     /// Park a batch under the whole typed child stack a member raised, or at
     /// the ordinary active/linked boundary when the stack does not own the prompt.
     pub(crate) fn park_batch_owner_for_paused_member(
@@ -2954,11 +2947,18 @@ impl ResolutionStack {
         pending: PendingBatchDeliveries,
         member_stack_start: ChildStackDepth,
     ) -> Result<RetainedBatchOwner, ResolutionStackError> {
+        let depth = self.capture_child_boundary();
         assert!(
-            self.capture_child_boundary() >= member_stack_start,
+            depth >= member_stack_start,
             "a paused batch member removed a parent before its batch was parked"
         );
-        self.park_checked_batch_owner(pending, None, Some(member_stack_start))
+        let child_boundary = (depth > member_stack_start
+            && matches!(
+                self.last().map(ResolutionFrame::gate),
+                Some(FrameGate::DirectChoice(_))
+            ))
+        .then_some(member_stack_start);
+        self.park_checked_batch_owner(pending, None, child_boundary)
     }
 
     /// Replace exactly the retained owner; failed authority never inserts.
@@ -2975,7 +2975,7 @@ impl ResolutionStack {
         &mut self,
         mut pending: PendingBatchDeliveries,
         retained: Option<&RetainedBatchOwner>,
-        member_stack_start: Option<ChildStackDepth>,
+        child_boundary: Option<ChildStackDepth>,
     ) -> Result<RetainedBatchOwner, ResolutionStackError> {
         let group = pending.logical_zone_change_group.logical_group_id;
         let boundary = match self.checked_batch_delivery_owner_slot(group, retained, Some(&pending))
@@ -3003,42 +3003,44 @@ impl ResolutionStack {
                                 .is_some_and(|link| link.parent_group_id == group)
                     )
                 });
-                let candidate = if let Some(child_slot) = linked_child {
-                    let Some(ResolutionFrame::BatchDelivery(child)) = self.frames.get(child_slot)
-                    else {
-                        unreachable!()
-                    };
-                    Self::validate_component_parent(
-                        child,
-                        &pending.logical_zone_change_group,
-                        pending.paused_current.as_ref(),
-                        pending.staged.as_ref(),
-                    )?;
+                let child_slot = match child_boundary {
+                    Some(depth) => Some(
+                        self.frames
+                            .slot_at_captured_depth(depth)
+                            .ok_or(ResolutionStackError::NoActiveChild)?,
+                    ),
+                    None => linked_child,
+                };
+                let candidate = if let Some(child_slot) = child_slot {
+                    if let Some(ResolutionFrame::BatchDelivery(child)) =
+                        self.frames.get(child_slot).filter(|frame| {
+                            matches!(frame, ResolutionFrame::BatchDelivery(child)
+                            if child.component_delivery_parent.is_some())
+                        })
+                    {
+                        Self::validate_component_parent(
+                            child,
+                            &pending.logical_zone_change_group,
+                            pending.paused_current.as_ref(),
+                            pending.staged.as_ref(),
+                        )?;
+                    }
                     let candidate = self.frames.below(child_slot);
                     self.frames.insert_below(
                         child_slot,
                         ResolutionFrame::BatchDelivery(Box::new(pending)),
                     );
                     candidate
-                } else if let Some(depth) = member_stack_start.filter(|depth| {
-                    self.capture_child_boundary() > *depth
-                        && matches!(
-                            self.last().map(ResolutionFrame::gate),
-                            Some(FrameGate::DirectChoice(_))
-                        )
-                }) {
-                    self.insert_batch_owner_at_child_boundary(pending, depth)?;
-                    return Ok(RetainedBatchOwner {
-                        group,
-                        boundary: BatchOwnerBoundary::InsertedAtChild(depth),
-                    });
                 } else {
                     let candidate = self.frames.top();
                     self.push_batch_delivery(pending);
                     candidate
                 };
                 self.flip_batch_marker_from(group, candidate, BatchMarkerResidency::Parked);
-                BatchOwnerBoundary::ActiveOrLinked
+                child_boundary.map_or(
+                    BatchOwnerBoundary::ActiveOrLinked,
+                    BatchOwnerBoundary::InsertedAtChild,
+                )
             }
             Err(error) => return Err(error),
         };
@@ -9565,6 +9567,39 @@ mod tests {
             invalid, before,
             "invalid insertion validates before any mutation"
         );
+    }
+
+    #[test]
+    fn detached_batch_parking_checks_the_component_child_before_inserting() {
+        let (mut stack, _, _) = component_batch_pair(344);
+        let mut child = stack.take_active_batch_delivery().unwrap().unwrap();
+        let owner = stack.take_active_batch_delivery().unwrap().unwrap();
+        let boundary = stack.capture_child_boundary();
+        stack.push_batch_delivery(child.clone());
+        stack.push_inner(continuation_frame(345));
+        stack
+            .park_batch_owner_below_children(owner.clone(), boundary)
+            .unwrap();
+        stack
+            .validate(&WaitingFor::Priority {
+                player: PlayerId(0),
+            })
+            .unwrap();
+
+        child
+            .component_delivery_parent
+            .as_mut()
+            .unwrap()
+            .member
+            .incarnation += 1;
+        let mut invalid = ResolutionStack::default();
+        invalid.push_batch_delivery(child);
+        invalid.push_inner(continuation_frame(345));
+        let before = invalid.clone();
+        assert!(invalid
+            .park_batch_owner_below_children(owner, boundary)
+            .is_err());
+        assert_eq!(invalid, before, "a wrong child edge cannot park an owner");
     }
 
     /// Synthetic two-member handoff: the installed pause still names A while

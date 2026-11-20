@@ -7745,6 +7745,18 @@ fn run_throne_co_entry(owner: ThroneOwner, case: ThroneCoEntry) {
         ),
         ThroneOwner::Rise => {
             cast_and_pass(&mut board.runner, board.spell, None, None, &mut events);
+            if matches!(case, ThroneCoEntry::Ordered) {
+                let state = board.runner.state();
+                assert_eq!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementDecisionOrder {
+                        player: P0,
+                        objects: vec![board.throne, board.jammer],
+                    }
+                );
+                assert_eq!(zone(state, board.throne), Zone::Graveyard);
+                assert_eq!(zone(state, board.jammer), Zone::Graveyard);
+            }
         }
     }
     assert_eq!(
