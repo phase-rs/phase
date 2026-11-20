@@ -1456,8 +1456,8 @@ mod tests {
     /// grant's chain rung refuses the finding (D7, B1) and Gemrazer, an exiled
     /// card the trigger never exiled from the library, gains no permission.
     ///
-    /// START (`78d7440488`): Gemrazer has no `PlayFromExile` (raw grant).
-    /// Mutation (r5's grant-as-E2: a grant reader skips the chain rung and the
+    /// Before this change: Gemrazer has no `PlayFromExile` (raw grant).
+    /// Mutation (a grant reader skips the chain rung and the
     /// publisher count and keeps only the stamp veto): Gemrazer gains `PlayFromExile`.
     #[test]
     fn reno_and_rude_grant_does_not_reach_a_sacrificed_tokens_component() {
@@ -1634,7 +1634,7 @@ mod tests {
     /// has two or more publishers, so no printed grant finds a non-member
     /// component; the graveyard board is staged by hand.
     ///
-    /// START (`78d7440488`): the rider carries no stamp after the grant.
+    /// Before this change: the rider carries no stamp after the grant.
     /// Mutations: revert the grant routing -> rider unstamped; restore the
     /// sweep's "members + exile" legs -> the graveyard rider keeps its stamp.
     #[test]
@@ -1684,7 +1684,7 @@ mod tests {
     /// a tracked set has an exile producer or two or more publishers, so no
     /// printed card shows a single non-exile publisher before a grant.
     ///
-    /// START (`78d7440488`): the rider carries no stamp (raw grant).
+    /// Before this change: the rider carries no stamp (raw grant).
     /// Mutation: revert the grant routing -> the same.
     #[test]
     fn r_rr_b_one_publisher_grant_finds_the_component() {

@@ -6860,12 +6860,12 @@ mod tests {
     /// Nearest printed card: Necromantic Selection ("Destroy all creatures, then
     /// return a creature card put into a graveyard this way to the battlefield
     /// under your control. It's a black Zombie in addition to its other colors
-    /// and types. Exile Necromantic Selection."). SYNTHETIC: at `78d7440488`
+    /// and types. Exile Necromantic Selection."). SYNTHETIC: for now
     /// that clause (and Starfall Invocation's, Zero Point Ballad's and Danse
     /// Macabre's) parses to `Effect::Unimplemented`, so no printed card reaches
     /// the chain-pool reader; the merge and the sacrifice are staged by hand.
     ///
-    /// START (`78d7440488`): the offer is `[host]` for both sources.
+    /// Before this change: the offer is `[host]` for both sources.
     /// Mutation: revert the `chain_tracked_set_cards` routing -> `[host]`.
     #[test]
     fn r8_chain_pool_offers_the_components_the_set_finds() {

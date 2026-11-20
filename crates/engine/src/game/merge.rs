@@ -1084,8 +1084,8 @@ fn is_census_publisher(effect: &Effect) -> bool {
 ///   resolution's chain rung ([`targeting::chain_rung_root`]). A concrete id
 ///   carried into the resolution (a delayed bound id, a cost-exile id) is
 ///   allocated before any chain id of this resolution, so it never equals the
-///   chain id and is never admitted. No reader (the validator, legal-action
-///   enumeration) is never admitted.
+///   chain id and is never admitted. A call with no reader (the validator,
+///   legal-action enumeration) is never admitted.
 /// - Cause-bound (`caused_by` set): admitted; CR 608.2c + CR 614.6 the producer
 ///   action is then checked per member by the caller (D4).
 /// - Cause-free: the reader must follow exactly one census publisher on the

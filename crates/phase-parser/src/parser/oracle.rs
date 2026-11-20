@@ -9802,7 +9802,7 @@ fn holds_unlowered_guard(value: &serde_json::Value) -> bool {
 /// the order written (CR 608.2c), folded into a `ChainPriorPublishers` by the same
 /// classifier the clause parser uses (`chain_clause_is_exile_producer`), while the chain
 /// stays on one resolution line (`stays_on_resolution_line`). A return off that line keeps
-/// the bare sentinel, START's binding. It runs once,
+/// the bare sentinel, the binding it had before this pass. It runs once,
 /// after assembly, the relocation pass, every Phase 2 pass and lowering, so wherever those
 /// stages put the return is where it is judged; no stage reports where it put it.
 ///
@@ -9979,7 +9979,7 @@ fn stays_on_resolution_line(def: &AbilityDefinition) -> bool {
 /// resolution line (`stays_on_resolution_line`), `prior` folding their instructions in
 /// the order written; it is `None` once one of them left it. A definition on the line
 /// settles against `prior`. Every other definition settles against
-/// `ChainPriorPublishers::Absent`, which keeps the sentinel: START's binding.
+/// `ChainPriorPublishers::Absent`, which keeps the bare sentinel.
 ///
 /// A same-resolution branch (a coin flip's win and lose, a vote, a die result, a pile, a
 /// "choose one", a declined reveal), a mode and an `else_ability` are walked off the

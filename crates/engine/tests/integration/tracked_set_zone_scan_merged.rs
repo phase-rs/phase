@@ -512,7 +512,7 @@ fn fortune_carried_set_does_not_find_the_merged_component() {
 /// it. The binding never reads the resolution's own chain, so the CR 730.3c
 /// finding cannot widen it.
 ///
-/// A plain creature (no merge) pins the START binding shape exactly.
+/// A plain creature (no merge) pins the unchanged binding shape exactly.
 ///
 /// Revert sensitivity: an admission that let the bound read find components
 /// would write a `TrackedSetFiltered` and skip the release, so the delayed

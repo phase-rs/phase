@@ -2333,7 +2333,7 @@ pub(crate) mod finding {
     /// the enumerator alone, and the merge, the sacrifice and the resolution
     /// carrier are staged by hand.
     ///
-    /// START (`78d7440488`): the enumerator returns `[host]` for the first three
+    /// Before this change: the enumerator returns `[host]` for the first three
     /// filters while the predicate admits both (disagreement).
     /// Mutation: revert the targeting enumerator's routing → `[host]`.
     #[test]
@@ -2403,7 +2403,7 @@ pub(crate) mod finding {
     /// (a token ceases only at a state-based-action check, CR 704.3), so the row
     /// runs the check by hand.
     ///
-    /// START (`78d7440488`): token-topped one publisher `[host]` (the component
+    /// Before this change: token-topped one publisher `[host]` (the component
     /// is missed: `co_split_components` needs the survivor object); card-topped
     /// two publishers `[host, rider]` (co-location under E3).
     /// Mutation: revert step 1 → those two values.
@@ -2513,7 +2513,7 @@ pub(crate) mod finding {
     /// cards, not "the new object that a merged permanent becomes as it leaves
     /// the battlefield". Exactly those two return; Gemrazer stays.
     ///
-    /// START (`78d7440488`): Gemrazer also returns (co-location over-find).
+    /// Before this change: Gemrazer also returns (co-location over-find).
     /// Mutation: revert steps 1a and 1c together → Gemrazer returns (1a alone leaves this row green).
     #[test]
     fn victimize_returns_only_the_chosen_cards() {
@@ -2603,7 +2603,7 @@ pub(crate) mod finding {
     /// permanent became as it left the battlefield, so Gemrazer is not found
     /// and stays in the graveyard.
     ///
-    /// START (`78d7440488`): Gemrazer also returns (co-location over-find).
+    /// Before this change: Gemrazer also returns (co-location over-find).
     /// Mutation: revert steps 1a and 1c together → Gemrazer returns.
     #[test]
     fn gruesome_menagerie_returns_only_the_chosen_card() {
@@ -2718,7 +2718,7 @@ pub(crate) mod finding {
     /// ceases to exist (CR 704.5d). CR 702.88a: cast from hand, Ephemerate is
     /// exiled as it resolves (Rebound).
     ///
-    /// Preservation control: START (`78d7440488`) gives the same result. The
+    /// Preservation control: the engine before this change gives the same result. The
     /// exile harvest makes both components members, so the per-referent bound
     /// path finds them as members (no gate).
     #[test]
