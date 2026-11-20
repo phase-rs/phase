@@ -2653,7 +2653,22 @@ fn try_parse_subject_restriction_clause(
         (before.original.trim(), after.original[1..].trim())
     };
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    build_restriction_clause(application, predicate)
+    let mut clause = build_restriction_clause(application, predicate)?;
+    // CR 611.2a: "this turn" on the cast-relative subject also bounds the
+    // resolved rule effect; it is not an indefinite grant over future turns.
+    if clause.duration.is_none() {
+        if let Ok((_, (_, Some(duration)))) = parse_spell_subject(&subject.to_lowercase()) {
+            clause.duration = Some(duration.clone());
+            if let Effect::GenericEffect {
+                duration: effect_duration,
+                ..
+            } = &mut clause.effect
+            {
+                *effect_duration = Some(duration);
+            }
+        }
+    }
+    Some(clause)
 }
 
 /// CR 702.3b: "[subject] can attack [<segment>] as though it/they didn't have defender"
@@ -3363,6 +3378,69 @@ pub(super) fn parse_subject_application(
     parse_subject_application_for(subject, ctx, AnaphorConsumer::Other)
 }
 
+/// CR 601.2i + CR 109.5: spell subjects distinguish the caster's journal
+/// from the current controller. Each optional qualifier uses the shared grammar.
+fn parse_spell_subject(input: &str) -> OracleResult<'_, (TargetFilter, Option<Duration>)> {
+    enum SpellQualifier {
+        Type(TypeFilter),
+        Property(FilterProp),
+    }
+    let (input, other) = opt(tag("other ")).parse(input)?;
+    // CR 105.1 + CR 205.2a: color and card-type adjectives qualify the spells.
+    let (input, qualifiers) = nom::multi::many0(terminated(
+        alt((
+            map(nom_primitives::parse_core_type, |core| {
+                SpellQualifier::Type(super::conditions::core_type_to_type_filter(core))
+            }),
+            map(
+                crate::types::text_grammar::parse_color_property,
+                SpellQualifier::Property,
+            ),
+        )),
+        tag(" "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("spells you ").parse(input)?;
+    let (input, cast_this_turn) = alt((
+        value(false, tag("control")),
+        value(true, tag("cast this turn")),
+    ))
+    .parse(input)?;
+    let (input, _) = eof(input)?;
+    let mut type_filters = Vec::new();
+    let mut properties = Vec::new();
+    for qualifier in qualifiers {
+        match qualifier {
+            SpellQualifier::Type(type_filter) => type_filters.push(type_filter),
+            SpellQualifier::Property(property) => properties.push(property),
+        }
+    }
+    if other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    if cast_this_turn {
+        properties.push(FilterProp::CastThisTurn {
+            caster: ControllerRef::You,
+        });
+    }
+    Ok((
+        input,
+        (
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: (!cast_this_turn).then_some(ControllerRef::You),
+                        properties,
+                    }),
+                ],
+            },
+            cast_this_turn.then_some(Duration::UntilEndOfTurn),
+        ),
+    ))
+}
+
 fn parse_subject_application_for(
     subject: &str,
     ctx: &mut ParseContext,
@@ -3391,6 +3469,17 @@ fn parse_subject_application_for(
     }
 
     let lower = subject.to_lowercase();
+
+    if let Ok((_, (filter, _))) = parse_spell_subject(&lower) {
+        return Some(SubjectApplication {
+            affected: filter,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
 
     // CR 108.3 + CR 115.1: the owner is the actor, while the printed object
     // (including its optional cardinality) is the only announced target.
@@ -8263,6 +8352,10 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             // `static_definitions` so the targeting check in `targeting.rs::can_target`
             // observes it via active_static_definitions.
             | StaticMode::CantBeTargeted { .. }
+            // CR 611.2c + CR 101.2: a resolved "can't be countered" grant is
+            // read live off the transient effect by the counter resolvers, so
+            // the TCE must carry the mode as a modification.
+            | StaticMode::CantBeCountered
     )
 }
 
