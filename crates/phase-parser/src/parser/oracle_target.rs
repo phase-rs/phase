@@ -5541,7 +5541,7 @@ fn starts_with_article_core_type_segment(text: &str) -> bool {
     false
 }
 
-fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
+pub(crate) fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
         TargetFilter::StackSpell
@@ -5550,6 +5550,27 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_has_meaningful_content)
         }
+        _ => false,
+    }
+}
+
+/// Whether a filter contains an explicit noun or property rather than only
+/// the implicit battlefield scope injected for controlled permanents.
+pub(crate) fn target_filter_has_explicit_content(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            !tf.type_filters.is_empty()
+                || tf
+                    .properties
+                    .iter()
+                    .any(|prop| !matches!(prop, FilterProp::InZone { .. }))
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_has_explicit_content)
+        }
+        TargetFilter::StackSpell
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. } => true,
         _ => false,
     }
 }

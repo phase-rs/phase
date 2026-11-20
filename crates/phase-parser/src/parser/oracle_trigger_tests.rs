@@ -2319,6 +2319,74 @@ fn parse_kookus_named_creature_condition_preserves_literal_name_and_body() {
 }
 
 #[test]
+fn parse_jadar_decayed_intervening_if_hoists_keyword_filter() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, if you control no creatures with decayed, create a 2/2 black Zombie creature token with decayed.",
+        "Jadar, Ghoulcaller of Nephalia",
+        &[],
+        &[],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("Jadar trigger");
+    let condition = trigger
+        .condition
+        .as_ref()
+        .expect("intervening-if condition");
+    match condition {
+        TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } => match filter {
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                properties,
+            }) => {
+                assert!(type_filters.contains(&TypeFilter::Creature));
+                assert!(properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Decayed
+                    }
+                )));
+                assert!(properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield
+                    }
+                )));
+            }
+            other => {
+                panic!("expected your battlefield creatures-with-decayed filter, got {other:?}")
+            }
+        },
+        other => panic!("expected zero-creatures-with-decayed condition, got {other:?}"),
+    }
+    assert!(trigger
+        .execute
+        .as_ref()
+        .and_then(|execute| execute.condition.as_ref())
+        .is_none());
+}
+
+#[test]
+fn control_none_intervening_if_declines_incomplete_or_untyped_filters() {
+    assert!(parse_control_none_intervening_if(
+        "if you control no permanents other than this enchantment and have no cards in hand, you win the game."
+    )
+    .is_err());
+    assert!(parse_control_none_intervening_if("if you control no , create a token.").is_err());
+    assert!(parse_control_none_intervening_if(
+        "if you control no creatures and unsupported, create a token."
+    )
+    .is_err());
+}
+
+#[test]
 fn glory_of_battle_trigger_gates_on_creature_recipient() {
     // CR 120.3: "Whenever ~ deals damage to a creature, put a +1/+1 counter
     // on ~" (Strax, Sontaran Nurse — Glory of Battle) must set a typed
