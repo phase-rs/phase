@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::identifiers::TrackedSetId;
-use crate::types::keywords::{Keyword, KeywordKind};
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
@@ -16660,7 +16660,9 @@ mod tests {
     fn card_with_flashback_or_disturb_uses_keyword_kind_filters() {
         let (f, rest) =
             parse_type_phrase_folding("card with flashback or disturb, put it into your graveyard");
-        assert_eq!(rest, "put it into your graveyard");
+        // Preserve the comma that terminates the keyword qualifier so callers
+        // that parse a following clause can validate its boundary.
+        assert_eq!(rest, ", put it into your graveyard");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
@@ -16748,7 +16750,9 @@ mod tests {
         let (f, rest) = parse_type_phrase_folding(
             "creature with deathtouch, hexproof, reach, or trample and reveal it",
         );
-        assert_eq!(rest, "reveal it");
+        // The final "and" is a clause delimiter, not a fifth keyword-list
+        // separator; preserve it for the caller that owns the next clause.
+        assert_eq!(rest, " and reveal it");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
