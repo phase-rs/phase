@@ -5038,8 +5038,6 @@ fn fmt_trigger_condition(
         TC::WasPlayed => "was played".into(),
         TC::AdditionalCostPaid { .. } => "additional cost was paid".into(),
         TC::SourceIsAttacking => "source is attacking".into(),
-        // CR 122.1f: defending player is poisoned.
-        TC::DefendingPlayerIsPoisoned => "defending player is poisoned".into(),
         TC::CastVariantPaid { .. } => "cast variant was paid".into(),
         TC::CastVariantPaidPersistent { .. } => "cast variant was paid (persistent)".into(),
         TC::ActivatedAbilityIsNonMana => "activated ability is not a mana ability".into(),
@@ -5334,8 +5332,6 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::DefendingPlayerControls { filter } => {
             format!("defending player controls {}", fmt_target(filter))
         }
-        // CR 122.1f: defending player is poisoned.
-        SC::DefendingPlayerIsPoisoned => "defending player is poisoned".into(),
         SC::SourceAttackingAlone => "source is attacking alone".into(),
         SC::SourceIsAttacking => "source is attacking".into(),
         SC::SourceIsBlocking => "source is blocking".into(),
@@ -10586,7 +10582,7 @@ fn extract_trigger_condition_features(
         TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
             extract_trigger_condition_features(condition, features);
         }
-// Operand-free: no `QuantityExpr` to walk.
+        // Operand-free: no `QuantityExpr` to walk.
         TriggerCondition::GainedLife { .. }
         | TriggerCondition::LostLife
         | TriggerCondition::Descended
@@ -10596,7 +10592,6 @@ fn extract_trigger_condition_features(
         | TriggerCondition::DuringPlayersTurn { .. }
         | TriggerCondition::SourceEnteredThisTurn
         | TriggerCondition::SourceAttackedThisCombat
-        | TriggerCondition::SourceIsAttacking
         | TriggerCondition::ChoseOtherRingBearer
         | TriggerCondition::ChoseRingBearer
         | TriggerCondition::EchoDue
@@ -10608,7 +10603,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::WasCast { .. }
         | TriggerCondition::WasPlayed
         | TriggerCondition::AdditionalCostPaid { .. }
-        | TriggerCondition::DefendingPlayerIsPoisoned
+        | TriggerCondition::SourceIsAttacking
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
@@ -11420,9 +11415,6 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // `combat::attacker_can_attack_target` rather than guess. The board census is
         // `filter::player_controls_matching` (CR 109.2 + CR 108.4).
         StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Handled),
-        // CR 122.1f: defending player poison status is resolved at runtime by
-        // `layers::evaluate_condition_with_context`'s `DefendingPlayerIsPoisoned` arm.
-        StaticCondition::DefendingPlayerIsPoisoned => ("DefendingPlayerIsPoisoned", Handled),
         // CR 506.5: resolved by `layers::evaluate_condition_inner` against the live
         // `combat.attackers` set. Every static-condition consumer (layers, combat's
         // `evaluate_condition_with_recipient` callers, `functioning_abilities`)
