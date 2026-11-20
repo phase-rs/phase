@@ -1163,6 +1163,11 @@ fn library_search_that_finds_nothing_still_shuffles() {
 #[test]
 fn declined_optional_search_does_not_shuffle() {
     let o = run_case_deciding(spec_named("Ashiok's Forerunner"), "L", false);
+    // Reach guard: the optional prompt was shown and declined, so the negatives below are not vacuous.
+    assert!(
+        o.prompts.iter().any(|p| p == "OptionalEffectChoice"),
+        "the optional search prompt was reached: {o:?}"
+    );
     assert_eq!(o.searched, 0, "{o:?}");
     assert_eq!(o.shuffles, 0, "{o:?}");
     assert_eq!(o.found_zone, Some(Zone::Library), "{o:?}");
