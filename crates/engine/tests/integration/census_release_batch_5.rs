@@ -248,6 +248,8 @@ fn master_of_barbs_ignores_damage_that_is_not_noncombat_damage_to_an_opponent() 
         .expect("declare attackers");
     drive_until(&mut runner, "combat damage dealt", |r| life(r, P1) < 20);
     assert_eq!(life(&runner, P1), 18, "reach-guard: the Bears hit P1 for 2");
+    // Let any trigger the combat damage caused go on the stack and resolve before looking.
+    to_end_step(&mut runner);
     assert_eq!(
         power_toughness(&runner, master),
         (2, 1),
