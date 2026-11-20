@@ -2300,6 +2300,20 @@ pub struct SpellContext {
     /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_turn_player: Option<crate::types::player::PlayerId>,
+    /// CR 608.2c: the player actions an instruction of this chain performed, carried on the
+    /// ability so a later "if you … this way" gate reads THIS chain's earlier instruction.
+    /// The per-resolution `GameState::player_actions_this_way` ledger is cleared by every
+    /// nested top-level chain (a copy-choice entry runs one between the search and the
+    /// shuffle), so a gate that must survive reads this snapshot instead. Stamped only by
+    /// `ResolvedAbility::record_performed_actions_this_way_recursive`, and only on a chain that
+    /// carries such a gate. The ledger's other readers (`PlayerFilter::PerformedActionThisWay`
+    /// in a player-scope population or a quantity) are not moved to this snapshot.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::game_state::LazyBoxedVec::is_empty"
+    )]
+    pub performed_actions_this_way:
+        crate::types::game_state::LazyBoxedVec<(PlayerId, crate::types::events::PlayerActionKind)>,
 }
 
 /// CR 608.2c + CR 608.2d: one entry of a per-object player assignment — the
@@ -6509,6 +6523,40 @@ impl ResolvedAbility {
             || self
                 .child_links()
                 .any(|(_, child)| child.has_optional_effect_performed_gate())
+    }
+
+    /// CR 608.2c: Does any node in this local ability chain carry a gate that reads the player
+    /// actions an earlier instruction performed ("if you search your library this way")?
+    /// Mirrors the traversal of [`Self::has_optional_effect_performed_gate`].
+    pub fn has_performed_action_this_way_gate(&self) -> bool {
+        self.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::reads_performed_action_this_way)
+            || self
+                .child_links()
+                .any(|(_, child)| child.has_performed_action_this_way_gate())
+    }
+
+    /// CR 608.2c: Stamp the player actions an instruction just performed across the local
+    /// ability chain, so a later "this way" gate of the chain reads them from its own context
+    /// (the per-resolution ledger is cleared by every nested top-level chain).
+    pub fn record_performed_actions_this_way_recursive(
+        &mut self,
+        actions: &[(PlayerId, crate::types::events::PlayerActionKind)],
+    ) {
+        for action in actions {
+            if !self
+                .context
+                .performed_actions_this_way
+                .iter()
+                .any(|recorded| recorded == action)
+            {
+                self.context.performed_actions_this_way.push(*action);
+            }
+        }
+        for (_, child) in self.child_links_mut() {
+            child.record_performed_actions_this_way_recursive(actions);
+        }
     }
 
     /// CR 608.2d: Stamp `context.guess_outcome` across the local ability chain.

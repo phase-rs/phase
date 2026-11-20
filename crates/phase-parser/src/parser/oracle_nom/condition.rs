@@ -13094,6 +13094,28 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
     ))
 }
 
+/// CR 701.23a + CR 701.24a + CR 608.2c: Parse "you search your library this way": the guard of
+/// "search your library for …, put it into your hand. If you search your library this way,
+/// shuffle." True only when the preceding search instruction of the same chain searched the
+/// controller's library (a `CantSearchLibrary` effect leaves a graveyard- or hand-only search
+/// without a library search). Reads the performed-action snapshot the chain carries, the same
+/// `PlayerActionKind::SearchedLibrary` that "each player who searched their library this way"
+/// reads from the per-resolution ledger.
+pub fn parse_you_search_library_this_way_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    value(
+        AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Controller,
+                action: PlayerActionKind::SearchedLibrary,
+            },
+        },
+        tag("you search your library this way"),
+    )
+    .parse(input)
+}
+
 /// CR 603.12 + CR 608.2c: the affirmative connector set. Literal "when you do"
 /// creates a reflexive triggered ability; literal "if ... do" continues the
 /// resolving effect when its preceding instruction was performed.
@@ -26935,6 +26957,34 @@ mod tests {
     /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and
     /// comparator, not a fixed "one or more" — Sarek ("three or more"), the
     /// "or fewer" mirror, and the legacy "one or more" / "at least one" forms.
+    #[test]
+    fn parse_you_search_library_this_way_condition_reads_only_the_controller_search() {
+        let (rest, condition) =
+            parse_you_search_library_this_way_condition("you search your library this way")
+                .unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            condition,
+            AbilityCondition::ScopedPlayerMatches {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Controller,
+                    action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+        for text in [
+            "you searched your library this way",
+            "an opponent searches their library this way",
+            "you search your graveyard this way",
+            "they search their library this way",
+        ] {
+            assert!(
+                parse_you_search_library_this_way_condition(text).is_err(),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn parse_you_draw_this_way_condition_reads_threshold_and_comparator() {
         let previous = QuantityExpr::Ref {

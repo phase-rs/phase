@@ -276,13 +276,12 @@ fn chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
 //
 //   * The clause is a STATE guard (CR 608.2c — no "would"), and under the amended rule
 //     only the EVENT reading gaps, so it falls through to base behaviour by design.
-//   * The guard is VACUOUS, not merely unowned: its truth condition is entailed by the
-//     effect it gates. `Effect::SearchLibrary`'s own doc says the trailing sentence "is
-//     the effect's own Shuffle sub-ability and is always reached in the multi-zone case
-//     because Library is in the set", and `swallow_check`'s escape for it says "the
-//     engine's SearchLibrary effect auto-shuffles, so the 'if' gates nothing". Gapping it
-//     would DELETE a correctly-represented instruction, and two pre-existing rows assert
-//     that `Shuffle` on this very sentence:
+//   * The guard is represented, not unowned: it lowers to `ScopedPlayerMatches`
+//     `PerformedActionThisWay { Controller, SearchedLibrary }` on the sentence's own `Shuffle`
+//     (`library_search_this_way.rs`), true only when the chain's own search looked through the
+//     library (a `CantSearchLibrary` effect leaves a graveyard-only search without it).
+//     Gapping it would DELETE a correctly-represented instruction, and two pre-existing rows
+//     assert that `Shuffle` on this very sentence:
 //     `oracle_effect::tests::hunger_tide_rises_chapter_iv_sacrifice_search_put_chain` and
 //     `oracle_effect::tests::claim_jumper_parses_repeat_once_while_opponent_lands`.
 //

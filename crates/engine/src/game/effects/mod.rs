@@ -28633,6 +28633,19 @@ fn resolve_chain_body(
         ability
     };
     record_player_actions_performed(state, &events[events_before..]);
+    // CR 608.2c + CR 701.23a: a later "if you search your library this way" gate of this chain
+    // reads the actions its own earlier instruction performed from the chain's context, not
+    // from the ledger a nested top-level chain clears.
+    let performed_actions_owned =
+        Some(performed_actions_in(&events[events_before..]).collect::<Vec<_>>())
+            .filter(|actions| !actions.is_empty())
+            .filter(|_| ability.has_performed_action_this_way_gate())
+            .map(|actions| {
+                rebound_ability(ability, |owned| {
+                    owned.record_performed_actions_this_way_recursive(&actions);
+                })
+            });
+    let ability = performed_actions_owned.as_deref().unwrap_or(ability);
 
     // CR 608.2c: Normalize the actual outcome before the printed tail is
     // evaluated. An effect that resolved as a no-op keeps `WhenYouDo` /
@@ -30736,24 +30749,37 @@ fn resolve_chain_body(
     Ok(progress)
 }
 
+/// CR 608.2c + CR 109.5: The `(player, action)` pair of every `PlayerPerformedAction` event in
+/// `new_events`, in event order. The one reader of those events for the per-resolution ledger
+/// and for the chain-carried snapshot.
+fn performed_actions_in(
+    new_events: &[GameEvent],
+) -> impl Iterator<Item = (PlayerId, PlayerActionKind)> + '_ {
+    new_events.iter().filter_map(|event| {
+        if let GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } = event
+        {
+            Some((*player_id, *action))
+        } else {
+            None
+        }
+    })
+}
+
 /// CR 608.2c + CR 109.5: Accumulate the player actions in `new_events` for
 /// `PlayerFilter::PerformedActionThisWay`. This is distinct from
 /// `last_zone_changed_ids`: "searched this way" keys off the player action even
 /// when the search finds no card.
 fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEvent]) {
-    for event in new_events {
-        if let GameEvent::PlayerPerformedAction {
-            player_id, action, ..
-        } = event
-        {
-            state.player_actions_this_way.insert((*player_id, *action));
-            // Draw completions record their turn-ledger entry at the single event
-            // emission site in `draw.rs`; overlapping nested chain windows may
-            // still see that event for the resolution-local set, but must not
-            // append it to the Vec more than once.
-            if *action != PlayerActionKind::Draw {
-                record_player_action_this_turn(state, *player_id, *action);
-            }
+    for (player_id, action) in performed_actions_in(new_events) {
+        state.player_actions_this_way.insert((player_id, action));
+        // Draw completions record their turn-ledger entry at the single event
+        // emission site in `draw.rs`; overlapping nested chain windows may
+        // still see that event for the resolution-local set, but must not
+        // append it to the Vec more than once.
+        if action != PlayerActionKind::Draw {
+            record_player_action_this_turn(state, player_id, action);
         }
     }
 }
@@ -33310,6 +33336,16 @@ fn scoped_player_matches_filter(
                     .find(|p| p.id == candidate)
                     .is_some_and(|p| p.life_gained_this_turn > 0)
         }
+        // CR 608.2c + CR 109.5 + CR 701.23a: "if you search your library this way" reads the
+        // actions the chain's earlier instruction performed, carried on the ability's context.
+        PlayerFilter::PerformedActionThisWay { relation, action } => {
+            crate::game::players::matches_relation(state, candidate, controller, *relation)
+                && ability
+                    .context
+                    .performed_actions_this_way
+                    .iter()
+                    .any(|recorded| *recorded == (candidate, *action))
+        }
         // Set-valued / event-context / aggregate variants: not used by
         // decline-tail today. Fail closed (mirrors the
         // `TriggerCondition::DuringPlayersTurn` fallthrough pattern).
@@ -33320,7 +33356,6 @@ fn scoped_player_matches_filter(
         | PlayerFilter::OpponentAttackingEnchantedPlayer
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
-        | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::OwnersOfCardsExiledBySource
         | PlayerFilter::TriggeringPlayer
         | PlayerFilter::OpponentOtherThanTriggering
@@ -70042,6 +70077,138 @@ mod tests {
                 "without a trigger event the caster anchor is undefined; {pid:?} must not match"
             );
         }
+    }
+
+    /// CR 608.2c + CR 701.23a: `PerformedActionThisWay` in a scoped-player gate reads the actions the
+    /// chain's own earlier instruction performed, carried on the ability context. The global ledger is
+    /// not enough (a nested top-level chain clears it), the wrong action or player is not a match, and the
+    /// relation to the printed controller is honoured.
+    #[test]
+    fn scoped_player_matches_performed_action_reads_the_context_snapshot() {
+        use crate::types::events::PlayerActionKind;
+        let mut state = GameState::new_two_player(42);
+        let filter = |relation, action| PlayerFilter::PerformedActionThisWay { relation, action };
+        let controller_searched = filter(
+            PlayerRelation::Controller,
+            PlayerActionKind::SearchedLibrary,
+        );
+        let mut ability = build_resolved_from_def(
+            &AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            ),
+            ObjectId(9000),
+            PlayerId(0),
+        );
+
+        // Ledger only: not a match.
+        state
+            .player_actions_this_way
+            .insert((PlayerId(0), PlayerActionKind::SearchedLibrary));
+        assert!(!scoped_player_matches_filter(
+            &state,
+            &ability,
+            PlayerId(0),
+            &controller_searched
+        ));
+
+        ability.record_performed_actions_this_way_recursive(&[(
+            PlayerId(0),
+            PlayerActionKind::SearchedLibrary,
+        )]);
+        assert!(scoped_player_matches_filter(
+            &state,
+            &ability,
+            PlayerId(0),
+            &controller_searched
+        ));
+        // The stamp is independent of the ledger.
+        state.player_actions_this_way.clear();
+        assert!(scoped_player_matches_filter(
+            &state,
+            &ability,
+            PlayerId(0),
+            &controller_searched
+        ));
+        // Another action, another player, and the Opponent relation do not match.
+        assert!(!scoped_player_matches_filter(
+            &state,
+            &ability,
+            PlayerId(0),
+            &filter(
+                PlayerRelation::Controller,
+                PlayerActionKind::ShuffledLibrary
+            )
+        ));
+        assert!(!scoped_player_matches_filter(
+            &state,
+            &ability,
+            PlayerId(1),
+            &controller_searched
+        ));
+        assert!(!scoped_player_matches_filter(
+            &state,
+            &ability,
+            PlayerId(0),
+            &filter(PlayerRelation::Opponent, PlayerActionKind::SearchedLibrary)
+        ));
+    }
+
+    /// CR 608.2c: the stamp reaches every node of the local chain (the hand-off clones the parent context,
+    /// and a parked replacement frame holds a deeper node), and a chain without the gate is not stamped.
+    #[test]
+    fn performed_action_stamp_reaches_the_gated_descendant_only_when_a_gate_exists() {
+        use crate::types::events::PlayerActionKind;
+        let gate = AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Controller,
+                action: PlayerActionKind::SearchedLibrary,
+            },
+        };
+        let shuffle = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            )
+        };
+        let mut gated_def = shuffle();
+        gated_def.condition = Some(gate.clone());
+        let mut middle_def = shuffle();
+        middle_def.sub_ability = Some(Box::new(gated_def));
+        let mut root_def = shuffle();
+        root_def.sub_ability = Some(Box::new(middle_def));
+        let mut chain = build_resolved_from_def(&root_def, ObjectId(9000), PlayerId(0));
+        assert!(chain.has_performed_action_this_way_gate());
+        // Composed gates are still seen.
+        assert!(AbilityCondition::Not {
+            condition: Box::new(gate.clone())
+        }
+        .reads_performed_action_this_way());
+        assert!(AbilityCondition::And {
+            conditions: vec![AbilityCondition::SourceIsTapped, gate]
+        }
+        .reads_performed_action_this_way());
+
+        let performed = (PlayerId(0), PlayerActionKind::SearchedLibrary);
+        chain.record_performed_actions_this_way_recursive(&[performed]);
+        chain.record_performed_actions_this_way_recursive(&[performed]);
+        let grandchild = chain
+            .sub_ability
+            .as_deref()
+            .and_then(|middle| middle.sub_ability.as_deref())
+            .expect("the gated Shuffle is two levels down");
+        assert_eq!(
+            grandchild.context.performed_actions_this_way.as_slice(),
+            &[performed],
+            "stamped once on the deepest node"
+        );
+
+        let ungated = build_resolved_from_def(&shuffle(), ObjectId(9001), PlayerId(0));
+        assert!(!ungated.has_performed_action_this_way_gate());
     }
 
     /// CR 102.2 / CR 102.3 + CR 109.5: the production

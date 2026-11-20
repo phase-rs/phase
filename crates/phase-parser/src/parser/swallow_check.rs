@@ -4924,8 +4924,8 @@ fn detect_condition_if(
     // before scanning. These are built-in rules of their parent effect, not
     // separate conditions:
     //   "If you search your library this way, shuffle." — no CR makes this
-    //   implicit; the engine's SearchLibrary effect auto-shuffles, so the
-    //   "if" gates nothing.
+    //   implicit; the guard is represented (a `ScopedPlayerMatches` gate on
+    //   the sentence's own `Shuffle`), so the sentence is not a swallowed one.
     //   CR 305.9 :  "If you don't, [it/this/this land] enters tapped." — the
     //               mana-payment alternative is encoded as a replacement
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
@@ -5251,8 +5251,8 @@ fn strip_cr_implicit_if_phrases(cleaned: &str) -> String {
         if s.is_empty() {
             continue;
         }
-        // Search-shuffle implicit: SearchLibrary auto-shuffles (engine
-        // convention, no CR).
+        // The search-shuffle guard is represented (a `ScopedPlayerMatches`
+        // gate on the sentence's own `Shuffle`), not swallowed.
         // allow-noncombinator: swallow detector phrase scan on classified text
         if s.contains("if you search your library this way") {
             continue;

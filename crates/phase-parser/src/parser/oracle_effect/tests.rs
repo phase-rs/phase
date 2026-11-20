@@ -104936,3 +104936,61 @@ fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
         otherwise.effect
     );
 }
+
+/// CR 701.23a + CR 701.24a + CR 608.2c: "If you search your library this way, shuffle." lowers its guard onto
+/// the `Shuffle` (it was dropped, so the shuffle was unconditional). Verbatim Oracle text of Ashiok's
+/// Forerunner (MTGJSON); the guard reads the controller's `SearchedLibrary` action.
+#[test]
+fn if_you_search_your_library_this_way_shuffle_is_gated() {
+    use crate::types::ability::{PlayerFilter, PlayerRelation};
+    use crate::types::event_kinds::PlayerActionKind;
+
+    let def = parse_effect_chain(
+        "You may search your library and/or graveyard for a card named Ashiok, Sculptor of Fears, reveal it, and put it into your hand. If you search your library this way, shuffle.",
+        AbilityKind::Spell,
+    );
+    let mut node = Some(&def);
+    let mut shuffle = None;
+    while let Some(link) = node {
+        if matches!(&*link.effect, Effect::Shuffle { .. }) {
+            shuffle = Some(link);
+        }
+        node = link.sub_ability.as_deref();
+    }
+    let shuffle = shuffle.expect("the chain ends in the printed shuffle");
+    assert_eq!(
+        shuffle.condition,
+        Some(AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Controller,
+                action: PlayerActionKind::SearchedLibrary,
+            },
+        })
+    );
+}
+
+/// The guard is the controller's own library search only: another reading keeps its prior parse (no gate on
+/// the shuffle), so the rung does not widen to any "... this way" text.
+#[test]
+fn search_this_way_guard_rung_does_not_widen() {
+    for text in [
+        "Search your library for a card, put it into your hand. If an opponent searches their library this way, shuffle.",
+        "Search your library for a card, put it into your hand. If you searched your library this way, shuffle.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let mut node = Some(&def);
+        while let Some(link) = node {
+            if matches!(&*link.effect, Effect::Shuffle { .. }) {
+                assert!(
+                    !matches!(
+                        link.condition,
+                        Some(AbilityCondition::ScopedPlayerMatches { .. })
+                    ),
+                    "{text}: {:?}",
+                    link.condition
+                );
+            }
+            node = link.sub_ability.as_deref();
+        }
+    }
+}
