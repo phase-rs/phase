@@ -76,6 +76,15 @@ fn drive_until(runner: &mut GameRunner, label: &str, done: impl Fn(&GameRunner) 
     panic!("{label}: never reached");
 }
 
+/// Play on to this turn's end step (CR 513): an effect that lasts "until end of turn" is still on
+/// there (it is not an until-end-of-combat effect) and is gone after the cleanup step (CR 514.2).
+fn to_end_step(runner: &mut GameRunner) {
+    drive_until(runner, "end step", |r| {
+        r.state().phase == Phase::End
+            && matches!(r.state().waiting_for, WaitingFor::Priority { .. })
+    });
+}
+
 /// Play the rest of this turn and the opponent's turn out, and stop at P0's next declare-attackers
 /// prompt: every "until end of turn" effect has expired by then (CR 514.2).
 fn to_next_turn(runner: &mut GameRunner) {
@@ -164,6 +173,12 @@ fn master_of_barbs_pumps_creatures_you_control_when_an_opponent_is_dealt_noncomb
         "a creature that enters after the trigger resolved is not pumped (CR 611.2c)"
     );
 
+    to_end_step(&mut runner);
+    assert_eq!(
+        power_toughness(&runner, master),
+        (3, 1),
+        "the +1/+0 lasts to the end step (until end of turn, not until end of combat)"
+    );
     to_next_turn(&mut runner);
     assert_eq!(
         power_toughness(&runner, master),
@@ -301,6 +316,12 @@ fn belligerent_yearling_base_power_becomes_the_entering_dinosaurs_power() {
         power_toughness(&runner, yearling),
         (6, 2),
         "base power becomes 6; toughness stays 2"
+    );
+    to_end_step(&mut runner);
+    assert_eq!(
+        power_toughness(&runner, yearling),
+        (6, 2),
+        "the base power change lasts to the end step"
     );
     to_next_turn(&mut runner);
     assert_eq!(
@@ -459,6 +480,12 @@ fn scion_of_the_ur_dragon_becomes_a_copy_of_the_dragon_it_put_into_the_graveyard
         "the copy carries Shivan Dragon's {{R}}: +1/+0 and it works"
     );
 
+    to_end_step(&mut runner);
+    assert_eq!(
+        runner.state().objects[&scion].name,
+        "Shivan Dragon",
+        "the copy lasts to the end step"
+    );
     to_next_turn(&mut runner);
     let back = &runner.state().objects[&scion];
     assert_eq!(
