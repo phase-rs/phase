@@ -12601,7 +12601,17 @@ impl WhereXSlot {
             WhereXSlot::Amount => x,
             WhereXSlot::PtAdjustment => match x {
                 QuantityExpr::ClampMin { minimum, .. } if minimum >= 0 => x,
-                x => QuantityExpr::ClampMin {
+                QuantityExpr::ClampMin { .. }
+                | QuantityExpr::Ref { .. }
+                | QuantityExpr::Fixed { .. }
+                | QuantityExpr::DivideRounded { .. }
+                | QuantityExpr::Offset { .. }
+                | QuantityExpr::Multiply { .. }
+                | QuantityExpr::Sum { .. }
+                | QuantityExpr::UpTo { .. }
+                | QuantityExpr::Power { .. }
+                | QuantityExpr::Difference { .. }
+                | QuantityExpr::Max { .. } => QuantityExpr::ClampMin {
                     inner: Box::new(x),
                     minimum: 0,
                 },
