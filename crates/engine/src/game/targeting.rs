@@ -3913,7 +3913,7 @@ fn stack_entry_matches_filter_with_context(
 ) -> bool {
     match &entry.kind {
         StackEntryKind::Spell { .. } => {
-            stack_spell_entry_matches_filter(state, entry, filter, source_id, target_ctx)
+            stack_spell_entry_matches_filter(state, entry, filter, target_ctx)
         }
         StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
@@ -4137,7 +4137,7 @@ fn add_stack_spells(
         if entry.id == source_id {
             continue;
         }
-        if !stack_spell_entry_matches_filter(state, entry, filter, source_id, target_ctx) {
+        if !stack_spell_entry_matches_filter(state, entry, filter, target_ctx) {
             continue;
         }
 
@@ -4257,7 +4257,6 @@ fn stack_spell_entry_matches_filter(
     state: &GameState,
     entry: &StackEntry,
     filter: &TargetFilter,
-    source_id: ObjectId,
     target_ctx: &super::filter::FilterContext,
 ) -> bool {
     if !matches!(entry.kind, StackEntryKind::Spell { .. }) {
@@ -4265,9 +4264,6 @@ fn stack_spell_entry_matches_filter(
     }
 
     let single_target = super::filter::single_target_count(filter);
-    let targets_only_constraint = super::filter::extract_targets_only(filter);
-    let targets_constraint = super::filter::extract_targets(filter);
-    let source_controller_opt = state.objects.get(&source_id).map(|o| o.controller);
     let targets = entry
         .ability()
         .map(super::ability_utils::declared_targets_in_chain)
@@ -4278,44 +4274,17 @@ fn stack_spell_entry_matches_filter(
         return false;
     }
 
-    let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
-    // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
-    if let Some(ref constraint) = targets_only_constraint {
-        if targets.is_empty()
-            || !targets.iter().all(|t| match t {
-                TargetRef::Object(id) => {
-                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
-                    state,
-                    constraint,
-                    *pid,
-                    source_controller_opt,
-                    Some(source_id),
-                ),
-            })
-        {
-            return false;
-        }
+    // CR 115.9b / CR 115.9c: "that targets [only] [X]", with "you" read from
+    // `target_ctx` — the looking ability's controller (CR 109.5).
+    if super::filter::extract_targets_only(filter).is_some_and(|constraint| {
+        !super::filter::entry_targets_satisfy(state, entry, target_ctx, &constraint, true)
+    }) {
+        return false;
     }
-    // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
-    if let Some(ref constraint) = targets_constraint {
-        if targets.is_empty()
-            || !targets.iter().any(|t| match t {
-                TargetRef::Object(id) => {
-                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
-                    state,
-                    constraint,
-                    *pid,
-                    source_controller_opt,
-                    Some(source_id),
-                ),
-            })
-        {
-            return false;
-        }
+    if super::filter::extract_targets(filter).is_some_and(|constraint| {
+        !super::filter::entry_targets_satisfy(state, entry, target_ctx, &constraint, false)
+    }) {
+        return false;
     }
 
     stack_spell_matches_filter(state, entry.id, filter, target_ctx)
