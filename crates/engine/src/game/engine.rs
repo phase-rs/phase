@@ -8402,6 +8402,7 @@ pub(crate) fn replay_bounded_offer(
 }
 
 /// CR 732.2a: what the sign check answers of a period that makes progress for its proposer.
+#[derive(Debug)]
 pub(crate) enum PeriodSign {
     /// It may repeat without bound: its delta and any certified departure.
     Unbounded(
@@ -31359,5 +31360,69 @@ At the beginning of combat on your turn, you may choose two. Each mode must targ
             remembered.state().waiting_for
         );
         assert_eq!(remembered.state().loop_decision_tally.optional, 1);
+    }
+}
+
+#[cfg(test)]
+mod period_sign_check_tests {
+    use super::*;
+    use crate::game::game_object::GameObject;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    fn inert_token(state: &mut GameState, id: u64, controller: u8, name: &str) -> ObjectId {
+        let oid = ObjectId(id);
+        let object = GameObject::new(
+            oid,
+            CardId(id),
+            PlayerId(controller),
+            name.into(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(oid, object);
+        state.battlefield.push_back(oid);
+        oid
+    }
+
+    /// CR 111.1 + CR 704.5g + CR 732.2a (issue #10192): A token minted during a loop period is
+    /// growth, not a spent driving resource. When it enters with damage on it (e.g. Marauding Raptor
+    /// dealing 2 damage to entering Polyraptor tokens), the period offer sign check must exclude
+    /// the newly minted token's entry damage so the loop reads as unbounded rather than spend.
+    #[test]
+    fn newly_minted_token_entry_damage_does_not_demote_period_to_spend() {
+        let mut s_n1 = GameState::new_two_player(7);
+        // Engine (Marauding Raptor) and initial dinosaur (Polyraptor) on P0's battlefield
+        inert_token(&mut s_n1, 100, 0, "Marauding Raptor");
+        inert_token(&mut s_n1, 101, 0, "Polyraptor");
+        // Initial Polyraptor was dealt 2 damage when it entered
+        s_n1.objects.get_mut(&ObjectId(101)).unwrap().damage_marked = 2;
+
+        let mut s_n2 = s_n1.clone();
+        // During the period, a new token copy enters and takes 2 entry damage
+        inert_token(&mut s_n2, 102, 0, "Polyraptor Token");
+        s_n2.objects.get_mut(&ObjectId(102)).unwrap().damage_marked = 2;
+
+        // The newly minted token's entry damage must not be counted as increased damage
+        // marked on the persisting population. The loop makes progress (minted token) and
+        // has no loss axis, so it must return PeriodSign::Unbounded.
+        let sign = period_sign_check(&s_n1, &s_n2, PlayerId(0));
+        assert!(
+            matches!(sign, Ok(PeriodSign::Unbounded(_))),
+            "expected Unbounded, got {sign:?}"
+        );
+
+        // Control: if damage marked increases on a PERSISTING permanent (e.g. the Raptor
+        // accumulates damage each cycle), it is a spent driving resource and returns PeriodSign::Spend.
+        let mut s_n2_damaged_persisting = s_n2.clone();
+        s_n2_damaged_persisting
+            .objects
+            .get_mut(&ObjectId(100))
+            .unwrap()
+            .damage_marked = 2;
+        let control_sign = period_sign_check(&s_n1, &s_n2_damaged_persisting, PlayerId(0));
+        assert!(
+            matches!(control_sign, Ok(PeriodSign::Spend)),
+            "expected Spend when persisting permanent takes damage, got {control_sign:?}"
+        );
     }
 }
