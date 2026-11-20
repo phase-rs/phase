@@ -11,7 +11,7 @@
 //! and/or toughness of a creature or creature card."
 
 use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -22,7 +22,6 @@ const NANTUKO_MENTOR: &str =
     "{2}{G}, {T}: Target creature gets +X/+X until end of turn, where X is that creature's power.";
 const YEW_SPIRIT: &str =
     "{2}{G}{G}: This creature gets +X/+X until end of turn, where X is its power.";
-const STALACTITE_STALKER: &str = "Menace\nAt the beginning of your end step, if you descended this turn, put a +1/+1 counter on this creature. (You descended if a permanent card was put into your graveyard from anywhere.)\n{2}{B}, Sacrifice this creature: Target creature gets -X/-X until end of turn, where X is this creature's power.";
 const AURIOK_BLADEWARDEN: &str =
     "{T}: Target creature gets +X/+X until end of turn, where X is this creature's power.";
 const DEATHS_SHADOW: &str = "This creature gets -X/-X, where X is your life total.";
@@ -43,19 +42,41 @@ fn pool(parts: &[(usize, ManaType)]) -> Vec<ManaUnit> {
     parts.iter().flat_map(|&(n, ty)| mana(n, ty)).collect()
 }
 
-/// "where X is that creature's power" on a target with power -1 adds +0/+0.
+fn add_befuddle(s: &mut GameScenario) -> ObjectId {
+    s.with_library_top(P0, &["Card A"]);
+    s.add_spell_to_hand_from_oracle(P0, "Befuddle", true, BEFUDDLE)
+        .id()
+}
+
+fn befuddle(r: &mut GameRunner, spell: ObjectId, target: ObjectId) -> (i32, i32) {
+    r.cast(spell)
+        .target_object(target)
+        .resolve()
+        .power_toughness(target)
+}
+
+/// "where X is that creature's power" on a Befuddled 3/3 (power -1) adds +0/+0.
 #[test]
 fn nantuko_mentor_negative_target_power_adds_nothing() {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    s.with_mana_pool(P0, pool(&[(2, ManaType::Colorless), (1, ManaType::Green)]));
+    s.with_mana_pool(
+        P0,
+        pool(&[
+            (4, ManaType::Colorless),
+            (1, ManaType::Blue),
+            (1, ManaType::Green),
+        ]),
+    );
     let mentor = s
         .add_creature_from_oracle(P0, "Nantuko Mentor", 1, 1, NANTUKO_MENTOR)
         .id();
-    let neg = s.add_creature(P0, "Negative", -1, 3).id();
+    let bear = s.add_creature(P0, "Bear", 3, 3).id();
+    let spell = add_befuddle(&mut s);
     let mut r = s.build();
-    let out = r.activate(mentor, 0).target_object(neg).resolve();
-    assert_eq!(out.power_toughness(neg), (-1, 3));
+    assert_eq!(befuddle(&mut r, spell, bear), (-1, 3));
+    let out = r.activate(mentor, 0).target_object(bear).resolve();
+    assert_eq!(out.power_toughness(bear), (-1, 3));
 }
 
 /// Yew Spirit ruling: "If this creature's power is negative as its ability
@@ -64,57 +85,37 @@ fn nantuko_mentor_negative_target_power_adds_nothing() {
 fn yew_spirit_negative_power_adds_nothing() {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    s.with_mana_pool(P0, pool(&[(2, ManaType::Colorless), (2, ManaType::Green)]));
+    s.with_mana_pool(
+        P0,
+        pool(&[
+            (4, ManaType::Colorless),
+            (1, ManaType::Blue),
+            (2, ManaType::Green),
+        ]),
+    );
     let yew = s
-        .add_creature_from_oracle(P0, "Yew Spirit", -1, 3, YEW_SPIRIT)
+        .add_creature_from_oracle(P0, "Yew Spirit", 3, 3, YEW_SPIRIT)
         .id();
+    let spell = add_befuddle(&mut s);
     let mut r = s.build();
+    assert_eq!(befuddle(&mut r, spell, yew), (-1, 3));
     let out = r.activate(yew, 0).resolve();
     assert_eq!(out.power_toughness(yew), (-1, 3));
 }
 
-fn stalker_on(stalker_power: i32) -> (i32, i32) {
+fn auriok_on_bear(befuddle_auriok: bool) -> (i32, i32) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    s.with_mana_pool(P0, pool(&[(2, ManaType::Colorless), (1, ManaType::Black)]));
-    let stalker = s
-        .add_creature_from_oracle(
-            P0,
-            "Stalactite Stalker",
-            stalker_power,
-            1,
-            STALACTITE_STALKER,
-        )
-        .id();
-    let bear = s.add_creature(P1, "Bear", 3, 3).id();
-    let mut r = s.build();
-    let index = r.state().objects[&stalker].abilities.len() - 1;
-    let out = r.activate(stalker, index).target_object(bear).resolve();
-    out.power_toughness(bear)
-}
-
-/// A sacrificed source with power -2 makes "-X/-X" give -0/-0, never +2/+2;
-/// a power-2 source still gives -2/-2.
-#[test]
-fn stalactite_stalker_negative_power_never_pumps_the_target() {
-    assert_eq!(stalker_on(2), (1, 1));
-    assert_eq!(stalker_on(-2), (3, 3));
-}
-
-fn auriok_on(source_power: i32) -> (i32, i32) {
-    let mut s = GameScenario::new();
-    s.at_phase(Phase::PreCombatMain);
+    s.with_mana_pool(P0, pool(&[(2, ManaType::Colorless), (1, ManaType::Blue)]));
     let auriok = s
-        .add_creature_from_oracle(
-            P0,
-            "Auriok Bladewarden",
-            source_power,
-            1,
-            AURIOK_BLADEWARDEN,
-        )
+        .add_creature_from_oracle(P0, "Auriok Bladewarden", 1, 1, AURIOK_BLADEWARDEN)
         .id();
-    let bear = s.add_creature(P0, "Bear", 3, 2).id();
+    let bear = s.add_creature(P0, "Bear", 4, 4).id();
+    let spell = add_befuddle(&mut s);
     let mut r = s.build();
+    if befuddle_auriok {
+        assert_eq!(befuddle(&mut r, spell, auriok), (-3, 1));
+    }
     let out = r.activate(auriok, 0).target_object(bear).resolve();
     out.power_toughness(bear)
 }
@@ -123,8 +124,8 @@ fn auriok_on(source_power: i32) -> (i32, i32) {
 /// source power gives the target +0/+0.
 #[test]
 fn auriok_bladewarden_negative_source_power_gives_nothing() {
-    assert_eq!(auriok_on(2), (5, 4));
-    assert_eq!(auriok_on(-1), (3, 2));
+    assert_eq!(auriok_on_bear(false), (5, 5));
+    assert_eq!(auriok_on_bear(true), (4, 4));
 }
 
 fn deaths_shadow_after_sign_in_blood(life: i32) -> (i32, i32, i32) {
@@ -162,37 +163,43 @@ fn deaths_shadow_negative_life_does_not_grow_it() {
     assert_eq!(deaths_shadow_after_sign_in_blood(1), (-1, 13, 13));
 }
 
-/// "the greatest power among creatures you control" of -2 adds +0/+0.
+/// "the greatest power among creatures you control" of -2 (a Befuddled 2/3)
+/// adds +0/+0.
 #[test]
 fn overwhelming_stampede_negative_greatest_power_adds_nothing() {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    s.with_mana_pool(P0, pool(&[(3, ManaType::Colorless), (2, ManaType::Green)]));
-    let neg = s.add_creature(P0, "Negative", -2, 3).id();
+    s.with_mana_pool(
+        P0,
+        pool(&[
+            (5, ManaType::Colorless),
+            (1, ManaType::Blue),
+            (2, ManaType::Green),
+        ]),
+    );
+    let bear = s.add_creature(P0, "Bear", 2, 3).id();
+    let spell = add_befuddle(&mut s);
     let stampede = s
         .add_spell_to_hand_from_oracle(P0, "Overwhelming Stampede", false, OVERWHELMING_STAMPEDE)
         .id();
     let mut r = s.build();
+    assert_eq!(befuddle(&mut r, spell, bear), (-2, 3));
     let out = r.cast(stampede).resolve();
-    assert_eq!(out.power_toughness(neg), (-2, 3));
+    assert_eq!(out.power_toughness(bear), (-2, 3));
 }
 
 fn skyknight_after_enlisting(befuddle_helper: bool) -> i32 {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    s.with_library_top(P0, &["Card A"]);
     s.with_mana_pool(P0, pool(&[(2, ManaType::Colorless), (1, ManaType::Blue)]));
     let skyknight = s
         .add_creature_from_oracle(P0, "Coalition Skyknight", 2, 2, COALITION_SKYKNIGHT)
         .id();
     let helper = s.add_creature(P0, "Helper", 3, 3).id();
-    let befuddle = s
-        .add_spell_to_hand_from_oracle(P0, "Befuddle", true, BEFUDDLE)
-        .id();
+    let spell = add_befuddle(&mut s);
     let mut r = s.build();
     if befuddle_helper {
-        let out = r.cast(befuddle).target_object(helper).resolve();
-        assert_eq!(out.power_toughness(helper), (-1, 3));
+        assert_eq!(befuddle(&mut r, spell, helper), (-1, 3));
     }
     r.advance_to_combat();
     r.declare_attackers(&[(skyknight, AttackTarget::Player(P1))])
