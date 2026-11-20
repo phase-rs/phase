@@ -273,7 +273,7 @@ describe("owner printing carrier surfaces (group 1)", () => {
     await act(async () => env.admit());
     await expectImage(surface.container, URL_A);
     const settings = render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
-    const checkbox = screen.getByRole("checkbox", { name: "Show cards as their owners chose" });
+    const checkbox = screen.getByRole("checkbox", { name: "Show chosen and varied card art" });
     fireEvent.click(checkbox);
     await expectImage(surface.container, URL_V);
     fireEvent.click(checkbox);
@@ -525,7 +525,7 @@ describe("owner printing carrier surfaces (group 1)", () => {
         cardSize={{ width: 120, height: 168 }} />);
       await expectImage(surface.container, URL_A);
       const settings = render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
-      const checkbox = screen.getByRole("checkbox", { name: "Show cards as their owners chose" });
+      const checkbox = screen.getByRole("checkbox", { name: "Show chosen and varied card art" });
       fireEvent.click(checkbox);
       await expectImage(surface.container, URL_V);
       fireEvent.click(checkbox);

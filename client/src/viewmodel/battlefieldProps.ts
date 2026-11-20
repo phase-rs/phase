@@ -8,7 +8,7 @@ import type {
 } from "../adapter/types";
 import { isMeldedPermanent, publicName, toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
-import { cardImageLookup, ownerPrintedRefOf } from "../services/cardImageLookup";
+import { cardImageLookup, ownerPrintedRefOf, printingComparison } from "../services/cardImageLookup";
 
 function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolean {
   // Ring-bearers (CR 701.54) must never be hidden behind a same-named
@@ -56,7 +56,7 @@ function groupKey(
   const lookup = cardImageLookup(obj);
   const p = lookup.ownerPrinting;
   const ref = ownerPrintedRefOf(lookup);
-  const ownerArtKey = p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null;
+  const ownerArtKey = printingComparison(p, ref);
   return JSON.stringify([legacyKey, ownerArtKey]);
 }
 
