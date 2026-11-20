@@ -45,7 +45,7 @@ use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
-    parse_chosen_qualifier_subject, parse_continuous_modifications,
+    parse_chosen_qualifier_subject, parse_continuous_gets_has, parse_continuous_modifications,
     parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
     parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
@@ -6290,6 +6290,72 @@ fn build_continuous_clause(
         return None;
     }
 
+    // CR 613.4c: a targeted continuous grant may combine a leading keyword
+    // clause with a dynamic P/T clause ("gains indestructible and gets +1/+0
+    // for each ..."). The generic modification extractor intentionally keeps
+    // the fixed P/T shape, so let the static parser's shared dynamic-pump
+    // authority replace only those fixed axes while preserving the keyword
+    // modifications and the existing GenericEffect runtime path.
+    let affected = static_affected_for_application(&application);
+    let already_dynamic = modifications.iter().any(|modification| {
+        matches!(
+            modification,
+            ContinuousModification::AddDynamicPower { .. }
+                | ContinuousModification::AddDynamicToughness { .. }
+        )
+    });
+    if !already_dynamic {
+        if let Some(dynamic_def) =
+            parse_continuous_gets_has(predicate_text, affected.clone(), predicate_text)
+        {
+            let dynamic_modifications: Vec<_> = dynamic_def
+                .modifications
+                .into_iter()
+                .filter(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddDynamicPower { .. }
+                            | ContinuousModification::AddDynamicToughness { .. }
+                    )
+                })
+                .collect();
+            if !dynamic_modifications.is_empty() {
+                let mut combined = modifications;
+                combined.retain(|modification| {
+                    !matches!(
+                        modification,
+                        ContinuousModification::AddPower { .. }
+                            | ContinuousModification::AddToughness { .. }
+                    )
+                });
+                combined.extend(dynamic_modifications);
+                return Some(ParsedEffectClause {
+                    history: Vec::new(),
+                    head_text: None,
+                    optional_targeting: false,
+                    unlowered_guard: None,
+                    effect: Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(affected)
+                            .modifications(combined)
+                            .description(predicate_text.to_string())],
+                        duration: duration.clone(),
+                        target: application.target,
+                        end_cost: None,
+                    },
+                    duration,
+                    sub_ability: None,
+                    distribute: None,
+                    multi_target: None,
+                    condition: None,
+                    optional: false,
+                    unless_pay: None,
+                    entry_onset: ContinuousEffectOnset::WhenFollowed,
+                });
+            }
+        }
+    }
+
     // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
     // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
     // has a time counter) until its last time counter is removed (CR 702.62b). CR
@@ -6398,7 +6464,6 @@ fn build_continuous_clause(
         });
     }
 
-    let affected = static_affected_for_application(&application);
     let static_abilities =
         if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
             let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));

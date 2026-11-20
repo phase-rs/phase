@@ -24,6 +24,95 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
+/// CR 202.3 + CR 608.2h + CR 701.14: Algorithmic Ferocity's static pump must
+/// retain the hand-card mana-value predicate while the same resolved effect
+/// keeps its indestructible grant and Fight clause.
+#[test]
+fn algorithmic_ferocity_static_parse_keeps_dynamic_cmc_pump_and_fight() {
+    use crate::parser::oracle::parse_oracle_text;
+    let parsed = parse_oracle_text(
+        "Until end of turn, target creature you control gains indestructible and gets +1/+0 for each card in your hand with mana value 4 or greater. Then it fights target creature an opponent controls.",
+        "Algorithmic Ferocity",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.parse_warnings.iter().all(|warning| {
+        warning.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")
+    }));
+
+    let ability = &parsed.abilities[0];
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = ability.effect.as_ref()
+    else {
+        panic!("expected the static grant to lower through GenericEffect");
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    let [static_ability] = static_abilities.as_slice() else {
+        panic!("expected one static grant, got {static_abilities:?}");
+    };
+    assert!(
+        !static_ability
+            .modifications
+            .iter()
+            .any(|modification| matches!(
+                modification,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+        "the +1/+0 must not remain fixed: {:?}",
+        static_ability.modifications
+    );
+    assert!(static_ability
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }));
+    let dynamic_power = static_ability
+        .modifications
+        .iter()
+        .find_map(|modification| match modification {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .expect("expected dynamic power");
+    assert_eq!(
+        dynamic_power,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Hand,
+                card_types: Vec::new(),
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(TypedFilter::default().properties(
+                    vec![FilterProp::Cmc {
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }]
+                ),)),
+            },
+        }
+    );
+
+    let Some(fight_ability) = ability.sub_ability.as_deref() else {
+        panic!("expected the chained Fight effect");
+    };
+    assert!(matches!(
+        fight_ability.effect.as_ref(),
+        Effect::Fight {
+            subject: TargetFilter::ParentTarget,
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            }),
+        } if type_filters == &vec![TypeFilter::Creature] && properties.is_empty()
+    ));
+}
+
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
 /// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies

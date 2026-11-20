@@ -8575,61 +8575,10 @@ pub(crate) fn parse_mana_value_suffix(
         }
     }
 
-    // Static "N or less" / "N or greater" — also accepts literal X via
-    // `parse_quantity_expr_number`, which emits `QuantityRef::Variable { "X" }`
-    // resolved at effect time against the resolving ability's `chosen_x`.
-    // CR 107.3a + CR 601.2b: X announced at cast, read at resolution.
-    //
-    // CR 202.3: "mana value 4, 5, or 6" / "mana value 4 or 5" — an exact-value
-    // disjunction, one EQ comparison per listed value. Tried before the single
-    // number so the list is read whole; it stops before any clause comma.
-    if let Ok((after, values)) = nom_quantity::parse_number_disjunction(rest) {
-        let props = values
-            .into_iter()
-            .map(|value| FilterProp::Cmc {
-                comparator: Comparator::EQ,
-                value,
-            })
-            .collect();
-        return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-    }
-    let (after_num_raw, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-    let after_num = after_num_raw.trim_start();
-
-    let (prop, after) =
-        if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::GE,
-                    value,
-                },
-                a,
-            )
-        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::LE,
-                    value,
-                },
-                a,
-            )
-        } else {
-            // An "or" tail that neither the comparator arms above nor the
-            // exact-value list read ("mana value 4 or blue") is not an exact
-            // reading: decline the whole suffix rather than keep EQ N and strand
-            // the "or" clause.
-            not(tag::<_, _, OracleError<'_>>("or "))
-                .parse(after_num)
-                .ok()?;
-            // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::EQ,
-                    value,
-                },
-                after_num,
-            )
-        };
+    // CR 202.3: Literal/X thresholds and exact-value disjunctions are shared
+    // with zone-card counts; contextual and superlative branches above remain
+    // target-parser-specific.
+    let (after, prop) = nom_filter::parse_mana_value_comparison_tail(rest).ok()?;
     // CR 107.3a + CR 202.3: rebind a bare `X` mana-value gate from a trailing
     // ", where X is <quantity>" clause (As Foretold). No-op for every other caller.
     let (prop, after) = rebind_bare_x_mana_value(prop, after);

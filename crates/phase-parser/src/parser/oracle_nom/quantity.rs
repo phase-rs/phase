@@ -18,6 +18,7 @@ use nom::Parser;
 use super::context::ParseContext;
 use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
+use super::filter as nom_filter;
 use super::primitives::{
     parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
     parse_number, parse_or_closed_list, scan_at_word_boundaries, scan_preceded,
@@ -3387,13 +3388,70 @@ fn type_filters_are_juxtaposed_subtype_and_core(type_filters: &[TypeFilter]) -> 
 /// named card zone. The default is intentionally reject-by-default so a future
 /// property cannot widen this parser without an explicit admissibility decision.
 fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
-    matches!(
+    if matches!(
         property,
         FilterProp::Historic
             | FilterProp::NotHistoric
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
-    )
+            | FilterProp::Cmc {
+                value: QuantityExpr::Fixed { .. },
+                ..
+            }
+    ) {
+        return true;
+    }
+    match property {
+        FilterProp::AnyOf { props } => {
+            !props.is_empty() && props.iter().all(is_admissible_zone_card_count_property)
+        }
+        _ => false,
+    }
+}
+
+/// CR 202.3: A zone-card count's numeric mana-value qualifier is valid only
+/// for literal thresholds. X and contextual quantities belong to target
+/// filters, not this hand/graveyard/library census class.
+fn parse_zone_card_count_mana_value_suffix(input: &str) -> OracleResult<'_, Option<FilterProp>> {
+    let (rest, head) = opt(alt((
+        tag(" with mana value "),
+        tag(" with converted mana cost "),
+    )))
+    .parse(input)?;
+    let Some(_) = head else {
+        return Ok((rest, None));
+    };
+    let (rest, property) = nom_filter::parse_mana_value_comparison_tail(rest)?;
+    if is_admissible_zone_card_count_property(&property) {
+        Ok((rest, Some(property)))
+    } else {
+        Err(oracle_err(input))
+    }
+}
+
+fn add_zone_card_count_property(
+    filter: Option<TargetFilter>,
+    property: FilterProp,
+) -> TargetFilter {
+    match filter {
+        None => TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
+        Some(TargetFilter::Typed(mut typed)) => {
+            typed.properties.push(property);
+            TargetFilter::Typed(typed)
+        }
+        Some(TargetFilter::Or { filters }) => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_zone_card_count_property(Some(filter), property.clone()))
+                .collect(),
+        },
+        Some(filter) => TargetFilter::And {
+            filters: vec![
+                filter,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
+            ],
+        },
+    }
 }
 
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -3410,12 +3468,17 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         {
             let (rest, _) = tag(" in ").parse(after_cards)?;
             let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+            let (rest, mana_value_filter) = parse_zone_card_count_mana_value_suffix(rest)?;
+            let base_filter = filter;
+            let filter = mana_value_filter
+                .map(|property| add_zone_card_count_property(Some(base_filter.clone()), property))
+                .or(Some(base_filter));
             return Ok((
                 rest,
                 QuantityRef::ZoneCardCount {
                     zone,
                     card_types: Vec::new(),
-                    filter: Some(filter),
+                    filter,
                     scope,
                 },
             ));
@@ -3479,6 +3542,11 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         )
     } else {
         (card_types, None)
+    };
+    let (rest, mana_value_filter) = parse_zone_card_count_mana_value_suffix(rest)?;
+    let filter = match mana_value_filter {
+        Some(property) => Some(add_zone_card_count_property(filter, property)),
+        None => filter,
     };
     Ok((
         rest,
@@ -12824,6 +12892,86 @@ mod tests {
             }
         );
         assert_eq!(rest, " and");
+    }
+
+    /// CR 202.3 + CR 608.2h: a hand census keeps its dynamic count while
+    /// carrying the literal mana-value predicate on the counted cards.
+    #[test]
+    fn parse_zone_card_count_mana_value_filter() {
+        let (rest, q) =
+            parse_quantity_ref("cards in your hand with mana value 4 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Hand,
+                card_types: vec![],
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(TypedFilter::default().properties(
+                    vec![FilterProp::Cmc {
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }]
+                ),)),
+            }
+        );
+
+        let (rest, q) =
+            parse_quantity_ref("creature cards in your graveyard with mana value 4, 5, or 6")
+                .unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::ZoneCardCount { filter, .. } = q else {
+            panic!("typed zone count must remain a ZoneCardCount");
+        };
+        assert_eq!(
+            filter,
+            Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 5 },
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 6 },
+                        },
+                    ],
+                }]
+            ),))
+        );
+
+        assert!(
+            parse_quantity_ref("cards in your hand with mana value 4 or blue").is_err(),
+            "a present but malformed mana-value head must not fall back to an unfiltered count"
+        );
+    }
+
+    #[test]
+    fn parse_zone_card_count_keeps_unfiltered_and_object_boundaries() {
+        let (rest, unfiltered) = parse_quantity_ref("cards in your hand").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            unfiltered,
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Hand,
+                card_types: vec![],
+                scope: CountScope::Controller,
+                filter: None,
+            }
+        );
+
+        let (rest, object_count) =
+            parse_type_count_on_battlefield("creatures on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(object_count, QuantityRef::ObjectCount { .. }),
+            "a battlefield object phrase must not be captured as a zone-card count: {object_count:?}"
+        );
     }
 
     /// CR 404.1 + CR 102.2: the whole phrase reading of an opponents'-graveyard
