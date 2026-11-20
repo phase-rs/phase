@@ -7436,9 +7436,12 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             subject_slot,
             subject,
         } => {
+            // CR 603.2: the shared scope mapper (exhaustive over `ObjectScope`) decides whether the
+            // subject is an event object; no scope is classified here by a one-variant test.
+            let event_bound = read_object_scope(subject, StateKind::ObjectPt).reads_event_live;
             let mut p = if *use_lki {
                 frozen_source_read()
-            } else if matches!(subject, ObjectScope::EventSource)
+            } else if event_bound
                 && crate::types::ability::filter_contains_filter_prop(
                     filter,
                     &crate::game::filter::filter_prop_reads_only_mana_cost,
@@ -7448,8 +7451,9 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
                 })
             {
                 // CR 603.2 + CR 608.2h + CR 202.3: an event-bound predicate whose only properties
-                // compare mana value reads the event object, recorded below as `reads_event_live`,
-                // exactly as `TriggerCondition::TriggeringSpellMatchesFilter` does; the same-event
+                // read the mana cost (mana value, parity, printed cost) reads the event object,
+                // recorded below as `reads_event_live`, exactly as
+                // `TriggerCondition::TriggeringSpellMatchesFilter` does; the same-event
                 // event-object discriminator orders it against a sibling that writes that object.
                 // A board P/T read would make a sibling's write to its OWN counters look like a
                 // feed (Prismari Apprentice and Herald of Ilharg observing one cast). Residual,
@@ -7471,8 +7475,8 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             {
                 p.merge(reads_board_of(StateKind::ObjectCounters));
             }
-            // CR 603.2: `EventSource` reads the object the trigger event names.
-            if matches!(subject, ObjectScope::EventSource) {
+            // CR 603.2: an event-object subject reads the object the trigger event names.
+            if event_bound {
                 p.merge(reads_event_live());
             }
             // CR 608.2c (PR-6.75 c5): Some(n) tests a specific DECLARED chain slot
