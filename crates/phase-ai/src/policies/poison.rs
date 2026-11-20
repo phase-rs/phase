@@ -439,8 +439,15 @@ pub(crate) fn previewed_poison(
     recipient: PlayerId,
     count: u32,
 ) -> Option<u32> {
-    match preview_player_counter_addition(state, actor, recipient, PlayerCounterKind::Poison, count)
-    {
+    // CR 614.16: the sole caller projects a Ward cost payment — fail closed.
+    match preview_player_counter_addition(
+        state,
+        actor,
+        recipient,
+        PlayerCounterKind::Poison,
+        count,
+        engine::types::proposed_event::CounterCause::Other,
+    ) {
         PlayerCounterAdditionPreview::Applied { count }
         | PlayerCounterAdditionPreview::Transformed { count } => Some(count),
         PlayerCounterAdditionPreview::Prevented => Some(0),

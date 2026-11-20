@@ -8189,7 +8189,7 @@ fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
         } => {
             // The amount must lower to "1 + the number of spells cast from any
             // non-hand cast-capable zone this turn", i.e. an `Offset` wrapping
-            // a `SpellsCastThisTurn` ref whose filter excludes the hand — NOT a
+            // a `SpellsCast` ref whose filter excludes the hand — NOT a
             // verbatim-English `Variable` that resolves to 0 at runtime. A
             // mere "not bare Variable(\"X\")" check would pass for the garbage
             // `Variable { name: "1 plus the number of spells…" }` shape.
@@ -8198,10 +8198,15 @@ fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
             };
             assert_eq!(*offset, 1, "where-X \"1 plus …\" must offset by 1");
             let QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } = inner.as_ref()
             else {
-                panic!("Offset inner must be a SpellsCastThisTurn ref, got: {inner:?}");
+                panic!("Offset inner must be a SpellsCast ref, got: {inner:?}");
             };
             assert_eq!(
                 *scope,
@@ -11644,6 +11649,74 @@ fn effect_token_for_each_this_way_produces_graveyard_destination_card_count() {
         }
         other => panic!("expected Token, got {other:?}"),
     }
+}
+
+/// CR 608.2c: "<N> … tokens for each X" creates N per X (Fertile Imagination);
+/// an "a … token" head stays the bare for-each count (Waste Management).
+#[test]
+fn effect_token_for_each_keeps_fixed_count_multiplier() {
+    let token_count = |text: &str| match parse_effect(text) {
+        Effect::Token { count, .. } => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    assert_eq!(
+        token_count(
+            "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way."
+        ),
+        QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::IsChosenCardType])
+                    )),
+                    caused_by: None,
+                    destination: None,
+                }
+            }),
+        }
+    );
+    assert_eq!(
+        token_count(
+            "Create a 2/2 black Rogue creature token for each creature card exiled this way."
+        ),
+        QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                caused_by: Some(ThisWayCause::Exiled),
+                destination: None,
+            }
+        }
+    );
+}
+
+/// CR 608.2c: the token parser's own "for each" rider multiplies a numeric
+/// count head rather than replacing it.
+#[test]
+fn token_rider_count_keeps_fixed_count_multiplier() {
+    let rider_count = |text: &str| match try_parse_token(
+        &text.to_lowercase(),
+        text,
+        &mut ParseContext::default(),
+    ) {
+        Some(Effect::Token { count, .. }) => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    let fertile = rider_count(
+        "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way.",
+    );
+    assert!(
+        matches!(fertile, QuantityExpr::Multiply { factor: 2, .. }),
+        "{fertile:?}"
+    );
+    assert_eq!(
+        rider_count("create a Treasure token for each opponent dealt damage"),
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            }
+        }
+    );
 }
 
 #[test]
@@ -22323,6 +22396,107 @@ fn compound_tap_and_put_counter_lowercase_trigger_context() {
         "sub should stay ParentTarget through effect-chain parsing, got {:?}",
         sub.effect
     );
+}
+
+/// CR 608.2c: in a targeted compound's anaphoric continuation, a bare "it"
+/// names the object the primary instruction announced (CR 115.1d), not the
+/// trigger subject or the ability's source. Grappling Kraken (landfall, a typed
+/// land subject), Fear of Sleep Paralysis (eerie, an `Or{SelfRef, Typed}`
+/// subject) and Mjölnir, Storm Hammer ("equipped creature", `AttachedTo`) all
+/// print this clause under a typed trigger subject. Reverting the typed-referent
+/// continuation pin in `try_split_targeted_compound` makes the sub `SelfRef`.
+#[test]
+fn compound_tap_and_put_counter_binds_parent_target_under_typed_trigger_subject() {
+    for subject in [
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+        TargetFilter::AttachedTo,
+    ] {
+        let clause = parse_effect_clause(
+            "tap target creature an opponent controls and put a stun counter on it",
+            &mut ParseContext {
+                subject: Some(subject.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "primary should tap the announced typed target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Stun,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "stun counter should go on the tapped target under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
+}
+
+/// Synthetic boundary probe: no printed card has this targeted compound under
+/// a typed trigger subject. The nearest printed card is Defiant Vanguard:
+/// "When this creature blocks, at end of combat, destroy it and all creatures
+/// it blocked this turn." This probe checks preservation of the existing
+/// fail-closed boundary.
+///
+/// CR 509.1g + CR 608.2i: the typed-referent continuation pin never reaches a
+/// block-history clause. "it" in "all creatures it blocked this turn" names this
+/// same instruction's target, not an earlier instruction's, so the clause
+/// declines and the continuation fails closed under a typed trigger subject
+/// exactly as it does without one (where the post-parse anaphor rewrite, not
+/// the pin, handles the continuation). Reverting the history-clause guard on
+/// the pin in `try_split_targeted_compound` binds the clause instead and the
+/// typed-subject row's sub becomes a `DestroyAll`.
+#[test]
+fn compound_typed_referent_pin_does_not_bind_block_history_clause() {
+    for subject in [
+        None,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )),
+    ] {
+        let clause = parse_effect_clause(
+            "destroy target creature and all creatures it blocked this turn",
+            &mut ParseContext {
+                subject: subject.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reach guard: the primary destroys the announced target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "the history continuation must fail closed under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
 }
 
 #[test]
@@ -34901,8 +35075,9 @@ fn each_opponent_loses_life_equal_to_life_they_lost_uses_scoped_player() {
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::ScopedPlayer,
+                window: TurnWindow::ThisTurn,
             },
         },
         "per-opponent 'they lost' must rebind to ScopedPlayer, got {amount:?}",
@@ -34925,8 +35100,9 @@ fn each_opponent_loses_life_equal_to_life_that_player_lost_uses_scoped_player() 
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::ScopedPlayer,
+                window: TurnWindow::ThisTurn,
             },
         },
         "per-opponent 'that player lost' must rebind to ScopedPlayer, got {amount:?}",
@@ -34960,8 +35136,9 @@ fn target_opponent_loses_life_equal_to_life_that_player_lost_uses_target() {
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window: TurnWindow::ThisTurn,
             },
         },
         "targeted 'that player lost' must stay Target-scoped, got {amount:?}",
@@ -36813,8 +36990,9 @@ fn seek_with_opponent_cast_mana_value_condition_keeps_filter_clean() {
         def.condition,
         Some(AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Opponents,
+                    window: TurnWindow::ThisTurn,
                     ..
                 }
             },
@@ -41038,6 +41216,87 @@ fn resolve_it_pronoun_any_subject() {
     assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
+/// CR 608.2c + CR 706.2: `condition_compares_only_event_amount` holds for a
+/// comparison of the triggering event's amount with a constant, on either side,
+/// and for nothing else: another quantity, a wrapped event amount, a constant
+/// against a constant, and every non-comparison condition (including a negated
+/// or conjoined event-amount check) name no event amount alone.
+#[test]
+fn condition_compares_only_event_amount_names_a_bare_event_amount_comparison() {
+    let amount = || QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    let fixed = |value| QuantityExpr::Fixed { value };
+    let check = |lhs, rhs| AbilityCondition::QuantityCheck {
+        lhs,
+        comparator: Comparator::GE,
+        rhs,
+    };
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        fixed(4)
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        fixed(4),
+        amount()
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        amount()
+    )));
+
+    assert!(!condition_compares_only_event_amount(&check(
+        fixed(1),
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        amount(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
+        }
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Offset {
+            inner: Box::new(amount()),
+            offset: 1,
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::Not {
+            condition: Box::new(check(amount(), fixed(4))),
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::And {
+            conditions: vec![check(amount(), fixed(4))],
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: fixed(3),
+            channel: crate::types::ability::DamageChannel::Total,
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }
+    ));
+}
+
 /// Issue #6507 (CR 122.1): `condition_refs_source_object` must
 /// recognize a source-scoped counter-threshold `QuantityCheck` ("if there are
 /// no mining counters on this land") as source-referential — that gate is what
@@ -43102,13 +43361,15 @@ fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
             cast.condition.as_ref(),
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: crate::types::ability::CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
+                ..
             })
         ),
         "cast condition got {:?}",
@@ -54346,10 +54607,202 @@ fn maelstrom_pulse_destroys_only_same_named_permanents() {
         typed.properties
     );
     assert!(
-        typed.properties.contains(&FilterProp::Another),
-        "DestroyAll must exclude the targeted permanent itself, got {:?}",
+        typed
+            .properties
+            .contains(&FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }),
+        "DestroyAll must exclude the targeted permanent itself via DistinctFrom(ParentTarget), got {:?}",
         typed.properties
     );
+}
+
+/// CR 201.2 + CR 201.2a: Detention Sphere's "target nonland permanent not
+/// named Detention Sphere" keeps the name restriction on the target. The
+/// compound clause represents the "all other permanents with the same name as
+/// that permanent" mass exile as a sub-ability in the same AST chain (issue #10125).
+#[test]
+fn detention_sphere_keeps_not_named_target_and_same_name_mass_exile() {
+    let parsed = crate::parser::parse_oracle_text(
+        "When this enchantment enters, you may exile target nonland permanent not named Detention Sphere and all other permanents with the same name as that permanent.\nWhen this enchantment leaves the battlefield, return the exiled cards to the battlefield under their owner's control.",
+        "Detention Sphere",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let root = parsed.triggers[0].execute.as_deref().expect("ETB execute");
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(target),
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected targeted exile, got {:?}", root.effect);
+    };
+    assert_eq!(
+        target.type_filters,
+        vec![
+            TypeFilter::Permanent,
+            TypeFilter::Non(Box::new(TypeFilter::Land))
+        ]
+    );
+    assert_eq!(
+        target.properties,
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "detention sphere".to_string(),
+            }),
+        }],
+        "the target must exclude permanents named Detention Sphere"
+    );
+    let sub = root.sub_ability.as_ref().expect("same-name mass exile");
+    let Effect::ChangeZoneAll {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(mass),
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected ChangeZoneAll(Exile), got {:?}", sub.effect);
+    };
+    assert_eq!(mass.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(
+        mass.controller, None,
+        "\"all other permanents\" spans every controller"
+    );
+    assert!(
+        mass.properties.contains(&FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        }),
+        "mass exile must exclude the parent target, got {:?}",
+        mass.properties
+    );
+    assert!(mass
+        .properties
+        .contains(&FilterProp::SameNameAsParentTarget));
+}
+
+/// CR 608.2c: The Motherlode, Excavator's reflexive trigger targets only
+/// "target nonbasic land defending player controls". A rejected target-list
+/// extension does not widen the destroy target to include creatures (issue #10125).
+#[test]
+fn the_motherlode_excavator_destroy_target_excludes_creatures() {
+    use crate::types::card_type::Supertype;
+    let parsed = crate::parser::parse_oracle_text(
+        "Whenever The Motherlode attacks, you may pay {E}{E}{E}{E}. When you do, destroy target nonbasic land defending player controls, and creatures that player controls without flying can't block this turn.",
+        "The Motherlode, Excavator",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let mut found_destroy = false;
+    for trig in &parsed.triggers {
+        let mut cur = trig.execute.as_deref();
+        while let Some(node) = cur {
+            if let Effect::Destroy { target, .. } = &*node.effect {
+                let TargetFilter::Typed(typed) = target else {
+                    panic!("expected Typed filter for destroy target, got {target:?}");
+                };
+                assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
+                assert_eq!(typed.controller, Some(ControllerRef::DefendingPlayer));
+                assert_eq!(
+                    typed.properties,
+                    vec![FilterProp::NotSupertype {
+                        value: Supertype::Basic,
+                    }],
+                    "destroy target must be only nonbasic land defending player controls, got {typed:?}"
+                );
+                found_destroy = true;
+            }
+            cur = node.sub_ability.as_deref();
+        }
+    }
+    assert!(found_destroy, "reflexive destroy ability must be present");
+}
+
+/// CR 201.2 + CR 115.1: a "target <type> not named <name>" suffix lowers to
+/// `Not(Named)` on the target filter, ending the name at the shared clause
+/// boundary and leaving trailing text ("from a graveyard") to the caller.
+#[test]
+fn target_not_named_suffix_restricts_target_filter() {
+    for (name, types, text, expected_name, expected_origin) in [
+        (
+            "Clever Conjurer",
+            "Creature",
+            "Mage Hand — {T}: Untap target permanent not named Clever Conjurer. Activate only as a sorcery.",
+            "clever conjurer",
+            None,
+        ),
+        (
+            "Dutiful Replicator",
+            "Artifact",
+            "When this creature enters, you may pay {1}. When you do, create a token that's a copy of target token you control not named Dutiful Replicator.",
+            "dutiful replicator",
+            None,
+        ),
+        (
+            "Staff of Eden, Vault's Key",
+            "Artifact",
+            "When Staff of Eden enters, put target legendary permanent card not named Staff of Eden, Vault's Key from a graveyard onto the battlefield under your control.",
+            "staff of eden, vault's key",
+            Some(Zone::Graveyard),
+        ),
+    ] {
+        let parsed =
+            crate::parser::parse_oracle_text(text, name, &[], &[types.to_string()], &[]);
+        let root = parsed
+            .abilities
+            .first()
+            .or_else(|| parsed.triggers.first().and_then(|t| t.execute.as_deref()))
+            .unwrap_or_else(|| panic!("{name}: no ability"));
+        let (targeted, origin) = std::iter::successors(Some(root), |def| def.sub_ability.as_deref())
+            .find_map(|def| match &*def.effect {
+                Effect::SetTapState { target, .. } | Effect::CopyTokenOf { target, .. } => {
+                    Some((target.clone(), None))
+                }
+                Effect::ChangeZone { target, origin, .. } => Some((target.clone(), *origin)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: no targeted effect"));
+        let TargetFilter::Typed(typed) = targeted else {
+            panic!("{name}: expected Typed target, got {targeted:?}");
+        };
+        assert!(
+            typed.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::Named {
+                    name: expected_name.to_string(),
+                }),
+            }),
+            "{name}: target must exclude its name, got {:?}",
+            typed.properties
+        );
+        assert_eq!(origin, expected_origin, "{name}: origin zone");
+    }
+}
+
+/// CR 201.2 + CR 115.1: a coordinated "creature or planeswalker not named X"
+/// restricts every alternative, not just the last one.
+#[test]
+fn target_not_named_suffix_distributes_over_coordinated_types() {
+    let mut ctx = ParseContext::default();
+    let (filter, rest) = crate::parser::oracle_target::parse_target_with_ctx(
+        "target creature or planeswalker not named Foo",
+        &mut ctx,
+    );
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for f in &filters {
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected Typed branch, got {f:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "foo".to_string(),
+            }),
+        }));
+    }
+    assert!(rest.trim().is_empty(), "suffix consumed, got {rest:?}");
 }
 
 /// CR 608.2c + CR 201.2a: "<verb> target <object> an opponent
@@ -55926,8 +56379,9 @@ fn assert_life_lost_villainous_chooser(chooser: &PlayerFilter, expected_relation
             assert_eq!(*comparator, Comparator::GE);
             assert!(matches!(
                 attr.as_ref(),
-                QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::ScopedPlayer
+                QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window: TurnWindow::ThisTurn,
                 }
             ));
             assert_eq!(value.as_ref(), &QuantityExpr::Fixed { value: 3 });
@@ -59804,8 +60258,9 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
         def.condition,
         Some(AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Opponents,
+                    window: TurnWindow::ThisTurn,
                     ..
                 }
             },
@@ -59824,16 +60279,26 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
             cant_counter.effect
         );
     };
+    // CR 611.2c + CR 109.5: the rule effect covers spells on the stack that
+    // the caster of Veil controls, read live at counter time.
     assert!(static_abilities
         .iter()
         .any(|sd| sd.mode == StaticMode::CantBeCountered
-            && matches!(
-                sd.affected,
-                Some(TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::You),
-                    ..
-                }))
-            )));
+            && sd.affected
+                == Some(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        }),
+                    ],
+                })
+            && sd.modifications
+                == vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeCountered,
+                }]));
 
     let hexproof = cant_counter
         .sub_ability
@@ -72272,6 +72737,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -72611,6 +73077,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -97353,8 +97820,9 @@ fn life_count_slot_cells() {
             "LoseLife",
             "amount",
             &QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
+                qty: QuantityRef::LifeLost {
                     player: PlayerScope::Target,
+                    window: TurnWindow::ThisTurn,
                 },
             },
         ),
@@ -101161,6 +101629,70 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
     }
 }
 
+/// CR 608.2c: building block for the generic "if you can't" strict-fail
+/// class. A compound clause's nested "and" remainder resolves as its own
+/// nodes, so `def_chain_is_zone_ledger_invisible` certifies a chain only when
+/// every nested node's effect is ledger-invisible and no node carries a cost,
+/// an "unless" payment, an else branch or modes. Hand-built chains reach the
+/// walk whatever shape the chunker gives a printed line.
+#[test]
+fn def_chain_is_zone_ledger_invisible_walks_the_nested_compound_chain() {
+    let tap = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        )
+    };
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Stun,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    );
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+
+    assert!(
+        def_chain_is_zone_ledger_invisible(&tap().sub_ability(put_counter.clone())),
+        "tap → put a counter: every node's success is ledger-invisible"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().sub_ability(sacrifice)),
+        "tap → sacrifice: the nested sacrifice writes the ledger"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().cost(AbilityCost::Tap)),
+        "a node with a cost is not certified"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().unless_pay(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            payer: TargetFilter::Controller,
+        })),
+        "a node with an \"unless\" payment is not certified"
+    );
+    let mut with_else = tap();
+    with_else.else_ability = Some(Box::new(put_counter));
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&with_else),
+        "a node with an else branch is not certified"
+    );
+}
+
 #[test]
 fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
     // Verbatim Oracle text (Scryfall). CR 608.2c: three instructions of one
@@ -104073,6 +104605,164 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
     );
 }
 
+// SHAPE: synthetic qualifier combinations exercise the grammar class represented
+// by Domri, Anarch of Bolas, Determined, and Veil of Summer.
+#[test]
+fn counter_prohibition_spell_subject_grammar() {
+    let rows: [(&str, Vec<TypeFilter>, Vec<FilterProp>); 5] = [
+        ("", vec![], vec![]),
+        ("Creature ", vec![TypeFilter::Creature], vec![]),
+        (
+            "Green ",
+            vec![],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        (
+            "Green creature ",
+            vec![TypeFilter::Creature],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        ("Artifact ", vec![TypeFilter::Artifact], vec![]),
+    ];
+    for (qualifier, type_filters, qualifier_props) in rows {
+        for other in ["", "Other "] {
+            for cast in [false, true] {
+                let relative = if cast { "cast this turn" } else { "control" };
+                let suffix = if cast { "" } else { " this turn" };
+                let text =
+                    format!("{other}{qualifier}spells you {relative} can't be countered{suffix}.");
+                let def = parse_effect_chain(&text, AbilityKind::Spell);
+                assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+                let Effect::GenericEffect {
+                    static_abilities,
+                    duration,
+                    target,
+                    ..
+                } = &*def.effect
+                else {
+                    panic!("{text}: expected a rule effect, got {def:#?}");
+                };
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn), "{text}");
+                assert!(
+                    target.is_none(),
+                    "broadcast subjects do not declare a target"
+                );
+                // CR 109.5 + CR 601.2i: "you control" reads the current
+                // controller; "you cast this turn" reads the cast journal.
+                let mut properties = qualifier_props.clone();
+                if !other.is_empty() {
+                    properties.push(FilterProp::Another);
+                }
+                if cast {
+                    properties.push(FilterProp::CastThisTurn {
+                        caster: ControllerRef::You,
+                    });
+                }
+                let expected = TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: type_filters.clone(),
+                            controller: (!cast).then_some(ControllerRef::You),
+                            properties,
+                        }),
+                    ],
+                };
+                assert_eq!(static_abilities.len(), 1, "{text}");
+                assert_eq!(
+                    static_abilities[0].affected.as_ref(),
+                    Some(&expected),
+                    "{text}"
+                );
+                assert_eq!(
+                    static_abilities[0].modifications,
+                    vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeCountered
+                    }],
+                    "{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn counter_prohibition_rejects_unrepresented_restrictions() {
+    // The positive sibling proves this reached the spell-subject grammar.
+    assert!(!ability_chain_has_unimplemented(&parse_effect_chain(
+        "Creature spells you cast this turn can't be countered.",
+        AbilityKind::Spell,
+    )));
+    for text in [
+        "Creature spells you cast this turn yesterday can't be countered.",
+        "Spells you control can't be countered by blue or black spells this turn.",
+        "Spells you control can't be countered by blue or black spells this turn, and creatures you control can't be the targets of blue or black spells this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+    }
+}
+
+#[test]
+fn domri_full_oracle_plus_one_has_mana_and_counter_prohibition() {
+    let parsed = parse_oracle_text(
+        "Creatures you control get +1/+0.\n[+1]: Add {R} or {G}. Creature spells you cast this turn can't be countered.\n[−2]: Target creature you control fights target creature you don't control.",
+        "Domri, Anarch of Bolas", &[], &["Planeswalker".to_string()], &["Domri".to_string()],
+    );
+    let plus = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::Mana { .. }))
+        .expect("Domri's +1 starts with mana");
+    assert!(!ability_chain_has_unimplemented(plus), "{plus:#?}");
+    assert!(collect_chain_effects(plus)
+        .iter()
+        .any(|effect| matches!(effect, Effect::GenericEffect { .. })));
+}
+
+/// CR 500: the player-scope rebind of "the life they lost" (`Target` -> `ScopedPlayer`) rebuilds
+/// the quantity, and the rebuilt value must carry the window across; a literal `ThisTurn` would
+/// silently reset a last-turn payload to this turn. The this-turn row is the paired control that
+/// the rebind itself ran.
+#[test]
+fn player_scope_rebind_of_life_lost_preserves_the_window() {
+    for window in [TurnWindow::ThisTurn, TurnWindow::LastTurn] {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLost {
+                        player: PlayerScope::Target,
+                        window,
+                    },
+                },
+                target: None,
+            },
+        );
+        def.player_scope = Some(PlayerFilter::Opponent);
+
+        apply_player_scope_rewrites(&mut def);
+
+        let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
+            panic!("expected life loss");
+        };
+        assert_eq!(
+            amount,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window,
+                },
+            },
+            "{window:?}"
+        );
+    }
+}
+
 /// CR 608.2c + CR 614.1a: each printed mass-damage face of "[noun] dealt damage
 /// this way would die this turn, exile it instead" lowers to a head `DamageAll`
 /// whose sub-ability carries the die-exile replacement bound to the set the
@@ -104451,4 +105141,128 @@ fn arcane_artisan_exile_from_hand_keeps_scoped_owner() {
     assert!(legs[0].properties.contains(&FilterProp::Owned {
         controller: ControllerRef::ScopedPlayer
     }));
+}
+
+/// CR 608.2c: "Otherwise, create one of those tokens" (Brood Birthing) names the
+/// tokens of the instruction it replaces; the else branch clones that token
+/// with count 1 through the shared "of those tokens" anaphor authority.
+#[test]
+fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
+    let parsed = parse_oracle_text(
+        "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, create one of those tokens.",
+        "Brood Birthing",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let otherwise = parsed.abilities[0]
+        .else_ability
+        .as_deref()
+        .expect("reach guard: the Otherwise branch parsed");
+    assert!(
+        matches!(&*otherwise.effect, Effect::Token { name, power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(1), count: QuantityExpr::Fixed { value: 1 }, .. }
+            if name == "Eldrazi Spawn"),
+        "{:?}",
+        otherwise.effect
+    );
+}
+
+/// CR 603.2b + CR 608.2c + CR 611.2a + CR 702.1d: the shared-predicate
+/// condition and the "same is true" continuation must remain typed all the way
+/// through the real card parser. The class census was generated with:
+/// `jq -c '[.data | to_entries[] | .value[] | select((.text // "") | ascii_downcase |
+/// test("(gains|gain) [^\\n.]* until end of turn if [^\\n.]*\\. the same is true for")) |
+/// {name:.name,text:.text}] | sort_by(.name)' data/mtgjson/AtomicCards.json`
+/// against MTGJSON 5.3.0+20261118; the normalized output SHA-256 is
+/// `5369ed6bbd8d9efc01435743bb7a94268060fd547cbf6feff8734e974a4bdf6d6`.
+#[test]
+fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, Sproutwatch Dryad gains flying until end of turn if a creature you control or a card in your hand has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Sproutwatch Dryad",
+        &[],
+        &["Creature".to_string()],
+        &["Dryad".to_string()],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("begin-combat trigger must have an effect");
+    assert_eq!(parsed.triggers[0].phase, Some(Phase::BeginCombat));
+
+    let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected GenericEffect, got {:?}", execute.effect);
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(static_abilities.len(), 12);
+
+    let expected_keywords = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Haste,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Lifelink,
+        Keyword::Menace,
+        Keyword::Reach,
+        Keyword::Trample,
+        Keyword::Vigilance,
+    ];
+    for (static_ability, expected_keyword) in static_abilities.iter().zip(expected_keywords.iter())
+    {
+        assert_eq!(
+            static_ability.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: expected_keyword.clone(),
+            }]
+        );
+        assert_eq!(
+            static_ability.condition.as_ref(),
+            Some(&StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::card()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone { zone: Zone::Hand },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                    ],
+                }),
+            })
+        );
+        assert!(static_ability
+            .description
+            .as_deref()
+            .is_none_or(|description| !description.contains(" if ")));
+    }
 }

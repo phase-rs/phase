@@ -2,7 +2,7 @@
 //! you've cast this turn**" counts DISTINCT CARD TYPES over the per-turn cast
 //! journal (CR 205.2a over CR 601.2a), not the number of spells cast.
 //!
-//! Pre-fix this bound `QuantityRef::SpellsCastThisTurn`, a raw count of cast
+//! Pre-fix this bound `QuantityRef::SpellsCast`, a raw count of cast
 //! records, because `parse_spell_history_clause`'s terminal fallback claimed
 //! any clause containing a cast verb phrase and silently discarded the
 //! unconsumed "card type among" aggregation head.
@@ -84,7 +84,7 @@ fn april_oneil_binds_card_types_over_the_cast_journal() {
 ///
 /// Cast THREE spells spanning TWO card types, then advance to the end step and
 /// let April O'Neil's own triggered ability resolve. The 3-casts / 2-types split
-/// is the discriminator: the pre-fix `SpellsCastThisTurn` reading draws 3.
+/// is the discriminator: the pre-fix `SpellsCast` reading draws 3.
 ///
 /// The direct `resolve_quantity` probe is kept as a second, sharper assertion —
 /// it pins the quantity in isolation — but it is NOT the primary check. On its

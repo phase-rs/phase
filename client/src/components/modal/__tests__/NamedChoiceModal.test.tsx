@@ -6,6 +6,8 @@ import { useGameStore } from "../../../stores/gameStore.ts";
 import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
 import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { NamedChoiceModal, SecretAgendaModal } from "../NamedChoiceModal.tsx";
+import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
+import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
 
 const dispatchMock = vi.fn();
 
@@ -31,9 +33,94 @@ type NamedChoiceData = Extract<WaitingFor, { type: "NamedChoice" }>["data"];
 afterEach(() => {
   cleanup();
   dispatchMock.mockReset();
+  useGameStore.setState({ gameState: null });
 });
 
 describe("NamedChoiceModal", () => {
+  describe("creature type suggestions", () => {
+    const options = ["Bear", "Dragon", "Druid", "Elf", "Faerie", "Goblin", "Human", "Merfolk", "Rogue", "Scout", "Shapeshifter", "Warrior", "Wizard"];
+    const data: NamedChoiceData = {
+      player: 0,
+      choice_type: { CreatureType: { options: [] } },
+      options,
+    };
+
+    function setup(suggestions?: string[]) {
+      setGameStoreForTest({
+        gameState: buildGameState({ derived: { named_choice_suggestions: suggestions } }),
+      });
+      render(<NamedChoiceModal data={data} />);
+    }
+
+    function labels() {
+      return screen.getAllByRole("button")
+        .map((button) => button.textContent)
+        .filter((label) => label !== "Confirm");
+    }
+
+    it("shows engine suggestion order, searches every legal type, and restores on clearing or whitespace", () => {
+      setup(["Elf", "Druid"]);
+      expect(labels()).toEqual(["Elf", "Druid"]);
+      const input = screen.getByRole("textbox");
+      fireEvent.change(input, { target: { value: "DRAG" } });
+      expect(labels()).toEqual(["Dragon"]);
+      fireEvent.click(screen.getByRole("button", { name: "Dragon" }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+      expect(dispatchMock).toHaveBeenCalledExactlyOnceWith({
+        type: "ChooseOption", data: { choice: "Dragon" },
+      });
+      fireEvent.change(input, { target: { value: "" } });
+      expect(labels()).toEqual(["Elf", "Druid"]);
+      fireEvent.change(input, { target: { value: "   " } });
+      expect(labels()).toEqual(["Elf", "Druid"]);
+    });
+
+    it("keeps the full-domain search input mounted after no matches", () => {
+      setup(["Elf"]);
+      const input = screen.getByRole("textbox");
+      fireEvent.change(input, { target: { value: "no such type" } });
+      expect(labels()).toEqual([]);
+      expect(screen.getByRole("textbox")).toBe(input);
+      fireEvent.change(input, { target: { value: "wizard" } });
+      expect(labels()).toEqual(["Wizard"]);
+    });
+
+    it.each([undefined, []])("falls back to the complete domain for suggestions %s", (suggestions) => {
+      setup(suggestions);
+      expect(labels()).toEqual(options);
+      expect(screen.getByRole("textbox")).toBeInTheDocument();
+    });
+
+    it("uses the full option count for the filter threshold", () => {
+      setup(["Elf"]);
+      expect(screen.getByRole("textbox")).toBeInTheDocument();
+      cleanup();
+      const short = options.slice(0, 12);
+      render(<NamedChoiceModal data={{ ...data, options: short }} />);
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+      // Without a search box every legal option stays on screen.
+      expect(labels()).toEqual(short);
+      const unsuggested = short.find((option) => option !== "Elf")!;
+      fireEvent.click(screen.getByRole("button", { name: unsuggested }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+      expect(dispatchMock).toHaveBeenCalledWith({
+        type: "ChooseOption",
+        data: { choice: unsuggested },
+      });
+    });
+
+    it("preserves the engine's explicit Oracle option order", () => {
+      setGameStoreForTest({ gameState: buildGameState({ derived: {} }) });
+      render(<NamedChoiceModal data={{
+        player: 0,
+        choice_type: { CreatureType: { options: ["Human", "Merfolk", "Goblin"] } },
+        options: ["Human", "Merfolk", "Goblin"],
+      }} />);
+      expect(labels()).toEqual(["Human", "Merfolk", "Goblin"]);
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    });
+  });
+
   it("renders engine-provided restricted color options", () => {
     const data: NamedChoiceData = {
       player: 0,

@@ -2124,6 +2124,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
         trigger_events: Vec::new(),
         trigger_match_count: None,
         return_result_occurrence: None,
+        replacement_action: None,
     });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
@@ -2179,6 +2180,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
         trigger_events: Vec::new(),
         trigger_match_count: None,
         return_result_occurrence: None,
+        replacement_action: None,
     });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
@@ -3026,6 +3028,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
@@ -3107,6 +3110,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 
     let result = apply_as_current(
@@ -3163,6 +3167,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });
@@ -4269,7 +4274,12 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
                 )
             })
             .expect("move_to_zone must emit a ZoneChanged for the entry");
-        state.deferred_entry_events.push(entry_event);
+        state
+            .deferred_entry_events
+            .push(crate::types::game_state::ParkedEntry::pending(
+                entry_event,
+                None,
+            ));
     }
     state.waiting_for = WaitingFor::CopyTargetChoice {
         player: PlayerId(0),
@@ -4451,7 +4461,12 @@ fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
                 )
             })
             .expect("move_to_zone must emit a ZoneChanged for the entry");
-        state.deferred_entry_events.push(entry_event);
+        state
+            .deferred_entry_events
+            .push(crate::types::game_state::ParkedEntry::pending(
+                entry_event,
+                None,
+            ));
     }
     state.waiting_for = WaitingFor::CopyTargetChoice {
         player: PlayerId(0),

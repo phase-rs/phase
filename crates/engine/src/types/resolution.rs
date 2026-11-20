@@ -135,6 +135,16 @@ pub struct OptionalEffectFrame {
     /// prompt, including save/reload before its named result is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    /// CR 614.6 + CR 615.5 + CR 608.2c + CR 608.2d: `Some` when this "may" was reached inside a
+    /// replacement's own action that owns an amount. The answer resumes that action, so its
+    /// "that much" is still the amount the replacement replaced or prevented (Channel Harm: "If
+    /// damage is prevented this way, you may have Channel Harm deal that much damage to target
+    /// creature."). Captured when the offer is made (`quantity::current_replacement_action`),
+    /// like `PendingContinuation::replacement_action`. Re-entered by every resolution of this
+    /// frame's ability. Serde-defaulted: a save taken at the prompt before this field existed
+    /// resumes outside the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_action: Option<crate::types::game_state::ReplacementActionScope>,
     /// `Some` when this frame is a parked any-player poll cursor rather than a
     /// live offer: it owns no prompt, so its gate is [`FrameGate::AfterChild`]
     /// and it arms in `resume_resolution_frames` once the frames above it are
@@ -144,6 +154,36 @@ pub struct OptionalEffectFrame {
     /// default to `None`, i.e. an ordinary live offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_poll: Option<Box<ParkedOpponentMayPoll>>,
+}
+
+impl OptionalEffectFrame {
+    /// CR 608.2d: a live offer of `ability`'s "may", carrying the resolution context its answer
+    /// resumes in. Mirrors `PendingContinuation::new`, which captures its own.
+    pub(crate) fn live_offer(ability: ResolvedAbility, state: &GameState) -> Self {
+        Self {
+            ability: Box::new(ability),
+            // CR 608.2: capture the triggering event in lockstep with the stashed ability while
+            // `current_trigger_event` is still live (we are inside `execute_effect`). Restored
+            // when the optional decision resumes so an optional ("may") trigger's effect
+            // resolves `TriggeringPlayer` and other event-context refs exactly as a
+            // non-optional trigger would.
+            trigger_event: state.current_trigger_event.clone(),
+            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a "you may"
+            // reproduction (Captain Marvel, Apex Avenger) folds every `CounterAdded` occurrence
+            // when the decision resumes.
+            trigger_events: state.current_trigger_events.clone(),
+            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a "you may"
+            // sub-ability of a batched trigger (Ur-Dragon's optional permanent-from-hand
+            // sub-effect) resumes with the same `EventContextAmount` the pre-pause resolution
+            // observed.
+            trigger_match_count: state.current_trigger_match_count,
+            return_result_occurrence: state.active_return_result_occurrence,
+            // CR 614.6 + CR 615.5: the replacement action this offer is made in, if it owns an
+            // amount.
+            replacement_action: crate::game::quantity::current_replacement_action(),
+            parked_poll: None,
+        }
+    }
 }
 
 /// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
@@ -806,6 +846,20 @@ pub struct PendingCipherEncode {
     pub creatures: Vec<ObjectId>,
 }
 
+/// CR 508.4: an entrant put onto the battlefield attacking joins combat once its
+/// entry has completed; this frame wakes after the entry's whole child stack.
+///
+/// Parked only when no logical owner resumes the move and the entrant's
+/// as-enters continuation paused, at the child boundary the move captured before
+/// its operation pushed its first frame. It owns no prompt: when it resumes it
+/// leaves the stack, takes the seat the entrant's parked entry owes and seats it,
+/// which may raise `WaitingFor::EntryAttackTargetChoice`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEntryAttackSeat {
+    /// The incarnation that entered (CR 400.7): a later one is not seated.
+    pub entrant: ObjectIncarnationRef,
+}
+
 /// CR 800.4a: one logical zone-change owner a player-left-game sweep retires a
 /// member from: a parked batch delivery or a paused `ChangeZone` iteration.
 pub(crate) enum ZoneChangeOwnerMut<'a> {
@@ -879,6 +933,7 @@ pub enum ResolutionFrame {
     SpellResolution(PendingSpellResolution),
     MutateMerge(PendingMutateMerge),
     CipherEncode(PendingCipherEncode),
+    EntryAttackSeat(PendingEntryAttackSeat),
     PostReplacement(PostReplacementDrainStack),
 }
 
@@ -913,6 +968,7 @@ pub enum FrameKind {
     SpellResolution,
     MutateMerge,
     CipherEncode,
+    EntryAttackSeat,
     PostReplacement,
 }
 
@@ -946,6 +1002,7 @@ impl ResolutionFrame {
             Self::SpellResolution(_) => FrameKind::SpellResolution,
             Self::MutateMerge(_) => FrameKind::MutateMerge,
             Self::CipherEncode(_) => FrameKind::CipherEncode,
+            Self::EntryAttackSeat(_) => FrameKind::EntryAttackSeat,
             Self::PostReplacement(_) => FrameKind::PostReplacement,
         }
     }
@@ -984,6 +1041,7 @@ impl ResolutionFrame {
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
             | Self::CipherEncode(_)
+            | Self::EntryAttackSeat(_)
             | Self::PostReplacement(_) => true,
         }
     }
@@ -1066,6 +1124,8 @@ impl ResolutionFrame {
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
+            // CR 508.4: the seat waits for the entry's whole child stack.
+            | Self::EntryAttackSeat(_)
             | Self::PostReplacement(_) => FrameGate::AfterChild,
         }
     }
@@ -1287,6 +1347,28 @@ impl IdentifiedPostReplacementDispatch {
     }
 }
 
+/// How much resolution work is left: the stack depth, then the drain count of the active
+/// post-replacement frame (or its paired parent), compared lexicographically. Positional on
+/// purpose: a resume loop only needs a measure that strictly decreases while it makes progress,
+/// not the subtree's identity (that is `ReplacementSubtreeBoundary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionPosition {
+    resolution_depth: usize,
+    active_post_replacement_drains: usize,
+}
+
+impl ResolutionPosition {
+    /// Strictly less work remains than at `before`: the stack is lower, or as high with fewer
+    /// drains in the active post-replacement frame (lexicographic on ℕ×ℕ).
+    pub(crate) fn is_strictly_inside(&self, before: &Self) -> bool {
+        (self.resolution_depth, self.active_post_replacement_drains)
+            < (
+                before.resolution_depth,
+                before.active_post_replacement_drains,
+            )
+    }
+}
+
 impl ResolutionStack {
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
@@ -1316,7 +1398,37 @@ impl ResolutionStack {
             .and_then(|slot| self.frames.get(slot))
         {
             Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -1329,7 +1441,37 @@ impl ResolutionStack {
         let slot = self.frames.slot_at_captured_depth(child_stack_start)?;
         match self.frames.get_mut(slot) {
             Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -1342,6 +1484,19 @@ impl ResolutionStack {
             ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
             _ => None,
         })
+    }
+
+    /// The ability continuations from the top of the stack down, mutably.
+    pub(crate) fn ability_continuations_from_top_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut PendingContinuation> {
+        self.frames
+            .iter_mut()
+            .rev()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::AbilityContinuation(frame) => Some(&mut frame.pending),
+                _ => None,
+            })
     }
 
     pub(crate) fn next_draw_sequence_frame_id(&self) -> u64 {
@@ -1531,7 +1686,37 @@ impl ResolutionStack {
             ) {
                 return match self.frames.get_mut(current) {
                     Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
-                    _ => None,
+                    Some(
+                        ResolutionFrame::RepeatFor(_)
+                        | ResolutionFrame::RepeatUntil(_)
+                        | ResolutionFrame::RepeatedOptionalPayment(_)
+                        | ResolutionFrame::ChangeZone(_)
+                        | ResolutionFrame::BatchDelivery(_)
+                        | ResolutionFrame::CounterMoves(_)
+                        | ResolutionFrame::CounterRemovals(_)
+                        | ResolutionFrame::CounterAdditions(_)
+                        | ResolutionFrame::CopyToken(_)
+                        | ResolutionFrame::DebugCardEntries(_)
+                        | ResolutionFrame::EachPlayerCopyChosen(_)
+                        | ResolutionFrame::ChooseOneOf(_)
+                        | ResolutionFrame::VoteBallot(_)
+                        | ResolutionFrame::PerPlayerZoneChoice(_)
+                        | ResolutionFrame::PerCategoryZoneChoice(_)
+                        | ResolutionFrame::OptionalEffect(_)
+                        | ResolutionFrame::CoinFlip(_)
+                        | ResolutionFrame::DieRoll(_)
+                        | ResolutionFrame::Proliferate(_)
+                        | ResolutionFrame::MultiDraw(_)
+                        | ResolutionFrame::Discard(_)
+                        | ResolutionFrame::ConniveReentry(_)
+                        | ResolutionFrame::LifeTotalAssignment(_)
+                        | ResolutionFrame::SpellResolution(_)
+                        | ResolutionFrame::MutateMerge(_)
+                        | ResolutionFrame::CipherEncode(_)
+                        | ResolutionFrame::EntryAttackSeat(_)
+                        | ResolutionFrame::PostReplacement(_),
+                    )
+                    | None => None,
                 };
             }
             slot = self.frames.below(current);
@@ -2228,7 +2413,12 @@ impl ResolutionStack {
     pub(crate) fn park_batch_owner(
         &mut self,
         pending: PendingBatchDeliveries,
+        member_stack_start: ChildStackDepth,
     ) -> Result<(), ResolutionStackError> {
+        assert!(
+            self.capture_child_boundary() >= member_stack_start,
+            "a paused batch member removed a parent before its batch was parked"
+        );
         let group = pending.logical_zone_change_group.logical_group_id;
         let linked = self.active_batch_delivery().is_some_and(|child| {
             child
@@ -2244,7 +2434,18 @@ impl ResolutionStack {
             if self.batch_delivery_slot_for_group(group).is_some() {
                 return self.replace_batch_delivery_for_group(pending);
             }
-            self.push_batch_delivery(pending);
+            if matches!(
+                self.last().map(ResolutionFrame::gate),
+                Some(FrameGate::DirectChoice(_))
+            ) && self.capture_child_boundary() > member_stack_start
+            {
+                self.insert_parent_at_child_boundary(
+                    ResolutionFrame::BatchDelivery(Box::new(pending)),
+                    member_stack_start,
+                )?;
+            } else {
+                self.push_batch_delivery(pending);
+            }
             return Ok(());
         }
         Self::validate_component_parent(
@@ -2278,7 +2479,7 @@ impl ResolutionStack {
         }
         let child = self.take_active_batch_delivery()?.expect("checked child");
         if existing == 1 {
-            self.replace_active_batch_delivery(pending)?;
+            self.replace_batch_delivery_for_group(pending)?;
         } else {
             self.push_batch_delivery(pending);
         }
@@ -2423,7 +2624,37 @@ impl ResolutionStack {
         }
         match self.frames.get_mut(found?) {
             Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
-            Some(_) | None => None,
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
         }
     }
 
@@ -2513,23 +2744,6 @@ impl ResolutionStack {
     /// Park a complete BatchDelivery owner as the active inner frame.
     pub fn push_batch_delivery(&mut self, pending: PendingBatchDeliveries) {
         self.push_inner(ResolutionFrame::BatchDelivery(Box::new(pending)));
-    }
-
-    /// Re-park the active BatchDelivery owner after another replacement pause.
-    pub fn replace_active_batch_delivery(
-        &mut self,
-        pending: PendingBatchDeliveries,
-    ) -> Result<(), ResolutionStackError> {
-        match self.last() {
-            Some(ResolutionFrame::BatchDelivery(_)) => {
-                self.replace_active(ResolutionFrame::BatchDelivery(Box::new(pending)))
-            }
-            None => Err(ResolutionStackError::Empty),
-            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
-                expected: FrameKind::BatchDelivery,
-                actual: frame.kind(),
-            }),
-        }
     }
 
     /// Returns the CounterMoves queue only when its typed frame owns the stack
@@ -3356,6 +3570,172 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::CipherEncode(frame));
     }
 
+    /// CR 508.4: Consumes exactly the active entry attack seat, once the entry's
+    /// whole child stack has retired.
+    pub fn take_active_entry_attack_seat(
+        &mut self,
+    ) -> Result<Option<PendingEntryAttackSeat>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::EntryAttackSeat(_)) => {
+                let ResolutionFrame::EntryAttackSeat(frame) =
+                    self.pop_expected(FrameKind::EntryAttackSeat)?
+                else {
+                    unreachable!("checked entry-attack-seat frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::EntryAttackSeat,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Reads the active entry attack seat without consuming it.
+    pub fn active_entry_attack_seat(&self) -> Option<&PendingEntryAttackSeat> {
+        match self.last() {
+            Some(ResolutionFrame::EntryAttackSeat(frame)) => Some(frame),
+            Some(
+                ResolutionFrame::AbilityContinuation(_)
+                | ResolutionFrame::RepeatFor(_)
+                | ResolutionFrame::RepeatUntil(_)
+                | ResolutionFrame::RepeatedOptionalPayment(_)
+                | ResolutionFrame::ChangeZone(_)
+                | ResolutionFrame::BatchDelivery(_)
+                | ResolutionFrame::CounterMoves(_)
+                | ResolutionFrame::CounterRemovals(_)
+                | ResolutionFrame::CounterAdditions(_)
+                | ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::DebugCardEntries(_)
+                | ResolutionFrame::EachPlayerCopyChosen(_)
+                | ResolutionFrame::ChooseOneOf(_)
+                | ResolutionFrame::VoteBallot(_)
+                | ResolutionFrame::PerPlayerZoneChoice(_)
+                | ResolutionFrame::PerCategoryZoneChoice(_)
+                | ResolutionFrame::OptionalEffect(_)
+                | ResolutionFrame::CoinFlip(_)
+                | ResolutionFrame::DieRoll(_)
+                | ResolutionFrame::Proliferate(_)
+                | ResolutionFrame::MultiDraw(_)
+                | ResolutionFrame::Discard(_)
+                | ResolutionFrame::ConniveReentry(_)
+                | ResolutionFrame::LifeTotalAssignment(_)
+                | ResolutionFrame::SpellResolution(_)
+                | ResolutionFrame::MutateMerge(_)
+                | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::PostReplacement(_),
+            )
+            | None => None,
+        }
+    }
+
+    /// Parks one entry attack seat on the stack top. A seat owed beneath a live
+    /// child goes through `GameState::park_entry_attack_seat_after_child`.
+    pub fn push_entry_attack_seat(&mut self, frame: PendingEntryAttackSeat) {
+        self.push_inner(ResolutionFrame::EntryAttackSeat(frame));
+    }
+
+    /// CR 603.2 + CR 603.6d: every paused delivery a live logical owner anywhere
+    /// on the stack will resume and collect: each `ChangeZone` owner's when its
+    /// drain counts the member (the branch that runs custody), and each batch
+    /// owner's. A whole-stack reader: the owner can sit beneath the paused
+    /// member's `PostReplacement` frame and the frames that frame raised.
+    pub(crate) fn paused_owner_delivery_events(&self) -> Vec<GameEvent> {
+        let mut held = Vec::new();
+        for frame in self.frames.iter() {
+            if let ResolutionFrame::ChangeZone(frame) = frame {
+                if let Some(paused) = frame
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.paused_current.as_ref())
+                    .filter(|paused| {
+                        matches!(
+                            paused.count,
+                            crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
+                        )
+                    })
+                {
+                    held.extend(paused.delivery_events.iter().cloned());
+                }
+            } else if let ResolutionFrame::BatchDelivery(pending) = frame {
+                if let Some(paused) = pending.paused_current.as_ref() {
+                    held.extend(paused.delivery_events.iter().cloned());
+                }
+            }
+        }
+        held
+    }
+
+    /// CR 603.6a + CR 614.12a: the change that a parked logical owner anywhere
+    /// on the stack is delivering `member` into. The owner can sit beneath the
+    /// member's `PostReplacement` frame and the frames it raised.
+    pub(crate) fn paused_owner_group_of(
+        &self,
+        member: ObjectId,
+    ) -> Option<&LogicalZoneChangeGroup> {
+        self.frames.iter().find_map(|frame| match frame {
+            ResolutionFrame::ChangeZone(frame) => frame
+                .pending
+                .as_ref()
+                .filter(|pending| {
+                    pending
+                        .paused_current
+                        .as_ref()
+                        .is_some_and(|paused| paused.member.object_id == member)
+                })
+                .map(|pending| &pending.logical_zone_change_group),
+            ResolutionFrame::BatchDelivery(pending) => pending
+                .paused_current
+                .as_ref()
+                .is_some_and(|paused| paused.member.object_id == member)
+                .then_some(&pending.logical_zone_change_group),
+            ResolutionFrame::AbilityContinuation(_)
+            | ResolutionFrame::RepeatFor(_)
+            | ResolutionFrame::RepeatUntil(_)
+            | ResolutionFrame::RepeatedOptionalPayment(_)
+            | ResolutionFrame::CounterMoves(_)
+            | ResolutionFrame::CounterRemovals(_)
+            | ResolutionFrame::CounterAdditions(_)
+            | ResolutionFrame::CopyToken(_)
+            | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::EachPlayerCopyChosen(_)
+            | ResolutionFrame::ChooseOneOf(_)
+            | ResolutionFrame::VoteBallot(_)
+            | ResolutionFrame::PerPlayerZoneChoice(_)
+            | ResolutionFrame::PerCategoryZoneChoice(_)
+            | ResolutionFrame::OptionalEffect(_)
+            | ResolutionFrame::CoinFlip(_)
+            | ResolutionFrame::DieRoll(_)
+            | ResolutionFrame::Proliferate(_)
+            | ResolutionFrame::MultiDraw(_)
+            | ResolutionFrame::Discard(_)
+            | ResolutionFrame::ConniveReentry(_)
+            | ResolutionFrame::LifeTotalAssignment(_)
+            | ResolutionFrame::SpellResolution(_)
+            | ResolutionFrame::MutateMerge(_)
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
+            | ResolutionFrame::PostReplacement(_) => None,
+        })
+    }
+
+    /// CR 603.6d + CR 614.12a: is `entrant` bound to the resident of any
+    /// `PostReplacement` frame on the stack, whose dispatch's retirement then
+    /// records its entry's completion? A whole-stack reader, matched by
+    /// incarnation (CR 400.7).
+    pub(crate) fn binds_parked_entrant(&self, entrant: ObjectIncarnationRef) -> bool {
+        self.frames.iter().any(|frame| {
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                drains
+                    .drains()
+                    .any(|drain| drain.parked_entrants.contains(&entrant))
+            } else {
+                false
+            }
+        })
+    }
+
     /// Re-parks the active mutate-merge owner without exposing an empty-stack
     /// interval.
     pub fn replace_active_mutate_merge(
@@ -3762,6 +4142,16 @@ impl ResolutionStack {
         }
     }
 
+    /// How much resolution work is left (see [`ResolutionPosition`]).
+    pub(crate) fn position(&self) -> ResolutionPosition {
+        ResolutionPosition {
+            resolution_depth: self.len(),
+            active_post_replacement_drains: self
+                .active_post_replacement_or_paired_parent()
+                .map_or(0, PostReplacementDrainStack::len),
+        }
+    }
+
     /// Mutably accesses the active general drain or its exact immediate parent.
     pub fn active_post_replacement_or_paired_parent_mut(
         &mut self,
@@ -3907,6 +4297,19 @@ impl ResolutionStack {
             .map(PostReplacementDrainStack::len)
     }
 
+    /// CR 615.5 + CR 608.2c: queue `drain` behind the paused resident of the frame `id` names.
+    /// Identity-addressed, like the dispatcher's own cleanup.
+    pub(crate) fn install_post_replacement_drain_behind_paused(
+        &mut self,
+        id: PostReplacementFrameId,
+        drain: PostReplacementDrain,
+    ) -> Option<PostReplacementDrain> {
+        match self.post_replacement_frame_mut(id) {
+            Some(drains) => drains.install_behind_paused_resident(drain),
+            None => Some(drain),
+        }
+    }
+
     /// The mutable twin of [`Self::post_replacement_frame`].
     fn post_replacement_frame_mut(
         &mut self,
@@ -4007,6 +4410,26 @@ impl ResolutionStack {
             return None;
         };
         drains.finish_dispatch(dispatch.dispatch)
+    }
+
+    /// CR 603.6d + CR 614.12a: bind `entrant` to the resident of `dispatch`'s own
+    /// frame, wherever that frame now sits. That resident is the dispatch itself
+    /// or the nested drain that owns the rest of the entry (CR 616.1g). A
+    /// consumed frame binds nothing, so the entry stays pending.
+    pub(crate) fn bind_parked_entrant(
+        &mut self,
+        dispatch: IdentifiedPostReplacementDispatch,
+        entrant: ObjectIncarnationRef,
+    ) -> bool {
+        let Some(drains) = self.post_replacement_frame_mut(dispatch.frame) else {
+            Self::report_missing_post_replacement_frame(dispatch);
+            return false;
+        };
+        let Some(resident) = drains.resident_mut() else {
+            return false;
+        };
+        resident.parked_entrants.push(entrant);
+        true
     }
 
     /// Returns the active ChangeZone frame, or its exact immediate parent
@@ -4404,6 +4827,7 @@ impl ResolutionStack {
                 | ResolutionFrame::SpellResolution(_)
                 | ResolutionFrame::MutateMerge(_)
                 | ResolutionFrame::CipherEncode(_)
+                | ResolutionFrame::EntryAttackSeat(_)
                 | ResolutionFrame::PostReplacement(_) => {}
             }
         }
@@ -4914,7 +5338,8 @@ impl ResolutionStack {
 /// Version 14 preserves the copy-entry continuation's BeforeCounters and
 /// ChoiceSettled stages. Earlier readers would silently drop those stages on
 /// the existing FinishCopyTargetChoiceEntry tag, so they must refuse this wire.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 14;
+/// Version 15 retains as-enters dice instructions and parked entry custody.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 15;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4963,6 +5388,9 @@ const LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
 /// Last wire version before copy-entry continuations retained their counter
 /// plan or settled-choice stage. Missing stages keep their legacy meaning.
 const LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION: u64 = 13;
+
+/// Last writer without an explicit prospective-entrant list on logical-zone owners.
+const LEGACY_UNRECORDED_PROSPECTIVE_ENTRANTS_RESOLUTION_STATE_WIRE_VERSION: u64 = 14;
 
 /// Bound random-result branches identify their v11 format, not unrelated
 /// features added to later full-state resolution versions.
@@ -5688,6 +6116,53 @@ fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
     }
 }
 
+/// Pre-v15 logical-zone owners did not record prospective entrants. Their
+/// missing list retains the legacy empty-list meaning; present lists, including
+/// malformed ones, remain untouched so the strict group decoder validates them.
+fn migrate_legacy_prospective_entrants_owner(owner: &mut Value) {
+    if let Some(group) = owner
+        .get_mut("logical_zone_change_group")
+        .and_then(Value::as_object_mut)
+    {
+        group
+            .entry("prospective_entrants")
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+}
+
+/// The v2–v14 half of the prospective-entrant migration: the two owner schemas
+/// on the typed frame stack. Their v1 slots are migrated by the v1 reader arm.
+fn migrate_legacy_prospective_entrants(value: &mut Value, version: u64) {
+    if version > LEGACY_UNRECORDED_PROSPECTIVE_ENTRANTS_RESOLUTION_STATE_WIRE_VERSION {
+        return;
+    }
+
+    if let Some(frames) = value
+        .get_mut("resolution_frames")
+        .and_then(|stack| stack.get_mut("frames"))
+        .and_then(Value::as_array_mut)
+    {
+        for frame in frames {
+            match frame.get("type").and_then(Value::as_str) {
+                Some("ChangeZone") => {
+                    if let Some(owner) = frame
+                        .get_mut("data")
+                        .and_then(|data| data.get_mut("pending"))
+                    {
+                        migrate_legacy_prospective_entrants_owner(owner);
+                    }
+                }
+                Some("BatchDelivery") => {
+                    if let Some(owner) = frame.get_mut("data") {
+                        migrate_legacy_prospective_entrants_owner(owner);
+                    }
+                }
+                Some(_) | None => {}
+            }
+        }
+    }
+}
+
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
 /// payload. The only place in the engine permitted to infer a wire version.
 ///
@@ -6117,6 +6592,7 @@ impl ResolutionStateWire {
             | LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION
+            | 14
             | RESOLUTION_STATE_WIRE_VERSION
                 if version <= latest_supported_version =>
             {
@@ -6165,6 +6641,7 @@ impl ResolutionStateWire {
         };
 
         let decode_mode = Self::decode_mode_for_version(version, RESOLUTION_STATE_WIRE_VERSION)?;
+        migrate_legacy_prospective_entrants(&mut value, version);
         if version != LEGACY_RESOLUTION_STATE_WIRE_VERSION {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
         }
@@ -6261,6 +6738,17 @@ impl ResolutionStateWire {
                 // whole-value walks reach this carrier, but they only rewrite or
                 // refuse shapes a writer never puts in its `remaining` or entry
                 // fields, so the migrated result is unchanged.
+                // v1 owners never recorded prospective entrants; their missing
+                // list keeps its legacy empty meaning.
+                for key in [
+                    "pending_change_zone_iteration",
+                    "pending_batch_deliveries",
+                    "pending_mill_deliveries",
+                ] {
+                    if let Some(owner) = value.get_mut(key) {
+                        migrate_legacy_prospective_entrants_owner(owner);
+                    }
+                }
                 if let Some(carrier) = value
                     .get_mut("pending_change_zone_iteration")
                     .filter(|carrier| !carrier.is_null())
@@ -7081,6 +7569,8 @@ impl LegacyOptionalEffectWire {
             trigger_events: Vec::new(),
             trigger_match_count: self.pending_optional_trigger_match_count,
             return_result_occurrence: None,
+            // v1 wire predates the replacement-action carrier.
+            replacement_action: None,
         }))
     }
 }
@@ -7224,6 +7714,7 @@ impl LegacyReplacementTailsWire {
                         // to the affected object's controller, exactly as it did
                         // before the field existed.
                         controller: None,
+                        parked_entrants: Vec::new(),
                     },
                     ResidentDrainPolicy::Replace,
                 );
@@ -7402,6 +7893,9 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::CipherEncode(pending) => {
                 projected.push_cipher_encode_frame(pending.clone())
             }
+            ResolutionFrame::EntryAttackSeat(pending) => projected
+                .resolution_stack
+                .push_entry_attack_seat(pending.clone()),
             ResolutionFrame::MultiDraw(frame) => {
                 projected.resolution_stack.push_multi_draw(frame.clone())
             }
@@ -7603,7 +8097,10 @@ mod tests {
             sacrificed: victim,
             record,
         };
-        state.deferred_entry_events = vec![exploit.clone()];
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            exploit.clone(),
+            None,
+        )];
         (state, exploit)
     }
 
@@ -7658,6 +8155,57 @@ mod tests {
         assert!(value.get("resolution_state_version").is_none());
     }
 
+    /// CR 616.1g: a binding lands on the resident of the dispatch's own frame,
+    /// which is the nested drain that owns the rest of the entry, beside any
+    /// binding that drain already holds. A consumed frame binds nothing.
+    #[test]
+    fn a_bind_lands_on_the_nested_drain_that_owns_the_rest_of_the_entry() {
+        let inert = || {
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::unimplemented("nested", "park-binding fixture"),
+                ),
+            )))
+        };
+        let mut state = GameState::new_two_player(42);
+        state.install_post_replacement_drain(inert(), ResidentDrainPolicy::Replace);
+        let (_, outer) = state
+            .begin_post_replacement_dispatch()
+            .expect("the outer drain dispatches");
+        let nested = PostReplacementDrain {
+            status: DrainStatus::Paused,
+            ..inert()
+        };
+        state
+            .active_post_replacement_drains_mut()
+            .expect("the frame")
+            .install(nested, ResidentDrainPolicy::Replace);
+        assert!(!state.post_replacement_dispatch_is_resident_top(outer));
+        state
+            .finish_post_replacement_dispatch(outer)
+            .expect("the outer drain retires");
+
+        let first = ObjectIncarnationRef::of(ObjectId(1), 1);
+        let second = ObjectIncarnationRef::of(ObjectId(2), 1);
+        assert!(state.bind_parked_entrant(outer, first));
+        assert!(state.bind_parked_entrant(outer, second));
+        assert_eq!(
+            state
+                .active_post_replacement_drains()
+                .and_then(PostReplacementDrainStack::resident)
+                .expect("the nested drain")
+                .parked_entrants,
+            vec![first, second]
+        );
+
+        let _ = state
+            .resolution_stack
+            .take_active_post_replacement()
+            .expect("the frame is active");
+        assert!(!state.bind_parked_entrant(outer, first));
+    }
+
     #[test]
     fn exploit_victim_record_survives_v1_and_v2_resolution_wires() {
         let (state, expected) = state_with_recorded_exploit_event();
@@ -7667,8 +8215,11 @@ mod tests {
             let restored: ResolutionStateWire =
                 serde_json::from_value(wire).expect("complete exploit evidence restores");
             assert_eq!(
-                restored.game_state().deferred_entry_events,
-                vec![expected.clone()]
+                restored
+                    .game_state()
+                    .parked_entry_events()
+                    .collect::<Vec<_>>(),
+                vec![&expected]
             );
         }
     }
@@ -7679,7 +8230,7 @@ mod tests {
         let mut wires = [v1_wire_value(state.clone()), v2_wire_value(state)];
 
         for wire in &mut wires {
-            wire["deferred_entry_events"][0]["data"]
+            wire["deferred_entry_events"][0]["event"]["data"]
                 .as_object_mut()
                 .expect("event data is an object")
                 .remove("record");
@@ -7692,7 +8243,10 @@ mod tests {
                 ),
                 "{error}"
             );
-            assert!(error.contains("$.deferred_entry_events[0].data"), "{error}");
+            assert!(
+                error.contains("$.deferred_entry_events[0].event.data"),
+                "{error}"
+            );
         }
     }
 
@@ -7815,12 +8369,16 @@ mod tests {
         );
         let identity = ObjectIncarnationRef::of(object, state.objects[&object].incarnation);
         let event = ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Library, None);
-        let mut parent_group = state.allocate_logical_zone_change_group(&[object]);
+        let mut parent_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[object], Zone::Library),
+        );
         parent_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parent group latches");
         let parent_group_id = parent_group.logical_group_id;
-        let mut child_group = state.allocate_logical_zone_change_group(&[object]);
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[object], Zone::Library),
+        );
         child_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("child group latches");
@@ -8961,6 +9519,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         optional_effect
             .validate(&WaitingFor::OpponentMayChoice {
@@ -9051,6 +9610,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         let optional_payload = v2_fixture_with_frames(optional_state, optional_frames);
         let restored: ResolutionStateWire = serde_json::from_value(optional_payload)
@@ -9138,6 +9698,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         })
     }
 
@@ -9707,6 +10268,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             })
         };
         let opponent_may = WaitingFor::OpponentMayChoice {
@@ -9839,6 +10401,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             },
         );
         apply_as_current(
@@ -11090,6 +11653,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
                 source: None,
@@ -11265,6 +11829,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         buried_optional_frames.push_inner(continuation_frame(151));
         assert!(
@@ -11509,22 +12074,129 @@ mod tests {
         assert!(!wire.to_string().contains("\"dealer\""));
     }
 
+    fn logical_zone_owner_wire(batch: bool) -> Value {
+        let mut state = GameState::new_two_player(55);
+        state.next_logical_zone_change_group_id = 2;
+        state.resolution_stack.push_inner(if batch {
+            batch_delivery_frame(55)
+        } else {
+            change_zone_frame(55)
+        });
+        serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("an actual logical-zone owner serializes")
+    }
+
+    fn logical_zone_owner_group(wire: &mut Value, batch: bool) -> &mut Map<String, Value> {
+        let data = &mut wire["resolution_frames"]["frames"][0]["data"];
+        let owner = if batch { data } else { &mut data["pending"] };
+        owner["logical_zone_change_group"]
+            .as_object_mut()
+            .expect("both owner schemas carry a logical-zone group")
+    }
+
+    #[test]
+    fn v1_logical_zone_owners_restore_missing_prospective_entrants() {
+        for (key, batch) in [
+            ("pending_change_zone_iteration", false),
+            ("pending_batch_deliveries", true),
+            ("pending_mill_deliveries", true),
+        ] {
+            let current = logical_zone_owner_wire(batch);
+            let data = &current["resolution_frames"]["frames"][0]["data"];
+            let mut owner = if batch { data } else { &data["pending"] }.clone();
+            assert!(owner["logical_zone_change_group"]
+                .as_object_mut()
+                .expect("the legacy owner carries a logical-zone group")
+                .remove("prospective_entrants")
+                .is_some());
+
+            let mut state = GameState::new_two_player(55);
+            state.next_logical_zone_change_group_id = 2;
+            let mut wire = v1_wire_value(state);
+            assert_eq!(
+                wire["resolution_state_version"],
+                Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION)
+            );
+            wire[key] = owner;
+            let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap_or_else(|error| panic!("v1 {key}: {error}"));
+            let mut rewritten = serde_json::to_value(restored).expect("restored owner writes");
+            assert_eq!(
+                logical_zone_owner_group(&mut rewritten, batch)["prospective_entrants"],
+                serde_json::json!([]),
+                "v1 {key}: missing entrants retain their empty-list meaning"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_logical_zone_owners_restore_missing_prospective_entrants() {
+        for batch in [false, true] {
+            for version in [11, 14] {
+                let mut wire = logical_zone_owner_wire(batch);
+                wire["resolution_state_version"] = Value::from(version);
+                assert!(logical_zone_owner_group(&mut wire, batch)
+                    .remove("prospective_entrants")
+                    .is_some());
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap_or_else(|error| panic!("v{version}, batch={batch}: {error}"));
+                let mut rewritten = serde_json::to_value(restored).expect("restored owner writes");
+                assert_eq!(
+                    logical_zone_owner_group(&mut rewritten, batch)["prospective_entrants"],
+                    serde_json::json!([]),
+                    "legacy missing entrants retain their empty-list meaning"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn current_logical_zone_owners_require_prospective_entrants() {
+        for batch in [false, true] {
+            let mut wire = logical_zone_owner_wire(batch);
+            assert_eq!(wire["resolution_state_version"], Value::from(15));
+            serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                .expect("reach: the complete current owner restores");
+            logical_zone_owner_group(&mut wire, batch).remove("prospective_entrants");
+            let error = serde_json::from_value::<ResolutionStateWire>(wire)
+                .expect_err("current owners cannot omit the recorded entrant list")
+                .to_string();
+            assert!(
+                error.contains("missing field `prospective_entrants`"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_logical_zone_owners_do_not_default_malformed_prospective_entrants() {
+        for batch in [false, true] {
+            for malformed in [Value::Null, Value::Bool(false)] {
+                let mut wire = logical_zone_owner_wire(batch);
+                wire["resolution_state_version"] = Value::from(11);
+                logical_zone_owner_group(&mut wire, batch)
+                    .insert("prospective_entrants".to_string(), malformed);
+                assert!(serde_json::from_value::<ResolutionStateWire>(wire).is_err());
+            }
+        }
+    }
+
     #[test]
     fn copy_entry_resume_stages_require_a_version_the_previous_reader_refuses() {
-        // Version 13's reader accepts 1 through 13 before materializing state.
+        // Version 14's reader accepts 1 through 14 before materializing state.
         // Exercise that same admission gate with its historical ceiling: serde
         // must never get a chance to discard an unsupported resume_stage.
-        const PREVIOUS_READER_VERSION: u64 = 13;
+        const PREVIOUS_READER_VERSION: u64 = 14;
         let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
             GameState::new_two_player(42),
         ))
         .expect("wire serializes");
         let version = wire["resolution_state_version"].as_u64().unwrap();
-        assert_eq!(version, 14, "copy-entry stages need their own wire version");
+        assert_eq!(version, RESOLUTION_STATE_WIRE_VERSION);
         let error = ResolutionStateWire::decode_mode_for_version(version, PREVIOUS_READER_VERSION)
             .expect_err("the previous reader must refuse before state decoding or dispatch");
         assert!(
-            error.contains("unsupported resolution_state_version 14"),
+            error.contains(&format!("unsupported resolution_state_version {version}")),
             "{error}"
         );
         assert!(ResolutionStateWire::decode_mode_for_version(

@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, peek, value, verify};
+use nom::combinator::{opt, peek, recognize, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -271,6 +271,21 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
 
     if is_self_spell_cost_modification(lower) {
         return false;
+    }
+
+    // CR 608.2c: "If <condition>, <imperative instruction>. [Otherwise, …]" on an
+    // instant or sorcery is a conditional instruction of the spell's effect, even
+    // when a later sentence carries a static marker ("They have \"…\"", Brood
+    // Birthing). Only an imperative body defers; a self-static body ("If X is 5 or
+    // more, this spell can't be countered", Banefire) keeps its routing.
+    if split_leading_conditional(lower).is_some_and(|(_, body)| {
+        EFFECT_IMPERATIVE_PREFIXES.iter().any(|prefix| {
+            tag::<_, _, OracleError<'_>>(*prefix)
+                .parse(body.as_str())
+                .is_ok()
+        })
+    }) {
+        return true;
     }
 
     // CR 111.3 + CR 604.3a: "Create a … token. Its power is equal to … and its
@@ -1254,6 +1269,16 @@ fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
     // "instead" but still route through the replacement pipeline.
     nom_primitives::scan_at_word_boundaries(lower, |input| {
         alt((
+            // Typed middle ("can't have -1/-1 counters put on" — Darksteel
+            // Angel): `recognize` keeps the arm's `&str` output so it
+            // unifies with the `tag` arms. Either order is correct (the
+            // arms are disjoint); typed first by the specific-first
+            // convention.
+            recognize((
+                tag::<_, _, OracleError>("can't have "),
+                nom_primitives::parse_counter_type_typed,
+                tag(" counters put on"),
+            )),
             tag::<_, _, OracleError>("can't have counters put on"),
             tag("players can't get counters"),
             tag("counters can't be put on"),
@@ -1449,10 +1474,33 @@ mod tests {
 
     #[test]
     fn masked_brood_birthing_stays_static() {
-        // Brood Birthing invariant: the "have " grant marker is OUTSIDE the quote,
-        // so masking the quoted span must NOT flip the line off static.
+        // Fragment shape only: the bare "they have" grant marker is OUTSIDE the
+        // quote, so masking the quoted span must NOT flip this fragment off
+        // static. Routing of Brood Birthing's whole spell line is decided by
+        // `should_defer_spell_to_effect` (see
+        // `spell_if_imperative_line_defers_to_effect`).
         let line = "they have \"sacrifice this token: add {c}.\"";
         assert!(is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    /// CR 608.2c: an "If <condition>, <imperative>" spell line is a conditional
+    /// instruction of the spell; a self-static If-line keeps its routing.
+    #[test]
+    fn spell_if_imperative_line_defers_to_effect() {
+        assert!(should_defer_spell_to_effect(
+            "if you control an eldrazi spawn, create three 0/1 colorless eldrazi spawn \
+             creature tokens. they have \"sacrifice this token: add {c}.\" otherwise, \
+             create one of those tokens."
+        ));
+        for self_static in [
+            "if x is 5 or more, this spell can't be countered and the damage can't be prevented.",
+            "if this spell was kicked, it has split second.",
+            "if you revealed a dragon card or controlled a dragon as you cast this spell, \
+             this spell can't be countered.",
+            "if you weren't the starting player, this spell costs {1} less to cast.",
+        ] {
+            assert!(!should_defer_spell_to_effect(self_static), "{self_static}");
+        }
     }
 
     #[test]

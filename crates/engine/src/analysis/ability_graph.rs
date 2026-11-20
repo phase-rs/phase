@@ -997,6 +997,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Regenerate { .. }
@@ -1299,7 +1300,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::ExcessDamageAll
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
+        | TriggerMode::AbilityTriggered { .. }
         | TriggerMode::Countered
         | TriggerMode::YouAttackUnblocked
         | TriggerMode::AttackerBlocked

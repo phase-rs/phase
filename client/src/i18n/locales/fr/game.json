@@ -152,7 +152,8 @@
     "loading": "Chargement de {{name}}",
     "unimplemented": "Non implémenté : {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Engagé"
+    "tapped": "Engagé",
+    "reloadArt": "Toucher pour recharger l'illustration"
   },
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
@@ -161,6 +162,8 @@
     "flip": "Pivoter",
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
+    "reportNotSent": "Non envoyé",
+    "reloadArt": "Recharger l'illustration",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -1856,6 +1859,13 @@
       "titleExact_one": "Défaussez-vous d'une carte",
       "titleExact_other": "Défaussez-vous de {{count}} cartes",
       "titleWard": "Garde — Défaussez-vous d'une carte",
+      "instructionWithReason": "{{reason}} : {{instruction}}",
+      "reason": {
+        "ward": "Garde",
+        "connive": "Combine",
+        "additionalCost": "Coût supplémentaire",
+        "manaAbility": "Capacité de mana"
+      },
       "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte à défausser",
       "subtitleUpTo_other": "Choisissez jusqu'à {{count}} cartes à défausser",
       "subtitleUnless": "Choisissez {{count}} cartes ou 1 carte correspondante à défausser",
@@ -2015,7 +2025,8 @@
     "scrollLeft": "Défiler vers la gauche",
     "scrollRight": "Défiler vers la droite",
     "confirm": "Confirmer",
-    "cancel": "Annuler"
+    "cancel": "Annuler",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventure",
@@ -2441,6 +2452,9 @@
     "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
     "replacementChoices": "Choix de remplacement ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Maintenez appuyé pour voir la carte en entier"
+  },
   "optionalEffect": {
     "sourceFallback": "Effet",
     "title": "{{name}} - Effet facultatif",
@@ -2555,7 +2569,7 @@
     "appliedLast": "Appliqué en dernier — celui-ci l'emporte",
     "resultLabel": "Résultat : {{outcome}}",
     "confirmOrder": "Confirmer l'ordre",
-    "dragHint": "Faites glisser pour réordonner, ou utilisez les flèches.",
+    "dragHint": "Faites glisser la poignée <grip>⠿</grip> pour réordonner, ou utilisez les flèches.",
     "chooseSubtitle": "Choisissez quel effet de remplacement appliquer.",
     "candidateFallback": "Effet de remplacement {{number}}",
     "orderSubtitleComposing": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : chacun s'applique, donc l'ordre change le résultat (CR 616.1).",
@@ -2564,6 +2578,7 @@
     "composesNote": "Chaque effet s'applique — l'ordre change leur combinaison.",
     "moveUpNamed": "Déplacer {{name}} plus tôt",
     "moveDownNamed": "Déplacer {{name}} plus tard",
+    "dragHandleNamed": "Faites glisser {{name}} pour réordonner",
     "positionAnnounce": "Position {{position}} sur {{total}}"
   },
   "retargetChoice": {
@@ -2583,6 +2598,9 @@
     "partitionSubtitle": "Séparez vos créatures en deux tas. {{chooser}} en choisira un.",
     "partitionSubtitleRemaining_one": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueur de plus après vous)",
     "partitionSubtitleRemaining_other": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueurs de plus après vous)",
+    "partitionInstruction": "{{chooser}} en choisit un",
+    "partitionInstructionRemaining_one": "{{chooser}} en choisit un ({{count}} joueur de plus après vous)",
+    "partitionInstructionRemaining_other": "{{chooser}} en choisit un ({{count}} joueurs de plus après vous)",
     "pileALabel": "Tas A :",
     "pileBLabel": "Tas B :",
     "pileAria": "{{name}} — tas {{pile}}",
@@ -2689,6 +2707,20 @@
     "EndCombat": "Fin de combat",
     "PostCombatMain": "Phase principale 2",
     "End": "Étape de fin",
+    "Cleanup": "Nettoyage"
+  },
+  "phaseShortName": {
+    "Untap": "Dégagement",
+    "Upkeep": "Entretien",
+    "Draw": "Pioche",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attaquants",
+    "DeclareBlockers": "Bloqueurs",
+    "CombatDamage": "Blessures",
+    "EndCombat": "Fin combat",
+    "PostCombatMain": "Principale 2",
+    "End": "Fin",
     "Cleanup": "Nettoyage"
   },
   "counterMoveDistribution": {

@@ -541,6 +541,7 @@ fn open_private_zone_cast_selection(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }
@@ -678,6 +679,7 @@ fn open_linked_exile_cast_selection(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }
@@ -1765,6 +1767,7 @@ fn resolve_cast_slot_group(
     };
     window.sub_ability = None;
     window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    window.declared_player_target_slots.clear();
     super::free_cast_from_zones::resolve_with_face_policy(
         state,
         &window,

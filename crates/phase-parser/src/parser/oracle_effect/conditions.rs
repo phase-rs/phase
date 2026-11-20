@@ -4893,6 +4893,45 @@ pub(super) fn strip_routed_suffix_conditional(
     if crate::parser::oracle_cost::is_self_cost_reduction_prefix(effect_prefix_lower) {
         return (None, text.to_string());
     }
+    // CR 608.2c + CR 608.2h + CR 122.1: This postfix guard reads the
+    // event player's live counters. The condition pass precedes clause
+    // subject staging. Require a proven trigger root and the same event
+    // player in both subjects; do not reinterpret a nearer player or let
+    // ScopedPlayer fall back to the controller.
+    if position == GatedInstructionPosition::ChainRoot
+        && ctx.in_trigger
+        && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer)
+    {
+        if let Ok((_, (anaphor, kind))) =
+            all_consuming(nom_condition::parse_anaphoric_player_counter_absence)
+                .parse(condition_text)
+        {
+            let mut probe = ctx.clone_throwaway();
+            let names_event_player = |application: super::SubjectApplication| {
+                application.affected == TargetFilter::TriggeringPlayer
+            };
+            if subject::parse_subject_application(anaphor, &mut probe)
+                .is_some_and(names_event_player)
+                && subject::parse_leading_subject_application(effect_prefix, &mut probe)
+                    .is_some_and(names_event_player)
+            {
+                return (
+                    general(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerCounter {
+                                kind,
+                                scope: CountScope::ScopedPlayer,
+                            },
+                        },
+                        comparator: Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    }),
+                    effect_prefix.to_string(),
+                );
+            }
+            return (None, text.to_string());
+        }
+    }
     let effect_text = if let Some(tail) = copy_retarget_tail {
         format!("{effect_prefix}, and {tail}")
     } else {
@@ -7503,6 +7542,18 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
             condition: Box::new(ability_condition_to_static_condition(condition)?),
         }),
+        AbilityCondition::And { conditions } => Some(StaticCondition::And {
+            conditions: conditions
+                .iter()
+                .map(ability_condition_to_static_condition)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        AbilityCondition::Or { conditions } => Some(StaticCondition::Or {
+            conditions: conditions
+                .iter()
+                .map(ability_condition_to_static_condition)
+                .collect::<Option<Vec<_>>>()?,
+        }),
 
         // Casting-context conditions — read `SpellContext` / cast history at
         // resolution time; no continuous-evaluation (`StaticCondition`)
@@ -7572,9 +7623,7 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         | AbilityCondition::SourceMatchesFilter { .. }
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::DayNightIs { .. }
-        | AbilityCondition::ControllerControlsMatching { .. }
-        | AbilityCondition::And { .. }
-        | AbilityCondition::Or { .. } => None,
+        | AbilityCondition::ControllerControlsMatching { .. } => None,
     }
 }
 
@@ -9554,6 +9603,24 @@ fn parse_objects_share_quality_reference<'a>(
 }
 
 fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
+    // CR 706.2 + CR 608.2c: "the roll" a die-roll ability's body names is the
+    // roll it is resolving for — the triggering DieRolled event's result, which
+    // EventContextAmount reads (extract_amount_from_event); "If the roll was N
+    // or higher" gates the instruction it heads.
+    if let Ok((_, n)) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the roll was "),
+        terminated(nom_primitives::parse_number, tag(" or higher")),
+    ))
+    .parse(lower)
+    {
+        return Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        });
+    }
     let rest = tag::<_, _, OracleError<'_>>("the result is ")
         .parse(lower)
         .ok()
@@ -10272,6 +10339,51 @@ mod tests {
         SharedQuality, SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn player_counter_absence_requires_a_proven_event_antecedent() {
+        let printed = "that player gets two rad counters if they don't have any rad counters";
+        let mut event = ParseContext {
+            in_trigger: true,
+            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            ..Default::default()
+        };
+        let (guard, instruction) = strip_suffix_conditional(printed, &mut event);
+        assert!(guard.is_some());
+        assert_eq!(instruction, "that player gets two rad counters");
+
+        for mut ctx in [
+            ParseContext::default(),
+            ParseContext {
+                in_trigger: true,
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                strip_suffix_conditional(printed, &mut ctx),
+                (None, printed.to_owned())
+            );
+        }
+        assert_eq!(
+            strip_routed_suffix_conditional(
+                printed,
+                &mut event,
+                GatedInstructionPosition::AfterInstruction,
+            ),
+            (None, printed.to_owned())
+        );
+    }
+
+    #[test]
+    fn player_counter_absence_parses_the_kind_not_a_fixed_rad_keyword() {
+        assert_eq!(
+            all_consuming(nom_condition::parse_anaphoric_player_counter_absence)
+                .parse("that player doesn’t have any poison counters"),
+            Ok(("", ("that player", PlayerCounterKind::Poison)))
+        );
+    }
 
     /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
     /// returns `None` for it — a dropped `None` would lower the effect to
@@ -15094,9 +15206,10 @@ mod tests {
             lhs:
                 QuantityExpr::Ref {
                     qty:
-                        QuantityRef::SpellsCastThisTurn {
+                        QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
+                            window: crate::types::ability::TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::GE,
@@ -17636,6 +17749,52 @@ mod tests {
                 destination: Some(Zone::Battlefield),
             }),
             None
+        );
+    }
+
+    /// CR 706.2 + CR 608.2c: "If the roll was N or higher" (Monoxa, Midway
+    /// Manager) reads the triggering die roll's result through the event-context
+    /// amount, `EventContextAmount >= N`, both as the building block and through
+    /// the production condition dispatcher. The grammar is exactly "the roll was
+    /// N or higher": a bare number or a trailing word stays unparsed, and the
+    /// "the result is" arm keeps its own reading.
+    #[test]
+    fn the_roll_was_n_or_higher_reads_the_triggering_roll() {
+        let at_least = |value: i32| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher"),
+            Some(at_least(4))
+        );
+        assert_eq!(
+            parse_die_result_condition("the roll was 5 or higher"),
+            Some(at_least(5))
+        );
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "the roll was 4 or higher",
+                &mut ParseContext::default()
+            ),
+            Some(at_least(4)),
+            "the production dispatcher reaches the arm"
+        );
+        assert_eq!(parse_die_result_condition("the roll was 4"), None);
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher than"),
+            None
+        );
+        assert_eq!(
+            parse_die_result_condition("the result is 3 or less"),
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+                channel: DamageChannel::Total,
+            })
         );
     }
 }

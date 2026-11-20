@@ -78,6 +78,10 @@ export class GameObjectFactory extends Factory<GameObject> {
     return this.params({ zone: "Exile", entered_battlefield_turn: null });
   }
 
+  inLibrary() {
+    return this.params({ zone: "Library", entered_battlefield_turn: null });
+  }
+
   inCommandZone() {
     return this.params({ zone: "Command", entered_battlefield_turn: null });
   }

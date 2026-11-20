@@ -697,6 +697,19 @@ pub(crate) fn expand_returned_merge_components(
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     if matches!(target_filter, TargetFilter::SelfRef) {
+        // CR 603.7c + CR 730.3c: a delayed return whose source binding followed
+        // the source to the object it became when it left ("exile ~. Return it
+        // … at the beginning of the next end step") finds every object the
+        // merged permanent became.
+        if let Some(components) = delayed_binding_departure_components(state, ability) {
+            let mut expanded = resolved;
+            for id in components {
+                if !expanded.contains(&id) {
+                    expanded.push(id);
+                }
+            }
+            return expanded;
+        }
         // CR 701.24a + CR 730.3c: a source's own recorded departure is
         // followed only by the move component of a terminal-shuffle operation
         // ("shuffle it into its owner's library"), whose order is randomized.
@@ -788,6 +801,53 @@ fn expand_tracked_set_referents(
         expanded.extend(components);
     }
     expanded
+}
+
+/// CR 603.7c + CR 400.7 + CR 730.3c: the component cards of the merged
+/// permanent this delayed ability's (CR 603.7a) source binding found when it
+/// left the battlefield. The binding followed the source to the new object it
+/// became (`delayed_source_context`), so it records that object's
+/// off-battlefield zone and incarnation, which is exactly the survivor pin each
+/// split component carries. Reading the recorded value, not the survivor's
+/// current location, keeps a survivor that moved again (shuffled out of exile)
+/// from hiding its unmoved components; the effect does as much as possible
+/// (CR 609.3).
+///
+/// `None` when the binding did not follow a departed source, so other `SelfRef`
+/// rules apply. A library destination is excluded: ordering several returned
+/// components there is not implemented (#10759).
+fn delayed_binding_departure_components(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<ObjectId>> {
+    if ability.delayed_origin.is_none()
+        || matches!(
+            ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        )
+    {
+        return None;
+    }
+    let identity = &ability.trigger_source.as_ref()?.identity;
+    if identity.reference.object_id != ability.source_id
+        || identity.expected_zone == Zone::Battlefield
+    {
+        return None;
+    }
+    let mut components: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| {
+            obj.zone == identity.expected_zone
+                && obj.split_from_merge_survivor == Some(identity.reference)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    components.sort_by_key(|id| id.0);
+    Some(components)
 }
 
 /// CR 701.24a: the effect is the move component of a parser-emitted "shuffle

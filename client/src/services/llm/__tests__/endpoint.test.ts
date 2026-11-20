@@ -21,6 +21,7 @@ function profile(patch: Partial<LlmProfile>): LlmProfile {
     temperature: null,
     decisionContext: "selfContained",
     enabled: true,
+    rememberApiKey: false,
     ...patch,
   };
 }

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add FilterProp::CastThisTurn { caster } (cast-provenance filter for Domri, Anarch of Bolas); resolved CantBeCountered grants now carry an AddStaticMode modification read live by the counter resolvers. Old peers cannot deserialize the new filter variant in card data or transient effects."
+}
