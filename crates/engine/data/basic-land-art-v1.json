@@ -2,8 +2,8 @@
   "version": 1,
   "source": {
     "mtgjson_version": "5.3.0+20261026",
-    "scryfall_bulk_timestamp": null,
-    "scryfall_bulk_sha256": null
+    "scryfall_bulk_timestamp": "2026-11-19T22:06:31.074+00:00",
+    "scryfall_bulk_sha256": "a7836880a25c3074dd1021c333e424a0799a574e28a2742e9b20acb92b28d989"
   },
   "lands": {
     "bc71ebf6-2056-41f7-be35-b2e5c34afa99": {

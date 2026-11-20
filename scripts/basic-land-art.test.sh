@@ -15,15 +15,26 @@ barry=00000000-0000-0000-0000-000000000001
 alias_id=d8c0de06-7782-4d2b-93ba-ef42cd5f79b4
 alias_art=134a9ef4-e082-4518-8903-b2aaf47748f1
 
-jq --arg barry "$barry" '
-  ["Plains", "Island", "Swamp", "Mountain", "Forest"] as $basics
-  | ($basics + ($basics | map("Snow-Covered " + .)) + ["Wastes", "Snow-Covered Wastes"]) as $names
-  | (.lands | keys_unsorted) as $ids
-  | {data: (reduce range(0; $names | length) as $i ({};
-      .[$names[$i]] = [$ids[$i]]) | .["Barry\u0027s Land"] = [$barry]
-      | map_values(map({layout: "normal", types: ["Land"], supertypes: ["Basic"],
-          identifiers: {scryfallOracleId: .}})))}
-' "$catalog" > "$dir/atomic.json"
+# Oracle IDs from MTGJSON AtomicCards, fixed independently of the catalog under test.
+jq -n --arg barry "$barry" '
+  {
+    "Plains": "bc71ebf6-2056-41f7-be35-b2e5c34afa99",
+    "Island": "b2c6aa39-2d2a-459c-a555-fb48ba993373",
+    "Swamp": "56719f6a-1a6c-4c0a-8d21-18f7d7350b68",
+    "Mountain": "a3fb7228-e76b-4e96-a40e-20b5fed75685",
+    "Forest": "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6",
+    "Snow-Covered Plains": "ac8cc74d-e43b-4118-bba0-dfa8b9c04d45",
+    "Snow-Covered Island": "5b2460a5-6ae5-4cad-ba94-1a9e98e6e4c0",
+    "Snow-Covered Swamp": "d8239a86-7184-4005-ba1e-2dddcd756c47",
+    "Snow-Covered Mountain": "ca9f660b-e07d-4f42-a46e-abd0ca72510c",
+    "Snow-Covered Forest": "5f0d3be8-e63e-4ade-ae58-6b0c14f2ce6d",
+    "Wastes": "05d24b0c-904a-46b6-b42a-96a4d91a0dd4",
+    "Snow-Covered Wastes": "46a07b53-ff58-4bd6-80dd-ded2eb0e29a3",
+    "Barry\u0027s Land": $barry
+  }
+  | {data: map_values([{layout: "normal", types: ["Land"], supertypes: ["Basic"],
+      identifiers: {scryfallOracleId: .}}])}
+' > "$dir/atomic.json"
 
 jq --arg oracle "$oracle" --arg alias_id "$alias_id" --arg alias_art "$alias_art" '
   def printing($oracle; $id; $art; $set; $number):
@@ -37,6 +48,12 @@ jq --arg oracle "$oracle" --arg alias_id "$alias_id" --arg alias_art "$alias_art
         | printing($key; null; .value; $set; $number))]
   + [printing($oracle; $alias_id; $alias_art; "mh3"; "439")]
 ' "$catalog" > "$dir/bulk.json"
+
+bulk_sha=$(sha256sum < "$dir/bulk.json")
+fixture_catalog="$dir/fixture-catalog.json"
+jq --arg sha "${bulk_sha%% *}" '
+  .source |= (.scryfall_bulk_timestamp = null | .scryfall_bulk_sha256 = $sha)
+' "$catalog" > "$fixture_catalog"
 
 expect_failure() {
   local expected=$1
@@ -62,10 +79,11 @@ generate() {
 
 mutate_catalog() {
   jq --arg oracle "$oracle" --arg barry "$barry" --arg alias_id "$alias_id" --arg alias_art "$alias_art" \
-    "$1" "$catalog" > "$dir/mutated-catalog.json"
+    "$1" "$fixture_catalog" > "$dir/mutated-catalog.json"
 }
 
-source_check "$catalog"
+source_check "$fixture_catalog"
+expect_failure "Scryfall bulk SHA-256 mismatch" source_check "$catalog"
 mutate_catalog 'del(.lands[$oracle])'
 expect_failure "catalog launch membership mismatch" source_check "$dir/mutated-catalog.json"
 mutate_catalog '.lands[$barry] = .lands[$oracle] | del(.lands[$oracle])'
@@ -116,6 +134,14 @@ reject_index "unusable faces[0].normal URL"
 edit_index 'map(if selected then .faces |= ([{}] + .) else . end)'
 reject_index "unusable faces[0].normal URL"
 edit_index 'map(if selected then .faces[0].normal = "https:///no-host.jpg" else . end)'
+reject_index "unusable faces[0].normal URL"
+edit_index 'map(if selected then .faces[0].normal = "https://[:::]/normal.jpg" else . end)'
+reject_index "unusable faces[0].normal URL"
+edit_index 'map(if selected then .faces[0].normal = "https://256.0.0.1/normal.jpg" else . end)'
+reject_index "unusable faces[0].normal URL"
+edit_index 'map(if selected then .faces[0].normal = "https://img.example:65535/normal.jpg" else . end)'
+"$validator" renderer "$catalog" "$dir/mutated-index.json"
+edit_index 'map(if selected then .faces[0].normal = "https://img.example:65536/normal.jpg" else . end)'
 reject_index "unusable faces[0].normal URL"
 
 jq --arg oracle "$oracle" '

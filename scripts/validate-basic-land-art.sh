@@ -17,9 +17,27 @@ catalog=$2
 
 if [[ $mode == renderer ]]; then
   jq -e --slurpfile catalog "$catalog" '
+    def ipv6_host:
+      .[1:-1] | split("::") as $parts
+      | [$parts[] | select(length > 0) | split(":")[]] as $groups
+      | all($groups[]; test("^[0-9a-f]{1,4}$"; "i"))
+        and (if ($parts | length) == 2 then ($groups | length) < 8
+             else ($parts | length) == 1 and ($groups | length) == 8 end);
+
+    def usable_host:
+      if startswith("[") then ipv6_host
+      else split(".") as $labels
+        # Browsers parse hosts ending in a number as IPv4.
+        | if ($labels[-1] | test("^([0-9]+|0x[0-9a-f]*)$"; "i"))
+          then ($labels | length) == 4 and all($labels[];
+            test("^(0|[1-9][0-9]{0,2})$") and tonumber <= 255)
+          else true end
+      end;
+
     def usable_url:
       type == "string"
-      and test("^https://([a-z0-9-]+(\\.[a-z0-9-]+)*|\\[[0-9a-f:]+\\])(:[0-9]+)?([/?#][^[:space:]]*)?$"; "i")
+      and ((capture("^https://(?<host>[a-z0-9-]+(\\.[a-z0-9-]+)*|\\[[0-9a-f:]+\\])(?::(?<port>[0-9]+))?([/?#][^[:space:][:cntrl:]]*)?\\z"; "i")
+        | (.host | usable_host) and ((.port // "0") | tonumber <= 65535)) // false)
       and (test("^https://errors\\.scryfall\\.com(:[0-9]+)?/soon\\.jpg([?#]|$)"; "i") | not);
 
     . as $index
