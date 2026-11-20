@@ -66,6 +66,8 @@ type ChooseFromZoneChoiceWaitingFor = Extract<WaitingFor, { type: "ChooseFromZon
 type OpponentMayChoiceWaitingFor = Extract<WaitingFor, { type: "OpponentMayChoice" }>;
 type SearchChoiceWaitingFor = Extract<WaitingFor, { type: "SearchChoice" }>;
 type EffectZoneChoiceWaitingFor = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
+type SeparatePilesPartitionWaitingFor = Extract<WaitingFor, { type: "SeparatePilesPartition" }>;
+type SeparatePilesChoiceWaitingFor = Extract<WaitingFor, { type: "SeparatePilesChoice" }>;
 type LearnChoiceWaitingFor = Extract<WaitingFor, { type: "LearnChoice" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
@@ -286,7 +288,7 @@ export const searchChoiceWaitingForFactory =
 
 export class EffectZoneChoiceWaitingForFactory extends PlayerWaitingForFactory<EffectZoneChoiceWaitingFor> {}
 
-/** Defaults to exiling one card from a graveyard, a choice drawn as a card strip. */
+/** Defaults to exiling one card from a graveyard, a choice drawn in the card choice overlay. */
 export const effectZoneChoiceWaitingForFactory =
   EffectZoneChoiceWaitingForFactory.define((): EffectZoneChoiceWaitingFor => ({
     type: "EffectZoneChoice",
@@ -298,6 +300,36 @@ export const effectZoneChoiceWaitingForFactory =
       effect_kind: "ChangeZone",
       zone: "Graveyard",
       destination: "Exile",
+    },
+  }));
+
+export class SeparatePilesPartitionWaitingForFactory extends PlayerWaitingForFactory<SeparatePilesPartitionWaitingFor> {}
+
+/** Defaults to player 1 separating their creatures, with player 0 to choose a pile. */
+export const separatePilesPartitionWaitingForFactory =
+  SeparatePilesPartitionWaitingForFactory.define((): SeparatePilesPartitionWaitingFor => ({
+    type: "SeparatePilesPartition",
+    data: {
+      player: 1,
+      eligible: [],
+      remaining_subjects: [],
+      completed: [],
+      chooser: 0,
+      source_id: 1,
+    },
+  }));
+
+export class SeparatePilesChoiceWaitingForFactory extends PlayerWaitingForFactory<SeparatePilesChoiceWaitingFor> {}
+
+/** Defaults to player 0 choosing one of player 1's two piles. */
+export const separatePilesChoiceWaitingForFactory =
+  SeparatePilesChoiceWaitingForFactory.define((): SeparatePilesChoiceWaitingFor => ({
+    type: "SeparatePilesChoice",
+    data: {
+      player: 0,
+      pending: [],
+      current: { subject: 1, pile_a: [], pile_b: [] },
+      source_id: 1,
     },
   }));
 
@@ -862,6 +894,14 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(effectZoneChoiceWaitingForFactory.withData(data).build());
   }
 
+  separatePilesPartition(data: Partial<SeparatePilesPartitionWaitingFor["data"]> = {}) {
+    return this.variant(separatePilesPartitionWaitingForFactory.withData(data).build());
+  }
+
+  separatePilesChoice(data: Partial<SeparatePilesChoiceWaitingFor["data"]> = {}) {
+    return this.variant(separatePilesChoiceWaitingForFactory.withData(data).build());
+  }
+
   learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {
     return this.variant(learnChoiceWaitingForFactory.withData(data).build());
   }
@@ -1185,6 +1225,14 @@ export class GameStateFactory extends Factory<GameState> {
 
   effectZoneChoice(data: Partial<EffectZoneChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.effectZoneChoice(data).build());
+  }
+
+  separatePilesPartition(data: Partial<SeparatePilesPartitionWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.separatePilesPartition(data).build());
+  }
+
+  separatePilesChoice(data: Partial<SeparatePilesChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.separatePilesChoice(data).build());
   }
 
   learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {
