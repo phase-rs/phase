@@ -4851,7 +4851,7 @@ fn resume_mana_ability_root_payment(
             events,
         )? {
             super::costs::PaymentOutcome::Paid => {
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                super::effects::resolve_rider_with_parent_context(state, ability.as_ref(), events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     Ok(WaitingFor::Priority { player: return_to })
@@ -4862,7 +4862,7 @@ fn resume_mana_ability_root_payment(
             super::costs::PaymentOutcome::Paused { .. } => Ok(state.waiting_for.clone()),
             super::costs::PaymentOutcome::Failed { .. } => {
                 state.cost_payment_failed_flag = true;
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                super::effects::resolve_rider_with_parent_context(state, ability.as_ref(), events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     Ok(WaitingFor::Priority { player: return_to })
@@ -5064,7 +5064,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                 );
                 Ok(WaitingFor::Priority { player: return_to })
             } else {
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                super::effects::resolve_rider_with_parent_context(state, ability.as_ref(), events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     Ok(WaitingFor::Priority { player: return_to })

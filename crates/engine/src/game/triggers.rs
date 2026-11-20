@@ -34626,6 +34626,7 @@ pub mod tests {
                     filter: TargetFilter::Any,
                     use_lki: false,
                     subject_slot: Some(0),
+                    subject: crate::types::ability::ObjectScope::Target,
                 }),
                 (true, true, true),
             ),
@@ -34748,6 +34749,7 @@ pub mod tests {
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                     use_lki: false,
                     subject_slot: None,
+                    subject: crate::types::ability::ObjectScope::Target,
                 }),
             ),
             (

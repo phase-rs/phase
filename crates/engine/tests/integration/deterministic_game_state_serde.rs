@@ -1805,6 +1805,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
+                copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
                 name: "First liminal".to_string(),
                 source_id: ObjectId(11),
@@ -1826,6 +1827,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
+                copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
                 name: "Second liminal".to_string(),
                 source_id: ObjectId(22),

@@ -1958,6 +1958,7 @@ fn rewrite_keyword_anaphor_for_cost_paid_parent(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = &condition
     else {
         return condition;
@@ -2024,6 +2025,7 @@ fn keyword_anaphor_referent_is_unpublished_resolution_pick(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = condition
     else {
         return false;
@@ -13514,6 +13516,22 @@ fn parse_effect_clause_inner_with_damage_context(
     // "shuffle them into their libraries" never collapses into a bare
     // `Effect::Shuffle`.
     if let Some(effect) = parse_enter_from_zone_redirect_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+
+    // CR 611.2a + CR 614.1a + CR 514.2: floating turn-bound "if a [nontoken]
+    // creature would enter and it wasn't cast, exile it instead" (Mistcaller,
+    // Hallowed Moonlight). Dispatched after `strip_leading_duration` for the same
+    // reason as the Don't Blink lift above: the duration-stripped recursive call
+    // reaches it and the window is re-attached as `AbilityDefinition.duration`.
+    // This front door supports only clauses with a stated duration; durationless
+    // clauses remain unsupported here (CR 611.2a permits resolution-generated
+    // continuous effects without a stated duration) and keep their honest guard gap.
+    if let Some(effect) = super::oracle_replacement::parse_windowed_enter_wasnt_cast_exile_install(
+        &lower,
+        text,
+        ctx.stated_clause_duration.as_ref(),
+    ) {
         return parsed_clause(effect);
     }
 
@@ -32302,9 +32320,10 @@ fn effect_reads_announced_root_slots(
         || matches!(
             condition,
             Some(AbilityCondition::TargetMatchesFilter {
+                filter: _,
                 use_lki: false,
                 subject_slot: None,
-                ..
+                subject: ObjectScope::Target,
             })
         )
     {
@@ -43061,7 +43080,7 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
     mass_population_filter(&clause.parsed.effect).cloned()
 }
 
-/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If this clause is a
+/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If an effect is a
 /// `GenericEffect` Continuous-mode static grant over a BROADCAST population (a
 /// keyword/P-T/ability "gain(s)"/"have"/"has" grant, not a chosen-target
 /// application), return the population filter it establishes. Feeds
@@ -43076,12 +43095,12 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
 /// a broadcast population qualifies. Only a single static definition is
 /// accepted: a `GenericEffect` carrying two or more static defs has no single
 /// population to name without risking a wrong-antecedent guess.
-fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+pub(crate) fn continuous_grant_population(effect: &Effect) -> Option<&TargetFilter> {
     let Effect::GenericEffect {
         static_abilities,
         target: None,
         ..
-    } = &clause.parsed.effect
+    } = effect
     else {
         return None;
     };
@@ -43092,7 +43111,11 @@ fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilt
         return None;
     }
     let filter = static_def.affected.as_ref()?;
-    is_broadcast_population_filter(filter).then(|| filter.clone())
+    is_broadcast_population_filter(filter).then_some(filter)
+}
+
+fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    continuous_grant_population(&clause.parsed.effect).cloned()
 }
 
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
@@ -43647,6 +43670,26 @@ fn contains_explicit_tracked_set_pronoun(lower: &str) -> bool {
         || scan_contains_phrase(lower, "the exiled creature")
 }
 
+/// CR 608.2c: Detect a plural mass-population anaphor in a document paragraph.
+/// The caller supplies the producer's typed mass-population proof; this helper
+/// only recognizes the printed noun axis with the shared nom boundary scanner.
+pub(crate) fn contains_mass_population_anaphor(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("those creatures"),
+                tag("those permanents"),
+                tag("those tokens"),
+                tag("those auras"),
+                tag("those enchantments"),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 /// CR 608.2c: a clause led by a plural subject anaphor ("They are 5/5 …",
 /// "Those permanents gain …") names the set the earlier instructions published.
 fn starts_with_plural_subject_anaphor(lower: &str) -> bool {
@@ -43987,6 +44030,45 @@ pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &
     }
 }
 
+/// CR 608.2c: Re-anchor only the `ParentTarget` grant proven to be conditional
+/// on this ability path. A whole-tree rewrite is unsound here: a consumer can
+/// contain a singular or sibling `ParentTarget` grant that has no relationship
+/// to the preceding mass population.
+pub(super) fn rewrite_conditional_grant_parent_to_filter(
+    effect: &mut Effect,
+    replacement: &TargetFilter,
+    condition_in_scope: bool,
+) {
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return;
+    };
+
+    if condition_in_scope {
+        if let Some(target) = target {
+            if matches!(target, TargetFilter::ParentTarget) {
+                rewrite_filter_parent_to(target, replacement);
+            }
+        }
+    }
+    for static_def in static_abilities {
+        if static_def
+            .affected
+            .as_ref()
+            .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+            && (condition_in_scope || static_def.condition.is_some())
+        {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to(affected, replacement);
+            }
+        }
+    }
+}
+
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {
@@ -44291,7 +44373,7 @@ fn stamp_inside_delayed(effect: &mut Effect, expected: Zone) {
     }
 }
 
-fn append_to_deepest_sub_ability(
+pub(super) fn append_to_deepest_sub_ability(
     ability: &mut AbilityDefinition,
     tail: Option<Box<AbilityDefinition>>,
 ) {
@@ -58811,6 +58893,7 @@ pub mod test_helpers {
             filter: TargetFilter::Typed(TypedFilter::creature()),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     }
 
@@ -63896,5 +63979,24 @@ mod population_walk_destination_tests {
             vec![Some(TargetFilter::ParentTarget)],
             "a declined producer's grant keeps the bare anaphor"
         );
+    }
+
+    /// CR 608.2c: every plural object noun in the mass-population anaphor axis
+    /// is recognized by the same boundary-safe nom combinator. Singular
+    /// references do not enter this cross-item relation.
+    #[test]
+    fn mass_population_anaphor_covers_plural_object_vocabulary() {
+        for phrase in [
+            "those creatures gain flying",
+            "those permanents gain flying",
+            "those tokens gain flying",
+            "those auras gain flying",
+            "those enchantments gain flying",
+        ] {
+            assert!(contains_mass_population_anaphor(phrase), "{phrase}");
+        }
+        assert!(!contains_mass_population_anaphor(
+            "that creature gains flying"
+        ));
     }
 }

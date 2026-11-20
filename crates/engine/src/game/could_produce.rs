@@ -3259,6 +3259,7 @@ mod tests {
             filter: TargetFilter::Any,
             use_lki: false,
             subject_slot: None,
+            subject: crate::types::ability::ObjectScope::Target,
         };
         assert!(
             crate::game::effects::condition_depends_on_result_object(&result_gate),
