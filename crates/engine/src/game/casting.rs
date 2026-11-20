@@ -25438,7 +25438,7 @@ pub(super) fn effect_mana_funding_candidates(
 pub(crate) enum EffectManaFundingProbe {
     /// The funding pays the cost; the state the effect's later instructions
     /// then resolve in.
-    Funded(GameState),
+    Funded(Box<GameState>),
     /// CR 118.3: the funding leaves the cost unpaid.
     Unpayable,
     /// CR 605.3b + CR 616.1: a mana ability the funding activates paused for
@@ -25495,7 +25495,7 @@ pub(super) fn effect_mana_funding_probe(
     if run_effect_auto_tap_pass(&mut simulated, payer, source_id, cost, &mut tap_events) {
         return EffectManaFundingProbe::Undecided;
     }
-    EffectManaFundingProbe::Funded(simulated)
+    EffectManaFundingProbe::Funded(Box::new(simulated))
 }
 
 /// CR 608.2g + CR 605.3a + CR 605.3b + CR 605.4a: The payer activates
