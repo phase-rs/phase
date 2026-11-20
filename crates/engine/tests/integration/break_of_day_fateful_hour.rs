@@ -35,7 +35,7 @@ fn cast_break_of_day(
     let _second = scenario.add_creature(P0, "Second creature", 3, 1).id();
     let opponent = scenario.add_creature(P1, "Opponent creature", 4, 4).id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Break of Day", false, BREAK_OF_DAY)
+        .add_spell_to_hand_from_oracle(P0, "Break of Day", true, BREAK_OF_DAY)
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
