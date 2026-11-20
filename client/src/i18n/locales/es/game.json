@@ -1555,6 +1555,7 @@
     },
     "search": {
       "title": "Buscar en la biblioteca",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Elige {{count}} carta",
       "subtitleExact_other": "Elige {{count}} cartas",
       "subtitleUpTo_one": "Elige hasta {{count}} carta",
@@ -2450,6 +2451,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
     "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Mantén pulsado para ver la carta completa"
   },
   "optionalEffect": {
     "sourceFallback": "Efecto",

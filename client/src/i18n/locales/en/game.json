@@ -1593,6 +1593,7 @@
     },
     "search": {
       "title": "Search Library",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Choose {{count}} card",
       "subtitleExact_other": "Choose {{count}} cards",
       "subtitleUpTo_one": "Choose up to {{count}} card",
@@ -2488,6 +2489,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "Optional triggers ({{count, number}})",
     "replacementChoices": "Replacement choices ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Hold to see the full card"
   },
   "optionalEffect": {
     "sourceFallback": "Effect",

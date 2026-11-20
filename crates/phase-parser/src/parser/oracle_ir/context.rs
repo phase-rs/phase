@@ -92,9 +92,11 @@ impl HeadWindowProbe {
     }
 }
 
-/// The players an anaphoric controller phrase can bind to, read from the parse
-/// context (`ParseContext::player_antecedents`) or supplied by a named seed.
-/// `None` means no antecedent is in scope.
+/// The referents an anaphor in a captured clause may bind to — the players an
+/// anaphoric controller phrase names and the object a possessive-pronoun
+/// characteristic names — read from the parse context
+/// (`ParseContext::player_antecedents`) or supplied by a named seed. `None`
+/// means no antecedent is in scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PlayerAntecedents {
     /// CR 608.2c + CR 115.1a: the player the effect chain itself declared, the
@@ -108,6 +110,10 @@ pub(crate) struct PlayerAntecedents {
     pub third_person: Option<ControllerRef>,
     /// The referent of "its controller" / "their controller".
     pub object_controller: Option<ControllerRef>,
+    /// CR 608.2k + CR 608.2c: the object a possessive-pronoun characteristic
+    /// ("its power") in a where-X definition names — the characteristic twin of
+    /// `object_controller`; `None` keeps the `Source` default.
+    pub characteristic_pronoun_owner: Option<ObjectScope>,
 }
 
 impl PlayerAntecedents {
@@ -142,6 +148,18 @@ impl PlayerAntecedents {
     pub(crate) fn basic_land_type_count() -> Self {
         PlayerAntecedents {
             third_person: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        }
+    }
+
+    /// CR 608.2k: only the characteristic rung of `ctx`'s antecedents. The
+    /// count slot's where-X binder (`oracle_util::parse_count_slot`) reads
+    /// "its power" against the trigger's "it" antecedent, but it has never
+    /// threaded the player rungs, and threading them would rebind relative
+    /// controller phrases outside this class.
+    pub(crate) fn characteristic_owner_only(ctx: &ParseContext) -> Self {
+        PlayerAntecedents {
+            characteristic_pronoun_owner: ctx.player_antecedents().characteristic_pronoun_owner,
             ..Default::default()
         }
     }
@@ -1251,11 +1269,14 @@ pub struct ParseContext {
     pub trigger_condition_objects: TriggerConditionObjects,
     /// CR 608.2k: the owner a possessive PRONOUN ("its"/"his"/"her"/"their")
     /// characteristic binds to while this context is active. Set ONLY by
-    /// quantity interpreters parsing a clause whose subject position is known
-    /// (`parse_where_x_quantity_expression_with_owner`, for boon-granted
-    /// "it"/"that" perpetual tails, where the pronoun names the triggering
-    /// object). `None` (the default every other caller carries) preserves the
-    /// long-standing `Source` binding. Explicit self-references ("~'s",
+    /// quantity interpreters parsing a clause whose subject position is known:
+    /// the explicit owner of `parse_where_x_quantity_expression_with_owner`
+    /// (boon-granted "it"/"that" perpetual tails, where the pronoun names the
+    /// triggering object), or the antecedent rung
+    /// `PlayerAntecedents::characteristic_pronoun_owner` (a where-X tail in a
+    /// trigger body whose "it" names the trigger event's object). `None` (the
+    /// default every other caller carries) preserves the long-standing `Source`
+    /// binding. Explicit self-references ("~'s",
     /// "this creature's") NEVER consult this field — only the four genuinely
     /// anaphoric pronoun surfaces do.
     pub characteristic_pronoun_owner: Option<ObjectScope>,
@@ -1311,6 +1332,13 @@ impl ParseContext {
                 }
                 _ => ControllerRef::ParentTargetController,
             }),
+            // CR 608.2k: "its" names the same object "it" does. Delegate to the
+            // single pronoun authority, so a nearer antecedent (a parent target,
+            // the source) keeps today's `Source` binding and only an "it" that
+            // names the trigger event's object moves the characteristic there.
+            characteristic_pronoun_owner: (crate::parser::oracle_effect::resolve_it_pronoun(self)
+                == TargetFilter::TriggeringSource)
+                .then_some(ObjectScope::EventSource),
         }
     }
 
@@ -1898,5 +1926,114 @@ mod tests {
                 Some(expected_they)
             );
         }
+    }
+
+    /// CR 608.2k + CR 608.2c: the characteristic rung mirrors the single "it"
+    /// authority (`resolve_it_pronoun`). It names the trigger event's object
+    /// only where bare "it" does; every nearer or self antecedent leaves it
+    /// `None`, which keeps the `Source` default.
+    #[test]
+    fn characteristic_pronoun_owner_mirrors_it_pronoun() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let event_object = Some(ObjectScope::EventSource);
+        for (label, ctx, expected) in [
+            (
+                "typed creature trigger subject",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            (
+                "enchanted/equipped creature trigger subject",
+                ParseContext {
+                    subject: Some(TargetFilter::AttachedTo),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            (
+                "self subject, explicit triggering-source anaphor",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            ("no subject", ParseContext::default(), None),
+            (
+                "self subject",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "any subject",
+                ParseContext {
+                    subject: Some(TargetFilter::Any),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "cost-paid anchor",
+                ParseContext {
+                    subject: Some(TargetFilter::CostPaidObject),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "typed subject, nearer self anaphor",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    object_pronoun_ref: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "typed subject, nearer parent-target anaphor",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    object_pronoun_ref: Some(TargetFilter::ParentTarget),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(
+                ctx.player_antecedents().characteristic_pronoun_owner,
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// CR 608.2k: the count slot's seed carries only the characteristic rung;
+    /// every player rung stays empty so relative controller phrases keep their
+    /// context-free binding.
+    #[test]
+    fn characteristic_owner_only_seed_carries_only_the_rung() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        assert_eq!(
+            PlayerAntecedents::characteristic_owner_only(&ctx),
+            PlayerAntecedents {
+                characteristic_pronoun_owner: Some(ObjectScope::EventSource),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            PlayerAntecedents::characteristic_owner_only(&ParseContext::default()),
+            PlayerAntecedents::default()
+        );
     }
 }

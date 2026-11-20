@@ -6226,6 +6226,14 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
 /// the whole class of "a/an <permanent> <controller-clause> has <keyword>"
 /// conditions, not one card.
 fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_shared_subject_has_keyword,
+        parse_single_subject_has_keyword,
+    ))
+    .parse(input)
+}
+
+fn parse_single_subject_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> {
     // Optional leading article — `parse_type_phrase_folding` also strips it, but the
     // article may precede a non-type word, so guard it explicitly first.
     let (rest, _) = opt(parse_article).parse(input)?;
@@ -6247,6 +6255,46 @@ fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> 
     let filter = add_filter_property(filter, FilterProp::WithKeyword { value: keyword });
     Ok((
         after_kw,
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        },
+    ))
+}
+
+/// CR 702.1d + CR 608.2c: Parse a shared-predicate disjunction such as
+/// "a creature you control or a card in your hand has flying". The `or`
+/// joins the subjects before the single `has <keyword>` predicate; it is not a
+/// condition connective between two independently written predicates. Parse
+/// both subject phrases first, then apply the common keyword property to every
+/// branch through `add_filter_property`.
+fn parse_shared_subject_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = opt(parse_article).parse(input)?;
+    let (first, rest) = parse_type_phrase_folding(rest);
+    if matches!(first, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, _) = opt(parse_article).parse(rest)?;
+    let (second, rest) = parse_type_phrase_folding(rest);
+    if matches!(second, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = preceded(opt(tag(" ")), tag("has ")).parse(rest)?;
+    let (rest, keyword_name) = parse_keyword_name(rest)?;
+    let keyword: Keyword = keyword_name
+        .parse()
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
+    let filter = add_filter_property(
+        TargetFilter::Or {
+            filters: vec![
+                inject_battlefield_presence(first),
+                inject_battlefield_presence(second),
+            ],
+        },
+        FilterProp::WithKeyword { value: keyword },
+    );
+    Ok((
+        rest,
         StaticCondition::IsPresent {
             filter: Some(filter),
         },
@@ -7644,10 +7692,7 @@ fn parse_youve_life_history_condition(input: &str) -> OracleResult<'_, StaticCon
         ),
         value(
             make_quantity_ge(
-                QuantityRef::LifeLost {
-                    player: PlayerScope::Controller,
-                    window: TurnWindow::ThisTurn,
-                },
+                life_lost_in_window(PlayerScope::Controller, TurnWindow::ThisTurn),
                 1,
             ),
             tag("lost life this turn"),
@@ -8180,29 +8225,23 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         // opponent and other opponents diverge.
         value(
             make_quantity_ge(
-                QuantityRef::LifeLost {
-                    player: PlayerScope::Target,
-                    window: TurnWindow::ThisTurn,
-                },
+                life_lost_in_window(PlayerScope::Target, TurnWindow::ThisTurn),
                 1,
             ),
             tag("they lost life this turn"),
         ),
-        // "an opponent lost life this turn"
+        // Retain the historical opponent scope for this-turn "that player".
         value(
             make_quantity_ge(
-                QuantityRef::LifeLost {
-                    player: PlayerScope::Opponent {
+                life_lost_in_window(
+                    PlayerScope::Opponent {
                         aggregate: AggregateFunction::Sum,
                     },
-                    window: TurnWindow::ThisTurn,
-                },
+                    TurnWindow::ThisTurn,
+                ),
                 1,
             ),
-            alt((
-                tag("an opponent lost life this turn"),
-                tag("that player lost life this turn"),
-            )),
+            tag("that player lost life this turn"),
         ),
         // CR 119.3 + CR 603.4: "that player lost less than N life this turn"
         // (Lolth, Spider Queen emblem intervening-if).
@@ -8214,10 +8253,7 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
                 rest,
                 StaticCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLost {
-                            player: PlayerScope::ScopedPlayer,
-                            window: TurnWindow::ThisTurn,
-                        },
+                        qty: life_lost_in_window(PlayerScope::ScopedPlayer, TurnWindow::ThisTurn),
                     },
                     comparator: Comparator::LT,
                     rhs: QuantityExpr::Fixed {
@@ -8226,6 +8262,7 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
                 },
             ))
         },
+        parse_lost_life_in_window,
         parse_opponent_lost_life_this_turn,
         // CR 119.4 + CR 603.4: "an opponent gained life this turn" — sum across
         // opponents, mirroring the lost-life sibling. Unlocks Needlebite Trap
@@ -8253,9 +8290,6 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_player_lost_life_this_turn,
         // "you gained life this turn" / "you gained N or more life this turn"
         parse_you_gained_life_this_turn,
-        // "you lost life this turn" / "you lost N or more life this turn" — the
-        // controller-scoped mirror of the gained sibling (was the only missing
-        // subject in the gained/lost × you/opponent/player matrix).
         parse_you_lost_life_this_turn,
     ))
     .parse(input)
@@ -8543,10 +8577,10 @@ fn parse_no_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition>
     ))
 }
 
-/// History windows shared by the cast/draw history conditions: the current
-/// turn, the previous turn, and the "since your last turn ended" window
-/// (I Bask in Your Silent Awe). Each action maps the windows it has counters
-/// for and declines the rest, so related wordings compose without new tags.
+/// History windows shared by the spell, draw, and life-loss conditions: the
+/// current turn, the previous turn, and the "since your last turn ended"
+/// window (I Bask in Your Silent Awe). Each action maps the windows it has
+/// counters for and declines the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryWindow {
     ThisTurn,
@@ -9375,48 +9409,52 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
     ))
 }
 
-/// CR 119.3 + CR 603.4: Parse "you lost [N or more] life this turn".
-///
-/// Controller-scoped mirror of `parse_you_gained_life_this_turn`. The opponent
-/// and any-player subjects already parse (`parse_opponent_lost_life_this_turn`,
-/// `parse_player_lost_life_this_turn`) and the controller *gained* subject
-/// parses too — only "you lost …" was missing, so phase-trigger intervening-ifs
-/// such as The Book of Vile Darkness ("if you lost 2 or more life this turn,
-/// create a 2/2 black Zombie") silently dropped their condition. Resolves via
-/// the existing `LifeLost { Controller }` QuantityRef — no new variants.
-fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        value((), tag("you lost ")),
-        value((), (parse_youve, tag(" lost "))),
-    ))
-    .parse(input)?;
-    // Try "N or more life this turn".
-    if let Ok((after_n, n)) = parse_number(rest) {
-        let after_n = after_n.trim_start();
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("or more life this turn").parse(after_n)
-        {
-            return Ok((
-                rest,
-                make_quantity_ge(
-                    QuantityRef::LifeLost {
-                        player: PlayerScope::Controller,
-                        window: TurnWindow::ThisTurn,
-                    },
-                    n,
-                ),
-            ));
-        }
+fn life_lost_in_window(player: PlayerScope, window: TurnWindow) -> QuantityRef {
+    QuantityRef::LifeLost { player, window }
+}
+
+/// CR 119.3 + CR 603.4: literal, unquantified life loss in the current or
+/// immediately preceding turn. At GE 1, summing across opponents answers
+/// whether any opponent lost life. Quantified and anaphoric siblings stay
+/// this-turn only.
+fn parse_lost_life_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (player, _, window)) = (
+        alt((
+            value(PlayerScope::Controller, tag("you")),
+            value(
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                tag("an opponent"),
+            ),
+        )),
+        tag(" lost life "),
+        map_opt(parse_history_window, history_window_turn_window),
+    )
+        .parse(input)?;
+    if window == TurnWindow::LastTurn {
+        // The pinned last-turn class is a complete clause. Do not claim a
+        // prefix of a longer window or of an unsupported compound condition.
+        peek(alt((eof, tag(","), tag(".")))).parse(rest)?;
     }
-    // "life this turn" (minimum 1).
-    let (rest, _) = tag("life this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(life_lost_in_window(player, window), 1),
+    ))
+}
+
+/// CR 119.3 + CR 603.4: "you [or you've] lost N or more life this turn"
+/// (The Book of Vile Darkness). Unquantified "you've" is handled by
+/// `parse_youve_life_history_condition`.
+fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = (alt((parse_youve, tag("you"))), tag(" lost ")).parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag("or more life this turn").parse(rest.trim_start())?;
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::LifeLost {
-                player: PlayerScope::Controller,
-                window: TurnWindow::ThisTurn,
-            },
-            1,
+            life_lost_in_window(PlayerScope::Controller, TurnWindow::ThisTurn),
+            n,
         ),
     ))
 }
@@ -9440,13 +9478,13 @@ fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondi
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::LifeLost {
-                player: PlayerScope::AllPlayers {
+            life_lost_in_window(
+                PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
                     exclude: None,
                 },
-                window: TurnWindow::ThisTurn,
-            },
+                TurnWindow::ThisTurn,
+            ),
             n,
         ),
     ))
@@ -9459,12 +9497,12 @@ fn parse_opponent_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCon
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::LifeLost {
-                player: PlayerScope::Opponent {
+            life_lost_in_window(
+                PlayerScope::Opponent {
                     aggregate: AggregateFunction::Max,
                 },
-                window: TurnWindow::ThisTurn,
-            },
+                TurnWindow::ThisTurn,
+            ),
             n,
         ),
     ))
@@ -18352,20 +18390,90 @@ mod tests {
         );
     }
 
+    // SHAPE: CR 119.3 + CR 603.4. Literal and historical unquantified
+    // conditions keep their subject binding and use a GE 1 life-loss check.
     #[test]
-    fn test_youve_lost_life() {
-        let (rest, c) = parse_inner_condition("you've lost life this turn").unwrap();
-        assert_eq!(rest, "");
-        match c {
-            StaticCondition::QuantityComparison {
-                lhs:
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLost { .. },
+    fn unquantified_life_loss_preserves_scope_across_supported_windows() {
+        for (text, rest_expected, player, window) in [
+            (
+                "you lost life last turn",
+                "",
+                PlayerScope::Controller,
+                TurnWindow::LastTurn,
+            ),
+            (
+                "an opponent lost life last turn,",
+                ",",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                TurnWindow::LastTurn,
+            ),
+            (
+                "you lost life this turn",
+                "",
+                PlayerScope::Controller,
+                TurnWindow::ThisTurn,
+            ),
+            (
+                "an opponent lost life this turn",
+                "",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                TurnWindow::ThisTurn,
+            ),
+            (
+                "that player lost life this turn",
+                "",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+                TurnWindow::ThisTurn,
+            ),
+            (
+                "you've lost life this turn",
+                "",
+                PlayerScope::Controller,
+                TurnWindow::ThisTurn,
+            ),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, rest_expected, "{text}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLost { player, window },
                     },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 1 },
-            } => {}
-            other => panic!("expected LifeLost GE 1, got {other:?}"),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                "{text}",
+            );
+        }
+    }
+
+    // SHAPE: last-turn life loss does not claim quantities, other subjects or
+    // windows, or prefixes of longer conditions. The possessive window has
+    // its own legacy trigger parser, not this condition.
+    #[test]
+    fn unquantified_last_turn_life_loss_declines_out_of_scope_clauses() {
+        for text in [
+            "you lost 2 or more life last turn",
+            "an opponent lost at least 2 life last turn",
+            "a player lost 4 or more life last turn",
+            "that player lost life last turn",
+            "they lost life last turn",
+            "you've lost life last turn",
+            "you’ve lost life last turn",
+            "an opponent lost life during their last turn",
+            "you lost life since your last turn ended",
+            "you lost life last turnover",
+            "an opponent lost life last turn before combat",
+            "you lost life last turn and something else",
+        ] {
+            assert!(parse_inner_condition(text).is_err(), "{text}");
         }
     }
 
@@ -27359,6 +27467,103 @@ mod tests {
             }
             other => panic!("expected IsPresent(Typed), got {other:?}"),
         }
+    }
+
+    /// CR 702.1d: one shared `has` predicate can qualify more than one subject.
+    /// The keyword property must be copied to both branches of the subject
+    /// disjunction rather than parsed as two independent conditions.
+    #[test]
+    fn parse_inner_condition_shared_subjects_have_keyword() {
+        let (rest, condition) =
+            parse_inner_condition("a creature you control or a card in your hand has flying")
+                .unwrap();
+        assert!(rest.is_empty());
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Or { filters }),
+        } = condition
+        else {
+            panic!("expected a disjunctive presence condition, got {condition:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().all(|filter| match filter {
+            TargetFilter::Typed(typed) => typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }
+            ),),
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Not { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
+        }));
+    }
+
+    /// The shared-predicate recognizer must fail at its typed keyword tail;
+    /// accepting the subject prefix alone would silently drop the predicate.
+    #[test]
+    fn parse_shared_subject_has_keyword_rejects_unknown_keyword() {
+        assert!(parse_shared_subject_has_keyword(
+            "a creature you control or a card in your hand has counters"
+        )
+        .is_err());
     }
 
     /// No controller suffix — the bare "a creature has trample" form still

@@ -2,34 +2,8 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::static_abilities::additional_land_drops;
-use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, Effect};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
-
-#[test]
-fn explore_spell_parses_both_effects() {
-    let def = parse_effect_chain(
-        "You may play an additional land this turn.\nDraw a card.",
-        AbilityKind::Spell,
-    );
-
-    assert!(
-        matches!(&*def.effect, Effect::GenericEffect { .. }),
-        "Root effect should be GenericEffect for additional land, got {:?}",
-        def.effect
-    );
-
-    let sub = def
-        .sub_ability
-        .as_ref()
-        .expect("Should have a sub_ability for the draw");
-    assert!(
-        matches!(&*sub.effect, Effect::Draw { .. }),
-        "Sub-effect should be Draw, got {:?}",
-        sub.effect
-    );
-}
 
 #[test]
 fn explore_spell_grants_extra_land_drop_and_draws() {

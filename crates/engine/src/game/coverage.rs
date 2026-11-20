@@ -60,7 +60,6 @@ use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::ControlFlow;
-use std::sync::LazyLock;
 use strum::IntoEnumIterator;
 
 const TOKEN_FIDELITY_PARTIAL_MISSING_ABILITIES_LABEL: &str =
@@ -645,8 +644,10 @@ pub struct CoverageSummary {
     pub supported_cards: usize,
     pub coverage_pct: f64,
     pub keyword_count: usize,
-    #[serde(default)]
-    pub token_coverage: TokenCoverageSummary,
+    /// `None` from [`analyze_coverage`]: the token catalog does not depend on the database, so
+    /// only the printed report computes it ([`analyze_token_coverage`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_coverage: Option<TokenCoverageSummary>,
     #[serde(default)]
     pub coverage_by_format: BTreeMap<String, FormatCoverageSummary>,
     /// Per-set coverage rollup. Each card counts toward every set it was
@@ -922,6 +923,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("controlled by {}", fmt_player_filter(player)))
             }
             FilterProp::WasPlayed => parts.push("was played".into()),
+            FilterProp::CastThisTurn { caster } => {
+                parts.push(format!("cast this turn ({})", fmt_controller(caster)))
+            }
             FilterProp::Attacking { defender } => match defender {
                 None => parts.push("attacking".into()),
                 Some(ControllerRef::You) => parts.push("attacking you".into()),
@@ -1614,6 +1618,33 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
             }
             None => format!("{} of all players", fmt_aggregate_function(*aggregate)),
         },
+    }
+}
+
+/// CR 122.1f: display phrase for a "<player> is poisoned" condition.
+fn fmt_player_is_poisoned(player: &PlayerScope) -> String {
+    match player {
+        PlayerScope::Controller => "is poisoned".into(),
+        // `Opponent { Max }` is the parser's encoding of the existential "an opponent".
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Max,
+        } => "an opponent is poisoned".into(),
+        // RecipientController reaches this condition only by rebinding the "that player" anaphor (ScopedPlayer).
+        PlayerScope::ScopedPlayer | PlayerScope::RecipientController => {
+            "that player is poisoned".into()
+        }
+        PlayerScope::Target
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. }
+        | PlayerScope::ParentObjectTarget { .. }
+        | PlayerScope::Opponent {
+            aggregate: AggregateFunction::Min | AggregateFunction::Sum,
+        }
+        | PlayerScope::AllPlayers { .. } => {
+            format!("{} is poisoned", fmt_player_scope(player))
+        }
     }
 }
 
@@ -5230,12 +5261,7 @@ fn fmt_trigger_condition(
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         TC::IsMonarch { .. } => "that player is monarch".into(),
-        // CR 122.1f + CR 508.5: keep the defending-player wording distinct so a
-        // gap string names the player the trigger actually tests.
-        TC::IsPoisoned {
-            player: PlayerScope::DefendingPlayer,
-        } => "defending player is poisoned".into(),
-        TC::IsPoisoned { .. } => "that player is poisoned".into(),
+        TC::IsPoisoned { player } => fmt_player_is_poisoned(player),
         TC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -5502,11 +5528,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
-        // CR 122.1f: keep the subject wording parallel to `TC::IsPoisoned`.
-        SC::PlayerIsPoisoned {
-            player: PlayerScope::Controller,
-        } => "is poisoned".into(),
-        SC::PlayerIsPoisoned { .. } => "that player is poisoned".into(),
+        SC::PlayerIsPoisoned { player } => fmt_player_is_poisoned(player),
         SC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -7308,18 +7330,8 @@ fn token_pt_provenance_has_no_materialization_gap(
     ) && !token_rules_text_unparsed_gap(preset, materialized)
 }
 
-/// The token-catalog coverage summary, computed once per process.
-///
-/// Its only inputs are the compiled-in token catalog ([`known_token_presets`])
-/// and the pure Oracle parser, so the summary is a process-wide constant that
-/// does not depend on the `CardDatabase` being analyzed. Deriving it re-parses
-/// every catalog preset's rules text (~1.5k lines), which dominated each
-/// [`analyze_coverage`] call: ~20s per call in an unoptimized build against
-/// microseconds for a one-card database, so a test that analyzes N one-card
-/// databases paid the catalog parse N times.
-static TOKEN_COVERAGE: LazyLock<TokenCoverageSummary> = LazyLock::new(analyze_token_coverage);
-
-fn analyze_token_coverage() -> TokenCoverageSummary {
+/// Coverage of the compiled-in token catalog ([`known_token_presets`]); re-parses every preset's rules text.
+pub fn analyze_token_coverage() -> TokenCoverageSummary {
     let mut summary = TokenCoverageSummary::default();
     let mut gap_accumulators: BTreeMap<String, (usize, usize, Vec<String>)> = BTreeMap::new();
     let mut gap_token_accumulators: BTreeMap<(String, String), (usize, usize, Vec<String>)> =
@@ -7978,7 +7990,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         supported_cards,
         coverage_pct,
         keyword_count,
-        token_coverage: TOKEN_COVERAGE.clone(),
+        token_coverage: None,
         coverage_by_format,
         coverage_by_set,
         cards,
@@ -11842,13 +11854,10 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
     }
 }
 
-/// Whether the per-candidate reader behind `PlayerFilter::PlayerAttribute`
-/// (`effects::candidate_player_scalar`) answers `attr`, for the two
-/// window-parameterized history families. `Unhandled` exactly for a spell attr
-/// the reader returns `None` for (a this-turn count, or a last-turn count with a
-/// filter: the candidate predicate would fail closed and the guard never fire)
-/// and for a `LifeLost` attr in the last-turn window (no producer yet). Every
-/// other attr is `Handled`: their classification is deliberately unchanged.
+/// Coverage for the windowed history families read by
+/// `effects::candidate_player_scalar`. Both life-loss windows are readable.
+/// A this-turn spell attr or a filtered last-turn spell attr fails closed in
+/// that reader and must remain `Unhandled`. Other attrs are unchanged.
 fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
     use FeatureSupport::*;
     match attr {
@@ -11857,10 +11866,6 @@ fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
             filter: _,
             window: _,
         } if !candidate_scalar_reads_spell_attr(attr) => Unhandled,
-        QuantityRef::LifeLost {
-            player: _,
-            window: TurnWindow::LastTurn,
-        } => Unhandled,
         QuantityRef::SpellsCast {
             scope: _,
             filter: _,
@@ -11868,7 +11873,7 @@ fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
         }
         | QuantityRef::LifeLost {
             player: _,
-            window: TurnWindow::ThisTurn,
+            window: TurnWindow::ThisTurn | TurnWindow::LastTurn,
         } => Handled,
         // Every other ref is `Handled` here (their classification is unchanged),
         // enumerated so a new `QuantityRef` variant must be classified at this
@@ -12450,19 +12455,14 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
-        // CR 119.3 + CR 500: only the this-turn window has a producer. A deserialized
-        // `LastTurn` payload is read by the resolver but no parser path emits it until
-        // the life last-turn grammar lands, so it is classified unsupported (never
-        // advertised as supported), at this top-level position and, through
-        // `window_attr_support`, in a nested `PlayerAttribute`.
         QuantityRef::LifeLost {
+            player: _,
             window: TurnWindow::ThisTurn,
-            ..
         } => ("LifeLostThisTurn", Handled),
         QuantityRef::LifeLost {
+            player: _,
             window: TurnWindow::LastTurn,
-            ..
-        } => ("LifeLostLastTurn", Unhandled),
+        } => ("LifeLostLastTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
         QuantityRef::SpellsCast {
             window: TurnWindow::ThisTurn,
@@ -13388,6 +13388,18 @@ enum ParsedElement<'a> {
     Replacement(&'a ReplacementDefinition),
 }
 
+fn effect_has_nested_static_condition(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            static_abilities,
+            ..
+        } if static_abilities
+            .iter()
+            .any(|static_ability| static_ability.condition.is_some())
+    )
+}
+
 impl<'a> ParsedElement<'a> {
     fn description_lower(&self) -> Option<String> {
         match self {
@@ -13437,12 +13449,15 @@ impl<'a> ParsedElement<'a> {
                     || d.activation_restrictions
                         .iter()
                         .any(|r| matches!(r, ActivationRestriction::RequiresCondition { .. }))
+                    || effect_has_nested_static_condition(&d.effect)
             }),
             ParsedElement::Trigger(t) => {
                 t.condition.is_some()
-                    || t.execute
-                        .as_ref()
-                        .is_some_and(|e| ability_tree_any(e, &|d| d.condition.is_some()))
+                    || t.execute.as_ref().is_some_and(|e| {
+                        ability_tree_any(e, &|d| {
+                            d.condition.is_some() || effect_has_nested_static_condition(&d.effect)
+                        })
+                    })
             }
             ParsedElement::Static(s) => s.condition.is_some(),
             ParsedElement::Replacement(r) => {
@@ -19068,6 +19083,80 @@ mod tests {
     }
 
     #[test]
+    fn player_is_poisoned_condition_text_names_its_subject() {
+        let details = |face: &CardFace| -> Vec<(String, String)> {
+            build_parse_details_for_face(face)
+                .into_iter()
+                .flat_map(|item| item.details)
+                .collect()
+        };
+        let detail = |key: &str, value: &str| (key.to_string(), value.to_string());
+
+        let betrayers = max_speed_matrix_face(
+            "Viridian Betrayers",
+            "This creature has infect as long as an opponent is poisoned. (It deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)",
+            &[],
+            &["Creature"],
+            &["Phyrexian", "Elf", "Warrior"],
+        );
+        let betrayers_details = details(&betrayers);
+        assert!(
+            betrayers_details.contains(&detail("conditional", "an opponent is poisoned")),
+            "{betrayers_details:?}"
+        );
+
+        let rats = max_speed_matrix_face(
+            "Septic Rats",
+            "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)\nWhenever this creature attacks, if defending player is poisoned, it gets +1/+1 until end of turn.",
+            &["Infect"],
+            &["Creature"],
+            &["Phyrexian", "Rat"],
+        );
+        let rats_details = details(&rats);
+        assert!(
+            rats_details.contains(&detail("condition", "defending player is poisoned")),
+            "{rats_details:?}"
+        );
+
+        for (player, expected) in [
+            (PlayerScope::Controller, "is poisoned"),
+            (
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+                "an opponent is poisoned",
+            ),
+            (PlayerScope::ScopedPlayer, "that player is poisoned"),
+            (PlayerScope::RecipientController, "that player is poisoned"),
+            (
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+                "min of opponents is poisoned",
+            ),
+            (PlayerScope::Target, "target player is poisoned"),
+        ] {
+            assert_eq!(
+                fmt_static_condition(&StaticCondition::PlayerIsPoisoned {
+                    player: player.clone()
+                }),
+                expected,
+                "static {player:?}"
+            );
+            assert_eq!(
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::IsPoisoned {
+                        player: player.clone()
+                    },
+                    &TriggerMode::Attacks,
+                ),
+                expected,
+                "trigger {player:?}"
+            );
+        }
+    }
+
+    #[test]
     fn nonfirst_spell_constraint_has_grammatical_coverage_detail() {
         assert_eq!(
             fmt_trigger_constraint(&TriggerConstraint::NthSpellThisTurn {
@@ -20066,6 +20155,7 @@ mod tests {
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
         }));
+        assert_eq!(analyze_token_coverage(), summary);
     }
 
     #[test]
@@ -23413,6 +23503,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let db = CardDatabase::from_json_str(&export).expect("test export should deserialize");
         let summary = analyze_coverage(&db);
 
+        assert!(summary.token_coverage.is_none());
         assert_eq!(
             summary.coverage_by_set.get("SET_A"),
             Some(&SetCoverageSummary {
@@ -25413,17 +25504,12 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
-    /// C5 (D3 + Change 1). The attr nested in `PlayerCount { PlayerAttribute }`
-    /// is read by `effects::candidate_player_scalar`, which fails closed on
-    /// every spell attr except the unfiltered last-turn count and has no
-    /// last-turn life producer yet. Coverage must classify each such nested
-    /// payload unsupported (at the nested position) and a top-level
-    /// `LifeLost { LastTurn }` unsupported too, while Howler's real attr and the
-    /// this-turn life attr stay supported. Each row is a real Howler face with
-    /// only the condition's attr swapped, so a classifier that stops at the
-    /// outer `PlayerCount` (the pre-D3 blindness) flips every unsupported row.
+    /// C5 (D3): Check coverage at both the top-level quantity and nested
+    /// candidate attr positions. The candidate reader supports both life-loss
+    /// windows, but only the unfiltered last-turn spell count. The unmodified
+    /// Howler face is the positive control for the substituted conditions.
     #[test]
-    fn nested_window_attrs_the_reader_fails_closed_on_are_unsupported() {
+    fn windowed_history_coverage_distinguishes_supported_payloads() {
         let supported_with = |condition: TriggerCondition| {
             let mut face = gatstaf_howler_face();
             face.triggers[0].condition = Some(condition);
@@ -25436,35 +25522,31 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 window,
             })
         };
-        let life_attr = |window: TurnWindow| {
-            existential_over_attr(QuantityRef::LifeLost {
-                player: PlayerScope::ScopedPlayer,
-                window,
-            })
-        };
-        // Reach: the unmodified attr is supported, so every red row below is
-        // red because of its attr and not because the swapped face is broken.
         assert!(supported_with(spell_attr(None, TurnWindow::LastTurn)));
-        assert!(supported_with(life_attr(TurnWindow::ThisTurn)));
+        for window in [TurnWindow::ThisTurn, TurnWindow::LastTurn] {
+            assert!(supported_with(existential_over_attr(
+                QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window,
+                }
+            )));
+            assert!(supported_with(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLost {
+                        player: PlayerScope::Controller,
+                        window,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }));
+        }
         // Nested attrs the per-candidate reader fails closed on.
         assert!(!supported_with(spell_attr(
             Some(TargetFilter::Typed(TypedFilter::creature())),
             TurnWindow::LastTurn
         )));
         assert!(!supported_with(spell_attr(None, TurnWindow::ThisTurn)));
-        assert!(!supported_with(life_attr(TurnWindow::LastTurn)));
-        // Top-level last-turn life: classified unsupported until the life
-        // last-turn grammar lands.
-        assert!(!supported_with(TriggerCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeLost {
-                    player: PlayerScope::Controller,
-                    window: TurnWindow::LastTurn,
-                },
-            },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
-        }));
         // Top-level filtered last-turn spell count: no per-spell data survives.
         assert!(!supported_with(TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
@@ -25509,6 +25591,38 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .any(|f| matches!(f, SemanticFinding::DroppedCondition { condition_text, .. } if condition_text == "as long as")),
             "Should detect dropped 'as long as' condition: {findings:?}"
         );
+    }
+
+    #[test]
+    fn test_audit_accepts_condition_on_nested_generic_static() {
+        let mut face = make_face();
+        let oracle = "Target creature gains flying as long as you control a Dragon.";
+        face.oracle_text = Some(oracle.to_string());
+        let static_ability = StaticDefinition::continuous()
+            .affected(TargetFilter::Any)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }])
+            .condition(StaticCondition::DuringYourTurn)
+            .description(oracle.to_string());
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![static_ability],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            )
+            .description(oracle.to_string()),
+        );
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(!findings
+            .iter()
+            .any(|finding| matches!(finding, SemanticFinding::DroppedCondition { .. })));
     }
 
     #[test]

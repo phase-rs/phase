@@ -65,6 +65,7 @@ type OptionalEffectChoiceWaitingFor = Extract<
 type ChooseFromZoneChoiceWaitingFor = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type OpponentMayChoiceWaitingFor = Extract<WaitingFor, { type: "OpponentMayChoice" }>;
 type SearchChoiceWaitingFor = Extract<WaitingFor, { type: "SearchChoice" }>;
+type EffectZoneChoiceWaitingFor = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type LearnChoiceWaitingFor = Extract<WaitingFor, { type: "LearnChoice" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
@@ -280,6 +281,23 @@ export const searchChoiceWaitingForFactory =
       player: 0,
       cards: [],
       count: 1,
+    },
+  }));
+
+export class EffectZoneChoiceWaitingForFactory extends PlayerWaitingForFactory<EffectZoneChoiceWaitingFor> {}
+
+/** Defaults to exiling one card from a graveyard, a choice drawn as a card strip. */
+export const effectZoneChoiceWaitingForFactory =
+  EffectZoneChoiceWaitingForFactory.define((): EffectZoneChoiceWaitingFor => ({
+    type: "EffectZoneChoice",
+    data: {
+      player: 0,
+      cards: [],
+      count: 1,
+      source_id: 1,
+      effect_kind: "ChangeZone",
+      zone: "Graveyard",
+      destination: "Exile",
     },
   }));
 
@@ -840,6 +858,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(searchChoiceWaitingForFactory.withData(data).build());
   }
 
+  effectZoneChoice(data: Partial<EffectZoneChoiceWaitingFor["data"]> = {}) {
+    return this.variant(effectZoneChoiceWaitingForFactory.withData(data).build());
+  }
+
   learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {
     return this.variant(learnChoiceWaitingForFactory.withData(data).build());
   }
@@ -1159,6 +1181,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   searchChoice(data: Partial<SearchChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.searchChoice(data).build());
+  }
+
+  effectZoneChoice(data: Partial<EffectZoneChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.effectZoneChoice(data).build());
   }
 
   learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {

@@ -1555,6 +1555,7 @@
     },
     "search": {
       "title": "Procurar no Grimório",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Escolha {{count}} carta",
       "subtitleExact_other": "Escolha {{count}} cartas",
       "subtitleUpTo_one": "Escolha até {{count}} carta",
@@ -2450,6 +2451,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "Habilidades desencadeadas opcionais ({{count, number}})",
     "replacementChoices": "Escolhas de substituição ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Mantenha pressionado para ver a carta inteira"
   },
   "optionalEffect": {
     "sourceFallback": "Efeito",

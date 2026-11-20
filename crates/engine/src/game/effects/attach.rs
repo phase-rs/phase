@@ -678,6 +678,7 @@ pub(crate) fn attach_result_from_events(
             .map(|pin| TargetRef::Object(pin.object_id))
             .collect(),
         object_incarnations: attached,
+        phase_population: false,
     }
 }
 
@@ -1203,6 +1204,7 @@ fn park_resolution_attachment_choice(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 
     if let Some(active) = state.active_ability_continuation_frame() {

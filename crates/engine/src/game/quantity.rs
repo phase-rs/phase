@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
+use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
@@ -2063,19 +2063,22 @@ pub fn resolve_quantity_with_recipient(
 /// CR 205.2a + CR 607.2a: Resolve a quantity for a cast-time cost modifier,
 /// carrying the spell being cast as the `SharedCardTypes` intersection subject.
 /// `source_id` remains the static's source permanent (the exile link anchor),
-/// while `spell_id` supplies the spell-side card types.
+/// while `spell_id` supplies the spell-side card types and `caster` binds
+/// `CountScope::ScopedPlayer` to the player casting that spell.
 pub fn resolve_quantity_with_spell(
     state: &GameState,
     expr: &QuantityExpr,
     controller: PlayerId,
     source_id: ObjectId,
     spell_id: ObjectId,
+    caster: PlayerId,
 ) -> i32 {
     resolve_quantity_with_ctx(
         state,
         expr,
         controller,
         QuantityContext {
+            scoped_player: Some(caster),
             spell: Some(spell_id),
             ..QuantityContext::new(source_id)
         },
@@ -4983,14 +4986,7 @@ fn current_cast_occurrence_matches(
     {
         return false;
     }
-    let Ok(index) = usize::try_from(occurrence.turn_journal_index) else {
-        return false;
-    };
-    state
-        .spells_cast_this_turn_by_player
-        .get(&occurrence.caster)
-        .and_then(|records| records.get(index))
-        .is_some_and(|record| record.spell_object_id == Some(ability.source_id))
+    crate::game::ledger::cast_occurrence_is_current(state, occurrence, ability.source_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6965,22 +6961,60 @@ fn resolve_ref(
             actor,
             counters,
             target,
-        } => u32_to_i32_saturating(
-            state
-                .counter_added_this_turn
-                .iter()
-                .filter(|record| {
-                    count_scope_actor_matches(state, actor, ctx.clone(), controller, record.actor)
-                        && counters.matches(&record.counter_type)
-                        && matches_target_filter_on_counter_added_record(
-                            state,
-                            record,
-                            target,
-                            &filter_ctx,
+        } => {
+            // CR 400.7 + CR 608.2h: "on ~" names the ability's source: the exact
+            // object it triggered from, even after that object has left (a triggered
+            // ability exists independently of its source, CR 113.7a). A counter put
+            // on another incarnation was put on a different object. The record is
+            // history, so it is matched by identity, not against a live source.
+            // Population recipients keep reading every record; a legacy record
+            // without a stamp keeps the object-id-only match.
+            let self_identity = matches!(target, TargetFilter::SelfRef).then(|| {
+                trigger_source.as_ref().map_or_else(
+                    || {
+                        (
+                            source_id,
+                            state.objects.get(&source_id).map(|o| o.incarnation),
                         )
-                })
-                .fold(0, |total: u32, record| total.saturating_add(record.count)),
-        ),
+                    },
+                    |source| {
+                        let identity = source.identity.reference;
+                        (identity.object_id, Some(identity.incarnation))
+                    },
+                )
+            });
+            u32_to_i32_saturating(
+                state
+                    .counter_added_this_turn
+                    .iter()
+                    .filter(|record| {
+                        let recipient = match self_identity {
+                            Some((id, incarnation)) => {
+                                record.object_id == id
+                                    && incarnation.is_none_or(|current| {
+                                        record.incarnation.is_none_or(|stamp| stamp == current)
+                                    })
+                            }
+                            None => matches_target_filter_on_counter_added_record(
+                                state,
+                                record,
+                                target,
+                                &filter_ctx,
+                            ),
+                        };
+                        recipient
+                            && count_scope_actor_matches(
+                                state,
+                                actor,
+                                ctx.clone(),
+                                controller,
+                                record.actor,
+                            )
+                            && counters.matches(&record.counter_type)
+                    })
+                    .fold(0, |total: u32, record| total.saturating_add(record.count)),
+            )
+        }
         // CR 701.9 + CR 603.4: Cards discarded this turn, scoped via PlayerScope.
         QuantityRef::CardsDiscardedThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
@@ -10102,7 +10136,8 @@ where
     match aggregate {
         AggregateFunction::Max => values.max().unwrap_or(0),
         AggregateFunction::Min => values.min().unwrap_or(0),
-        AggregateFunction::Sum => values.sum(),
+        // CR 107.1: Individually representable tallies can overflow when summed.
+        AggregateFunction::Sum => sum_saturating_i32(values),
     }
 }
 
@@ -18411,7 +18446,7 @@ mod tests {
             "without a spell subject, SharedCardTypes must fail closed rather than use the source"
         );
         assert_eq!(
-            resolve_quantity_with_spell(&state, &expr, PlayerId(0), source, spell),
+            resolve_quantity_with_spell(&state, &expr, PlayerId(0), source, spell, PlayerId(0)),
             1,
             "the exact spell subject shares Creature with the source-linked exile population"
         );

@@ -1555,6 +1555,7 @@
     },
     "search": {
       "title": "Bibliothek durchsuchen",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Wähle {{count}} Karte",
       "subtitleExact_other": "Wähle {{count}} Karten",
       "subtitleUpTo_one": "Wähle bis zu {{count}} Karte",
@@ -2450,6 +2451,9 @@
     "entryLabel": "{{source}} – {{decision}}",
     "optionalTriggers": "Optionale ausgelöste Fähigkeiten ({{count, number}})",
     "replacementChoices": "Ersetzungsentscheidungen ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Gedrückt halten, um die ganze Karte zu sehen"
   },
   "optionalEffect": {
     "sourceFallback": "Effekt",

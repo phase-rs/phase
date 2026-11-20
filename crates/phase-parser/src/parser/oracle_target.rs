@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_while1};
 use nom::character::complete::{multispace0, one_of, satisfy, space1};
-use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::combinator::{cut, eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -790,6 +790,50 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     (filter, rest)
 }
 
+/// CR 201.2 + CR 115.1: "target <type> not named <card name>" restricts the
+/// target slot by name ("target nonland permanent not named Detention Sphere",
+/// "target permanent not named Clever Conjurer"). It names a card, not the
+/// source object, so every object with that name is excluded — CR 201.5 binds
+/// only a self-reference. The shared combinator ends the name at the named-filter
+/// clause boundary and leaves any trailing conjunct ("and all other permanents
+/// …", "from a graveyard") in the remainder for the caller. Scoped to the target
+/// keyword: search filters keep their own `SharesQuality` lowering, which their
+/// "different names" suffix reads.
+fn parse_target_not_named_suffix(filter: TargetFilter, rest: &str) -> (TargetFilter, &str) {
+    // A coordinated "creature or planeswalker not named X" restricts every
+    // alternative, so the restriction distributes over each typed branch.
+    let restrictable = match &filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(|f| matches!(f, TargetFilter::Typed(_)))
+        }
+        _ => false,
+    };
+    if !restrictable {
+        return (filter, rest);
+    }
+    let lower = rest.to_lowercase();
+    let Some((prop, after)) = nom_on_lower(rest, &lower, |input| {
+        preceded(multispace0, nom_filter::parse_not_named_suffix).parse(input)
+    }) else {
+        return (filter, rest);
+    };
+    let restrict = |f: TargetFilter| match f {
+        TargetFilter::Typed(mut typed) => {
+            typed.properties.push(prop.clone());
+            TargetFilter::Typed(typed)
+        }
+        other => other,
+    };
+    let restricted = match filter {
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(restrict).collect(),
+        },
+        other => restrict(other),
+    };
+    (restricted, after)
+}
+
 /// CR 115.10a + CR 608.2h: Bind an untargeted "each other" population to the
 /// immediate instruction's sole object target, never to a target-selection slot.
 pub(crate) fn parse_parent_target_controller_population<'a>(
@@ -1576,21 +1620,28 @@ pub fn parse_target_with_syntax<'a>(
         // is recognized as a typed-phrase prefix inside `parse_type_phrase_folding_with_ctx`
         // — it pushes `IsCommander` and composes uniformly with the existing
         // suffix machinery (ownership, control, counters, "with X", etc.).
-        let (filter, rest) = parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
-        // CR 115.1: an object-headed coordinated list whose later leg is a
-        // player ("creature token, player, or planeswalker") is still one
-        // target slot. Extend only when a player leg actually appears, so
+        let (filter, rest_after_type_phrase) =
+            parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
+        let type_phrase_end = lower.len() - rest_after_type_phrase.len();
+        let (filter, rest) = parse_target_not_named_suffix(filter, rest_after_type_phrase);
+        // CR 109.2b: a "spell" reference targets a spell on the stack. An
+        // object-headed coordinated list whose later leg is a player
+        // ("creature token, player, or planeswalker") is still one target
+        // slot. Extend only when a player leg actually appears, so
         // player-free lists keep their ordinary type-phrase semantics.
         let mut tentative_ctx = ctx.clone();
         let (combined, extended_rest, saw_player) =
             parse_coordinated_target_tail(filter.clone(), rest, &mut tentative_ctx);
         if saw_player || continues_suffixed_type_list(&filter, rest) {
             *ctx = tentative_ctx;
-            return (combined, extended_rest, syntax);
+            return (
+                scope_target_spell_phrase(combined, &lower[target_offset..type_phrase_end]),
+                extended_rest,
+                syntax,
+            );
         }
-        let consumed_end = lower.len() - rest.len();
         return (
-            scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
+            scope_target_spell_phrase(filter, &lower[target_offset..type_phrase_end]),
             rest,
             syntax,
         );
@@ -2713,6 +2764,11 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" that ")),
         value((), tag(" with ")),
         value((), tag(" without ")),
+        // CR 608.2c: a coordinated mass conjunct opens a new noun phrase
+        // after the name ("not named Detention Sphere and all other
+        // permanents with the same name as that permanent"). Bare " and " stays
+        // inside the name ("Gisa and Geralf").
+        value((), tag(" and all other ")),
         // CR 201.2 + CR 400.1: origin-zone suffixes are outside the literal
         // card name ("card named X from your graveyard"). Require a real zone
         // suffix after "from" so names like "Extract from Darkness" stay whole.
@@ -4596,8 +4652,10 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
-        properties.extend(zone_props);
+    if let Some((zone_props, zone_ctrl, consumed)) =
+        parse_zone_suffix_with_ownership(&lower[pos..], noun_phrase_ownership(&properties))
+    {
+        extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         // Apply zone-derived controller if we don't already have one
         if controller.is_none() {
@@ -4714,8 +4772,10 @@ fn parse_type_phrase_folding_unbound<'a>(
     // the chosen type" ("target creature card of the chosen type from your
     // graveyard", From the Rubble). The primary `parse_zone_suffix` arm above
     // runs before this suffix.
-    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
-        properties.extend(zone_props);
+    if let Some((zone_props, zone_ctrl, consumed)) =
+        parse_zone_suffix_with_ownership(&lower[pos..], noun_phrase_ownership(&properties))
+    {
+        extend_zone_properties(&mut properties, zone_props);
         pos += consumed;
         if controller.is_none() {
             controller = zone_ctrl;
@@ -5005,8 +5065,11 @@ fn parse_type_phrase_folding_unbound<'a>(
             let is_locative =
                 alt((tag::<_, _, OracleError<'_>>("in "), tag("on "))).parse(after_named);
             if is_locative.is_ok() {
-                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
-                    properties.extend(zone_props);
+                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix_with_ownership(
+                    &lower[pos..],
+                    noun_phrase_ownership(&properties),
+                ) {
+                    extend_zone_properties(&mut properties, zone_props);
                     pos += consumed;
                     if controller.is_none() {
                         controller = zone_ctrl;
@@ -5496,9 +5559,10 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
 /// This is deliberately the sole authority for the source-target grammar used
 /// by damage replacements.  It proves the `target` keyword with the shared nom
 /// target-prefix combinator, delegates the noun phrase to `parse_target`, and
-/// then scopes a consumed `spell` phrase to the stack.  The returned remainder
-/// is sliced from `text`, not its lowercase working copy, so callers that parse
-/// a mixed-case Oracle fragment retain the original spelling.
+/// uses the already-scoped filter from `parse_target` (which applies spell
+/// scoping at the correct grammar boundary, excluding name restrictions).
+/// The returned remainder is sliced from `text`, not its lowercase working copy,
+/// so callers that parse a mixed-case Oracle fragment retain the original spelling.
 pub(crate) fn parse_declared_damage_source_target<'a>(
     text: &'a str,
 ) -> OracleResult<'a, TargetFilter> {
@@ -5507,8 +5571,6 @@ pub(crate) fn parse_declared_damage_source_target<'a>(
         return Err(super::oracle_nom::error::oracle_err(text));
     }
     let (filter, rest) = parse_target(text);
-    let consumed = text.len() - rest.len();
-    let filter = scope_target_spell_phrase(filter, &lower[..consumed]);
     if !target_filter_has_meaningful_content(&filter) {
         return Err(super::oracle_nom::error::oracle_err(rest));
     }
@@ -6165,6 +6227,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -8495,7 +8558,9 @@ pub(crate) fn parse_mana_value_suffix(
             .map(|value| (value, after_punct))
             .or_else(|| {
                 let (phrase, zone_tail) =
-                    nom_primitives::scan_split_at_phrase(raw_phrase, parse_zone_suffix_nom)?;
+                    nom_primitives::scan_split_at_phrase(raw_phrase, |input| {
+                        parse_zone_suffix_nom(input, NounPhraseOwnership::Unestablished)
+                    })?;
                 let offset = raw_phrase.len() - zone_tail.len();
                 parse_value(phrase).map(|value| (value, &after_equal_to[offset..]))
             });
@@ -8514,6 +8579,20 @@ pub(crate) fn parse_mana_value_suffix(
     // `parse_quantity_expr_number`, which emits `QuantityRef::Variable { "X" }`
     // resolved at effect time against the resolving ability's `chosen_x`.
     // CR 107.3a + CR 601.2b: X announced at cast, read at resolution.
+    //
+    // CR 202.3: "mana value 4, 5, or 6" / "mana value 4 or 5" — an exact-value
+    // disjunction, one EQ comparison per listed value. Tried before the single
+    // number so the list is read whole; it stops before any clause comma.
+    if let Ok((after, values)) = nom_quantity::parse_number_disjunction(rest) {
+        let props = values
+            .into_iter()
+            .map(|value| FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value,
+            })
+            .collect();
+        return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
+    }
     let (after_num_raw, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
     let after_num = after_num_raw.trim_start();
 
@@ -8534,24 +8613,14 @@ pub(crate) fn parse_mana_value_suffix(
                 },
                 a,
             )
-        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or ").parse(after_num) {
-            let (after, second_value) = nom_quantity::parse_quantity_expr_number(a).ok()?;
-            (
-                FilterProp::AnyOf {
-                    props: vec![
-                        FilterProp::Cmc {
-                            comparator: Comparator::EQ,
-                            value,
-                        },
-                        FilterProp::Cmc {
-                            comparator: Comparator::EQ,
-                            value: second_value,
-                        },
-                    ],
-                },
-                after,
-            )
         } else {
+            // An "or" tail that neither the comparator arms above nor the
+            // exact-value list read ("mana value 4 or blue") is not an exact
+            // reading: decline the whole suffix rather than keep EQ N and strand
+            // the "or" clause.
+            not(tag::<_, _, OracleError<'_>>("or "))
+                .parse(after_num)
+                .ok()?;
             // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
             (
                 FilterProp::Cmc {
@@ -11263,37 +11332,21 @@ pub(crate) fn parse_relative_subtype_list(input: &str) -> Option<(Vec<String>, u
 /// leg, a two-leg "X or Y", or an Oxford-comma list "X, Y, ..., or Z". Returns
 /// the legs and the bytes consumed.
 ///
-/// A list is closed only by an "or" leg, so a comma run that never
-/// closes ("a Demon, Zombies you control ...") is not read as a list: the result
-/// rolls back to the legs up to the last closing conjunction, or to the first leg.
+/// Adapter over the shared [`nom_primitives::parse_or_closed_list`] grammar: a
+/// list is closed only by an "or" leg, so a comma run that never closes ("a
+/// Demon, Zombies you control ...") rolls back to the legs up to the last
+/// closing conjunction, or to the first leg.
 fn parse_relative_list<T>(
     input: &str,
     parse_leg: impl Fn(&str) -> Option<(T, &str)>,
 ) -> Option<(Vec<T>, usize)> {
-    let (first, mut rest) = parse_leg(input)?;
-    let mut legs = vec![first];
-    let mut closed = (1usize, rest);
-    while let Ok((after_separator, closes)) = alt((
-        value(
-            true,
-            alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or "))),
-        ),
-        value(false, tag(", ")),
-    ))
-    .parse(rest)
-    {
-        let Some((next, after_leg)) = parse_leg(after_separator) else {
-            break;
-        };
-        legs.push(next);
-        rest = after_leg;
-        if closes {
-            closed = (legs.len(), rest);
-        }
-    }
-    let (count, end) = closed;
-    legs.truncate(count);
-    Some((legs, input.len() - end.len()))
+    let (rest, legs) = nom_primitives::parse_or_closed_list(|i| {
+        parse_leg(i)
+            .map(|(leg, after)| (after, leg))
+            .ok_or_else(|| oracle_err(i))
+    })(input)
+    .ok()?;
+    Some((legs, input.len() - rest.len()))
 }
 
 fn is_relative_core_type_filter(type_filter: &TypeFilter) -> bool {
@@ -11876,8 +11929,8 @@ enum ZoneQual {
     /// "the chosen player's " — the player persisted on the source via an earlier
     /// "choose a player" (Haunting Apparition: "green creature cards in the chosen
     /// player's graveyard"). Sets `ControllerRef::SourceChosenPlayer`, mirroring
-    /// how `You` sets `ControllerRef::You`; CR 613.1 resolves it against the
-    /// source's persisted choice.
+    /// how `You` sets `ControllerRef::You`; CR 607.2d makes the printed
+    /// "choose a player" and this "the chosen player's" a linked reference.
     ChosenPlayer,
     /// "a ", "the ", or nothing (e.g., "from exile").
     Plain,
@@ -11891,9 +11944,21 @@ enum ZoneQual {
 /// directly; this scanner is for callers whose input has a subject before the zone
 /// phrase (e.g., conditions like "this creature in your graveyard").
 ///
-/// The returned `Zone` is extracted from the `FilterProp::InZone` entry (always present
-/// in a successful parse), so callers that only need the zone don't have to pattern-match
-/// the returned `Vec<FilterProp>`.
+/// The returned `Zone` is extracted from the `FilterProp::InZone` entry, so callers
+/// that only need the zone don't have to pattern-match the returned
+/// `Vec<FilterProp>`.
+///
+/// SINGLE-ZONE ONLY. A phrase whose zone suffix names a LIST ("in exile and in
+/// your graveyard", "from your graveyard or from exile") carries
+/// `FilterProp::InAnyZone` and no `InZone`, and there is no single `Zone` to
+/// return for it, so this scanner answers `None` — for the whole text, not just
+/// that offset. Declining is the conservative answer and is deliberate: every
+/// caller's return type is one `Zone` (`ParsedCondition::SourceInZone`, a
+/// `ChangeZone` origin), so resuming the scan past the list would find a LATER
+/// single-zone phrase and silently half-read the list. A caller that must handle
+/// a multi-zone phrase reads `TargetFilter::extract_zones` or declines the
+/// phrase. `oracle_condition`'s `scan_source_zone_filter` is itself a
+/// single-zone table and does NOT provide a multi-zone fallback.
 pub(crate) fn scan_zone_phrase(
     text: &str,
 ) -> Option<(Zone, Option<ControllerRef>, Vec<FilterProp>)> {
@@ -11908,16 +11973,24 @@ pub(crate) fn scan_zone_phrase_span(
 ) -> Option<(&str, Zone, Option<ControllerRef>, Vec<FilterProp>)> {
     let mut offset = 0;
     while offset <= text.len() {
-        if let Some((props, ctrl, consumed)) = parse_zone_suffix(&text[offset..]) {
-            let zone = props.iter().find_map(|p| match p {
-                FilterProp::InZone { zone } => Some(*zone),
-                _ => None,
-            })?;
-            // `consumed` counts bytes of the lowercased phrase, so the span is exact
-            // only for text whose lowercase keeps its byte length (callers pass
-            // lowercased text); otherwise it may be empty.
-            let span = text[offset..].get(..consumed).unwrap_or_default();
-            return Some((span, zone, ctrl, props));
+        match parse_zone_suffix_outcome(&text[offset..], NounPhraseOwnership::Unestablished) {
+            ZoneSuffixOutcome::Parsed(props, ctrl, consumed) => {
+                let zone = props.iter().find_map(|p| match p {
+                    FilterProp::InZone { zone } => Some(*zone),
+                    _ => None,
+                })?;
+                // `consumed` counts bytes of the lowercased phrase, so the span is exact
+                // only for text whose lowercase keeps its byte length (callers pass
+                // lowercased text); otherwise it may be empty.
+                let span = text[offset..].get(..consumed).unwrap_or_default();
+                return Some((span, zone, ctrl, props));
+            }
+            // The head is a zone list the grammar deliberately declined (mixed
+            // possession, a committed "or" to a non-zone phrase, or an invalid
+            // preposition). Resuming past it would half-read a later leg, so
+            // the whole scan declines.
+            ZoneSuffixOutcome::DeclinedList => return None,
+            ZoneSuffixOutcome::NoMatch => {}
         }
         match text[offset..].find(' ') {
             Some(i) => offset += i + 1,
@@ -11946,16 +12019,92 @@ pub(crate) fn scan_zone_phrase_span(
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
 /// - Other possessive / indefinite / definite / bare: → `InZone` alone.
+///
+/// CR 400.1 + CR 400.3: whether the caller's noun phrase already established
+/// ownership of the population. A mixed per-player/shared zone list can carry a
+/// possessor only in the `Established` case; `Unestablished` is the decline
+/// boundary that keeps one flat `Owned` from over-restricting a shared leg.
+#[derive(Clone, PartialEq, Eq)]
+enum NounPhraseOwnership {
+    Established(ControllerRef),
+    Unestablished,
+}
+
+/// The single authority for reading ownership off a constructed type phrase.
+fn noun_phrase_ownership(properties: &[FilterProp]) -> NounPhraseOwnership {
+    properties
+        .iter()
+        .find_map(|prop| match prop {
+            FilterProp::Owned { controller } => {
+                Some(NounPhraseOwnership::Established(controller.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or(NounPhraseOwnership::Unestablished)
+}
+
+/// The owner a zone-list qualifier would apply to, when it names one.
+fn zone_qualifier_owner(qual: &ZoneQual) -> Option<ControllerRef> {
+    match qual {
+        ZoneQual::Owner(owner) => Some(owner.clone()),
+        ZoneQual::You => Some(ControllerRef::You),
+        ZoneQual::ChosenPlayer => Some(ControllerRef::SourceChosenPlayer),
+        // "its owner's" / "that player's" / "each player's" do not bind one
+        // concrete ControllerRef, so a mixed list cannot prove the noun phrase
+        // and the qualifier name the same player.
+        ZoneQual::OtherPoss | ZoneQual::Plain => None,
+    }
+}
+
 pub(crate) fn parse_zone_suffix(
     text: &str,
 ) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
+    parse_zone_suffix_with_ownership(text, NounPhraseOwnership::Unestablished)
+}
+
+/// Distinguishes a genuine non-match from a deliberately declined zone list,
+/// so a boundary scanner cannot resume past the list and half-read a later leg.
+enum ZoneSuffixOutcome {
+    Parsed(Vec<FilterProp>, Option<ControllerRef>, usize),
+    DeclinedList,
+    NoMatch,
+}
+
+/// CR 400.1 + CR 400.3: `parse_zone_suffix`, with the caller's noun phrase
+/// ownership provenance.
+///
+/// A mixed per-player/shared zone list can carry a possessor only when the
+/// noun phrase already established whose cards the population is ("creature
+/// card you own in exile and in your graveyard"). Without that provenance the
+/// possessor belongs to the qualified leg alone ("in your graveyard or on the
+/// battlefield"), which one flat `InAnyZone` + `Owned` conjunction cannot
+/// express; the grammar declines rather than over-restricting the shared leg.
+fn parse_zone_suffix_with_ownership(
+    text: &str,
+    ownership: NounPhraseOwnership,
+) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
+    match parse_zone_suffix_outcome(text, ownership) {
+        ZoneSuffixOutcome::Parsed(props, ctrl, consumed) => Some((props, ctrl, consumed)),
+        ZoneSuffixOutcome::DeclinedList | ZoneSuffixOutcome::NoMatch => None,
+    }
+}
+
+fn parse_zone_suffix_outcome(text: &str, ownership: NounPhraseOwnership) -> ZoneSuffixOutcome {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let lower = trimmed.to_lowercase();
 
-    let (rest, (props, ctrl, _qual)) = parse_zone_suffix_nom(&lower).ok()?;
-    let consumed = lower.len() - rest.len();
-    Some((props, ctrl, leading_ws + consumed))
+    match parse_zone_suffix_nom(&lower, ownership) {
+        Ok((rest, (props, ctrl, _qual))) => {
+            let consumed = lower.len() - rest.len();
+            ZoneSuffixOutcome::Parsed(props, ctrl, leading_ws + consumed)
+        }
+        Err(nom::Err::Failure(_)) => ZoneSuffixOutcome::DeclinedList,
+        Err(nom::Err::Error(error)) if error.code == nom::error::ErrorKind::Fail => {
+            ZoneSuffixOutcome::DeclinedList
+        }
+        Err(_) => ZoneSuffixOutcome::NoMatch,
+    }
 }
 
 /// Recover a single graveyard source using the shared zone grammar, without
@@ -11967,7 +12116,8 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
     peek(tag::<_, _, OracleError<'_>>("from "))
         .parse(lower.as_str())
         .ok()?;
-    let (rest, (mut props, controller, qualifier)) = parse_zone_suffix_nom(&lower).ok()?;
+    let (rest, (mut props, controller, qualifier)) =
+        parse_zone_suffix_nom(&lower, NounPhraseOwnership::Unestablished).ok()?;
     if !props.iter().any(|prop| {
         matches!(
             prop,
@@ -12029,11 +12179,45 @@ pub fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
         .collect()
 }
 
-fn parse_zone_suffix_nom(
+/// Merge a zone phrase's properties into a type phrase's property conjunction,
+/// keeping one copy of each.
+///
+/// A zone phrase can restate an ownership the subject already carried:
+/// Huskburster Swarm's "creature card you own in exile and in your graveyard"
+/// names the same owner twice, once in "you own" and once in the "your " on the
+/// graveyard. A conjunction of filter properties is idempotent, so the second
+/// copy would be noise in the AST rather than a second constraint. Mirrors the
+/// `!properties.contains(&prop)` guard the other suffix passes in
+/// `parse_type_phrase_folding` already use.
+fn extend_zone_properties(properties: &mut Vec<FilterProp>, zone_props: Vec<FilterProp>) {
+    for prop in zone_props {
+        if !properties.contains(&prop) {
+            properties.push(prop);
+        }
+    }
+}
+
+/// One `prep qual zone` entry of a zone phrase, ending at a word boundary.
+///
+/// Shared by the head of THIS zone suffix and by every continuation of its zone
+/// list, so those two cannot drift on which prepositions, qualifiers or zone
+/// words they accept — the continuation used to carry its own copy of the
+/// grammar and its own copy of the `on`-check. It is not the repo's only zone
+/// phrase grammar: `oracle_nom::condition::parse_zone_phrase` keeps its own
+/// preposition/qualifier table, `oracle_nom::quantity::parse_commander_zone_disjunction`
+/// is a verbatim tag for one phrase, and `oracle_effect::mod`'s
+/// `put_hand_graveyard_origin_zones` is a verbatim table for the
+/// prepositionless list. Consolidating those onto this entry is a separate
+/// change.
+///
+/// Oracle text writes the battlefield with "on" and every other zone with "in"
+/// or "from" — CR 110.1 is why ("a permanent is a card or token ON the
+/// battlefield"), but the preposition itself is a wording convention, not a CR
+/// construct, so no rule is cited for the restriction. "on <other zone>" is
+/// therefore declined here rather than lowered into a misleading filter.
+fn parse_zone_phrase_entry(
     i: &str,
-) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
-{
-    let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
+) -> super::oracle_nom::error::OracleResult<'_, (ZoneQual, Zone)> {
     let (i, prep) = alt((
         value(ZonePrep::From, tag("from ")),
         value(ZonePrep::In, tag("in ")),
@@ -12044,65 +12228,169 @@ fn parse_zone_suffix_nom(
     let (i, zone) = parse_zone_word(i)?;
     let (i, _) = peek_zone_boundary(i)?;
 
-    // CR 400.1: only the battlefield is referred to with "on"; "on <other zone>" is not
-    // valid Oracle text, so reject it here rather than emitting a misleading filter.
     if prep == ZonePrep::On && zone != Zone::Battlefield {
+        // An invalid first entry, not a deliberately declined zone list: a
+        // boundary scanner may still find a later real zone phrase. A
+        // continuation after a committed "or" is wrapped in `cut`, which turns
+        // this into a hard failure and still stops the scan.
+        return Err(nom::Err::Error(nom::error::Error::new(
+            i,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((i, (qual, zone)))
+}
+
+/// CR 400.1: the possessor a whole zone list names, or `None` when it names two
+/// different players' zones.
+///
+/// "Each player has their own library, hand, and graveyard. The other zones are
+/// shared by all players." An unqualified shared-zone entry ("in exile") names
+/// no possessor, so the `ZoneQual::Plain` it carries says nothing about whose
+/// cards the list names. Reducing a list absorbs those, which is what
+/// makes the printed possessive asymmetry parse: Huskburster Swarm's "in exile
+/// and in your graveyard" reduces to `You`, Firemane Angel's "in your graveyard
+/// or on the battlefield" likewise, and Aven Interrupter's all-`Plain` "from
+/// graveyards or from exile" stays `Plain`.
+///
+/// Two DIFFERENT possessives still decline (as does a `Plain` on a per-player
+/// zone, which names an unspecified player's copy): those name two distinct
+/// populations and want a `TargetFilter::Or` of separately-owned filters, which
+/// a single `InAnyZone` cannot express. Declining keeps them a loud non-parse
+/// instead of silently binding both to one owner.
+///
+/// `Zone::is_per_player` is the shared authority for the partition — the same
+/// predicate `filter::is_owner_scoped_zone` reads at runtime.
+fn reduce_zone_quals(entries: &[(ZoneQual, Zone)]) -> Option<ZoneQual> {
+    let mut reduced: Option<ZoneQual> = None;
+    for (qual, zone) in entries {
+        if *qual == ZoneQual::Plain && !zone.is_per_player() {
+            continue;
+        }
+        match reduced.as_ref() {
+            None => reduced = Some(qual.clone()),
+            Some(existing) if existing == qual => {}
+            Some(_) => return None,
+        }
+    }
+    Some(reduced.unwrap_or(ZoneQual::Plain))
+}
+
+fn parse_zone_suffix_nom(
+    i: &str,
+    ownership: NounPhraseOwnership,
+) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>, ZoneQual)>
+{
+    let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
+    let (i, head) = parse_zone_phrase_entry(i)?;
+
+    // CR 400.1 + CR 400.7: in THIS position — a zone suffix qualifying a
+    // population noun phrase — a zone list is a union however English joins it.
+    // Each member of the population is one object, an object is in one zone, and
+    // it becomes a new object when it moves to another, so the list can only be
+    // naming alternative places for the same object: "creature card you own in
+    // exile and in your graveyard" (Huskburster Swarm) names the same population
+    // as "in your graveyard or in exile" would.
+    //
+    // THAT IS A POSITION-SCOPED CLAIM, NOT A FACT ABOUT "and". An "<object> is
+    // in X and in Y" PRESENCE predicate over ONE named object is a conjunction,
+    // and this grammar must not be extended until the caller's position is part
+    // of its input:
+    // * Hedron Alignment: "you win the game if you own a card named Hedron
+    //   Alignment in exile, in your hand, in your graveyard, and on the
+    //   battlefield" — four DISTINCT cards, one per zone. It escapes this
+    //   grammar only because its separators are commas; adding ", " to the
+    //   separator set below would silently turn that win condition into "one
+    //   copy in any of the four zones".
+    // * Masterful Ninja (UST/ULST, silver-bordered): "Masterful Ninja is on the
+    //   battlefield and in your hand until end of turn" — simultaneous, which
+    //   CR 400.1 cannot model at all. This grammar does consume that phrase as a
+    //   union today; the value is discarded upstream because the clause head
+    //   does not parse, so no behavior rests on it.
+    //
+    // The two conjunctions differ only in whether a continuation is REQUIRED,
+    // which is how they behave in printed Oracle text:
+    //
+    // * "or" commits. `cut` turns a non-zone continuation into a hard failure of
+    //   the whole suffix, which is exactly what this grammar did before the list
+    //   became a `many0` — so "from your hand or graveyard" (34 printed cards
+    //   whose second zone omits its preposition) keeps declining HERE instead of
+    //   half-reading the hand alone. Only part of that sub-class is covered
+    //   elsewhere: `oracle_effect::mod`'s `put_hand_graveyard_origin_zones` is a
+    //   verbatim-phrase table reaching just the hand/graveyard spellings, 17 of
+    //   the 34 are outside it, and 11 of the 34 are `supported: false` — e.g.
+    //   Soulless Jailer ("Players can't cast noncreature spells from graveyards
+    //   or exile"), whose single coverage gap IS that line. Generalizing the
+    //   continuation's preposition to `opt` would retire that table and cover
+    //   the whole sub-class; that is a separate change with its own 34-card
+    //   measurement, deliberately not folded in here. Declining is still the
+    //   right behavior for THIS grammar — an honest gap beats half a zone list.
+    // * "and" does not commit. After a zone phrase it far more often joins the
+    //   next instruction ("exile target card from a graveyard and put an oil
+    //   counter on this creature") than another zone phrase. Measured over every
+    //   printed face, matching this grammar's own zone words (plurals included)
+    //   and qualifiers: of the 159 cards that write " and " immediately after a
+    //   zone phrase, 149 continue with something that is not a zone phrase and
+    //   10 continue the list — a disjoint partition. So a continuation that is
+    //   not a zone phrase ends the list and leaves the "and" unconsumed for the
+    //   caller.
+    let (i, tail) = many0(alt((
+        preceded(tag(" or "), cut(parse_zone_phrase_entry)),
+        preceded(tag(" and "), parse_zone_phrase_entry),
+    )))
+    .parse(i)?;
+
+    let mut entries = Vec::with_capacity(1 + tail.len());
+    entries.push(head);
+    entries.extend(tail);
+    let Some(qual) = reduce_zone_quals(&entries) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             i,
             nom::error::ErrorKind::Fail,
         )));
-    }
+    };
+    let zones: Vec<Zone> = entries.into_iter().map(|(_, zone)| zone).collect();
 
-    // Check for zone disjunction: "or in <zone>" or "or on <zone>" or "or from <zone>"
-    let (i, zones) = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(i) {
-        // Parse additional zone phrases
-        let mut zones = vec![zone];
-        let mut rest = rest;
-
-        loop {
-            let (next_rest, next_prep) = alt((
-                value(ZonePrep::From, tag("from ")),
-                value(ZonePrep::In, tag("in ")),
-                value(ZonePrep::On, tag("on ")),
-            ))
-            .parse(rest)?;
-
-            let (next_rest, next_qual) = parse_zone_qual(next_rest)?;
-            let (next_rest, next_zone) = parse_zone_word(next_rest)?;
-            let (next_rest, _) = peek_zone_boundary(next_rest)?;
-
-            // CR 400.1: only the battlefield is referred to with "on"
-            if next_prep == ZonePrep::On && next_zone != Zone::Battlefield {
+    if zones.len() > 1 {
+        let all_per_player = zones.iter().all(|zone| zone.is_per_player());
+        let any_per_player = zones.iter().any(|zone| zone.is_per_player());
+        let any_shared = !all_per_player;
+        let mixed_scope = any_per_player && any_shared;
+        // CR 400.1 + CR 400.3: a mixed per-player/shared list cannot carry one
+        // ownership predicate over the whole union — the shared leg has no
+        // owner-qualified population. Accept it only when the noun phrase
+        // already established ownership (`extend_zone_properties` then dedupes
+        // the possessive), and otherwise decline rather than over-restrict the
+        // shared leg. Plain/no-possessor lists stay union-only.
+        if mixed_scope && qual != ZoneQual::Plain {
+            // CR 400.3: keep the actual owner reference. The noun phrase's
+            // ownership may be discarded only when the zone qualifier names the
+            // SAME player; otherwise the shared leg would silently inherit a
+            // different owner ("card you own in an opponent's graveyard or in
+            // exile" must not become "cards you own anywhere").
+            let Some(zone_owner) = zone_qualifier_owner(&qual) else {
                 return Err(nom::Err::Error(nom::error::Error::new(
-                    next_rest,
+                    i,
                     nom::error::ErrorKind::Fail,
                 )));
-            }
-
-            // Qualifier consistency check: all zones in a disjunction should use the same qualifier
-            if qual != next_qual {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    next_rest,
-                    nom::error::ErrorKind::Fail,
-                )));
-            }
-
-            zones.push(next_zone);
-            rest = next_rest;
-
-            // Check for another "or" separator
-            if tag::<_, _, OracleError<'_>>(" or ").parse(rest).is_err() {
-                break;
+            };
+            match ownership {
+                NounPhraseOwnership::Established(noun_owner) if noun_owner == zone_owner => {}
+                _ => {
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        i,
+                        nom::error::ErrorKind::Fail,
+                    )));
+                }
             }
         }
+        if mixed_scope || !any_per_player {
+            return Ok((i, (vec![FilterProp::InAnyZone { zones }], None, qual)));
+        }
+    }
 
-        (rest, zones)
-    } else {
-        (i, vec![zone])
-    };
-
-    // A disjunction ("from your graveyard or from your hand") names any
-    // of its zones; a single zone phrase names exactly that zone.
+    // A disjunction names any of its zones; a single phrase names that zone.
     let zone_prop = if let [zone] = zones.as_slice() {
         FilterProp::InZone { zone: *zone }
     } else {
@@ -12134,8 +12422,8 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
-        // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
-        // isn't consumed as a bare "the " article.
+        // Must precede the `Plain` "the " arm so "the chosen player's " isn't
+        // consumed as a bare "the " article.
         value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
         value(
             ZoneQual::Owner(ControllerRef::TargetPlayer),
@@ -12217,9 +12505,12 @@ pub(crate) fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult
 pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
     match i.chars().next() {
         None | Some(' ' | ',' | '.') => Ok((i, ())),
+        // An ordinary word-boundary miss, not a deliberately declined zone
+        // list. The distinct kind lets `scan_zone_phrase_span` continue past a
+        // non-zone phrase instead of aborting the whole scan.
         _ => Err(nom::Err::Error(nom::error::Error::new(
             i,
-            nom::error::ErrorKind::Fail,
+            nom::error::ErrorKind::Verify,
         ))),
     }
 }
@@ -15624,6 +15915,48 @@ mod tests {
                     ],
                 },
             ]))
+        );
+    }
+
+    /// CR 202.3: Kozilek's Unsealing — "with mana value 4, 5, or 6" is an
+    /// exact-value list, one EQ comparison per value, consumed up to (not
+    /// including) the clause comma.
+    #[test]
+    fn creature_spell_with_mana_value_4_5_or_6() {
+        let mut ctx = ParseContext::default();
+        let input =
+            "with mana value 4, 5, or 6, create two 0/1 colorless eldrazi spawn creature tokens";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("mana value list parses");
+        assert_eq!(
+            &input[consumed..],
+            ", create two 0/1 colorless eldrazi spawn creature tokens"
+        );
+        let mv_eq = |value| FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            prop,
+            FilterProp::AnyOf {
+                props: vec![mv_eq(4), mv_eq(5), mv_eq(6)],
+            }
+        );
+
+        // Firemind's Foresight: a single number before a clause comma stays an
+        // exact EQ reading and leaves the comma.
+        let input = "with mana value 3, reveal it, and put it into your hand";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("single mana value parses");
+        assert_eq!(&input[consumed..], ", reveal it, and put it into your hand");
+        assert_eq!(prop, mv_eq(3));
+
+        // An "or" tail that is neither a comparator nor a number leg declines
+        // the whole suffix (the pre-list behaviour), instead of keeping EQ 4 and
+        // leaving "or blue" behind. The two positives above are the reach-guard.
+        assert_eq!(
+            parse_mana_value_suffix("with mana value 4 or blue", &mut ctx),
+            None
         );
     }
 
@@ -26362,6 +26695,101 @@ mod tests {
             "a freshly defaulted context leaves the gate closed"
         );
     }
+
+    /// Regression test for issue #10125: "not named" suffix with a name containing
+    /// "spell" (e.g. "Spell Queller") must not trigger stack scoping. CR 109.2
+    /// defines the type description as a permanent on the battlefield; the name
+    /// restriction is a predicate, not a head type noun.
+    #[test]
+    fn not_named_suffix_with_spell_in_name_does_not_scope_to_stack() {
+        // "target nonland permanent not named Spell Queller" — "Spell Queller" is a
+        // creature name. The word "Spell" in the name must not cause the target to
+        // be scoped to the stack (TargetFilter::StackSpell).
+        let text = "target nonland permanent not named Spell Queller";
+        let mut ctx = ParseContext::default();
+        let (filter, _rest, _syntax) = parse_target_with_syntax(text, &mut ctx);
+
+        // The filter should be a Typed filter with Not(Named("spell queller"))
+        // and should NOT contain StackSpell.
+        fn has_stack_spell(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::StackSpell => true,
+                TargetFilter::And { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Or { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Not { filter } => has_stack_spell(filter),
+                _ => false,
+            }
+        }
+        assert!(
+            !has_stack_spell(&filter),
+            "Filter should not contain StackSpell, got: {:?}",
+            filter
+        );
+
+        // Verify it's a Typed filter with the correct properties
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("Expected Typed filter, got: {:?}", filter);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Permanent));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        let has_not_named = typed.properties.iter().any(|p| {
+            matches!(p, FilterProp::Not { prop } if matches!(&**prop, FilterProp::Named { name } if name == "spell queller"))
+        });
+        assert!(
+            has_not_named,
+            "Should have Not(Named(spell queller)) property"
+        );
+    }
+
+    /// Regression test: declared damage source with "not named" suffix containing
+    /// "spell" must not be scoped to stack. The scoping is done by `parse_target`
+    /// at the correct grammar boundary (excluding the name restriction).
+    #[test]
+    fn declared_damage_source_not_named_spell_queller_does_not_scope_to_stack() {
+        // "target creature not named Spell Queller" as a damage source
+        // Should not be scoped to StackSpell because "Spell Queller" is a name.
+        let text = "target creature not named Spell Queller";
+        let (_rest, filter) =
+            parse_declared_damage_source_target(text).expect("should parse as damage source");
+
+        fn has_stack_spell(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::StackSpell => true,
+                TargetFilter::And { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Or { filters } => filters.iter().any(has_stack_spell),
+                TargetFilter::Not { filter } => has_stack_spell(filter),
+                _ => false,
+            }
+        }
+        assert!(
+            !has_stack_spell(&filter),
+            "Damage source filter should not contain StackSpell, got: {:?}",
+            filter
+        );
+
+        // Should be And(ParentTargetSlot, Typed(Creature, Not(Named("spell queller"))))
+        let TargetFilter::And { filters } = &filter else {
+            panic!("Expected And filter, got: {:?}", filter);
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(matches!(
+            filters[0],
+            TargetFilter::ParentTargetSlot { index: 0 }
+        ));
+        let TargetFilter::Typed(typed) = &filters[1] else {
+            panic!("Expected Typed filter, got: {:?}", filters[1]);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        let has_not_named = typed.properties.iter().any(|p| {
+            matches!(p, FilterProp::Not { prop } if matches!(&**prop, FilterProp::Named { name } if name == "spell queller"))
+        });
+        assert!(
+            has_not_named,
+            "Should have Not(Named(spell queller)) property"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -26647,5 +27075,454 @@ mod color_or_type_union {
         }
         assert!(parse_type_phrase_union("Giant", &scope).is_none());
         assert!(parse_type_phrase_union("Goblin or Shaman you know", &scope).is_none());
+    }
+}
+
+#[cfg(test)]
+mod zone_list_grammar {
+    use super::*;
+
+    fn props_of(phrase: &str) -> (Vec<FilterProp>, Option<ControllerRef>, usize) {
+        parse_zone_suffix(phrase).unwrap_or_else(|| panic!("expected a zone suffix for {phrase:?}"))
+    }
+
+    /// CR 400.1 + CR 400.7: every zone-list shape printed on a card, read as the
+    /// union it is. An object occupies one zone and becomes a new object when it
+    /// moves (CR 400.7), so a list of zones naming where one object may be can
+    /// only be read disjunctively — "in exile and in your graveyard" names the
+    /// same population "in your graveyard or in exile" would.
+    ///
+    /// A mixed per-player/shared list carries a possessor only when the noun
+    /// phrase already established ownership ("card you own …"). Without that
+    /// provenance the possessor belongs to the qualified leg alone and the
+    /// grammar declines rather than applying `Owned` to the shared leg. The
+    /// owned rows below therefore go through `parse_type_phrase_folding`, which
+    /// is the production seam that supplies the noun phrase's `Owned` property.
+    ///
+    /// Every phrase is quoted from the named printed card.
+    #[test]
+    fn printed_zone_lists_read_as_one_union_with_one_possessor() {
+        for (phrase, card, zones) in [
+            (
+                "in exile and in your graveyard",
+                "Huskburster Swarm / Sailors' Bane / Crackling Drake",
+                vec![Zone::Exile, Zone::Graveyard],
+            ),
+            (
+                "from the command zone and from your graveyard",
+                "Campfire",
+                vec![Zone::Command, Zone::Graveyard],
+            ),
+            (
+                "from your hand or from the command zone",
+                "Next of Kin",
+                vec![Zone::Hand, Zone::Command],
+            ),
+            (
+                "in your graveyard or on the battlefield",
+                "Firemane Angel / Ichor Aberration",
+                vec![Zone::Graveyard, Zone::Battlefield],
+            ),
+            (
+                // The only printed card with this exact phrase is un-set:
+                // Mzed is `isFunny`, UNK-only, zero format legalities. Kept
+                // because a noun phrase that establishes ownership still has
+                // to read it, and flagged so it is never mistaken for a
+                // black-bordered authority. The black-bordered near-shape —
+                // same two zones, no possessor — is Stinging Study / Imposing
+                // Grandeur, pinned in its own row below.
+                "on the battlefield or in your command zone",
+                "Mzed, Mercenary Leader (UNK, un-set)",
+                vec![Zone::Battlefield, Zone::Command],
+            ),
+            (
+                "in your library or in the command zone",
+                "Worldknit",
+                vec![Zone::Library, Zone::Command],
+            ),
+            (
+                "from your graveyard or from exile",
+                "Mister Immortal / Squee, the Immortal / Doc Aurlock, Grizzled Genius",
+                vec![Zone::Graveyard, Zone::Exile],
+            ),
+        ] {
+            let phrase_with_owner = format!("card you own {phrase}");
+            let (filter, remainder) = parse_type_phrase_folding(&phrase_with_owner);
+            assert_eq!(remainder.trim(), "", "{card}: {phrase:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("{card}: expected a Typed filter for {phrase:?}");
+            };
+            assert_eq!(
+                typed.controller, None,
+                "{card}: a mixed list carries its owner as a property"
+            );
+            assert_eq!(
+                typed.properties,
+                vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    },
+                    FilterProp::InAnyZone { zones },
+                ],
+                "{card}: {phrase:?}"
+            );
+        }
+
+        // No possessive anywhere: the plural "graveyards" names every player's,
+        // and exile is shared, so no owner is emitted.
+        for (phrase, card, zones) in [
+            (
+                "from graveyards or from exile",
+                "Aven Interrupter",
+                vec![Zone::Graveyard, Zone::Exile],
+            ),
+            (
+                "in the command zone or on the battlefield",
+                "Edgar Markov / Arahbo, Roar of the World",
+                vec![Zone::Command, Zone::Battlefield],
+            ),
+        ] {
+            let (props, ctrl, consumed) = props_of(phrase);
+            assert_eq!(consumed, phrase.len(), "{card}: {phrase:?}");
+            assert_eq!(ctrl, None, "{card}: {phrase:?}");
+            assert_eq!(
+                props,
+                vec![FilterProp::InAnyZone { zones }],
+                "{card}: {phrase:?}"
+            );
+        }
+
+        // Limit the shared grammar: a mixed list whose possessor is not already
+        // established by the noun phrase declines instead of over-restricting
+        // the shared leg. The reach guard below shows the same phrases parse
+        // once the noun phrase supplies ownership.
+        for phrase in [
+            "in your graveyard or on the battlefield",
+            "in your library or in the command zone",
+        ] {
+            assert_eq!(
+                parse_zone_suffix(phrase),
+                None,
+                "a mixed list without noun-phrase ownership must decline: {phrase:?}"
+            );
+            let phrase_with_owner = format!("card you own {phrase}");
+            let (filter, remainder) = parse_type_phrase_folding(&phrase_with_owner);
+            assert_eq!(remainder.trim(), "", "reach guard: {phrase_with_owner:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("reach guard: expected Typed for {phrase_with_owner:?}");
+            };
+            assert!(typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InAnyZone { .. })));
+        }
+    }
+
+    /// CR 400.3 + CR 108.4a: a list whose zones are ALL per-player keeps the
+    /// house owner-zone encoding (`TypedFilter.controller`), which
+    /// `filter::typed_filter_is_owner_scoped` re-reads as ownership. Only a list
+    /// that also names a shared zone — which that predicate declines — switches
+    /// to an explicit `Owned` property.
+    ///
+    /// The game-side half of that re-reading is pinned by
+    /// `filter::explicit_you_ownership_zone_encoding_is_local_and_excludes_control_zones`,
+    /// which asserts a `[Hand, Library, Graveyard]` list IS owner-scoped and a
+    /// `[Hand, Exile]` one is not; this test owns only the parser's side of the
+    /// contract — which encoding each list shape gets.
+    ///
+    /// No printed card spells a prepositioned two-zone list whose zones are both
+    /// per-player (the printed lists all name a shared zone; the nearest are
+    /// Huskburster Swarm's "in exile and in your graveyard" and Next of Kin's
+    /// "from your hand or from the command zone"). This phrase is the fixture
+    /// `exile_graveyard_source_shape` already pins, reasserted here so the
+    /// reduction cannot quietly move the possessor off `controller` for it.
+    #[test]
+    fn all_per_player_zone_list_keeps_the_controller_owner_encoding() {
+        let phrase = "from your graveyard or from your hand";
+        let (props, ctrl, consumed) = props_of(phrase);
+        assert_eq!(consumed, phrase.len());
+        assert_eq!(ctrl, Some(ControllerRef::You));
+        assert_eq!(
+            props,
+            vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Graveyard, Zone::Hand]
+            }],
+            "no redundant Owned property when every zone is owner-scoped"
+        );
+    }
+
+    /// "or" commits to a second zone phrase, "and" does not — the asymmetry that
+    /// lets the union read Huskburster Swarm without half-reading the printed
+    /// cards whose "and" introduces the next instruction, nor the ones whose
+    /// "or" introduces a preposition-less second zone.
+    #[test]
+    fn or_commits_to_a_second_zone_phrase_and_and_does_not() {
+        // Armored Scrapgorger: "Whenever this creature becomes tapped, exile
+        // target card from a graveyard and put an oil counter on this creature."
+        let phrase = "from a graveyard and put an oil counter on this creature";
+        let (props, ctrl, consumed) = props_of(phrase);
+        assert_eq!(
+            props,
+            vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }],
+            "the head still parses when the 'and' is not another zone phrase"
+        );
+        assert_eq!(ctrl, None);
+        assert_eq!(
+            &phrase[consumed..],
+            " and put an oil counter on this creature",
+            "an 'and' that ends the list is left for the caller"
+        );
+
+        // Dakkon, Shadow Slayer: "You may put an artifact card from your hand or
+        // graveyard onto the battlefield." The second zone carries no
+        // preposition, so the committed "or" declines the whole suffix rather
+        // than silently reading the hand alone.
+        assert_eq!(parse_zone_suffix("from your hand or graveyard"), None);
+    }
+
+    /// CR 400.1: two DIFFERENT possessives name two players' zones, which one
+    /// `InAnyZone` cannot express, so the suffix declines instead of binding
+    /// both to one owner. A `Plain` on a PER-PLAYER zone is such a possessor —
+    /// an unspecified player's copy — and declines the same way; only a shared
+    /// zone's `Plain`, which can carry no possessor at all, is absorbed.
+    ///
+    /// No printed card spells any of these; the nearest printed shapes are the
+    /// single-possessor lists in
+    /// `printed_zone_lists_read_as_one_union_with_one_possessor`, which this
+    /// test's reach-guard reasserts so the declines below cannot pass because
+    /// the grammar stopped accepting zone lists at all.
+    #[test]
+    fn zone_list_declines_conflicting_possessors() {
+        for phrase in [
+            "in your graveyard or in an opponent's graveyard",
+            "in your graveyard and in an opponent's graveyard",
+            "from a graveyard or from your graveyard",
+            "from their hand or from your hand",
+        ] {
+            assert_eq!(parse_zone_suffix(phrase), None, "{phrase:?}");
+        }
+        // A mixed list with one possessor but no noun-phrase ownership also
+        // declines rather than over-restricting the shared leg.
+        assert_eq!(parse_zone_suffix("in your graveyard or in exile"), None);
+        // Reach-guard: the same two zones parse once the noun phrase supplies
+        // ownership.
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in your graveyard or in exile");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Exile]
+                },
+            ]
+        );
+    }
+
+    /// CR 400.3: the noun phrase's ownership must name the SAME player as the
+    /// zone qualifier. "card you own in an opponent's graveyard or in exile"
+    /// cannot discard the opposing possessor and let your Owned predicate apply
+    /// to every leg.
+    #[test]
+    fn mixed_list_declines_when_noun_owner_differs_from_zone_owner() {
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in an opponent's graveyard or in exile");
+        assert!(
+            !remainder.trim().is_empty(),
+            "mismatched noun/zone owners must not fold the list"
+        );
+        if let TargetFilter::Typed(typed) = filter {
+            assert!(
+                !typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InAnyZone { .. })),
+                "the mismatched list must not become an ownerless union"
+            );
+        }
+
+        // The matching-owner form still folds: the noun phrase and qualifier
+        // both name the same player.
+        let (filter, remainder) =
+            parse_type_phrase_folding("card you own in your graveyard or in exile");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Exile]
+                },
+            ]
+        );
+    }
+
+    /// `many0` admits a list of three or more zones, which the loop it replaced
+    /// also did; pinned because the reduction and the possessor binding now run
+    /// once over the whole list rather than pairwise.
+    ///
+    /// No printed card spells a prepositioned list of three or more zones — the
+    /// printed three-zone lists are comma-separated and this grammar declines
+    /// them on purpose (see `parse_zone_suffix_nom`: Hedron Alignment). The
+    /// nearest printed shapes are the two-zone lists in
+    /// `printed_zone_lists_read_as_one_union_with_one_possessor`.
+    #[test]
+    fn three_zone_list_reduces_once_over_the_whole_list() {
+        let phrase = "card you own in exile and in your graveyard and in your hand";
+        let (filter, remainder) = parse_type_phrase_folding(phrase);
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(typed.controller, None);
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Exile, Zone::Graveyard, Zone::Hand]
+                },
+            ]
+        );
+    }
+
+    /// CR 607.2d: "the chosen player's" is linked to an earlier "choose a
+    /// player" on the same object ("those abilities are linked. The second
+    /// ability refers only to a choice made as a result of the first ability"),
+    /// which is what makes it a possessor at all. An all-per-player list keeps
+    /// the controller encoding; a mixed list without noun-phrase ownership
+    /// declines rather than applying that possessor to the shared leg.
+    ///
+    /// No printed card spells a mixed-zone list with this possessor; the nearest
+    /// printed instance of the qualifier itself is Haunting Apparition's "green
+    /// creature cards in the chosen player's graveyard" (single zone).
+    #[test]
+    fn chosen_player_possessive_keeps_the_all_per_player_encoding() {
+        assert_eq!(
+            parse_zone_suffix("in exile and in the chosen player's graveyard"),
+            None,
+            "mixed list without noun-phrase ownership must decline"
+        );
+        // All-per-player keeps the controller encoding for this possessor too.
+        let (props, ctrl, _) =
+            props_of("in the chosen player's graveyard or in the chosen player's hand");
+        assert_eq!(ctrl, Some(ControllerRef::SourceChosenPlayer));
+        assert_eq!(
+            props,
+            vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Graveyard, Zone::Hand]
+            }]
+        );
+    }
+
+    /// THE COMMA IS NOT A ZONE-LIST SEPARATOR, AND MUST NOT BECOME ONE while
+    /// this grammar is blind to its caller's position.
+    ///
+    /// Hedron Alignment: "you win the game if you own a card named Hedron
+    /// Alignment in exile, in your hand, in your graveyard, and on the
+    /// battlefield" — FOUR distinct cards, one per zone, because an object is in
+    /// one zone (CR 400.7). Adding `", "` to the separator `alt` in
+    /// `parse_zone_suffix_nom` would fold that into a single
+    /// `InAnyZone { [Exile, Hand, Graveyard, Battlefield] }`, turning a
+    /// four-copies-in-four-zones win condition into one-copy-anywhere — and
+    /// every other test in this suite would stay green, which is why the hazard
+    /// is a gate here and not only a comment there.
+    ///
+    /// The assertion is the whole return value, so a change to any part of it
+    /// fails: the head consumes exactly "in exile" (8 bytes) and the comma ends
+    /// the list, leaving a scalar `InZone`.
+    #[test]
+    fn comma_is_not_a_zone_list_separator() {
+        assert_eq!(
+            parse_zone_suffix("in exile, in your hand"),
+            Some((vec![FilterProp::InZone { zone: Zone::Exile }], None, 8)),
+        );
+        // The full Hedron Alignment tail, read from the same position its
+        // enclosing condition would hand over.
+        assert_eq!(
+            parse_zone_suffix("in exile, in your hand, in your graveyard, and on the battlefield"),
+            Some((vec![FilterProp::InZone { zone: Zone::Exile }], None, 8)),
+        );
+    }
+
+    /// Oracle text writes the battlefield with "on" and every other zone with
+    /// "in"/"from" (CR 110.1: "a permanent is a card or token ON the
+    /// battlefield"). A committed "or" continuation that breaks that fails the
+    /// whole suffix; an uncommitted "and" one simply is not part of the list.
+    /// A declined zone list must stop the boundary scanner, not let it resume
+    /// at a later leg and return only that zone.
+    #[test]
+    fn boundary_scanner_declines_a_whole_list() {
+        assert_eq!(
+            scan_zone_phrase("this creature in your graveyard or on the battlefield"),
+            None,
+        );
+        assert_eq!(
+            scan_zone_phrase("this creature in exile and in your graveyard"),
+            None,
+            "the mixed list declines without noun-phrase ownership",
+        );
+        // An ordinary word-boundary miss is not a declined list; the scanner
+        // must continue and find the later real zone phrase.
+        assert_eq!(
+            scan_zone_phrase("on hand-picked cards in your graveyard").map(|(zone, _, _)| zone),
+            Some(Zone::Graveyard),
+        );
+        assert_eq!(
+            scan_zone_phrase("on exile in your graveyard").map(|(zone, _, _)| zone),
+            Some(Zone::Graveyard),
+            "an invalid first entry is not a committed list decline",
+        );
+    }
+
+    #[test]
+    fn zone_list_rejects_on_for_a_non_battlefield_zone() {
+        assert_eq!(parse_zone_suffix("in exile or on exile"), None);
+        let phrase = "in exile and on exile";
+        let (props, _, consumed) = props_of(phrase);
+        assert_eq!(props, vec![FilterProp::InZone { zone: Zone::Exile }]);
+        assert_eq!(&phrase[consumed..], " and on exile");
+    }
+
+    /// The whole Huskburster Swarm noun phrase, through the type-phrase folding
+    /// its cost-reduction parser calls: one `Owned { You }` — the phrase names
+    /// the owner twice, in "you own" and in the "your " on the graveyard — the
+    /// union of both zones, and nothing left over for the caller.
+    #[test]
+    fn huskburster_noun_phrase_folds_to_one_owned_prop_and_the_zone_union() {
+        let (filter, remainder) =
+            parse_type_phrase_folding("creature card you own in exile and in your graveyard");
+        assert_eq!(remainder.trim(), "");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a Typed filter");
+        };
+        assert_eq!(typed.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(typed.controller, None);
+        assert_eq!(
+            typed.properties,
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You
+                },
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Exile, Zone::Graveyard]
+                },
+            ]
+        );
     }
 }
