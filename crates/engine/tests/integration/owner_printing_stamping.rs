@@ -3741,8 +3741,9 @@ fn basic_art_preserves_rules_rng_and_real_land_mana() {
         zones::Zone,
     };
     let db = art_database();
-    // CR 305.6 gives Forests green mana. CR 107.4h defines a snow source.
-    // Wastes has no basic land subtype and produces colorless mana (CR 106.1b).
+    // CR 305.6 gives Forests green mana. CR 205.4g identifies snow permanents, and
+    // CR 107.4h describes how mana from a snow source can pay a snow cost. Wastes
+    // produces colorless mana through its printed mana ability, "{T}: Add {C}."
     for (name, color, snow) in [
         ("Forest", ManaType::Green, None),
         (

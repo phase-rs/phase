@@ -1,5 +1,5 @@
 import basicLandArtCatalog from "../../../../crates/engine/data/basic-land-art-v1.json";
-import { selectedPrinting } from "../artSelection.ts";
+import { selectedPrinting, selectSubmissionPrinting } from "../artSelection.ts";
 import { deriveImageUrl } from "../scryfall.ts";
 import type { PrintingEntry } from "../scryfall.ts";
 // Type-only, matching `artSelection.ts`: no runtime dependency is created from
@@ -152,13 +152,17 @@ function selectedPrintings(
   return [...byId.values()];
 }
 
-/** Only one exact printing may answer broad oracle/name semantic lookup for a
- * card. Source-specific identity remains on every English descriptor. */
-function withoutBroadSemanticCandidates(descriptor: ScryfallAssetDescriptor): ScryfallAssetDescriptor {
+/** Keep source identity while limiting secondary render art to non-semantic
+ * lookups and supplemental art to exact lookups. */
+function withoutBroadSemanticCandidates(
+  descriptor: ScryfallAssetDescriptor,
+  scope: "secondary_render" | "exact_only",
+): ScryfallAssetDescriptor {
   return {
     ...descriptor,
     candidateKeys: descriptor.candidateKeys.filter((key) => {
       const [kind] = decodeCandidateKey(key);
+      if (scope === "exact_only") return kind === "english_printing" || kind === "source_printing";
       return kind !== "oracle_face" && kind !== "name_face";
     }),
   };
@@ -196,7 +200,9 @@ function cardDescriptors(
   }));
   const primary = selected.find(({ descriptors }) => descriptors.length > 0)?.printing.id;
   const descriptors = selected.flatMap(({ printing, descriptors }) =>
-    printing.id === primary ? descriptors : descriptors.map(withoutBroadSemanticCandidates));
+    printing.id === primary
+      ? descriptors
+      : descriptors.map((value) => withoutBroadSemanticCandidates(value, "secondary_render")));
   // A selected printing without images contributes no rungs. Use canonical
   // art if none of the selected contexts produced an image.
   if (primary === undefined) {
@@ -215,23 +221,20 @@ function cardDescriptors(
 
   // Keep keys on any printing already supplied by a selected context.
   const seen = new Set(selected.filter((value) => value.descriptors.length > 0).map(({ printing }) => printing.id));
+  const addExactPrinting = (printing: PrintingEntry) => {
+    if (seen.has(printing.id)) return;
+    seen.add(printing.id);
+    descriptors.push(...describePrinting(printing).map((value) => withoutBroadSemanticCandidates(value, "exact_only")));
+  };
+  for (const source of sources) {
+    const printing = selectSubmissionPrinting(oracleId, printings, input.artChain, input.artOverrides, source);
+    if (printing) addExactPrinting(printing);
+  }
   for (const choice of lands[candidateOracleId as keyof typeof lands].choices) {
     if (seen.has(choice.scryfall_id)) continue;
     const printing = printings.find((row) =>
       row.id === choice.scryfall_id && row.set === choice.set && row.collector_number === choice.collector_number);
-    if (!printing) continue;
-    seen.add(printing.id);
-    for (const descriptor of describePrinting(printing)) {
-      // Exact-only candidates let these images coexist with the primary art,
-      // including canonical art, without competing for ordinary lookups.
-      descriptors.push({
-        ...descriptor,
-        candidateKeys: descriptor.candidateKeys.filter((key) => {
-          const [kind] = decodeCandidateKey(key);
-          return kind === "english_printing" || kind === "source_printing";
-        }),
-      });
-    }
+    if (printing) addExactPrinting(printing);
   }
   return descriptors;
 }
@@ -243,7 +246,7 @@ async function sha256Hex(value: string): Promise<string> {
 
 /**
  * Plan ordinary art under the user's preferences and deck contexts, with
- * exact catalog alternatives for the curated pack.
+ * exact catalog alternatives and deck submission printings for the curated pack.
  *
  * The digest covers each descriptor's source URL as well as its asset key. A
  * `canonical_card` key names no printing, so the bytes behind it are whatever
