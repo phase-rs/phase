@@ -15,7 +15,8 @@ use crate::types::ability::{
     TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::keywords::CompanionCondition;
+use crate::types::identifiers::TrackedSetId;
+use crate::types::keywords::{CompanionCondition, Keyword};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -3368,7 +3369,7 @@ use crate::types::ability::{
     SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange,
     TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
 };
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, WardCost};
+use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, StepEndManaAction};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, ProhibitionScope, StaticMode};
@@ -29267,6 +29268,7 @@ fn target_has_pt_threshold_gate_lowers_to_target_filter() {
             filter: TargetFilter::Typed(tf),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }) = &def.condition
         {
             if let [FilterProp::PtComparison {
@@ -37320,6 +37322,154 @@ fn ltb_return_promotion_keeps_the_actor() {
     assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
 }
 
+/// CR 202.3 + CR 608.2c + CR 603.2: the mana-value referent gate of the S2a members, one verbatim
+/// Oracle text per row. Each gate is a `TargetMatchesFilter { Cmc }` whose `subject` names the object
+/// the clause means — the announced target in a resolving spell ("that spell" after "Counter target
+/// spell"; "that permanent" after "Destroy/Exile target ..."), the trigger event's spell in a
+/// triggered ability ("Whenever you cast a creature spell, ... that spell has mana value 5 or
+/// greater"). Grammatical tense sets the `use_lki` hint; CR 608.2h governs the runtime
+/// read. The gate sits on the instruction the printed text conditions and on nothing else.
+#[test]
+fn mana_value_referent_gate_binds_the_object_the_clause_names() {
+    use crate::types::ability::{Comparator, ObjectScope};
+
+    /// `(gated effect, subject, use_lki, comparator, threshold)` of every `Cmc` referent gate
+    /// reachable from `def` (abilities, sub-abilities and trigger bodies).
+    fn gates(def: &AbilityDefinition, out: &mut Vec<(String, ObjectScope, bool, Comparator, i32)>) {
+        if let Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(typed),
+            use_lki,
+            subject_slot: None,
+            subject,
+        }) = &def.condition
+        {
+            if let [FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            }] = typed.properties.as_slice()
+            {
+                let name = format!(
+                    "{:?}",
+                    crate::types::ability::EffectKind::from(&*def.effect)
+                );
+                out.push((name, *subject, *use_lki, *comparator, *value));
+            }
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            gates(sub, out);
+        }
+    }
+    /// Parse `text` as the printed card `name` with printed `type_line` ("Legendary Creature — Human Shaman") and the
+    /// given keywords, and collect its mana-value gates.
+    fn gates_of(
+        text: &str,
+        name: &str,
+        type_line: &str,
+        keywords: &[Keyword],
+    ) -> Vec<(String, ObjectScope, bool, Comparator, i32)> {
+        let (head, subtypes) = type_line.split_once(" — ").unwrap_or((type_line, ""));
+        let types: Vec<&str> = head
+            .split_whitespace()
+            .filter(|w| !matches!(*w, "Legendary" | "Basic" | "Snow"))
+            .collect();
+        let subtypes: Vec<&str> = subtypes.split_whitespace().collect();
+        let r = parse(text, name, keywords, &types, &subtypes);
+        let mut out = Vec::new();
+        for def in r
+            .abilities
+            .iter()
+            .chain(r.triggers.iter().filter_map(|t| t.execute.as_deref()))
+        {
+            gates(def, &mut out);
+        }
+        out
+    }
+
+    // (name, printed type line, keywords, verbatim Oracle text, expected gate). Name, type line and text are the
+    // Scryfall `cards/named?exact=` values (checked by `results/111/scripts/check_printed.py`).
+    for (name, type_line, keywords, text, expected) in [
+        (
+            "Reject Imperfection",
+            "Instant",
+            &[][..],
+            "Counter target spell. If that spell's mana value was 3 or less, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+            ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Sound the Trumpets",
+            "Instant",
+            &[][..],
+            "Counter target spell. If that spell's mana value was 2 or less, recruit. (Draw a card, then discard a card. If you discarded a nonland card, create a 1/1 white Human Soldier creature token.)",
+            ("Draw", ObjectScope::Target, true, Comparator::LE, 2),
+        ),
+        (
+            "Carnivorous Canopy",
+            "Sorcery",
+            &[][..],
+            "Destroy target artifact, enchantment, or creature with flying. If that permanent's mana value was 3 or less, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+            ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Vindictive Triumph",
+            "Instant",
+            &[][..],
+            "Exile target creature or planeswalker. If that permanent's mana value was 3 or less, return it to the battlefield tapped under your control. Exile it at the beginning of the next end step.",
+            ("ChangeZone", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Prismari Apprentice",
+            "Creature — Human Shaman",
+            &[][..],
+            "Magecraft — Whenever you cast or copy an instant or sorcery spell, this creature can't be blocked this turn. If that spell has mana value 5 or greater, put a +1/+1 counter on this creature.",
+            ("PutCounter", ObjectScope::EventSource, false, Comparator::GE, 5),
+        ),
+        (
+            "Herald of Ilharg",
+            "Creature — Boar Beast",
+            &[Keyword::Trample][..],
+            "Trample\nWhenever you cast a creature spell, put two +1/+1 counters on this creature. If that spell has mana value 5 or greater, this creature deals damage equal to the number of counters on it to each opponent.",
+            ("DamageEachPlayer", ObjectScope::EventSource, false, Comparator::GE, 5),
+        ),
+    ] {
+        let found = gates_of(text, name, type_line, keywords);
+        let (effect, subject, use_lki, comparator, threshold) = expected;
+        assert_eq!(
+            found,
+            vec![(effect.to_string(), subject, use_lki, comparator, threshold)],
+            "{name}: exactly one mana-value gate, on the conditioned instruction"
+        );
+    }
+
+    // Claim set: the present-tense possessive "that spell's mana value is N or greater" keeps
+    // its quantity route (it is not claimed by the mana-value noun surface), so the printed
+    // cards that use it stay as they were (Prismari Pianist, Zaffai, Thunder Conductor).
+    for (name, type_line, text) in [
+        (
+            "Prismari Pianist",
+            "Creature — Djinn Bard",
+            "Whenever you cast an instant or sorcery spell, create a 1/1 blue and red Elemental creature token. If that spell's mana value is 5 or greater, create three of those tokens instead.",
+        ),
+        (
+            "Zaffai, Thunder Conductor",
+            "Legendary Creature — Human Shaman",
+            "Magecraft — Whenever you cast or copy an instant or sorcery spell, scry 1. If that spell's mana value is 5 or greater, create a 4/4 blue and red Elemental creature token. If that spell's mana value is 10 or greater, Zaffai deals 10 damage to an opponent chosen at random.",
+        ),
+    ] {
+        assert!(
+            gates_of(text, name, type_line, &[]).is_empty(),
+            "{name}: the present-tense `is` form is not a TargetMatchesFilter mana-value gate"
+        );
+        // Reach guard: the card does parse, with its mana-value clause on the quantity route.
+        let (head, subtypes) = type_line.split_once(" — ").unwrap_or((type_line, ""));
+        let subtypes: Vec<&str> = subtypes.split_whitespace().collect();
+        let parsed = format!("{:?}", parse(text, name, &[], &[head.trim_start_matches("Legendary ")], &subtypes).triggers);
+        assert!(
+            parsed.contains("QuantityCheck") && !parsed.contains("Unimplemented"), // allow-noncombinator: test instrument reading a Debug dump
+            "{name}: reach guard, the mana-value clause parses to a quantity check, got {parsed}"
+        );
+    }
+}
+
 /// CR 109.5 + CR 608.2c (#8751): in "Then if you control eight or more artifacts,
 /// each opponent loses life equal to that card's power" the guard is about the
 /// ability's controller ("you"), so its artifact count keeps `ControllerRef::You`;
@@ -37399,5 +37549,214 @@ fn each_opponent_with_no_cards_in_hand_guard_stays_scoped() {
     assert!(
         dump.contains("HandSize") && dump.contains("ScopedPlayer"),
         "{dump}"
+    );
+}
+
+/// CR 608.2c + CR 611.2c: Break of Day's ability-word paragraph is a
+/// cross-item rider over the population the first paragraph affected, not a
+/// second independent spell ability whose `ParentTarget` has no referent.
+#[test]
+fn break_of_day_fateful_hour_folds_onto_mass_population() {
+    let parsed = parse(
+        "Creatures you control get +1/+1 until end of turn.\nFateful hour — If you have 5 or less life, those creatures gain indestructible until end of turn.",
+        "Break of Day",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    let root = &parsed.abilities[0];
+    assert!(matches!(&*root.effect, Effect::PumpAll { .. }), "{root:#?}");
+    let rider = root
+        .sub_ability
+        .as_deref()
+        .expect("fateful-hour rider must be chained to the pump");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = rider.effect.as_ref()
+    else {
+        panic!("expected a keyword grant rider, got {rider:#?}");
+    };
+    let [static_def] = static_abilities.as_slice() else {
+        panic!("expected one indestructible static, got {static_abilities:#?}");
+    };
+    assert!(matches!(
+        static_def.affected,
+        Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        })
+    ));
+    assert!(effect_uses_tracked_set(rider.effect.as_ref()));
+    assert!(
+        static_def.condition.is_some(),
+        "fateful-hour guard was dropped"
+    );
+}
+
+/// Kytheon's Tactics is the same cross-line mass-population class with a
+/// different ability word and a different conditional static modification.
+#[test]
+fn kytheons_tactics_spell_mastery_folds_onto_mass_population() {
+    let parsed = parse(
+        "Creatures you control get +2/+1 until end of turn.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, those creatures also gain vigilance until end of turn.",
+        "Kytheon's Tactics",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    let rider = parsed.abilities[0]
+        .sub_ability
+        .as_deref()
+        .expect("spell-mastery rider must be chained to the pump");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = rider.effect.as_ref()
+    else {
+        panic!("expected a vigilance rider, got {rider:#?}");
+    };
+    let [static_def] = static_abilities.as_slice() else {
+        panic!("expected one vigilance static, got {static_abilities:#?}");
+    };
+    assert!(matches!(
+        static_def.affected,
+        Some(TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        })
+    ));
+    assert!(
+        static_def.condition.is_some(),
+        "spell-mastery guard was dropped"
+    );
+    assert!(static_def.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword { keyword } if keyword == &Keyword::Vigilance
+    )));
+}
+
+/// A continuous static grant can also establish the population named by a
+/// later cross-line rider. The addendum must remain attached to that grant.
+#[test]
+fn unbreakable_formation_addendum_folds_onto_continuous_population() {
+    let parsed = parse(
+        "Creatures you control gain indestructible until end of turn.\nAddendum — If you cast this spell during your main phase, put a +1/+1 counter on each of those creatures and they gain vigilance until end of turn.",
+        "Unbreakable Formation",
+        &[Keyword::Indestructible],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    assert!(parsed.abilities[0].sub_ability.is_some(), "{parsed:#?}");
+}
+
+/// A singular anaphor is not the cross-item mass-population class and must
+/// remain independent rather than being widened to the preceding mass filter.
+/// This is a parser-shape negative control: the verified card census for this
+/// class contains plural "those creatures" riders (Break of Day and Kytheon's
+/// Tactics), while the nearest printed singular riders are target-bound rather
+/// than cross-line population consumers. Keeping the synthetic phrase isolates
+/// the singular/plural boundary without claiming a real card has this shape.
+#[test]
+fn singular_cross_line_anaphor_does_not_fold_onto_mass_population() {
+    let parsed = parse(
+        "Creatures you control get +1/+1 until end of turn.\nFateful hour — If you have 5 or less life, that creature gains indestructible until end of turn.",
+        "Singular Population Probe",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 2, "{parsed:#?}");
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    assert!(matches!(
+        parsed.abilities[1].effect.as_ref(),
+        Effect::GenericEffect { .. }
+    ));
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = parsed.abilities[1].effect.as_ref()
+    else {
+        panic!("expected a generic independent rider: {parsed:#?}");
+    };
+    assert_eq!(static_abilities.len(), 1, "{parsed:#?}");
+    assert!(static_abilities[0].condition.is_some(), "{parsed:#?}");
+}
+
+fn parent_target_grant() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![
+                StaticDefinition::continuous().affected(TargetFilter::ParentTarget)
+            ],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+    )
+}
+
+fn grant_affected_filter(def: &AbilityDefinition) -> &TargetFilter {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected generic grant, got {def:#?}");
+    };
+    static_abilities[0]
+        .affected
+        .as_ref()
+        .expect("grant must have an affected filter")
+}
+
+/// CR 608.2c: the condition on a cross-line rider does not authorize a
+/// `ParentTarget` grant in the false branch of an `Otherwise` clause.
+#[test]
+fn cross_line_population_condition_does_not_rebind_else_branch() {
+    let mut root = parent_target_grant();
+    root.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+    root.else_ability = Some(Box::new(parent_target_grant()));
+
+    rewrite_ability_grant_parent_to_tracked_set(&mut root, &TargetFilter::Any);
+
+    assert!(matches!(
+        grant_affected_filter(&root),
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    ));
+    assert_eq!(
+        grant_affected_filter(root.else_ability.as_deref().unwrap()),
+        &TargetFilter::ParentTarget,
+        "the false branch must not inherit the producer population"
+    );
+}
+
+/// CR 608.2c: a separate-sentence sibling is an independent instruction, so a
+/// conditional population binding cannot leak into its `ParentTarget` grant.
+#[test]
+fn cross_line_population_condition_does_not_rebind_sequential_sibling() {
+    let mut root = parent_target_grant();
+    root.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
+    let mut sibling = parent_target_grant();
+    sibling.sub_link = SubAbilityLink::SequentialSibling;
+    root.sub_ability = Some(Box::new(sibling));
+
+    rewrite_ability_grant_parent_to_tracked_set(&mut root, &TargetFilter::Any);
+
+    assert!(matches!(
+        grant_affected_filter(&root),
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    ));
+    let sibling = root.sub_ability.as_deref().unwrap();
+    assert_eq!(sibling.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(
+        grant_affected_filter(sibling),
+        &TargetFilter::ParentTarget,
+        "the independent sibling must not inherit the producer population"
     );
 }

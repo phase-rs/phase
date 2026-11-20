@@ -169,6 +169,7 @@ mod bramble_elemental_aura_attach;
 mod brass_knuckles_equipment_threshold;
 mod brawl_commander_damage_exclusion;
 mod bre_of_clan_stoutarm_endstep;
+mod break_of_day_fateful_hour;
 mod breathless_knight_graveyard_origin;
 mod breeches_blastmaker_coin_flip_copy;
 mod brightling_pt_disjunction_choice;

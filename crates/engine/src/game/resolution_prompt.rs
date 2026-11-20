@@ -1571,6 +1571,7 @@ mod tests {
         // being drawn as a candidate under a `> 0` gate.
         assert!(!replacement::event_is_accounted(
             &ProposedEvent::TokenEntry {
+                redirected_to: None,
                 entry_ref: victim,
                 enter_tapped: Default::default(),
                 enter_with_counters: Vec::new(),

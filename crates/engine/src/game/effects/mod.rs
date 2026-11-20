@@ -3954,11 +3954,11 @@ fn park_player_scope_queue_end(
     }
 }
 
-/// CR 118.12 + CR 608.2c: Complete the original rider of a paused
-/// `Effect::PayCost` only after its typed cost root has settled. The root owns
-/// the parent effect while a mana-source cost move is paused, so this replays
-/// the same child hand-off the ordinary chain walker would have performed.
-pub(crate) fn resolve_effect_pay_cost_rider(
+/// CR 608.2c + CR 603.12: Resolve `ability`'s rider the way the chain walker would after the
+/// parent effect completed — inheriting the parent's targets (the selected card a "when you do,
+/// exile that card" rider reads) and chain context. The single hand-off for a parent whose
+/// effect was completed outside the chain walker (a paused cost, a resumed copy settlement).
+pub(crate) fn resolve_rider_with_parent_context(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -32126,6 +32126,251 @@ fn shared_quality_operand_values(
     }
 }
 
+/// CR 608.2c + CR 608.2h + CR 400.7: the object an `AbilityCondition::TargetMatchesFilter`
+/// reads, with the incarnation that proves WHICH object it is.
+struct ConditionReferent {
+    id: ObjectId,
+    /// The announced (declared target) or event-recorded incarnation. `None` when
+    /// nothing proves the incarnation (a referent resolved from the live board, a
+    /// legacy save): the read then keeps the id-keyed chain it always had.
+    pin: Option<ObjectIncarnationRef>,
+    /// The scope the referent was resolved under. An `ObjectScope::EventSource` referent whose
+    /// incarnation has no surviving last-known-information record answers false (the engine
+    /// limit) instead of reading whatever object now holds the storage id.
+    scope: ObjectScope,
+}
+
+/// CR 603.2 + CR 608.2h: the incarnation of the spell a `SpellCopied` event (or a `SpellCast`
+/// whose trigger carries no pin) names. The event carries none, so it is read from the object: still on the stack, the
+/// live incarnation; otherwise the incarnation of its latest recorded exit, which for a
+/// spell countered or otherwise moved off the stack before its trigger resolves is the stack
+/// exit that `exit_lki_for_incarnation` answers from (limit: a spell that went on to leave
+/// exile or the battlefield before the trigger resolved has a later record, which answers
+/// instead). `None` when no record survives.
+fn spell_event_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    if let Some(object) = state.objects.get(&id).filter(|o| o.zone == Zone::Stack) {
+        return Some(ObjectIncarnationRef::from_object(object));
+    }
+    state
+        .lki_by_incarnation
+        .get(&id)
+        .and_then(|history| history.keys().max().copied())
+        .map(|incarnation| ObjectIncarnationRef::of(id, incarnation))
+}
+
+/// CR 608.2c + CR 603.2: resolve the referent of a `TargetMatchesFilter` condition.
+///
+/// `ObjectScope::Target` (the default) is, in order: an explicit declared `subject_slot`;
+/// the node's own resolution-bound attachment-host recipient; the ability's first object
+/// target (with its announced pin); else, for subject-based triggers that carry no chosen
+/// target, the triggering event's subject. `ObjectScope::EventSource` is the object the
+/// current trigger event names even when the node also declares a target. Every other
+/// scope has no referent here (the parser never writes one): the condition is false.
+fn resolve_condition_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    subject_slot: Option<usize>,
+    subject: &ObjectScope,
+) -> Option<ConditionReferent> {
+    use crate::game::targeting;
+    let unpinned = |id| ConditionReferent {
+        id,
+        pin: None,
+        scope: ObjectScope::Target,
+    };
+    match subject {
+        ObjectScope::EventSource => {
+            let event = state.current_trigger_event.as_ref()?;
+            let id = targeting::extract_source_from_event(event)?;
+            // Only the two spell events need a spell-specific pin; every other event names its own
+            // object's incarnation through the one shared authority, `event_context_incarnation`.
+            let pin = if let GameEvent::SpellCast {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                cast_mana_value: _,
+            } = event
+            {
+                // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
+                // stack for (`triggering_spell_identity`), so a same-id recast cannot answer for it.
+                Some(
+                    targeting::triggering_spell_identity(state)
+                        .or_else(|| spell_event_incarnation(state, id))?,
+                )
+            } else if let GameEvent::SpellCopied {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                original_id: _,
+            } = event
+            {
+                Some(spell_event_incarnation(state, id)?)
+            } else {
+                targeting::event_context_incarnation(&TargetFilter::TriggeringSource, event, id)
+            };
+            Some(ConditionReferent {
+                id,
+                pin,
+                scope: ObjectScope::EventSource,
+            })
+        }
+        ObjectScope::Target => {
+            // CR 608.2c: An explicit `subject_slot` tests a specific declared
+            // chain slot (Malamet's condition reads slot 0, the you-control
+            // fighter) — the current node's local `targets` were overwritten by
+            // most-recent-only chain propagation, so resolve against the
+            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
+            // part of the effect requires information about an illegal target,
+            // it fails to determine any such information", so a slot that was
+            // an illegal target at resolution tests as unmatched.
+            if let Some(index) = subject_slot {
+                return match targeting::resolve_live_parent_slot_from_root(state, ability, index) {
+                    Some(TargetRef::Object(id)) => Some(unpinned(id)),
+                    Some(TargetRef::Player(_)) | None => None,
+                };
+            }
+            // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
+            // equipped creature if it's red" — the anaphor names this
+            // instruction's own recipient, the source's attachment host bound
+            // as the instruction resolves (CR 115.10a: not a target, so no
+            // slot carries it). A singular anaphor needs a unique referent: no
+            // host (unattached Equipment) leaves "it" without one, so the
+            // condition is false rather than falling through to an unrelated
+            // trigger-event subject. An Equipment or Aura has at most one host
+            // (CR 301.5c, CR 303.4d); two or more can only come from a
+            // non-attachment source's filter fallback, which no card in this
+            // class reaches, and likewise has no unique referent. CR 603.4
+            // does not apply — the "if" does not follow the trigger
+            // condition, so it is checked only here, on resolution.
+            if let Some(hosts) = ability.effect.target_filter().and_then(|recipient| {
+                targeting::resolution_bound_attachment_hosts(state, ability, recipient)
+            }) {
+                return match hosts.as_slice() {
+                    [host] => Some(unpinned(*host)),
+                    [] | [_, _, ..] => None,
+                };
+            }
+            // CR 400.7 + CR 608.2b: the first object target keeps its announced
+            // incarnation, so a target that has since changed zones is recognised as
+            // departed rather than read as the new object at the same storage id.
+            if let Some((index, id)) = ability.targets.iter().enumerate().find_map(|(i, t)| match t
+            {
+                TargetRef::Object(id) => Some((i, *id)),
+                TargetRef::Player(_) => None,
+            }) {
+                return Some(ConditionReferent {
+                    id,
+                    pin: ability.target_pin_at(index),
+                    scope: ObjectScope::Target,
+                });
+            }
+            // CR 603.2 + CR 400.7: no chosen target — the triggering event's subject object,
+            // with the incarnation the event itself proves (Tribute to the World Tree: the
+            // entrant may be gone before the trigger resolves, and its last known power is
+            // read from the snapshot of THAT incarnation's exit).
+            targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            )
+            .and_then(|t| match t {
+                TargetRef::Object(id) => Some(ConditionReferent {
+                    id,
+                    pin: state.current_trigger_event.as_ref().and_then(|event| {
+                        targeting::event_context_incarnation(
+                            &TargetFilter::TriggeringSource,
+                            event,
+                            id,
+                        )
+                    }),
+                    scope: ObjectScope::Target,
+                }),
+                TargetRef::Player(_) => None,
+            })
+        }
+        ObjectScope::Source
+        | ObjectScope::Recipient
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => None,
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 400.7: evaluate `filter` against the condition's referent.
+///
+/// The basis is chosen by WHERE the referent is, not by the clause's tense. A referent
+/// whose proven incarnation is still the live object in its expected zone is read live
+/// (CR 608.2h: "the current information of that object"). A referent that has moved reads
+/// the last known information recorded for THAT incarnation at its exit
+/// (`exit_lki_for_incarnation`), so a later object at the same storage id, or a stale
+/// id-keyed cache entry, can never answer in its place. With no incarnation proof, or no
+/// surviving record for an announced target, the id-keyed chain applies unchanged:
+/// past tense (`use_lki`) reads the id-keyed LKI cache, else the live object.
+fn evaluate_target_matches_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    use_lki: bool,
+    subject_slot: Option<usize>,
+    subject: &ObjectScope,
+) -> bool {
+    let Some(referent) = resolve_condition_referent(state, ability, subject_slot, subject) else {
+        return false;
+    };
+    let id = referent.id;
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    if use_lki {
+        if let Some(GameEvent::ZoneChanged {
+            object_id: _,
+            from: _,
+            to: _,
+            record,
+        }) = state.current_trigger_event.as_ref()
+        {
+            if record.object_id == id {
+                return crate::game::filter::matches_target_filter_on_zone_change_record(
+                    state, record, filter, &ctx,
+                );
+            }
+        }
+    }
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation on the live object.
+    let live = || crate::game::filter::matches_target_filter(state, id, filter, &ctx);
+    let id_keyed_chain = || {
+        if use_lki {
+            // CR 400.7: Check last-known information for past-tense conditions.
+            // Try LKI cache first, fall back to current state if object still exists.
+            if let Some(lki) = state.lki_cache.get(&id) {
+                return crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state, id, lki, filter, &ctx,
+                );
+            }
+        }
+        live()
+    };
+    match referent.pin {
+        Some(pin) if pin.is_current(state) => live(),
+        Some(pin) => {
+            match crate::game::filter::exit_lki_for_incarnation(state, id, pin.incarnation) {
+                Some(lki) => crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state, id, lki, filter, &ctx,
+                ),
+                None if matches!(referent.scope, ObjectScope::EventSource) => false,
+                None => id_keyed_chain(),
+            }
+        }
+        None => id_keyed_chain(),
+    }
+}
+
 /// CR 608.2c: Evaluate a condition against the current game state and ability context.
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
@@ -32802,118 +33047,9 @@ pub(crate) fn evaluate_condition(
             filter,
             use_lki,
             subject_slot,
+            subject,
         } => {
-            // CR 608.2c: An explicit `subject_slot` tests a specific declared
-            // chain slot (Malamet's condition reads slot 0, the you-control
-            // fighter) — the current node's local `targets` were overwritten by
-            // most-recent-only chain propagation, so resolve against the
-            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
-            // part of the effect requires information about an illegal target,
-            // it fails to determine any such information", so a slot that was
-            // an illegal target at resolution tests as unmatched.
-            // CR 608.2c + CR 603.2: without a slot, "that creature" / "it" is, in
-            // order: the node's own resolution-bound attachment-host recipient;
-            // else the ability's first object target; else — for subject-based
-            // triggers that carry no chosen target — the triggering event's
-            // subject object. The last tier mirrors the `ParentTargetController`
-            // fallback (targeting.rs): when `targets` has no object, resolve the
-            // anaphor against `TriggeringSource` from the current trigger event.
-            let target_id = if let Some(index) = subject_slot {
-                match crate::game::targeting::resolve_live_parent_slot_from_root(
-                    state, ability, *index,
-                ) {
-                    Some(TargetRef::Object(id)) => Some(id),
-                    _ => None,
-                }
-            } else if let Some(hosts) = ability.effect.target_filter().and_then(|recipient| {
-                crate::game::targeting::resolution_bound_attachment_hosts(state, ability, recipient)
-            }) {
-                // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
-                // equipped creature if it's red" — the anaphor names this
-                // instruction's own recipient, the source's attachment host bound
-                // as the instruction resolves (CR 115.10a: not a target, so no
-                // slot carries it). Read it from the same authority the effect
-                // uses. A singular anaphor needs a unique referent: no host
-                // (unattached Equipment) leaves "it" without one, so the
-                // condition is false rather than falling through to an unrelated
-                // trigger-event subject. An Equipment or Aura has at most one host
-                // (CR 301.5c, CR 303.4d); two or more can only come from a
-                // non-attachment source's filter fallback, which no card in this
-                // class reaches, and likewise has no unique referent. CR 603.4
-                // does not apply — the "if" does not follow the trigger
-                // condition, so it is checked only here, on resolution.
-                match hosts.as_slice() {
-                    [host] => Some(*host),
-                    _ => None,
-                }
-            } else {
-                ability
-                    .targets
-                    .iter()
-                    .find_map(|t| match t {
-                        TargetRef::Object(id) => Some(*id),
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        crate::game::targeting::resolve_event_context_target(
-                            state,
-                            &TargetFilter::TriggeringSource,
-                            ability.source_id,
-                        )
-                        .and_then(|t| match t {
-                            TargetRef::Object(id) => Some(id),
-                            TargetRef::Player(_) => None,
-                        })
-                    })
-            };
-            let matched = if let Some(id) = target_id {
-                if *use_lki {
-                    if let Some(GameEvent::ZoneChanged { record, .. }) =
-                        state.current_trigger_event.as_ref()
-                    {
-                        if record.object_id == id {
-                            return crate::game::filter::matches_target_filter_on_zone_change_record(
-                                state,
-                                record,
-                                filter,
-                                &crate::game::filter::FilterContext::from_ability(ability),
-                            );
-                        }
-                    }
-                    // CR 400.7: Check last-known information for past-tense conditions.
-                    // Try LKI cache first, fall back to current state if object still exists.
-                    if let Some(lki) = state.lki_cache.get(&id) {
-                        crate::game::filter::matches_target_filter_on_lki_snapshot(
-                            state,
-                            id,
-                            lki,
-                            filter,
-                            &crate::game::filter::FilterContext::from_ability(ability),
-                        )
-                    } else {
-                        // Object still exists — check current state.
-                        // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-                        crate::game::filter::matches_target_filter(
-                            state,
-                            id,
-                            filter,
-                            &crate::game::filter::FilterContext::from_ability(ability),
-                        )
-                    }
-                } else {
-                    // Check current state for present-tense conditions.
-                    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-                    crate::game::filter::matches_target_filter(
-                        state,
-                        id,
-                        filter,
-                        &crate::game::filter::FilterContext::from_ability(ability),
-                    )
-                }
-            } else {
-                false
-            };
-            matched
+            evaluate_target_matches_filter(state, ability, filter, *use_lki, *subject_slot, subject)
         }
         // CR 608.2c + CR 603.2: "if it targets a [filter]" — check the triggering
         // spell's committed targets (Flurry on Shiko and Narset, Unified).
@@ -44096,6 +44232,7 @@ mod tests {
             filter,
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         };
         for (label, condition, consumes) in [
             ("direct tracked-set filter", gate(tracked.clone()), true),
@@ -49507,6 +49644,7 @@ mod tests {
             filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         });
         let ability = ResolvedAbility::new(
             Effect::Bounce {

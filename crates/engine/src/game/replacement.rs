@@ -2631,13 +2631,27 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
     // more creatures … enter") is not used up by it and waits for a real entry.
     // Mirrors `draw_matcher`'s `count > 0`. A compound event is matched per batch
     // view, so an empty batch is skipped while its siblings still match.
+    //
+    // CR 614.6: a token entry already sent elsewhere by an applied replacement
+    // (`redirected_to`) is no longer an entry onto the battlefield, so no
+    // battlefield-entry replacement applies to it again.
     matches!(
         event,
         ProposedEvent::ZoneChange {
             to: Zone::Battlefield,
             ..
-        } | ProposedEvent::TokenEntry { .. }
-    ) || matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
+        } | ProposedEvent::TokenEntry {
+            redirected_to: None,
+            ..
+        }
+    ) || matches!(
+        event,
+        ProposedEvent::CreateToken {
+            count,
+            redirected_to: None,
+            ..
+        } if *count > 0
+    )
 }
 
 fn change_zone_applier(
@@ -2652,9 +2666,13 @@ fn change_zone_applier(
 fn moved_matcher(event: &ProposedEvent, source: ObjectId, _state: &GameState) -> bool {
     match event {
         ProposedEvent::ZoneChange { .. } => true,
-        ProposedEvent::TokenEntry { entry_ref, .. } => {
-            source != ObjectId(0) && *entry_ref == source
-        }
+        // CR 614.6: after a redirect, the battlefield entry no longer happens,
+        // so the entrant's remaining as-enters replacements do not apply.
+        ProposedEvent::TokenEntry {
+            entry_ref,
+            redirected_to: None,
+            ..
+        } => source != ObjectId(0) && *entry_ref == source,
         _ => false,
     }
 }
@@ -6136,7 +6154,11 @@ fn remove_counter_applier(
 // --- 9. CreateToken ---
 
 fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    matches!(event, ProposedEvent::CreateToken { .. })
+    // CR 616.1f + CR 614.6 + CR 701.7a: a batch that an applied replacement has
+    // zeroed (an entry redirect, or a Jinnie Fay / Moonlit Meditation / Esix
+    // substitution) creates nothing, so no token-creation replacement applies to
+    // it any more. Same shape as `remove_counter_matcher`'s `count > 0` guard.
+    matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
 }
 
 fn is_choose_token_substitution(def: &AbilityDefinition) -> bool {
@@ -6219,6 +6241,7 @@ fn create_token_applier(
         enter_tapped,
         count,
         mut appended,
+        redirected_to,
         applied,
     } = event
     {
@@ -6278,6 +6301,7 @@ fn create_token_applier(
                 enter_tapped,
                 count: 0,
                 appended,
+                redirected_to,
                 applied,
             });
         }
@@ -6301,7 +6325,30 @@ fn create_token_applier(
                 // instruction's tapped entry, so a batch appended after this
                 // substitution inherits it too.
                 substitute_spec.tapped |= spec.tapped;
+                // CR 614.6 + the same ruling: "tapped and attacking" and a
+                // delayed disposal ("sacrifice it at end of combat") are
+                // specified by the creating instruction, not by the replaced
+                // token, so they apply to the substitute. A copy batch carries
+                // its own attack destination and disposal; its probe spec only
+                // seeds `enters_attacking`.
+                substitute_spec.enters_attacking |= spec.enters_attacking;
+                match copy.as_deref() {
+                    Some(batch_copy) => {
+                        substitute_spec.attack_request = batch_copy.attack_request.clone();
+                        substitute_spec.sacrifice_at = batch_copy.sacrifice_at.clone();
+                    }
+                    None => {
+                        substitute_spec.attack_request = spec.attack_request.clone();
+                        substitute_spec.sacrifice_at = spec.sacrifice_at.clone();
+                    }
+                }
                 spec = Box::new(substitute_spec);
+                // CR 614.1a + CR 707.9b: the substitute's characteristics are
+                // the created token's (Divine Visitation: "that many 4/4 white
+                // Angel creature tokens ... are created instead"); the replaced
+                // copy's body — and the exception that made it a creature —
+                // must not be delivered in their place.
+                copy = None;
             }
         }
 
@@ -6343,6 +6390,7 @@ fn create_token_applier(
                     copy: None,
                     enter_tapped: EtbTapState::Unspecified,
                     count: new_count,
+                    redirected_to: None,
                 },
             );
         }
@@ -6384,6 +6432,7 @@ fn create_token_applier(
                         copy: None,
                         enter_tapped: EtbTapState::Unspecified,
                         count: new_count,
+                        redirected_to: None,
                     },
                 );
             }
@@ -6396,6 +6445,7 @@ fn create_token_applier(
             enter_tapped,
             count: new_count,
             appended,
+            redirected_to,
             applied,
         })
     } else {
@@ -7932,6 +7982,56 @@ fn replacement_condition_quantity_ctx(
     }
 }
 
+/// CR 614.12 + CR 616.1c: non-copy entry replacements belong to each entrant when
+/// the copy batch enters through a liminal `TokenEntry`. That entrant owns its entry
+/// choices, including any own copy that must settle first. Creation replacements
+/// and batch-wide "enter as copies" replacements remain on the creation event.
+fn entry_effects_deferred_to_entrant(def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
+    let ProposedEvent::CreateToken {
+        copy: Some(copy),
+        spec,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    def.event == ReplacementEvent::ChangeZone
+        && !def.execute.as_deref().is_some_and(ability_becomes_copy)
+        && crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
+            &copy.values,
+            &copy.additional_modifications,
+            &spec.enter_with_counters,
+        )
+        // The placed-token route records copied rolls with creation counters
+        // as unsupported. Keep counter folds at creation for those copies,
+        // unless their own as-enters copy must settle the body first.
+        && !(EventModifiers::has_entry_counter_fold(def.execute.as_deref())
+            && copy_entrant_has_own_entry_roll(&copy.values)
+            && !copy_entrant_has_own_entry_copy(&copy.values))
+}
+
+/// CR 614.12 + CR 616.1c: whether a copied token's own copiable replacements include an
+/// as-enters "enter as a copy of ..." (Phyrexian Metamorph, Clone).
+pub(crate) fn copy_entrant_has_own_entry_copy(
+    values: &crate::types::ability::CopiableValues,
+) -> bool {
+    values.replacement_definitions.iter().any(|def| {
+        def.event == ReplacementEvent::Moved
+            && def.destination_zone == Some(Zone::Battlefield)
+            && def.execute.as_deref().is_some_and(ability_becomes_copy)
+    })
+}
+
+/// CR 707.5 + CR 614.12: whether a token copy carries its own as-enters roll.
+pub(crate) fn copy_entrant_has_own_entry_roll(
+    values: &crate::types::ability::CopiableValues,
+) -> bool {
+    values
+        .replacement_definitions
+        .iter()
+        .any(replacement_rolls_as_it_enters)
+}
+
 /// CR 400.7 + CR 614.1d: determine whether a replacement's `valid_card`
 /// predicate matches the event subject. Connive carries its own exact snapshot;
 /// all other events retain their established live or entry-snapshot paths.
@@ -7961,6 +8061,16 @@ fn replacement_valid_card_matches(
             return false;
         }
     }
+    // CR 614.12 + CR 616.1c: an entry replacement (Hallowed Moonlight's "exile it
+    // instead", Grumgully's counter) is decided against the entrant as it will exist once its
+    // own as-enters copy has settled. A copy batch whose tokens carry such a copy
+    // (Phyrexian Metamorph) enters through per-entrant `TokenEntry` events, where
+    // that copy is applied first, so the batch-level creation consult — which has
+    // no entrant yet — leaves it to them. A batch-wide copy replacement (Mystic Reflection)
+    // and the creation-layer replacements still apply at this consult.
+    if entry_effects_deferred_to_entrant(repl_def, event) {
+        return false;
+    }
     let ctx = &repl_def.valid_card_context(state, source_id, controller);
     if let ProposedEvent::Connive { subject, .. } = event {
         return matches_target_filter_on_event_snapshot(state, subject, filter, ctx);
@@ -7969,7 +8079,20 @@ fn replacement_valid_card_matches(
         || (matches!(event, ProposedEvent::TokenEntry { .. })
             && repl_def.event == ReplacementEvent::Moved)
     {
-        return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
+        // CR 614.12: another source's entry replacement reads the entrant as it would exist on
+        // the battlefield; the entrant's own is checked through that projection separately
+        // (`entrant_retains_own_entry_replacement_on_entry_board`).
+        let own_entry = matches!(
+            event,
+            ProposedEvent::TokenEntry { entry_ref, .. } if *entry_ref == source_id
+        );
+        return if own_entry {
+            matches_target_filter_on_battlefield_entry(state, event, filter, ctx)
+        } else {
+            super::filter::matches_target_filter_on_projected_battlefield_entry(
+                state, event, filter, ctx,
+            )
+        };
     }
     // CR 109.2 + CR 110.1: a counter replacement whose `valid_card` describes
     // the object by a card type or subtype without naming a zone — "a creature
@@ -9795,6 +9918,7 @@ fn stage_transformed_entry_projection(
     state.liminal_entries.insert(
         entrant,
         LiminalEntry {
+            copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Card(projected),
             name,
             source_id: entrant,
@@ -9906,6 +10030,81 @@ fn legacy_object_replacement_candidates(
     legacy_object_replacement_candidates_on_entry_board(state, event, registry, None)
 }
 
+/// CR 614.5 + CR 707.5: a staged copy that exposes its acquired replacements keeps the
+/// superseded definitions only to reserve their indices on the current event.
+/// Only the new body can apply.
+pub(super) fn liminal_entry_replacements(
+    entry: &crate::types::game_state::LiminalEntry,
+) -> impl Iterator<Item = (usize, &ReplacementDefinition)> {
+    let superseded = entry
+        .copy_settlement
+        .as_ref()
+        .and_then(|settlement| settlement.superseded_replacements)
+        .unwrap_or(0);
+    entry
+        .object
+        .projected()
+        .replacement_definitions
+        .iter_all()
+        .enumerate()
+        .skip(superseded)
+}
+
+/// CR 614.6 + CR 707.5: whether a replacement other than the entrant's own would send
+/// this entry to another zone. The redirect ends the entry before its entry finisher
+/// runs, so a chosen copy's acquired entry replacements must be ordered ahead of it.
+pub(crate) fn liminal_entry_has_foreign_redirect(state: &GameState, event: &ProposedEvent) -> bool {
+    let Some(entry_ref) = liminal_entry_ref(event) else {
+        return false;
+    };
+    find_applicable_replacements(state, event, replacement_registry())
+        .into_iter()
+        .filter(|rid| rid.source != entry_ref)
+        .filter_map(|rid| replacement_choice_definition(state, rid).map(|def| (rid, def)))
+        .any(|(rid, def)| {
+            event_modifiers_for_ability(
+                def.execute.as_deref(),
+                state,
+                rid.source,
+                replacement_ability_controller(state, rid, def),
+                event,
+            )
+            .redirect_zone
+            .is_some_and(|zone| zone != Zone::Battlefield)
+        })
+}
+
+fn liminal_entry_replacement_candidates<'a>(
+    state: &'a GameState,
+    event: &'a ProposedEvent,
+    registry: &'a IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    entry_board: Option<&'a GameState>,
+) -> impl Iterator<Item = ReplacementId> + 'a {
+    liminal_entry_ref(event)
+        .and_then(|source| {
+            state
+                .liminal_entries
+                .get(&source)
+                .map(|entry| (source, entry))
+        })
+        .into_iter()
+        .flat_map(|(source, entry)| {
+            liminal_entry_replacements(entry).map(move |(index, _)| ReplacementId {
+                source,
+                index: index as u64,
+            })
+        })
+        .filter(move |&rid| {
+            object_replacement_candidate_applies_on_entry_board(
+                state,
+                event,
+                registry,
+                rid,
+                entry_board,
+            )
+        })
+}
+
 fn legacy_object_replacement_candidates_on_entry_board(
     state: &GameState,
     event: &ProposedEvent,
@@ -9934,32 +10133,12 @@ fn legacy_object_replacement_candidates_on_entry_board(
             .then_some(rid)
         })
         .collect();
-    if let Some(entry_ref) = liminal_entry_ref(event) {
-        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
-            candidates.extend(
-                entry
-                    .object
-                    .projected()
-                    .replacement_definitions
-                    .iter_all()
-                    .enumerate()
-                    .filter_map(|(index, _)| {
-                        let rid = ReplacementId {
-                            source: entry_ref,
-                            index: index as u64,
-                        };
-                        object_replacement_candidate_applies_on_entry_board(
-                            state,
-                            event,
-                            registry,
-                            rid,
-                            entry_board,
-                        )
-                        .then_some(rid)
-                    }),
-            );
-        }
-    }
+    candidates.extend(liminal_entry_replacement_candidates(
+        state,
+        event,
+        registry,
+        entry_board,
+    ));
     candidates
 }
 
@@ -10012,32 +10191,12 @@ fn indexed_object_replacement_candidates_from_index_on_entry_board(
         })
         .collect();
 
-    if let Some(entry_ref) = liminal_entry_ref(event) {
-        if let Some(entry) = state.liminal_entries.get(&entry_ref) {
-            candidates.extend(
-                entry
-                    .object
-                    .projected()
-                    .replacement_definitions
-                    .iter_all()
-                    .enumerate()
-                    .filter_map(|(index, _)| {
-                        let rid = ReplacementId {
-                            source: entry_ref,
-                            index: index as u64,
-                        };
-                        object_replacement_candidate_applies_on_entry_board(
-                            state,
-                            event,
-                            registry,
-                            rid,
-                            entry_board,
-                        )
-                        .then_some(rid)
-                    }),
-            );
-        }
-    }
+    candidates.extend(liminal_entry_replacement_candidates(
+        state,
+        event,
+        registry,
+        entry_board,
+    ));
 
     candidates
 }
@@ -10741,9 +10900,10 @@ fn find_applicable_replacements_on_entry_board(
     // Safety: every existing pending entry's registry matcher is event-specific
     // (a damage entry uses `damage_done_matcher`, matching only `Damage`; a
     // zone-change entry uses `change_zone_matcher`, matching only
-    // `ZoneChange{to: Battlefield}`/`CreateToken`). So a damage entry can never
-    // be a candidate for a non-damage event and vice versa — the new gates are
-    // reachable only by non-damage entries on non-damage events.
+    // `ZoneChange{to: Battlefield}`, `TokenEntry`, and a non-zero `CreateToken`).
+    // So a damage entry can never be a candidate for a non-damage event and vice
+    // versa — the new gates are reachable only by non-damage entries on
+    // non-damage events.
     {
         for (index, repl_def) in state.pending_damage_replacements.iter().enumerate() {
             let rid = ReplacementId {
@@ -11140,11 +11300,11 @@ pub(crate) fn proposed_event_prompt_cause(
 /// `predicted_axes` both read it, so the resolver and the witness cannot drift
 /// about which variants are accounted.
 ///
-/// THREE ZERO-PAYLOAD GUARDS ride the same rule, because a zero-valued event
+/// FOUR ZERO-PAYLOAD GUARDS ride the same rule, because a zero-valued event
 /// writes no axis while still drawing candidates: candidate selection carries
-/// `> 0` gates (the shield-damage arm and the CR 702.150a Compleated loyalty
-/// arm), so a still-zero amount must be honest-red rather than silently
-/// candidate-free.
+/// `> 0` gates (the shield-damage arm, the CR 702.150a Compleated loyalty arm,
+/// and the `change_zone_matcher` / `create_token_matcher` token-batch arms), so
+/// a still-zero amount must be honest-red rather than silently candidate-free.
 pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
     match event {
         // ---- accounted: the applier's principal board write, or its own
@@ -11156,8 +11316,10 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
         // Object / player counters. Zero-payload guard: the CR 702.150a
         // Compleated virtual candidate is drawn under `count > 0`.
         ProposedEvent::AddCounter { count, .. } => *count > 0,
-        // `zones::create_object` ⇒ battlefield cardinality.
-        ProposedEvent::CreateToken { .. } => true,
+        // `zones::create_object` ⇒ battlefield cardinality. Zero-payload guard:
+        // both candidate matchers (`change_zone_matcher`, `create_token_matcher`)
+        // are drawn under `count > 0` (CR 616.1f).
+        ProposedEvent::CreateToken { count, .. } => *count > 0,
         // CR 120.3a: the player branch DELEGATES its life write to a companion
         // `LifeLoss`, but keeps `state.damage_dealt_this_turn`. Zero-payload
         // guard: the shield-damage virtual candidate is drawn under `amount > 0`.
@@ -11483,6 +11645,21 @@ impl EventModifiers {
             };
             current = next;
         }
+    }
+
+    /// Whether the event-modifier prefix contributes entry counters (CR 614.1c).
+    fn has_entry_counter_fold(ability: Option<&AbilityDefinition>) -> bool {
+        std::iter::successors(ability, |link| link.sub_ability.as_deref())
+            .map(|link| link.effect.as_ref())
+            .take_while(|effect| Self::is_event_modifier_effect(effect))
+            .any(|effect| match effect {
+                Effect::PutCounter { .. } => true,
+                Effect::ChangeZone {
+                    enter_with_counters,
+                    ..
+                } => !enter_with_counters.is_empty(),
+                _ => false,
+            })
     }
 
     /// CR 614.1c: Walk the ability's sub_ability chain and find the first effect
@@ -13015,41 +13192,57 @@ fn apply_single_replacement(
                 }
                 // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace).
                 if let Some(zone) = modifiers.redirect_zone {
-                    if let ProposedEvent::ZoneChange {
-                        ref mut to,
-                        ref mut cause,
-                        ref mut library_placement,
-                        ..
-                    } = new_event
-                    {
-                        *to = zone;
-                        // CR 614.6: the replacement destination supersedes the
-                        // original placement, even when both name Library.
-                        *library_placement = None;
-                        // CR 607.2b: the redirecting replacement's own source is
-                        // the "exiled with [this object]" linked-ability
-                        // authority for whatever this event ultimately
-                        // delivers to. Stamp it unconditionally (last-applied-
-                        // wins, mirroring `controller_override` above) so
-                        // `zone_pipeline::apply_zone_delivery_tail`'s exile-link
-                        // attribution (`cause.or(source_id)`) sees the correct
-                        // object even when the caller (SBA-driven death,
-                        // `Effect::Destroy`, `Effect::Sacrifice`) has no
-                        // `ResolvedAbility` of its own to compute this from.
-                        //
-                        // `cause` has one other reader: the parked CR 616.1
-                        // ordering-choice resume path
-                        // (`engine_replacement.rs`'s
-                        // `handle_replacement_choice_inner`) forwards it as
-                        // `DeliveryCtx.source_id`, which — for a
-                        // redirect that lands on the battlefield — drives the CR
-                        // 603.6a `entered_via_ability_source` anti-recursion
-                        // stamp. That is the correct authority there too: the
-                        // ability that actually delivered the object onto the
-                        // battlefield is the WINNING replacement candidate,
-                        // i.e. this same `rid.source`, not the pre-redirect
-                        // event's original (often unrelated or absent) cause.
-                        *cause = Some(rid.source);
+                    match &mut new_event {
+                        ProposedEvent::ZoneChange {
+                            to,
+                            cause,
+                            library_placement,
+                            ..
+                        } => {
+                            *to = zone;
+                            // CR 614.6: the replacement destination supersedes the
+                            // original placement, even when both name Library.
+                            *library_placement = None;
+                            // CR 607.2b: the redirecting replacement's own source is
+                            // the "exiled with [this object]" linked-ability
+                            // authority for whatever this event ultimately
+                            // delivers to. Stamp it unconditionally (last-applied-
+                            // wins, mirroring `controller_override` above) so
+                            // `zone_pipeline::apply_zone_delivery_tail`'s exile-link
+                            // attribution (`cause.or(source_id)`) sees the correct
+                            // object even when the caller (SBA-driven death,
+                            // `Effect::Destroy`, `Effect::Sacrifice`) has no
+                            // `ResolvedAbility` of its own to compute this from.
+                            //
+                            // `cause` has one other reader: the parked CR 616.1
+                            // ordering-choice resume path
+                            // (`engine_replacement.rs`'s
+                            // `handle_replacement_choice_inner`) forwards it as
+                            // `DeliveryCtx.source_id`, which — for a
+                            // redirect that lands on the battlefield — drives the CR
+                            // 603.6a `entered_via_ability_source` anti-recursion
+                            // stamp. That is the correct authority there too: the
+                            // ability that actually delivered the object onto the
+                            // battlefield is the WINNING replacement candidate,
+                            // i.e. this same `rid.source`, not the pre-redirect
+                            // event's original (often unrelated or absent) cause.
+                            *cause = Some(rid.source);
+                        }
+                        // CR 614.6 + CR 111.1: the entry of a token (the whole
+                        // creation, or a liminal entrant) is replaced "instead" by
+                        // a move to another zone (Hallowed Moonlight: "exile it
+                        // instead"). The creation itself still happens (CR 701.7a);
+                        // only where the token ends up is replaced, so the batch
+                        // keeps its count and carries the destination to delivery.
+                        // A token anywhere but the battlefield then ceases to
+                        // exist (CR 111.7, CR 704.5d).
+                        ProposedEvent::CreateToken { redirected_to, .. }
+                        | ProposedEvent::TokenEntry { redirected_to, .. }
+                            if zone != Zone::Battlefield =>
+                        {
+                            *redirected_to = Some(zone);
+                        }
+                        _ => {}
                     }
                 }
                 if let (Some(copy_spec), ProposedEvent::CreateToken { copy, .. }) =
@@ -15633,6 +15826,56 @@ fn replay_pending_replacement(
     result
 }
 
+/// CR 614.12 + CR 616.1f: selected own-entry work must finish before discovering
+/// the next replacement. Bind the ready continuation to this exact entrant and an
+/// applied own replacement, not merely to the presence of an unrelated ready drain.
+pub(crate) fn token_entry_awaits_own_entry_settlement(
+    state: &GameState,
+    proposed: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::TokenEntry { entry_ref, .. } = proposed else {
+        return false;
+    };
+    let Some(drain) = state
+        .active_post_replacement_drains()
+        .and_then(|drains| drains.resident())
+        .filter(|drain| drain.source == Some(*entry_ref) && drain.ready_continuation().is_some())
+    else {
+        return false;
+    };
+    state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+        liminal_entry_replacements(entry).any(|(index, def)| {
+            let rid = ReplacementId {
+                source: *entry_ref,
+                index: index as u64,
+            };
+            if !proposed.already_applied(&rid)
+                || !drain
+                    .applied
+                    .contains(&AppliedReplacementKey::for_event(proposed, rid))
+            {
+                return false;
+            }
+            match drain.ready_continuation() {
+                Some(PostReplacementContinuation::Template(work)) => {
+                    [def.execute.as_deref(), replacement_mode_decline(&def.mode)]
+                        .into_iter()
+                        .flatten()
+                        .any(|ability| {
+                            ability == work.as_ref()
+                                || EventModifiers::first_non_modifier_ability(Some(ability))
+                                    == Some(work.as_ref())
+                        })
+                }
+                Some(PostReplacementContinuation::Resolved(work)) => {
+                    state.replacement_rider(def) == Some(work.as_ref())
+                }
+                None => false,
+            }
+        })
+    })
+}
+
 fn pipeline_loop(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -15661,6 +15904,11 @@ fn pipeline_loop(
         }
 
         if depth >= MAX_REPLACEMENT_DEPTH {
+            break;
+        }
+
+        // CR 614.12 + CR 616.1f: finish selected own-entry work before rediscovery.
+        if token_entry_awaits_own_entry_settlement(state, &proposed) {
             break;
         }
 
@@ -19010,6 +19258,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),
                 ),
@@ -19037,6 +19286,7 @@ mod tests {
         let result = replace_event(
             &mut state,
             ProposedEvent::TokenEntry {
+                redirected_to: None,
                 entry_ref,
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
@@ -19086,6 +19336,7 @@ mod tests {
             .expect("fixture conniver exists")
             .snapshot;
         let token_event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -19172,6 +19423,7 @@ mod tests {
             ),
             (
                 ProposedEvent::TokenEntry {
+                    redirected_to: None,
                     entry_ref: ObjectId(77),
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
@@ -22337,6 +22589,7 @@ mod tests {
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let proposed = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner: PlayerId(0),
                 spec: Box::new(spec),
                 copy: None,
@@ -24524,6 +24777,7 @@ mod tests {
         let dies =
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
         let token = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -24639,6 +24893,7 @@ mod tests {
     fn change_zone_matcher_requires_a_token_to_enter() {
         let state = GameState::new_two_player(42);
         let token = |count: u32| ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -24658,6 +24913,7 @@ mod tests {
         );
         assert!(change_zone_matcher(
             &ProposedEvent::TokenEntry {
+                redirected_to: None,
                 entry_ref: ObjectId(20),
                 enter_tapped: EtbTapState::Unspecified,
                 enter_with_counters: Vec::new(),
@@ -24833,6 +25089,7 @@ mod tests {
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -24858,6 +25115,7 @@ mod tests {
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -25018,6 +25276,7 @@ mod tests {
         );
         assert!(
             !check(&ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner: PlayerId(1),
                 count: 1,
                 spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
@@ -25989,6 +26248,7 @@ mod tests {
         let mut events = Vec::new();
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(
@@ -26033,6 +26293,7 @@ mod tests {
         spec.characteristics.subtypes.clear();
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(spec),
@@ -28928,6 +29189,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(plant_spec),
             copy: None,
@@ -29024,6 +29286,7 @@ mod tests {
         let mut treasure = artifact_spec("Treasure");
         treasure.source_id = manufactor;
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure),
             copy: None,
@@ -29099,6 +29362,7 @@ mod tests {
     /// would have left it.
     fn treasure_plus_squirrel_event(source_id: ObjectId) -> ProposedEvent {
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(compound_test_token_spec(
                 "Treasure",
@@ -29109,6 +29373,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
             appended: vec![TokenBatch {
+                redirected_to: None,
                 owner: PlayerId(0),
                 spec: Box::new(compound_test_token_spec(
                     "Squirrel",
@@ -29168,6 +29433,7 @@ mod tests {
             unreachable!();
         };
         let treasure_only = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner,
             spec,
             copy: None,
@@ -29322,6 +29588,7 @@ mod tests {
         };
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(food_spec),
             copy: None,
@@ -29397,6 +29664,7 @@ mod tests {
 
         let soldier = test_token_spec(PlayerId(0), CoreType::Creature);
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(soldier),
             copy: None,
@@ -29486,6 +29754,7 @@ mod tests {
         state.battlefield.push_back(source);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Artifact)),
             copy: None,
@@ -29701,6 +29970,7 @@ mod tests {
         state.battlefield.push_back(ojer);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
@@ -29806,6 +30076,7 @@ mod tests {
         );
 
         let token_event = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             count: 1,
             spec: Box::new(test_token_spec(PlayerId(1), CoreType::Creature)),
@@ -29912,6 +30183,7 @@ mod tests {
         };
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(soldier_spec),
             copy: None,
@@ -30493,6 +30765,7 @@ mod tests {
         let mut treasure = artifact_spec("Treasure");
         treasure.source_id = manufactor;
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(treasure),
             copy: None,
@@ -30595,6 +30868,7 @@ mod tests {
         treasure.source_id = manufactor;
         treasure.controller = PlayerId(1);
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(treasure),
             copy: None,
@@ -30725,6 +30999,7 @@ mod tests {
         state.battlefield.push_back(tap_effect2);
 
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(TokenSpec {
                 characteristics: crate::types::proposed_event::TokenCharacteristics {
@@ -31567,6 +31842,7 @@ mod tests {
             repl.mode(ReplacementMode::Optional { decline: None })
         }
         let create_two = || ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
             copy: None,
@@ -32548,6 +32824,175 @@ mod tests {
             candidates.is_empty(),
             "non-creature must be excluded by the valid_card gate (got {candidates:?})"
         );
+    }
+
+    // ---- Battlefield-entry redirect applied to token creation (CR 614.6, CR 701.7a) ----
+
+    /// The floating "if a creature would enter and it wasn't cast, exile it
+    /// instead" redirect (Hallowed Moonlight shape): `valid_card` is a creature
+    /// carrying the `Not(WasPlayed)` "wasn't cast" gate plus `extra_props`
+    /// (`NonToken` for the Mistcaller / Containment Priest shape).
+    fn enter_wasnt_cast_exile_global_replacement(
+        extra_props: Vec<FilterProp>,
+    ) -> ReplacementDefinition {
+        let mut props = extra_props;
+        props.push(FilterProp::Not {
+            prop: Box::new(FilterProp::WasPlayed),
+        });
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().properties(props),
+            ))
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: Default::default(),
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+
+    /// Install `def` as a floating (pending) replacement and run a proposed
+    /// one-token `CreateToken` of `spec` through `replace_event`, returning the
+    /// surviving count and the entry destination the replacement chose.
+    fn floating_redirect_token_batch(
+        def: ReplacementDefinition,
+        spec: TokenSpec,
+    ) -> (u32, Option<Zone>) {
+        let mut state = GameState::new_two_player(42);
+        state.pending_damage_replacements.push(def);
+        let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            appended: Vec::new(),
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        match replace_event(&mut state, proposed, &mut events) {
+            ReplacementResult::Execute(ProposedEvent::CreateToken {
+                count,
+                redirected_to,
+                ..
+            }) => (count, redirected_to),
+            other => panic!("expected Execute(CreateToken), got {other:?}"),
+        }
+    }
+
+    /// CR 614.6 + CR 701.7a + CR 111.1: creating a creature token under a
+    /// floating "exile it instead" entry redirect still creates it (the batch keeps
+    /// its count) but sends its entry to exile. Before the redirect arm for
+    /// `CreateToken` the event came back unchanged, with no destination.
+    #[test]
+    fn enter_exile_redirect_sends_creature_token_batch_to_exile() {
+        let creature = token_spec_of("Soldier", CoreType::Creature, "Soldier");
+        assert_eq!(
+            floating_redirect_token_batch(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                creature
+            ),
+            (1, Some(Zone::Exile)),
+            "a creature token that would enter is created in exile instead"
+        );
+    }
+
+    /// The redirect's `valid_card` creature gate still filters token batches: a
+    /// noncreature token enters normally. Paired with the creature positive.
+    #[test]
+    fn enter_exile_redirect_keeps_noncreature_token_batch() {
+        let positive = token_spec_of("Soldier", CoreType::Creature, "Soldier");
+        assert_eq!(
+            floating_redirect_token_batch(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                positive
+            ),
+            (1, Some(Zone::Exile)),
+            "reach-guard: the same definition redirects a creature batch"
+        );
+        let treasure = token_spec_of("Treasure", CoreType::Artifact, "Treasure");
+        assert_eq!(
+            floating_redirect_token_batch(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                treasure
+            ),
+            (1, None),
+            "a noncreature token is not a creature entering: no destination"
+        );
+    }
+
+    /// A `NonToken`-gated redirect (Mistcaller / Containment Priest shape) and the
+    /// Don't Blink redirect (`EnteredFromZone`: a created token has no physical
+    /// origin and no cast origin) never apply to a token batch. Each negative is
+    /// paired with the unfiltered creature positive.
+    #[test]
+    fn nontoken_and_from_zone_redirects_keep_creature_token_batch() {
+        assert_eq!(
+            floating_redirect_token_batch(
+                enter_wasnt_cast_exile_global_replacement(Vec::new()),
+                token_spec_of("Soldier", CoreType::Creature, "Soldier")
+            ),
+            (1, Some(Zone::Exile)),
+            "reach-guard: the unfiltered redirect applies to the creature batch"
+        );
+        assert_eq!(
+            floating_redirect_token_batch(
+                enter_wasnt_cast_exile_global_replacement(vec![FilterProp::NonToken]),
+                token_spec_of("Soldier", CoreType::Creature, "Soldier")
+            ),
+            (1, None),
+            "a NonToken-gated redirect must not apply to a token"
+        );
+        assert_eq!(
+            floating_redirect_token_batch(
+                dont_blink_global_replacement(),
+                token_spec_of("Soldier", CoreType::Creature, "Soldier")
+            ),
+            (1, None),
+            "an EnteredFromZone redirect must not apply to a newly created token"
+        );
+    }
+
+    /// CR 616.1f: a token batch zeroed by an applied substitution (Jinnie Fay) draws no candidate
+    /// (`change_zone_matcher` and `create_token_matcher` are gated on
+    /// `count > 0`), so the accounted partition must refuse it rather than treat
+    /// a candidate-free zero batch as accounted. Paired with the `count == 1`
+    /// positive.
+    #[test]
+    fn create_token_zero_count_is_not_accounted() {
+        for (accounted, count) in [(false, 0u32), (true, 1u32)] {
+            assert_eq!(
+                event_is_accounted(&ProposedEvent::CreateToken {
+                    redirected_to: None,
+                    owner: PlayerId(0),
+                    spec: Box::new(token_spec_of("Soldier", CoreType::Creature, "Soldier")),
+                    copy: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    count,
+                    appended: Vec::new(),
+                    applied: HashSet::new(),
+                }),
+                accounted,
+                "the token-batch candidates are gated on `count > 0`, so a zero-count \
+                 CreateToken must be honest-red rather than silently candidate-free"
+            );
+        }
     }
 
     /// CR 109.1 (issue #8485): a card-shaped `valid_card` recipient

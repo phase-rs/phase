@@ -20212,6 +20212,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the anaphor must bind the ability's object subject, not its source"
     );
@@ -20251,6 +20252,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "\"does not have\" must lower identically to \"doesn't have\""
     );
@@ -20267,6 +20269,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::FirstStrike),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the arm must cover the whole keyword class, not just Suspend"
     );
@@ -20346,6 +20349,7 @@ fn it_has_keyword_lowers_to_the_same_kind_level_prop_as_its_negative_twin() {
             filter: has_keyword_kind_filter(KeywordKind::FirstStrike),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the affirmative arm must emit the kind-level HasKeywordKind prop"
     );
@@ -20471,6 +20475,7 @@ fn keyword_anaphor_strict_fails_when_kind_does_not_identify_the_ability() {
             filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the guard must narrow the arm, not disable it"
     );
@@ -20535,6 +20540,7 @@ fn keyword_anaphor_rebinds_to_cost_paid_object_after_cost_paid_parent() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "an effect-introduced referent must keep the target-scoped reading"
     );
@@ -20648,6 +20654,7 @@ fn keyword_anaphor_after_resolution_time_pick_strict_fails_to_unimplemented() {
             filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "a deterministic context-ref parent must not be mistaken for a player pick"
     );
@@ -20700,6 +20707,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
         filter: without_keyword_kind_filter(KeywordKind::Suspend),
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     };
     rewrite_ability_condition_keyword(&mut target_seam, &Keyword::Flying);
     assert_eq!(
@@ -20708,6 +20716,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
             filter: without_keyword_kind_filter(KeywordKind::Flying),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     );
 
@@ -20734,6 +20743,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
         }),
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     };
     rewrite_ability_condition_keyword(&mut has_kind, &Keyword::Flying);
     assert_eq!(
@@ -20747,6 +20757,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
             }),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     );
 
@@ -30588,11 +30599,19 @@ fn suffix_power_equality_condition_preserves_pump_duration() {
     assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
     assert!(matches!(
         def.condition,
-        Some(AbilityCondition::QuantityCheck {
-            comparator: Comparator::EQ,
-            rhs: QuantityExpr::Fixed { value: 2 },
-            ..
-        })
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(ref typed),
+            use_lki: false,
+            subject_slot: None,
+            subject: ObjectScope::Target,
+        }) if matches!(
+            typed.properties.as_slice(),
+            [crate::types::ability::FilterProp::PtComparison {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 2 },
+                ..
+            }]
+        )
     ));
 }
 
@@ -68270,14 +68289,15 @@ fn amalia_lifegain_destroy_all_is_source_power_eq_20() {
     }
 }
 
-/// Non-regression (issue #735): Tribute to the World Tree keeps
-/// `ObjectScope::CostPaidObject` for its "if its power is 3 or greater" clause —
-/// the "its" binds the ENTERING creature, not the enchantment source. Its
-/// trigger subject is a typed object ("a creature you control"), which is not
-/// one of the Controller/Player/Any player-subject arms Edit B flips to Source.
+/// Non-regression (issue #735): Tribute to the World Tree's "if its power is 3 or greater"
+/// binds the ENTERING creature (an event object), not the enchantment source: it is a referent
+/// predicate on the node's own referent (`TargetMatchesFilter`, resolved at runtime against the
+/// triggering event's subject), never a quantity on the source. Its trigger subject is a typed
+/// object ("a creature you control"), which is not one of the Controller/Player/Any
+/// player-subject arms that bind "its" to the source.
 #[test]
-fn tribute_world_tree_keeps_cost_paid_object_scope() {
-    use crate::types::ability::{ObjectScope, QuantityRef};
+fn tribute_world_tree_binds_its_to_the_entering_creature_as_a_referent_predicate() {
+    use crate::types::ability::{FilterProp, PtStat, PtValueScope};
 
     let parsed = parse_oracle_text(
         "Whenever a creature you control enters, draw a card if its power is 3 or greater. \
@@ -68291,32 +68311,34 @@ fn tribute_world_tree_keeps_cost_paid_object_scope() {
         .triggers
         .iter()
         .find_map(|t| t.execute.as_deref().and_then(|e| e.condition.clone()))
-        .expect("Tribute trigger must carry a QuantityCheck condition");
+        .expect("Tribute trigger must carry a referent condition");
 
-    assert!(
-        matches!(
-            condition,
-            AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::Power {
-                        scope: ObjectScope::CostPaidObject
-                    }
-                },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 3 },
-            }
-        ),
-        "Tribute must keep Power{{CostPaidObject}} GE 3, got {condition:?}"
+    assert_eq!(
+        condition,
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }
+            ])),
+            use_lki: false,
+            subject_slot: None,
+            subject: crate::types::ability::ObjectScope::Target,
+        },
+        "Tribute must read the entering creature's power through the referent predicate"
     );
 }
 
 /// CR 115.1 + CR 608.2c + CR 208.1: Ent's Fury's "if its power is 4 or greater"
-/// condition reads the object targeted by the gated counter instruction. A
-/// generic cost-paid-object fallback would read no object for this spell and
-/// incorrectly skip the counter.
+/// condition reads the object targeted by the gated counter instruction: a referent predicate
+/// on the node's own referent (its first declared object target). A generic cost-paid-object
+/// fallback would read no object for this spell and incorrectly skip the counter.
 #[test]
 fn ents_fury_power_gate_binds_to_the_gated_target() {
-    use crate::types::ability::{ObjectScope, QuantityRef};
+    use crate::types::ability::{FilterProp, PtStat, PtValueScope};
 
     let parsed = parse_oracle_text(
         "Put a +1/+1 counter on target creature you control if its power is 4 or greater. \
@@ -68331,22 +68353,24 @@ fn ents_fury_power_gate_binds_to_the_gated_target() {
         .abilities
         .iter()
         .find_map(|a| a.condition.clone())
-        .expect("Ent's Fury must carry a QuantityCheck condition");
+        .expect("Ent's Fury must carry a referent condition");
 
-    assert!(
-        matches!(
-            condition,
-            AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::Power {
-                        scope: ObjectScope::Target
-                    }
-                },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 4 },
-            }
-        ),
-        "Ent's Fury must bind the power gate to its announced target, got {condition:?}"
+    assert_eq!(
+        condition,
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }
+            ])),
+            use_lki: false,
+            subject_slot: None,
+            subject: crate::types::ability::ObjectScope::Target,
+        },
+        "Ent's Fury must bind the power gate to its announced target"
     );
 }
 
