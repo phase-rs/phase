@@ -12086,13 +12086,26 @@ pub(crate) fn stack_entry_targets_satisfy(
     let Some(entry) = state.stack.iter().find(|e| e.id == stack_obj_id) else {
         return true; // Not a stack entry — permissive.
     };
-    let slots = stack_entry_counted_targets(state, entry);
     let ctx = match source_controller {
         Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
         None => FilterContext::from_source(state, source_id),
     };
+    entry_targets_satisfy(state, entry, &ctx, filter, require_all)
+}
+
+/// CR 115.9b/115.9c: [`stack_entry_targets_satisfy`] for a given entry, with
+/// "you" read from `ctx` — the looking ability's controller (CR 109.5), not
+/// its source's current controller.
+pub(crate) fn entry_targets_satisfy(
+    state: &GameState,
+    entry: &crate::types::game_state::StackEntry,
+    ctx: &FilterContext,
+    filter: &TargetFilter,
+    require_all: bool,
+) -> bool {
+    let slots = stack_entry_counted_targets(state, entry);
     let check = |t: &TargetRef| match t {
-        TargetRef::Object(id) => matches_target_filter(state, *id, filter, &ctx),
+        TargetRef::Object(id) => matches_target_filter(state, *id, filter, ctx),
         TargetRef::Player(pid) => player_matches_target_filter_in_state(
             state,
             filter,
@@ -12134,7 +12147,10 @@ fn stack_entry_counted_targets(
                 .then_some(target)
             })
             .collect(),
-        _ => entry
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::CombatDamage { .. } => entry
             .ability()
             .map(crate::game::ability_utils::declared_target_entries_in_chain)
             .unwrap_or_default()

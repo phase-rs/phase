@@ -949,37 +949,38 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
 /// A trailing controller phrase ("an opponent controls") and/or "that targets
 /// [only] …" clause is consumed and conjoined onto every leg.
 pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> {
-    let (rest, legs) = parse_stack_object_legs(input)?;
+    let (rest, mut legs) = parse_stack_object_legs(input)?;
     let (rest, controller) = opt(preceded(tag(" "), parse_controller_suffix)).parse(rest)?;
     let (rest, properties) =
         match crate::parser::oracle_target::parse_that_clause_suffix(rest, None) {
             Some((properties, consumed)) => (&rest[consumed..], properties),
             None => (rest, Vec::new()),
         };
-    if controller.is_none() && properties.is_empty() {
-        return Ok((rest, legs));
+    if controller.is_some() || !properties.is_empty() {
+        // CR 115.1 + CR 115.9b + CR 113.8 / CR 405.4: a trailing controller phrase and/or
+        // "that targets …" clause restricts every leg; each leg stays a top-level
+        // `Or` branch because legal-target enumeration dispatches per branch.
+        let qualifier = TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller,
+            properties,
+        });
+        legs = legs
+            .into_iter()
+            .map(|leg| TargetFilter::And {
+                filters: vec![leg, qualifier.clone()],
+            })
+            .collect();
     }
-    // CR 115.1 + CR 115.9b + CR 113.8 / CR 405.4: a trailing controller phrase and/or
-    // "that targets …" clause restricts every leg; each leg stays a top-level
-    // `Or` branch because legal-target enumeration dispatches per branch.
-    let qualifier = TargetFilter::Typed(TypedFilter {
-        type_filters: Vec::new(),
-        controller,
-        properties,
-    });
-    let qualify = |leg| TargetFilter::And {
-        filters: vec![leg, qualifier.clone()],
-    };
-    let filter = match legs {
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters.into_iter().map(qualify).collect(),
-        },
-        leg => qualify(leg),
+    let filter = match <[TargetFilter; 1]>::try_from(legs) {
+        Ok([leg]) => leg,
+        Err(filters) => TargetFilter::Or { filters },
     };
     Ok((rest, filter))
 }
 
-fn parse_stack_object_legs(input: &str) -> OracleResult<'_, TargetFilter> {
+/// The disjunct legs of a stack-object phrase, in source order (never empty).
+fn parse_stack_object_legs(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
     alt((
         // "spell or ability" / "spell and/or ability" → both spells and abilities.
         // This literal arm stays FIRST so the simple two-word form keeps its
@@ -990,16 +991,14 @@ fn parse_stack_object_legs(input: &str) -> OracleResult<'_, TargetFilter> {
         // `parse_ability_spell_disjunction`), but the literal arm preserves the
         // asserted canonical shape with zero risk.
         value(
-            TargetFilter::Or {
-                filters: vec![
-                    TargetFilter::StackSpell,
-                    TargetFilter::StackAbility {
-                        controller: None,
-                        tag: None,
-                        kind: None,
-                    },
-                ],
-            },
+            vec![
+                TargetFilter::StackSpell,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                    kind: None,
+                },
+            ],
             alt((
                 tag("spell or ability"),
                 tag("spell and/or ability"),
@@ -1172,7 +1171,7 @@ fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
 /// spell", "spell") is owned by `parse_target` + `constrain_filter_to_stack`;
 /// this combinator only fires for what bare `parse_target` cannot represent —
 /// an ability disjunct.
-fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter> {
+fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
     enum StackLeg {
         Spell(TargetFilter),
         Ability(TargetFilter),
@@ -1268,14 +1267,7 @@ fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter
         return Err(oracle_err(input));
     }
 
-    let filter = match filters.len() {
-        // Unreachable given the `saw_ability` guard (a true `saw_ability`
-        // implies at least one pushed leg), but kept total.
-        0 => return Err(oracle_err(input)),
-        1 => filters.into_iter().next().unwrap(),
-        _ => TargetFilter::Or { filters },
-    };
-    Ok((rest, filter))
+    Ok((rest, filters))
 }
 
 /// Parse a (possibly type-restricted) spell phrase into a stack-constrained

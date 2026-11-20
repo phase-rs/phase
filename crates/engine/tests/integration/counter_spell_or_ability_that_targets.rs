@@ -5,8 +5,9 @@
 use std::collections::BTreeSet;
 
 use engine::ai_support::legal_actions_full;
+use engine::game::ability_utils::declared_targets_in_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ResolvedAbility, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -21,6 +22,8 @@ const SIREN_STORMTAMER: &str = "Flying\n{U}, Sacrifice this creature: Counter ta
 const DIPLOMATIC_ESCORT: &str =
     "{U}, {T}, Discard a card: Counter target spell or ability that targets a creature.";
 const NIMBLE_OBSTRUCTIONIST: &str = "Flash\nFlying\nCycling {2}{U} ({2}{U}, Discard this card: Draw a card.)\nWhen you cycle this card, counter target activated or triggered ability you don't control.";
+const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this turn.)";
+const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 const KEEP_SAFE: &str = "Counter target spell that targets a permanent you control.\nDraw a card.";
 const MURDER: &str = "Destroy target creature.";
 const STONE_RAIN: &str = "Destroy target land.";
@@ -178,14 +181,6 @@ fn offered(runner: &GameRunner) -> BTreeSet<ObjectId> {
         .collect()
 }
 
-fn chain_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
-    let mut out = ability.targets.clone();
-    if let Some(sub) = &ability.sub_ability {
-        out.extend(chain_targets(sub));
-    }
-    out
-}
-
 fn entry_targets(runner: &GameRunner, id: ObjectId) -> Vec<TargetRef> {
     let entry = runner
         .state()
@@ -193,7 +188,7 @@ fn entry_targets(runner: &GameRunner, id: ObjectId) -> Vec<TargetRef> {
         .iter()
         .find(|e| e.id == id)
         .expect("stack entry");
-    chain_targets(entry.ability().expect("entry ability"))
+    declared_targets_in_chain(entry.ability().expect("entry ability"))
 }
 
 fn pass_until_gone(runner: &mut GameRunner, id: ObjectId) {
@@ -364,6 +359,61 @@ fn siren_stormtamer_reads_player_or_creature_qualifier() {
     let legal = offered(&r);
     assert_eq!(legal, set(&[a_p0, a_mine]));
     assert!(![a_p1, a_theirs, p_land].iter().any(|id| legal.contains(id)));
+}
+
+/// CR 109.5 + CR 608.2b: a stolen Siren Stormtamer sacrificed to its own cost
+/// reads "you" as its activator, not its owner, when the Bolt it counters is
+/// rechecked at resolution; a Bolt targeting only the owner is never offered.
+#[test]
+fn stolen_siren_stormtamer_reads_you_as_activator() {
+    for victim_is_player in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let mine = bears(&mut s, P0);
+        let siren = s
+            .add_creature_from_oracle(P1, "Siren Stormtamer", 1, 1, SIREN_STORMTAMER)
+            .id();
+        let treason = free_spell(&mut s, P0, "Act of Treason", false, ACT_OF_TREASON);
+        let bolts: Vec<_> = (0..3)
+            .map(|_| free_spell(&mut s, P1, "Lightning Bolt", true, LIGHTNING_BOLT))
+            .collect();
+        s.with_mana_pool(P0, mana(1, ManaType::Blue));
+        let mut r = s.build();
+        give_turn(&mut r, P0);
+        let treason_entry = cast(&mut r, treason, &[siren]);
+        pass_until_gone(&mut r, treason_entry);
+        assert_eq!(r.state().objects[&siren].controller, P0);
+
+        give_turn(&mut r, P1);
+        let before = r.state().stack.len();
+        r.cast(bolts[0]).target_player(P0).commit();
+        let at_p0 = pushed(&r, before, "bolt at P0");
+        let at_mine = cast(&mut r, bolts[1], &[mine]);
+        let before = r.state().stack.len();
+        r.cast(bolts[2]).target_player(P1).commit();
+        let at_owner = pushed(&r, before, "bolt at P1");
+        pass(&mut r);
+
+        start_activation(&mut r, siren);
+        assert_eq!(offered(&r), set(&[at_p0, at_mine]));
+        let (victim, survivor) = if victim_is_player {
+            (at_p0, at_mine)
+        } else {
+            (at_mine, at_p0)
+        };
+        choose_targets(&mut r, &[TargetRef::Object(victim)]);
+        let counter = top_id(&r);
+        assert_eq!(r.state().objects[&siren].zone, Zone::Graveyard);
+        assert_eq!(r.state().objects[&siren].controller, P1);
+        pass_until_gone(&mut r, counter);
+
+        assert_eq!(
+            r.state().objects[&victim].zone,
+            Zone::Graveyard,
+            "victim_is_player={victim_is_player}"
+        );
+        assert!(on_stack(&r, survivor) && on_stack(&r, at_owner));
+    }
 }
 
 /// Diplomatic Escort: any creature target, including an Equip's; Crew has no
