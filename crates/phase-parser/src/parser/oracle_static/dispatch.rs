@@ -4231,8 +4231,11 @@ fn parse_player_action_cause(lower: &str) -> Option<TriggerCause> {
             (
                 terminated(
                     alt((
-                        value(CausingPlayer::You, tag::<_, _, OracleError<'_>>("you")),
-                        value(CausingPlayer::Any, tag("a player")),
+                        value(
+                            PlayerRelation::Controller,
+                            tag::<_, _, OracleError<'_>>("you"),
+                        ),
+                        value(PlayerRelation::All, tag("a player")),
                     )),
                     tag(" "),
                 ),

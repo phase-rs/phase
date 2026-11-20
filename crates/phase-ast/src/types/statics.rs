@@ -716,17 +716,6 @@ impl CausingObject {
     }
 }
 
-/// CR 603.2d: which player's action a trigger doubler's cause names, relative
-/// to the doubler's controller: "you gaining life" (Dr. Beverly Crusher) or "a
-/// player drawing a card" (Krang, the All-Powerful).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum CausingPlayer {
-    /// Any player.
-    Any,
-    /// CR 109.5: the doubler's controller.
-    You,
-}
-
 /// CR 603.2d: the player action that causes a trigger, for
 /// `TriggerCause::PlayerAction`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -785,9 +774,10 @@ pub enum TriggerCause {
     RoomEntered,
     /// CR 603.2d: Trigger was caused by a player's action ("If you gaining
     /// life causes ..." — Dr. Beverly Crusher; "If a player drawing a card
-    /// causes ..." — Krang, the All-Powerful).
+    /// causes ..." — Krang, the All-Powerful). `player` is relative to the
+    /// doubler's controller (CR 109.5).
     PlayerAction {
-        player: CausingPlayer,
+        player: super::ability::PlayerRelation,
         action: PlayerCauseAction,
     },
     /// CR 116.2b + CR 708.8: Trigger was caused by turning a face-down
@@ -848,7 +838,7 @@ enum TriggerCauseWire {
         qualifiers: Vec<ZoneChangeQualifier>,
     },
     PlayerAction {
-        player: CausingPlayer,
+        player: super::ability::PlayerRelation,
         action: PlayerCauseAction,
     },
     TurnedFaceUp,
@@ -4990,11 +4980,11 @@ mod tests {
             },
             TriggerCause::RoomEntered,
             TriggerCause::PlayerAction {
-                player: CausingPlayer::You,
+                player: crate::types::ability::PlayerRelation::Controller,
                 action: PlayerCauseAction::GainedLife,
             },
             TriggerCause::PlayerAction {
-                player: CausingPlayer::Any,
+                player: crate::types::ability::PlayerRelation::All,
                 action: PlayerCauseAction::DrewCard,
             },
             TriggerCause::TurnedFaceUp,

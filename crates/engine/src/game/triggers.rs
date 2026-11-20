@@ -43,8 +43,8 @@ use crate::types::resolved_commands::{
     ResolvedTriggerCollectionReplayInvariantError,
 };
 use crate::types::statics::{
-    CausingObject, CausingPlayer, ControlledCreatureEvent, PlayerCauseAction, StaticMode,
-    SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+    CausingObject, ControlledCreatureEvent, PlayerCauseAction, StaticMode, SuppressedTriggerEvent,
+    TriggerCause, ZoneChangeQualifier,
 };
 use crate::types::triggers::{AttackTargetFilter, TriggerEventKey, TriggerMode};
 use crate::types::zones::Zone;
@@ -16901,11 +16901,9 @@ pub(super) fn trigger_cause_matches(
                 ) => *player_id,
                 (PlayerCauseAction::GainedLife | PlayerCauseAction::DrewCard, _) => return false,
             };
-            match player {
-                CausingPlayer::Any => true,
-                // CR 109.5: "you" is the doubler's controller.
-                CausingPlayer::You => acting_player == doubler_controller,
-            }
+            // CR 109.5: the player relation is relative to the doubler's
+            // controller ("you" — Crusher; "a player" — Krang).
+            super::players::matches_relation(state, acting_player, doubler_controller, *player)
         }
         // CR 116.2b + CR 708.8: turning a face-down permanent face up
         // (Panoptic Projektor).
@@ -24745,11 +24743,11 @@ pub mod tests {
             },
             TriggerCause::RoomEntered,
             TriggerCause::PlayerAction {
-                player: CausingPlayer::You,
+                player: crate::types::ability::PlayerRelation::Controller,
                 action: PlayerCauseAction::GainedLife,
             },
             TriggerCause::PlayerAction {
-                player: CausingPlayer::Any,
+                player: crate::types::ability::PlayerRelation::All,
                 action: PlayerCauseAction::DrewCard,
             },
             TriggerCause::TurnedFaceUp,

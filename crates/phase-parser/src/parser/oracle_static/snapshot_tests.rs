@@ -946,14 +946,14 @@ fn player_action_and_face_up_doubler_causes() {
         (
             "If you gaining life causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
             TriggerCause::PlayerAction {
-                player: CausingPlayer::You,
+                player: PlayerRelation::Controller,
                 action: PlayerCauseAction::GainedLife,
             },
         ),
         (
             "If a player drawing a card causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
             TriggerCause::PlayerAction {
-                player: CausingPlayer::Any,
+                player: PlayerRelation::All,
                 action: PlayerCauseAction::DrewCard,
             },
         ),
