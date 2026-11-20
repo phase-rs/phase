@@ -27002,9 +27002,8 @@ mod tests {
         );
     }
 
-    /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and
-    /// comparator, not a fixed "one or more" — Sarek ("three or more"), the
-    /// "or fewer" mirror, and the legacy "one or more" / "at least one" forms.
+    /// CR 701.23a + CR 608.2c: only the controller's own "you search your library this way" is
+    /// the guard; the past tense, another player and another zone are not.
     #[test]
     fn parse_you_search_library_this_way_condition_reads_only_the_controller_search() {
         let (rest, condition) =
@@ -27033,6 +27032,9 @@ mod tests {
         }
     }
 
+    /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and
+    /// comparator, not a fixed "one or more" — Sarek ("three or more"), the
+    /// "or fewer" mirror, and the legacy "one or more" / "at least one" forms.
     #[test]
     fn parse_you_draw_this_way_condition_reads_threshold_and_comparator() {
         let previous = QuantityExpr::Ref {

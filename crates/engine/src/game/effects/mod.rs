@@ -33284,6 +33284,8 @@ pub(crate) fn evaluate_condition(
 /// closed. `ScopedPlayerMatches` is emitted for decline tails and for
 /// relationship-qualified scoped phase-player conditions; both surfaces use
 /// the same printed-controller-relative player relation semantics.
+/// `PerformedActionThisWay` reads the chain's own performed-action snapshot
+/// (`SpellContext::performed_actions_this_way`), not the per-resolution ledger.
 fn scoped_player_matches_filter(
     state: &GameState,
     ability: &ResolvedAbility,

@@ -59,12 +59,30 @@ enum Found {
         mv: u32,
     },
     Printed(&'static str),
+    /// A printed card with its own text: type line, power/toughness and cost from MTGJSON.
     Oracle {
         name: &'static str,
         oracle: &'static str,
-        aura: bool,
+        printed: PrintedFind,
+        generic: u32,
+        shards: &'static [ManaCostShard],
         subtypes: &'static [&'static str],
     },
+}
+
+/// The printed card type of a `Found::Oracle` find.
+#[derive(Clone, Copy)]
+enum PrintedFind {
+    Creature(i32, i32),
+    ArtifactCreature(i32, i32),
+    Aura,
+}
+
+fn printed_cost(generic: u32, shards: &[ManaCostShard]) -> ManaCost {
+    ManaCost::Cost {
+        generic,
+        shards: shards.to_vec(),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -664,27 +682,38 @@ fn add_found(scn: &mut GameScenario, f: Found) -> ObjectId {
         Found::Oracle {
             name,
             oracle,
-            aura,
+            printed,
+            generic,
+            shards,
             subtypes,
-        } => {
-            if aura {
-                scn.add_enchantment_to_hand_from_oracle(P0, name, oracle)
-                    .with_subtypes(subtypes.to_vec())
-                    .id()
-            } else {
-                scn.add_creature_to_hand_from_oracle(P0, name, 6, 6, oracle)
-                    .with_subtypes(subtypes.to_vec())
-                    .id()
-            }
-        }
+        } => match printed {
+            PrintedFind::Aura => scn
+                .add_enchantment_to_hand_from_oracle(P0, name, oracle)
+                .with_subtypes(subtypes.to_vec())
+                .with_mana_cost(printed_cost(generic, shards))
+                .id(),
+            PrintedFind::Creature(power, toughness) => scn
+                .add_creature_to_hand_from_oracle(P0, name, power, toughness, oracle)
+                .with_subtypes(subtypes.to_vec())
+                .with_mana_cost(printed_cost(generic, shards))
+                .id(),
+            PrintedFind::ArtifactCreature(power, toughness) => scn
+                .add_creature_to_hand_from_oracle(P0, name, power, toughness, oracle)
+                .as_artifact()
+                .with_subtypes(subtypes.to_vec())
+                .with_mana_cost(printed_cost(generic, shards))
+                .id(),
+        },
         Found::Printed(n) => {
             if n == RUNE.0 {
                 scn.add_enchantment_to_hand_from_oracle(P0, RUNE.0, RUNE.1)
                     .with_subtypes(vec!["Aura", "Rune"])
+                    .with_mana_cost(printed_cost(1, &[ManaCostShard::White]))
                     .id()
             } else if n == WEB.0 {
                 scn.add_enchantment_to_hand_from_oracle(P0, WEB.0, WEB.1)
                     .with_subtypes(vec!["Aura"])
+                    .with_mana_cost(printed_cost(2, &[ManaCostShard::Green]))
                     .id()
             } else {
                 unreachable!("only Rune of Sustenance and Arachnus Web are printed finds")
@@ -1089,12 +1118,12 @@ fn muzzled_search_does_not_shuffle_for_every_member() {
             .find(|variant| variant.ends_with('M'))
             .expect("every member has a muzzled variant");
         let o = run_case(spec, muzzled);
-        let found_elsewhere = matches!(
-            o.found_zone,
-            Some(Zone::Hand | Zone::Battlefield | Zone::Graveyard)
-        );
+        // Reach guard: the search offered the found card and it left its start zone.
+        let found_it = o.pick_offered
+            && o.moves_of_found >= 1
+            && matches!(o.found_zone, Some(Zone::Hand | Zone::Battlefield));
         let library_searched = counts_search_events(spec) && o.searched != 0;
-        if o.stuck.is_some() || !found_elsewhere || library_searched || o.shuffles != 0 {
+        if o.stuck.is_some() || !found_it || library_searched || o.shuffles != 0 {
             failures.push(format!("{}: {o:?}", spec.name));
         }
     }
@@ -1153,7 +1182,9 @@ fn copy_choice_entry_between_search_and_shuffle_keeps_the_shuffle() {
     let spec = last_light_finding(Found::Oracle {
         name: "Deceptive Frostkite",
         oracle: FROSTKITE,
-        aura: false,
+        printed: PrintedFind::Creature(1, 1),
+        generic: 0,
+        shards: &[ManaCostShard::Blue, ManaCostShard::Blue],
         subtypes: &["Dragon"],
     });
     let o = run_case(&spec, "L");
@@ -1173,7 +1204,9 @@ fn copy_choice_entry_with_muzzled_library_does_not_shuffle() {
     let spec = last_light_finding(Found::Oracle {
         name: "Deceptive Frostkite",
         oracle: FROSTKITE,
-        aura: false,
+        printed: PrintedFind::Creature(1, 1),
+        generic: 0,
+        shards: &[ManaCostShard::Blue, ManaCostShard::Blue],
         subtypes: &["Dragon"],
     });
     let o = run_case(&spec, "HM");
@@ -1191,14 +1224,18 @@ fn as_enters_choice_entry_between_search_and_shuffle_keeps_the_shuffle() {
     let dragon_kin = last_light_finding(Found::Oracle {
         name: "Glorious Dragon-Kin",
         oracle: GDK,
-        aura: false,
+        printed: PrintedFind::ArtifactCreature(6, 6),
+        generic: 7,
+        shards: &[],
         subtypes: &["Dragon"],
     });
     let mut boonweaver = *spec_named("Boonweaver Giant");
     boonweaver.found = Found::Oracle {
         name: "Chromatic Armor",
         oracle: CHROMATIC,
-        aura: true,
+        printed: PrintedFind::Aura,
+        generic: 1,
+        shards: &[ManaCostShard::White, ManaCostShard::Blue],
         subtypes: &["Aura"],
     };
     for spec in [dragon_kin, boonweaver] {

@@ -105148,8 +105148,10 @@ fn search_this_way_guard_rung_does_not_widen() {
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         let mut node = Some(&def);
+        let mut shuffles_seen = 0;
         while let Some(link) = node {
             if matches!(&*link.effect, Effect::Shuffle { .. }) {
+                shuffles_seen += 1;
                 assert!(
                     !matches!(
                         link.condition,
@@ -105161,6 +105163,7 @@ fn search_this_way_guard_rung_does_not_widen() {
             }
             node = link.sub_ability.as_deref();
         }
+        assert!(shuffles_seen > 0, "reach guard: {text} parsed a Shuffle");
     }
 }
 
