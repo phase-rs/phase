@@ -105105,3 +105105,102 @@ fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
         otherwise.effect
     );
 }
+
+/// CR 603.2b + CR 608.2c + CR 611.2a + CR 702.1d: the shared-predicate
+/// condition and the "same is true" continuation must remain typed all the way
+/// through the real card parser. The class census was generated with:
+/// `jq -c '[.data | to_entries[] | .value[] | select((.text // "") | ascii_downcase |
+/// test("(gains|gain) [^\\n.]* until end of turn if [^\\n.]*\\. the same is true for")) |
+/// {name:.name,text:.text}] | sort_by(.name)' data/mtgjson/AtomicCards.json`
+/// against MTGJSON 5.3.0+20261118; the normalized output SHA-256 is
+/// `5369ed6bbd8d9efc01435743bb7a94268060fd547cbf6feff8734e974a4bdf6d6`.
+#[test]
+fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, Sproutwatch Dryad gains flying until end of turn if a creature you control or a card in your hand has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Sproutwatch Dryad",
+        &[],
+        &["Creature".to_string()],
+        &["Dryad".to_string()],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("begin-combat trigger must have an effect");
+    assert_eq!(parsed.triggers[0].phase, Some(Phase::BeginCombat));
+
+    let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected GenericEffect, got {:?}", execute.effect);
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(static_abilities.len(), 12);
+
+    let expected_keywords = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Haste,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Lifelink,
+        Keyword::Menace,
+        Keyword::Reach,
+        Keyword::Trample,
+        Keyword::Vigilance,
+    ];
+    for (static_ability, expected_keyword) in static_abilities.iter().zip(expected_keywords.iter())
+    {
+        assert_eq!(
+            static_ability.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: expected_keyword.clone(),
+            }]
+        );
+        assert_eq!(
+            static_ability.condition.as_ref(),
+            Some(&StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::card()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone { zone: Zone::Hand },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                    ],
+                }),
+            })
+        );
+        assert!(static_ability
+            .description
+            .as_deref()
+            .is_none_or(|description| !description.contains(" if ")));
+    }
+}
