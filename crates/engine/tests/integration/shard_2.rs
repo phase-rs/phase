@@ -134,6 +134,7 @@ mod become_chosen_subtype;
 mod become_color_set_std_batch;
 mod become_prepared_declared_target;
 mod becomes_target_paused_cast_triggers;
+mod before_combat_step_windows;
 mod behold_chosen_object_power_damage;
 mod belbe_thornbow_life_loss;
 mod belladonna_took;
