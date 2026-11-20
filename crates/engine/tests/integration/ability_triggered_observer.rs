@@ -29,6 +29,14 @@
 //! triggered while a placement process was put on the stack after that whole
 //! process, in the next repetition. Each board is built from its cards'
 //! verbatim Oracle text.
+//!
+//! A reflexive ability (CR 603.12) in these tests goes on the stack as its
+//! targets or modes are chosen, below the other abilities that triggered
+//! earlier in the same resolution, without an order choice. That is the
+//! engine's existing placement of a reflexive ability (`effects/mod.rs`), not a
+//! CR 603.3b requirement: CR 603.3b lets its controller order it among their
+//! other first-part abilities. Those rows assert the reflexive-first order only
+//! as today's behavior; their CR 603.3b claim is what goes on after the process.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -3830,7 +3838,8 @@ fn bolg_board(
 }
 
 /// CR 603.3b + CR 603.12 + CR 603.3d: Bolg's ETB sacrifices Doomed Dissenter;
-/// Bolg's reflexive ability is placed with the Dissenter's dies trigger, and
+/// Bolg's reflexive ability goes on below the Dissenter's dies trigger (the
+/// engine's existing reflexive placement; see the module note), and
 /// Tar Pit Warrior's trigger, which triggered as the reflexive ability was put
 /// on the stack targeting it, goes on after both, with no order to choose.
 #[test]
@@ -4050,8 +4059,9 @@ fn choose_draw_and_damage(runner: &mut GameRunner) {
 }
 
 /// CR 603.3b + CR 603.12 + CR 700.2b + CR 700.13: Caesar's reflexive ability
-/// (modes chosen as it is put on the stack, its damage mode targeting P1) is
-/// placed with Doomed Dissenter's dies trigger; Deepmuck Desperado's crime
+/// (modes chosen as it is put on the stack, its damage mode targeting P1) goes
+/// on below Doomed Dissenter's dies trigger (the engine's existing reflexive
+/// placement; see the module note); Deepmuck Desperado's crime
 /// trigger goes on after both, with no order to choose.
 #[test]
 fn modal_reflexive_ability_is_placed_with_an_earlier_trigger_of_its_resolution() {
