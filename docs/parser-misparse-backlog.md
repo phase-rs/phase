@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4480
-- **Total card appearances across root causes:** 4513 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4476
+- **Total card appearances across root causes:** 4509 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -47,11 +47,11 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 719 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 567 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 399 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 1 | Relative-clause / filter restriction on target dropped | 718 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 3 | Anaphor bound to wrong referent | 396 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 323 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 322 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 224 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
@@ -77,11 +77,11 @@ The full-Oracle controls establish these clauses, not complete support for every
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2387/4516 ≈ 52.9% of all misparse appearances; the top 10 cover 3364/4516 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2381/4509 ≈ 52.8% of all misparse appearances; the top 10 cover 3357/4509 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (719 cards)
+### 1. Relative-clause / filter restriction on target dropped  (718 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -177,7 +177,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Caesar, Legion's Emperor
 - Calix, Destiny's Hand
 - Callous Giant
-- Campfire
 - Cantor of the Refrain
 - Captain America's Shield
 - Captain N'ghathrod
@@ -811,7 +810,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (567 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (568 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1038,6 +1037,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Hall of the Bandit Lord
 - Hawkeye, Avenging Archer
 - Head to Head
+- Hedron Alignment
 - Hedron-Field Purists
 - Heir of the Ancient Fang
 - Helicarrier Strike
@@ -1389,7 +1389,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (399 cards)
+### 3. Anaphor bound to wrong referent  (396 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1447,7 +1447,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Brudiclad, Telchor Engineer
 - Burn Away
 - Call of the Death-Dweller
-- Captain Ripley Vance
 - Celeborn the Wise
 - Cemetery Gatekeeper
 - Cemetery Protector
@@ -1617,7 +1616,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Mind Spiral
 - Mindshrieker
 - Minn, Wily Illusionist
-- Mogg Bombers
 - Mogis, God of Slaughter
 - Moku, Meandering Drummer
 - Monkey Cage
@@ -1634,7 +1632,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Nissa's Judgment
 - Niv-Mizzet, Supreme
 - No One Will Hear Your Cries
-- Norin the Wary
 - Numbing Dose
 - Ob Nixilis, Unshackled
 - Oblation
@@ -2187,7 +2184,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (323 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (322 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2328,7 +2325,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Hex Parasite
 - Hinata, Dawn-Crowned
 - Hurkyl, Master Wizard
-- Huskburster Swarm
 - Hydradoodle
 - Ill-Gotten Gains
 - Illuminated Folio
@@ -2786,6 +2782,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Bringer of the Black Dawn
 - Burning-Rune Demon
 - Calibrated Blast
+- Campfire
 - Canyon Drake
 - Captain Kirk, Boldly Going
 - Cathartic Operation
@@ -2845,7 +2842,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Harper Recruiter
 - Haunted Angel
 - Hazardroot Herbalist
-- Hedron Alignment
 - Hellkite Courser
 - Hildibrand Manderville
 - Hinder

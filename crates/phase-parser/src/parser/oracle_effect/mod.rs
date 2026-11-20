@@ -52623,7 +52623,9 @@ fn parse_effect_chain_ir_body(
             // first. A referent established by an EARLIER CLAUSE OF THIS CHAIN wins
             // ("exile target creature. If you do, ... it"), as does the member of the
             // per-member iteration this clause runs under — that is the
-            // `ParentTarget` rung (`chunk_object_referent`). Only when the chain has
+            // `ParentTarget` rung (`chunk_object_referent`). Next comes a source the
+            // previous instruction named via `~` (CR 608.2c; the seed block below
+            // writes it into this slot). Only when the chain has
             // introduced no typed referent of its own does the anaphor reach back to
             // the antecedent the
             // TRIGGER CONDITION introduced (`ParseContext::object_pronoun_ref`, set
@@ -53018,16 +53020,25 @@ fn parse_effect_chain_ir_body(
         } else if !continues_elided_subject {
             carried_player = carried_player.filter(CarriedPlayerSubject::persists_across_sentences);
         }
-        // CR 608.2c: when a carried player subject continues an immediately
-        // preceding instruction that named the source (`~`), its bare object
-        // pronoun refers to that source rather than to an absent parent target
-        // ("that player untaps Karona and gains control of it"). Same antecedent
-        // test as the named-`~` pronoun rewrite below.
-        if inherited_player_subject.is_some()
-            && builder
-                .clauses()
-                .last()
-                .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed))
+        // CR 608.2c + CR 201.5: an instruction that names the source (`~`) makes
+        // it the nearest antecedent of the next instruction's bare object
+        // pronoun. Two outer antecedents would otherwise capture it: the parent
+        // target a carried player subject implies (Karona), and an object the
+        // trigger condition introduced (CR 608.2k pin; the cast spell,
+        // CR 109.2b) or a non-source trigger subject (Norin, Gwenna, Prize Pig,
+        // Mogg Bombers). Chain-local referents (`chunk_object_referent`) and the
+        // compound-owner seed are nearer and keep precedence; when the pronoun
+        // already binds the source the seed is a no-op so the `ParentTarget`
+        // self-recall authority (assembly) keeps its chains.
+        let previous_instruction_named_source = builder
+            .clauses()
+            .last()
+            .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed));
+        let outer_antecedent_is_another_object = chunk_object_referent.is_none()
+            && inherited_compound_owner_seed.is_none()
+            && !matches!(resolve_it_pronoun(ctx), TargetFilter::SelfRef);
+        if previous_instruction_named_source
+            && (inherited_player_subject.is_some() || outer_antecedent_is_another_object)
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }
@@ -56252,6 +56263,15 @@ fn try_parse_put_zone_change_parts(
                 Some(zones) => add_put_multi_origin_constraint(target, zones),
                 None => target,
             };
+            // CR 400.1 + CR 400.7: A put instruction whose own type phrase names
+            // more than one origin zone ("from your hand or from the command
+            // zone" — Next of Kin) carries that union on the TARGET filter. The
+            // single `origin` field cannot express it, and the literal
+            // hand/graveyard table above reaches only two spellings, so deriving
+            // multi-origin authority from the parsed zones is what keeps the
+            // producer and the resolver's scan set from disagreeing. Leave
+            // `origin: None` and let the resolver read `extract_zones()`.
+            let target_names_multiple_origins = target.extract_zones().len() > 1;
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
             // defining clause (Birthing Ritual: "...with mana value X or less
             // ..., where X is 1 plus the sacrificed creature's mana value")
@@ -56349,7 +56369,10 @@ fn try_parse_put_zone_change_parts(
                 // `origin: Some(Exile)` shape — `resolve_all` with
                 // `origin: None` would fall back to a Battlefield scan).
                 Some(Zone::Exile)
-            } else if is_tracked_anaphor || multi_origin_zones.is_some() {
+            } else if is_tracked_anaphor
+                || multi_origin_zones.is_some()
+                || target_names_multiple_origins
+            {
                 None
             } else {
                 let origin_text = format!("{}{}", before.lower, after.lower);

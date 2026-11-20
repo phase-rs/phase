@@ -9199,6 +9199,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let actions = candidate_actions_broad(&state);
@@ -11089,6 +11090,7 @@ mod tests {
         };
         state.waiting_for = WaitingFor::EffectZoneChoice {
             performed_by: None,
+            privacy_zones: None,
             player: PlayerId(0),
             cards: vec![a, b],
             count: 2,
