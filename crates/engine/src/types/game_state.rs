@@ -19528,7 +19528,7 @@ pub enum PersistedRestoreError {
     /// earlier turn. The history is never inferred, so the save is refused
     /// rather than loaded with an invented kind, whatever the object's current
     /// statics.
-    #[error("persisted damage history of {object_id:?} is ambiguous: the save cannot prove whether it has dealt combat damage")]
+    #[error("persisted damage history of {object_id:?} is ambiguous: the save cannot prove whether it has dealt combat damage, and the game contains an ability that reads it")]
     AmbiguousLegacyDamageHistory { object_id: ObjectId },
 }
 

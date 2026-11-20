@@ -18931,6 +18931,19 @@ impl StaticCondition {
         }
     }
 
+    /// CR 120.2a + CR 120.2b: true when some leaf of this condition reads the
+    /// per-kind damage history of its source (`SourceHasDealtDamage` with a
+    /// kind other than `Any`). `Any` consults only the any-damage set and never
+    /// needs the combat/noncombat split.
+    pub fn reads_damage_kind(&self) -> bool {
+        self.any_leaf(|leaf| {
+            matches!(
+                leaf,
+                StaticCondition::SourceHasDealtDamage { kind } if *kind != DamageKindFilter::Any
+            )
+        })
+    }
+
     /// True when any LEAF of this condition tree satisfies `predicate`.
     /// Short-circuiting projection of [`Self::walk_leaves`]; combinator nodes
     /// are never passed to `predicate`.

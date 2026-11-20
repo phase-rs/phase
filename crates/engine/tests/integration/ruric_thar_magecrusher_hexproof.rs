@@ -1943,16 +1943,42 @@ fn s3_old_save_unprovable_history_is_refused() {
     assert_ambiguous_refusal(try_restore(json, &db), ruric);
 }
 
-/// S3-control - the refusal does not depend on the statics an object has at
-/// restore time. A vanilla creature (the Mirage Mirror / copy-effect shape:
-/// CR 707.2a + CR 611.3a let it gain a kind-reading ability later) with
-/// unprovable earlier-turn combat history is refused too; admitting it with an
-/// empty latch would later read as "has not dealt combat damage".
+/// S3-control - the refusal is scoped to games that can read the damage kind.
+/// A creature with unprovable earlier-turn history, in a game where nothing
+/// reads the kind, restores exactly as it did before the per-kind latch: its
+/// latch is left empty (nothing invented) and the Any-set entry survives.
 #[test]
-fn s3_control_ambiguous_history_without_a_kind_reader_is_refused() {
+fn s3_control_ambiguous_history_without_a_kind_reader_in_the_game_restores() {
     let db = ruric_face_db();
     let mut scenario = base_scenario();
     let bear = scenario.add_creature(P0, "Old Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    run_combat(&mut runner, &[bear], &[]);
+    pass_to_next_turn(&mut runner);
+    flush_layers(runner.state_mut());
+    let pre = runner.state().clone();
+    assert!(pre.objects_that_dealt_damage.contains(&bear));
+    assert!(records_of(&pre, bear).is_empty());
+    let (json, stripped) = old_format_save(&pre);
+    assert_eq!(stripped, 1);
+    let restored = restore(json, &db);
+    assert_restore_ran(&pre, &restored, bear);
+    assert_eq!(kinds(&restored, bear), (false, false), "nothing invented");
+}
+
+/// S3-mirror - the Mirage Mirror shape. The object with unprovable history has
+/// no kind-reading static of its own, but Ruric Thar is in the game (here in
+/// hand), and CR 707.2a + CR 611.3a let a copy effect hand the object Ruric's
+/// static later. An empty latch would then read "has not dealt combat damage",
+/// so the save is refused whatever zone the reader sits in.
+#[test]
+fn s3_mirror_kind_reader_elsewhere_in_the_game_refuses_the_restore() {
+    let db = ruric_face_db();
+    let mut scenario = base_scenario();
+    let bear = scenario.add_creature(P0, "Old Bear", 2, 2).id();
+    scenario
+        .add_creature_to_hand_from_oracle(P0, RURIC_NAME, 7, 7, RURIC_ORACLE_TEXT)
+        .with_keyword(Keyword::Trample);
     let mut runner = scenario.build();
     run_combat(&mut runner, &[bear], &[]);
     pass_to_next_turn(&mut runner);

@@ -1615,6 +1615,21 @@ pub(crate) fn recover_legacy_dealt_damage_kinds(
     state: &mut GameState,
 ) -> Result<bool, crate::types::game_state::PersistedRestoreError> {
     let candidates: Vec<ObjectId> = state.objects_that_dealt_damage.iter().copied().collect();
+    // CR 120.2a + CR 120.2b: unprovable history only matters when the game can
+    // read the damage kind. CR 611.3a + CR 707.2a: an object may gain such an
+    // ability later (a copy of Ruric Thar), but the source must already be in
+    // the game (any zone), so one pass over every object decides for the whole
+    // restore. A game with no kind reader loads as it always did.
+    let kind_reader_in_game = state.objects.values().any(|obj| {
+        obj.static_definitions
+            .iter_all()
+            .chain(obj.base_static_definitions.iter())
+            .any(|def| {
+                def.condition
+                    .as_ref()
+                    .is_some_and(|condition| condition.reads_damage_kind())
+            })
+    });
     let mut changed = false;
     for id in candidates {
         let Some(obj) = state.objects.get(&id) else {
@@ -1638,16 +1653,15 @@ pub(crate) fn recover_legacy_dealt_damage_kinds(
         }
         let complete = obj.entered_battlefield_turn == Some(state.turn_number) && matched > 0;
         if !recovered.has(DamageKindFilter::CombatOnly) && !complete {
-            // CR 120.2a + CR 120.2b: earlier-turn history is unprovable. Never
-            // attribute it to a kind, and refuse regardless of the statics the
-            // object has NOW: CR 611.3a + CR 707.2a let it gain a kind-reading
-            // ability later (a copy effect, an Aura), which would read the
-            // empty latch as "has not dealt combat damage".
-            return Err(
-                crate::types::game_state::PersistedRestoreError::AmbiguousLegacyDamageHistory {
-                    object_id: id,
-                },
-            );
+            // Earlier-turn history is unprovable: never attribute it to a kind,
+            // and refuse when the game contains something that reads the kind.
+            if kind_reader_in_game {
+                return Err(
+                    crate::types::game_state::PersistedRestoreError::AmbiguousLegacyDamageHistory {
+                        object_id: id,
+                    },
+                );
+            }
         }
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.dealt_damage_kinds = recovered;
