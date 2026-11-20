@@ -7054,10 +7054,12 @@ mod tests {
     }
 
     /// CONSTRUCTED, and deliberately so: no corpus card exercises this path, because the
-    /// exemption works. Both sentences below ARE corpus-attested — the outer text is
-    /// Land Aid '04 verbatim (UNH; it fires `Condition_If` at base), and "If you search
-    /// your library this way, shuffle." is printed on many corpus cards, NONE of which
-    /// produces a `Condition_If` warning. Only the COMPOSITION is synthetic.
+    /// exemption works. The outer text is Land Aid '04 (UNH; it fires `Condition_If` at base)
+    /// with its second sentence in the past tense, "If you searched your library this way,
+    /// shuffle.": the present-tense "If you search your library this way, shuffle." is now
+    /// lowered to a `Shuffle` gate (a represented condition makes the detector treat the
+    /// text's guards as represented), so only the past-tense form, which no rung lowers,
+    /// still reaches the exemption. The COMPOSITION is synthetic.
     ///
     /// The two corpus facts above are stated as predicates rather than counts, because a
     /// count here would rot silently against every corpus refresh while this comment sat
@@ -7067,7 +7069,7 @@ mod tests {
     /// producing a `Condition_If` `SwallowedClause` — the intersection is what must stay
     /// empty.
     const EXEMPTED_FIRST_IF: &str = "Search your library for a basic land card, put that card \
-onto the battlefield tapped, then shuffle. If you search your library this way, shuffle. \
+onto the battlefield tapped, then shuffle. If you searched your library this way, shuffle. \
 If you sang a song the whole time you were searching and shuffling, you may untap that land.";
 
     /// A text whose FIRST `if` is exempted reports the guard that survives.
@@ -7075,7 +7077,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// What this discriminates: `strip_cr_implicit_if_phrases` drops the inserted
     /// sentence, so the surviving guard is the sang-a-song one. Passing `cleaned` instead
     /// of `stripped` at the `Condition_If` push site yields
-    /// `Some(Condition { guard: "you search your library this way" })` — a DIFFERENT,
+    /// `Some(Condition { guard: "you searched your library this way" })` — a DIFFERENT,
     /// non-None value, measured. The test is therefore red under the single most likely
     /// wiring mistake, and it cannot be satisfied vacuously by an upstream short-circuit,
     /// which would give `None` rather than the other guard.
