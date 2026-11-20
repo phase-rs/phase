@@ -227,7 +227,7 @@ impl ManaTapState {
     }
 
     /// Serde `skip_serializing_if` predicate — omit the default from the wire.
-    fn is_not_from_tap(&self) -> bool {
+    pub(crate) fn is_not_from_tap(&self) -> bool {
         matches!(self, ManaTapState::NotFromTap)
     }
 }

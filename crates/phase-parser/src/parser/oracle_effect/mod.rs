@@ -20880,6 +20880,42 @@ fn parse_windowed_graveyard_redirect_ir(
     })
 }
 
+/// CR 608.2d + CR 105.4: dresses [`mana::try_parse_color_of_objects_mana`]'s
+/// production as a one-clause chain (Meteor Crater, Corrupted Grafstone): the
+/// grammar/wrapper split `parse_windowed_graveyard_redirect_ir` uses.
+fn parse_color_of_objects_mana_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    let effect = mana::try_parse_color_of_objects_mana(text, ctx)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            text,
+            parsed_clause(effect),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+        injected_color_choice: InjectedColorChoice::Permitted,
+    })
+}
+
 /// CR 611.2a: the same recognizer, packaged as a whole ability for the two LINE
 /// dispatchers (`oracle::parse_normalized_oracle_ir`, `oracle_dispatch`) and for
 /// the spell-body join gate (`oracle::is_spell_resolution_instruction_line`).
@@ -48033,6 +48069,21 @@ fn parse_ability_ir_with_damage_context(
                 sub_link: Some(SubAbilityLink::SequentialSibling),
                 ..AbilityShellIr::default()
             },
+            die_results: vec![],
+            root_transforms: vec![],
+            modal: None,
+        };
+    }
+    // CR 608.2d + CR 105.4: "Choose a color of <objects>. Add one mana of that
+    // color." (Meteor Crater, Corrupted Grafstone) is one production: its color
+    // is chosen while that mana is added, from the colors of the objects it
+    // names, so the two sentences are read together before clause dispatch
+    // would split them.
+    if let Some(body) = parse_color_of_objects_mana_ir(text, kind, ctx) {
+        return AbilityIr {
+            source_text: text.to_string(),
+            body,
+            shell: AbilityShellIr::default(),
             die_results: vec![],
             root_transforms: vec![],
             modal: None,

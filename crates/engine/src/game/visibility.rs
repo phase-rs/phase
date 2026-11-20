@@ -756,20 +756,16 @@ pub(crate) fn identity_projection_for_viewer(
         }
     }
 
-    let (manifest_dread_visible, manifest_dread_cards): (HashSet<ObjectId>, HashSet<ObjectId>) =
-        if let WaitingFor::ManifestDreadChoice {
-            player, ref cards, ..
-        } = state.waiting_for
+    // CR 701.62a: the manifest dread controller's own view of the two cards it
+    // looked at. Every other seat's view of them is `revealed_to_every_seat`.
+    let manifest_dread_visible: HashSet<ObjectId> = match &state.waiting_for {
+        WaitingFor::ManifestDreadChoice { player, cards, .. }
+            if can_view_private_for_player(*player) =>
         {
-            let all_cards: HashSet<ObjectId> = cards.iter().copied().collect();
-            if can_view_private_for_player(player) {
-                (all_cards.clone(), all_cards)
-            } else {
-                (HashSet::new(), all_cards)
-            }
-        } else {
-            (HashSet::new(), HashSet::new())
-        };
+            cards.iter().copied().collect()
+        }
+        _ => HashSet::new(),
+    };
 
     // CR 701.20e: the looked-at pile is shown only to the looking player, and
     // the `DigChoice` prompt's `player` IS that looker — `effects::dig` parks it
@@ -951,8 +947,7 @@ pub(crate) fn identity_projection_for_viewer(
             // ("reveal the top N"), dig cards are also in revealed_cards and must remain
             // public during DigChoice. For private digs ("look at"), revealed_cards won't
             // contain dig cards, so the exclusion still applies.
-            || (state.revealed_cards.contains(&obj_id)
-                && !manifest_dread_cards.contains(&obj_id))
+            || revealed_to_every_seat(state, &state.revealed_cards, obj_id)
             || state.viewer_knows_card_identity(viewer, obj_id)
             // CR 701.20a + CR 401.2: a stack-bound reveal lease deliberately
             // does NOT unhide a library object. Its identity is public, but its
@@ -4296,6 +4291,27 @@ fn viewer_may_look_at_face_down(
     false
 }
 
+/// CR 400.2 + CR 701.20a + CR 701.62a: whether a reveal recorded in `revealed`
+/// shows `id` to EVERY seated player.
+///
+/// Every member qualifies except the cards a pending manifest dread looked at,
+/// which `manifest_dread::resolve` records in `revealed_cards` for its
+/// controller only (manifest dread LOOKS at them). This is the
+/// seat-independent half of [`identity_projection_for_viewer`]'s library
+/// decision; the CR 106.7 publicity gate (`could_produce`) asks the same
+/// question through this function, so the two cannot drift.
+pub(crate) fn revealed_to_every_seat(
+    state: &GameState,
+    revealed: &HashSet<ObjectId>,
+    id: ObjectId,
+) -> bool {
+    revealed.contains(&id)
+        && !matches!(
+            &state.waiting_for,
+            WaitingFor::ManifestDreadChoice { cards, .. } if cards.contains(&id)
+        )
+}
+
 fn is_visible_revealed_card(state: &GameState, viewer: PlayerId, obj_id: ObjectId) -> bool {
     state.revealed_cards.contains(&obj_id)
         || state.viewer_knows_card_identity(viewer, obj_id)
@@ -5413,10 +5429,14 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         is_suspected: _,
         was_prepared: _,
         attachments,
+        produceable_mana_types,
         intensity,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
     *intensity = 0;
+    // CR 106.7: what the object could produce is read from its abilities, so it
+    // identifies the card as much as its other characteristics do.
+    produceable_mana_types.clear();
     *token_image_ref = None;
     *power = None;
     *toughness = None;
@@ -8544,6 +8564,66 @@ mod tests {
             ("Secret Victim".to_string(), true),
             "the owner keeps the record"
         );
+    }
+
+    /// V-1 (CR 400.2 + CR 701.20a + CR 701.62a): `revealed_to_every_seat` is
+    /// the seated projection's own library rule. A plain reveal shows the top
+    /// card to every seat; the cards a pending manifest dread looked at stay
+    /// hidden from the opponent and visible to their controller, though both
+    /// sit in `revealed_cards`.
+    #[test]
+    fn revealed_to_every_seat_is_the_seated_projections_rule() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::phase::Phase;
+
+        for manifest_dread in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario.add_creature(P0, "Dread Source", 1, 1).id();
+            scenario.add_spell_to_library_top(P0, "Second", false);
+            let top = scenario.add_spell_to_library_top(P0, "Top", false).id();
+            let mut runner = scenario.build();
+            if manifest_dread {
+                let ability = ResolvedAbility::new(Effect::ManifestDread, vec![], source, P0);
+                let mut events = Vec::new();
+                crate::game::effects::manifest_dread::resolve(
+                    runner.state_mut(),
+                    &ability,
+                    &mut events,
+                )
+                .expect("manifest dread resolves");
+                assert!(
+                    matches!(
+                        &runner.state().waiting_for,
+                        WaitingFor::ManifestDreadChoice { cards, .. } if cards.contains(&top)
+                    ),
+                    "reach-guard: manifest dread is pending over the top card"
+                );
+            } else {
+                runner.state_mut().revealed_cards.insert(top);
+            }
+            let state = runner.state();
+            assert!(state.revealed_cards.contains(&top), "reach-guard");
+
+            assert_eq!(
+                revealed_to_every_seat(state, &state.revealed_cards, top),
+                !manifest_dread,
+                "manifest dread: {manifest_dread}"
+            );
+            assert_eq!(
+                identity_projection_for_viewer(state, P1).contains_key(&top),
+                manifest_dread,
+                "the opponent's view, manifest dread: {manifest_dread}"
+            );
+            assert!(
+                !identity_projection_for_viewer(state, P0).contains_key(&top),
+                "the controller sees the card either way"
+            );
+            assert!(
+                !revealed_to_every_seat(state, &state.revealed_cards, source),
+                "a card no reveal recorded"
+            );
+        }
     }
 
     #[test]

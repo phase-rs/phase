@@ -35,6 +35,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::TriggerMode;
 
+use super::could_produce;
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::mana_abilities;
 use super::mana_abilities::{ManaActivationPurpose, ManaPayabilityMode};
@@ -2275,7 +2276,14 @@ pub fn display_land_mana_pips(
             }
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
-                let colors = opponent_land_color_options(state, controller);
+                let colors: Vec<ManaColor> = could_produce::census(
+                    state,
+                    could_produce::CouldProducePopulation::OpponentLands { controller },
+                    could_produce::CouldProduceMeasure::Colors,
+                )
+                .into_iter()
+                .filter_map(mana_type_to_color)
+                .collect();
                 if !colors.is_empty() {
                     push(&mut pips, ManaPip::OneOfColors(colors));
                 }
@@ -2284,10 +2292,16 @@ pub fn display_land_mana_pips(
             // type union (including Colorless) as a per-unit choice. Each
             // colored type emits a `Color` pip; a Colorless contribution emits
             // a separate `Colorless` pip so the frame faithfully shows the
-            // full option set.
+            // full option set. A cost-referent form ("the sacrificed land") has
+            // no referent until activation, so it shows no pips.
             ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
-                let types =
-                    produceable_mana_types_by_filter(state, land_filter, controller, object_id);
+                let types = could_produce::types_for_clause(
+                    state,
+                    land_filter,
+                    controller,
+                    object_id,
+                    None,
+                );
                 let colors: Vec<ManaColor> = types
                     .iter()
                     .copied()
@@ -3036,9 +3050,9 @@ fn reveal_then_mana_profile_kinds(
         shape,
         casting_spell,
         |produced, scratch, node| {
-            if let Some(kind) =
-                profile_kind_from_production(scratch, object_id, controller, produced, node)
-            {
+            if let Some(kind) = profile_kind_from_production(
+                scratch, object_id, controller, ability, produced, node,
+            ) {
                 kinds.push(kind);
             }
         },
@@ -3157,15 +3171,44 @@ fn usable_mana_ability_net(
             activation_cost,
         ));
     };
-    let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
-    if capacity_use == CapacityUse::XCeiling
-        && sizing.as_ref().is_some_and(|(resolved, _)| {
-            activation_amount_depends_on_color(state, produced, resolved)
-        })
+    // CR 106.7 + CR 608.2k: an unbound cost referent ranges over the
+    // cost's legal choices (`could_produce::census` over
+    // `CostCandidates`); it yields its count when any choice could
+    // produce mana, and nothing otherwise (CR 106.5). The resolver
+    // alone would answer zero, because the referent is bound only
+    // when the cost is paid.
+    let gross = if let ManaProduction::AnyTypeProduceableBy {
+        count,
+        land_filter: TargetFilter::CostPaidObject,
+    } = produced
     {
-        return None;
-    }
-    let gross = sizing.map_or(0, |(_, gross)| gross);
+        let options = could_produce::census(
+            state,
+            could_produce::CouldProducePopulation::CostCandidates {
+                controller,
+                source: object_id,
+                ability,
+            },
+            could_produce::CouldProduceMeasure::Types,
+        );
+        if options.is_empty() {
+            0
+        } else {
+            let resolved =
+                super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+            super::quantity::resolve_quantity_with_targets(state, count, &resolved).max(0) as u32
+        }
+    } else {
+        let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
+        if capacity_use == CapacityUse::XCeiling
+            && sizing.as_ref().is_some_and(|(resolved, _)| {
+                activation_amount_depends_on_color(state, produced, resolved)
+            })
+        {
+            return None;
+        }
+        sizing.map_or(0, |(_, gross)| gross)
+    };
     // CR 605.3b: Net the mana paid to activate. Non-mana cost
     // components (Sacrifice / Discard / PayLife / Exile) have no
     // mana sub-cost, so `mana_sub_cost_of` returns `None` and the
@@ -3428,6 +3471,7 @@ fn profile_kind_from_production(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
+    ability: &AbilityDefinition,
     produced: &ManaProduction,
     resolved: &crate::types::ability::ResolvedAbility,
 ) -> Option<ActivatableManaProfileKind> {
@@ -3481,6 +3525,33 @@ fn profile_kind_from_production(
             } else {
                 Some(ActivatableManaProfileKind::any_one_color(count, options))
             }
+        }
+        // CR 106.7 + CR 608.2k + CR 601.2g: "any type the sacrificed land could
+        // produce" has no referent until its cost is paid; credit the union over
+        // the cost's legal choices (KCI precedent: the estimator, not the gate,
+        // is cost-aware). The count is read from the expression because the
+        // resolver yields no types for an unbound referent.
+        ManaProduction::AnyTypeProduceableBy {
+            count,
+            land_filter: TargetFilter::CostPaidObject,
+        } => {
+            let options = could_produce::census(
+                state,
+                could_produce::CouldProducePopulation::CostCandidates {
+                    controller,
+                    source: object_id,
+                    ability,
+                },
+                could_produce::CouldProduceMeasure::Types,
+            );
+            if options.is_empty() {
+                return None;
+            }
+            let count = super::quantity::resolve_quantity_with_targets(state, count, resolved);
+            Some(ActivatableManaProfileKind::any_one_color(
+                count.max(0) as u32,
+                options,
+            ))
         }
         ManaProduction::OpponentLandColors { .. }
         | ManaProduction::AnyTypeProduceableBy { .. }
@@ -3597,7 +3668,12 @@ fn activatable_mana_profiles_for_object(
                             .iter()
                             .filter_map(|resolved| {
                                 profile_kind_from_production(
-                                    &after, object_id, controller, produced, resolved,
+                                    &after,
+                                    object_id,
+                                    controller,
+                                    &production,
+                                    produced,
+                                    resolved,
                                 )
                                 .map(|kind| kind.with_repeated_type_bonus(repeated_type_bonus))
                             })
@@ -3657,8 +3733,10 @@ fn activatable_mana_profiles_for_object(
         for kind in sizing_resolutions(state, ability, object_id, controller)
             .iter()
             .filter_map(|resolved| {
-                profile_kind_from_production(state, object_id, controller, produced, resolved)
-                    .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
+                profile_kind_from_production(
+                    state, object_id, controller, ability, produced, resolved,
+                )
+                .and_then(|kind| profile_kind_allowed_for_context(kind, payment_context))
             })
         {
             if !ability_kinds.contains(&kind) {
@@ -4676,7 +4754,7 @@ pub(crate) fn chosen_color_mana_type_options(
     options
 }
 
-fn mana_options_from_production(
+pub(crate) fn mana_options_from_production(
     state: &GameState,
     controller: PlayerId,
     object_id: ObjectId,
@@ -4717,17 +4795,20 @@ fn mana_options_from_production(
                 .into_iter()
                 .collect()
         }
-        // CR 106.7: Compute colors dynamically from opponent-controlled lands.
-        // CR 106.1a + CR 105.1: the survey returns `ManaColor`, so colorless is
-        // unrepresentable here (cf. `AnyInCommandersColorIdentity` below).
-        ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller)
-            .iter()
-            .map(mana_color_to_type)
-            .collect(),
-        // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)
-        // from lands matching `land_filter` (Reflecting Pool class).
+        // CR 106.7 + CR 105.1: the colors opponent-controlled lands could
+        // produce (Exotic Orchard class — never colorless).
+        ManaProduction::OpponentLandColors { .. } => could_produce::census(
+            state,
+            could_produce::CouldProducePopulation::OpponentLands { controller },
+            could_produce::CouldProduceMeasure::Colors,
+        ),
+        // CR 106.7 + CR 106.1b: the full type set (incl. Colorless) lands
+        // matching `land_filter` could produce (Reflecting Pool class). This
+        // enumeration has no resolving ability, so a cost-referent form ("the
+        // sacrificed land") has no pre-activation option set and contributes
+        // nothing, like `AnyCombinationOfObjectColors` below.
         ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
-            produceable_mana_types_by_filter(state, land_filter, controller, object_id)
+            could_produce::types_for_clause(state, land_filter, controller, object_id, None)
         }
         // CR 605.1a + CR 406.1 + CR 610.3: Compute colors dynamically from cards
         // exiled-with this source via `state.exile_links` (Pit of Offerings).
@@ -4881,119 +4962,6 @@ fn collect_production_colors(
         }
         colors.push(mana_type);
     }
-}
-
-/// CR 106.7: Compute the mana colors that lands controlled by opponents could produce.
-///
-/// Iterates over all opponent-controlled lands on the battlefield and collects the
-/// union of mana colors their non-`OpponentLandColors` mana abilities could produce.
-/// `OpponentLandColors` abilities are excluded to prevent infinite recursion when
-/// an opponent also controls a card like Exotic Orchard.
-///
-/// The return type carries the color axis: `ManaColor` has no colorless member
-/// (CR 106.1a + CR 105.1), so "any color that a land an opponent controls could
-/// produce" can never name `{C}` (CR 106.1b makes colorless a type, not a color).
-/// An empty result means no color can be defined, so the ability produces no
-/// mana (CR 106.5 + CR 106.7). Callers needing `ManaType` convert with
-/// [`mana_color_to_type`].
-pub(crate) fn opponent_land_color_options(
-    state: &GameState,
-    controller: PlayerId,
-) -> Vec<ManaColor> {
-    let opponents = super::players::opponents(state, controller);
-    let mut options = Vec::new();
-    // CR 730.2: iterate `state.battlefield` (the independent-permanent list) so an
-    // absorbed merge component is never counted as a separate mana source.
-    for object_id in state.battlefield.iter() {
-        let Some(obj) = state.objects.get(object_id) else {
-            continue;
-        };
-        if !opponents.contains(&obj.controller) {
-            continue;
-        }
-        if !obj.card_types.core_types.contains(&CoreType::Land) {
-            continue;
-        }
-        // Scan each mana ability, skipping recursive producers to prevent
-        // mutual recursion (Exotic Orchard ↔ Exotic Orchard, Exotic Orchard ↔
-        // Reflecting Pool). The skip set is symmetric with the one in
-        // `produceable_mana_types_by_filter` — both directions exclude each
-        // other so a cross-controller cycle yields the empty set (CR 106.5).
-        for ability in obj.abilities.iter() {
-            if ability.kind != AbilityKind::Activated
-                || !super::mana_abilities::is_mana_ability(ability)
-            {
-                continue;
-            }
-            if !has_tap_component(&ability.cost) {
-                continue;
-            }
-            let Effect::Mana { produced, .. } = &*ability.effect else {
-                continue;
-            };
-            // CR 106.7: Skip both recursive producers. `OpponentLandColors`
-            // facing itself yields no mana; `AnyTypeProduceableBy` (Reflecting
-            // Pool class) is excluded so the mutual cycle terminates cleanly
-            // (CR 106.5) when both sides skip each other. This is a cycle-breaking
-            // approximation, not a CR 106.7 requirement: an opponent's Reflecting
-            // Pool could legally produce what that opponent's other lands produce.
-            if matches!(
-                produced,
-                ManaProduction::OpponentLandColors { .. }
-                    | ManaProduction::AnyTypeProduceableBy { .. }
-            ) {
-                continue;
-            }
-            // CR 106.7 + CR 109.5: "Could produce" asks what the land's own ability
-            // would produce, and "you"/"your" on that land means its controller, so
-            // evaluate it as the opponent who controls the land (Command Tower reads
-            // that opponent's commander), not as the activator surveying it.
-            // CR 106.1a + CR 105.1: "any color" ranges over the five colors only;
-            // colorless is a mana type (CR 106.1b), not a color, so a surveyed land
-            // that could produce {C} adds no option (Exotic Orchard / Fellwar Stone
-            // rulings).
-            for color in mana_options_from_production(state, obj.controller, *object_id, produced)
-                .into_iter()
-                .filter_map(mana_type_to_color)
-            {
-                if !options.contains(&color) {
-                    options.push(color);
-                }
-            }
-        }
-        // Fallback: basic-land subtype-only objects (no explicit mana ability).
-        // Check whether this specific object contributed any colors above — if not,
-        // fall back to its land subtypes. (Must be per-object, not global, otherwise
-        // once any land adds a color via an explicit ability, later basic lands with
-        // no explicit ability silently skip the fallback.)
-        let obj_had_explicit_ability = obj.abilities.iter().any(|ability| {
-            if ability.kind != AbilityKind::Activated
-                || !super::mana_abilities::is_mana_ability(ability)
-                || !has_tap_component(&ability.cost)
-            {
-                return false;
-            }
-            !matches!(
-                &*ability.effect,
-                Effect::Mana {
-                    produced: ManaProduction::OpponentLandColors { .. }
-                        | ManaProduction::AnyTypeProduceableBy { .. },
-                    ..
-                }
-            )
-        });
-        if !obj_had_explicit_ability {
-            // CR 106.1a + CR 105.1: same color-only mapping as the ability loop.
-            if let Some(color) = obj.card_types.subtypes.iter().find_map(|s| {
-                super::mana_payment::land_subtype_to_mana_type(s).and_then(mana_type_to_color)
-            }) {
-                if !options.contains(&color) {
-                    options.push(color);
-                }
-            }
-        }
-    }
-    options
 }
 
 /// CR 605.1b + CR 106.12a: Enumerate the mana bonus options that
@@ -5213,103 +5181,24 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
     sources
 }
 
-/// CR 106.7 + CR 106.1b: Compute the mana types (W/U/B/R/G/C) that lands
-/// matching `land_filter` could produce, surveyed from the perspective of
-/// `controller`. Used by `ManaProduction::AnyTypeProduceableBy` (Reflecting
-/// Pool, Naga Vitalist, Incubation Druid, Cactus Preserve, Horizon of Progress).
-///
-/// Differs from `opponent_land_color_options` in two ways:
-/// 1. The land scope is parameterized via `TargetFilter` rather than hard-coded
-///    to opponents — so "you control" / "an opponent controls" / future
-///    "any player controls" variants slot in by passing a different filter.
-/// 2. Returns the full *type* set (`ManaType`, including `Colorless`), matching
-///    CR 106.1b's definition of "type" (six types) versus "color" (five colors),
-///    whereas `opponent_land_color_options` returns `ManaColor` and so can never
-///    hold `Colorless`. Reflecting Pool reads "any **type**", so a Wastes you
-///    control contributes `Colorless`.
-///
-/// Per CR 106.7 the surveyed lands' mana abilities are inspected for what types
-/// they *could* produce; cost-payability is ignored. Both `OpponentLandColors`
-/// and `AnyTypeProduceableBy` abilities on the surveyed lands are skipped to
-/// prevent infinite mutual recursion (e.g., two Reflecting Pools facing each
-/// other with no other lands produce no mana, per CR 106.5).
-pub(crate) fn produceable_mana_types_by_filter(
+/// CR 608.2h + CR 106.7: Capture `object`'s public characteristics together with
+/// the mana types it could produce as it last existed, for a cost-paid referent
+/// ("the sacrificed land"). Taken while the permanent is still on the
+/// battlefield with layers applied, so a granted ability (Urborg's Swamp
+/// intrinsic, CR 305.6) is part of the answer and a removed one is not. "Could
+/// produce" is defined for permanents; a card paid from a graveyard, library, or
+/// hand has no such set. The reading is `could_produce::could_produce`, the one
+/// CR 106.7 authority, anchored to the permanent's own controller — for a
+/// sacrifice that is the activator (CR 701.21a).
+pub(crate) fn snapshot_with_produceable_mana_types(
     state: &GameState,
-    land_filter: &TargetFilter,
-    controller: PlayerId,
-    self_source_id: ObjectId,
-) -> Vec<ManaType> {
-    use crate::game::filter::{matches_target_filter, FilterContext};
-    // CR 109.4: `ControllerRef::You` resolves against the activator. Anchor the
-    // filter context to the explicit controller so the "you control" predicate
-    // is correct even when the source object has left play (e.g., self-sac
-    // costs) or in synthetic test contexts.
-    let filter_ctx = FilterContext::from_source_with_controller(self_source_id, controller);
-    let mut options = Vec::new();
-    // CR 730.2: iterate the independent-permanent list (excludes absorbed merge components).
-    for object_id in state.battlefield.iter() {
-        let Some(obj) = state.objects.get(object_id) else {
-            continue;
-        };
-        if !obj.card_types.core_types.contains(&CoreType::Land) {
-            continue;
-        }
-        if !matches_target_filter(state, *object_id, land_filter, &filter_ctx) {
-            continue;
-        }
-        // CR 106.7: Survey each mana ability, skipping the recursive variants
-        // so a self-referential cycle yields the empty set (CR 106.5).
-        let mut obj_had_explicit_ability = false;
-        for ability in obj.abilities.iter() {
-            if ability.kind != AbilityKind::Activated
-                || !super::mana_abilities::is_mana_ability(ability)
-            {
-                continue;
-            }
-            if !has_tap_component(&ability.cost) {
-                continue;
-            }
-            let Effect::Mana { produced, .. } = &*ability.effect else {
-                continue;
-            };
-            // CR 106.7: Skip recursive producers to prevent infinite mutual
-            // recursion (Reflecting Pool ↔ Reflecting Pool, Reflecting Pool ↔
-            // Exotic Orchard).
-            if matches!(
-                produced,
-                ManaProduction::OpponentLandColors { .. }
-                    | ManaProduction::AnyTypeProduceableBy { .. }
-            ) {
-                obj_had_explicit_ability = true;
-                continue;
-            }
-            obj_had_explicit_ability = true;
-            // CR 106.7 + CR 109.5: `controller` scopes which lands are surveyed;
-            // each surveyed land's ability is evaluated for its own controller,
-            // which differs whenever the filter admits another player's lands.
-            for mana_type in
-                mana_options_from_production(state, obj.controller, *object_id, produced)
-            {
-                if !options.contains(&mana_type) {
-                    options.push(mana_type);
-                }
-            }
-        }
-        // Fallback: basic-land subtype-only objects (no explicit mana ability).
-        if !obj_had_explicit_ability {
-            if let Some(mana_type) = obj
-                .card_types
-                .subtypes
-                .iter()
-                .find_map(|s| super::mana_payment::land_subtype_to_mana_type(s))
-            {
-                if !options.contains(&mana_type) {
-                    options.push(mana_type);
-                }
-            }
-        }
+    object: &crate::game::game_object::GameObject,
+) -> crate::types::game_state::LKISnapshot {
+    let mut lki = object.snapshot_for_mana_spent();
+    if object.zone == Zone::Battlefield {
+        lki.produceable_mana_types = could_produce::could_produce(state, object.id);
     }
-    options
+    lki
 }
 
 pub fn mana_color_to_type(color: &ManaColor) -> ManaType {
@@ -5783,11 +5672,23 @@ mod tests {
 
     /// CR 106.1a + CR 105.1 + CR 106.7: with several opponents the surveyed union
     /// holds colors only. P1's Wastes could produce {C} (an explicit ability) and
-    /// P2's Island could produce {U} (subtype fallback); the union is `[Blue]`.
-    /// P1's Wastes alone leaves no color, so the result is empty (CR 106.5).
+    /// P2's Island could produce {U} (its intrinsic ability, CR 305.6, once layers
+    /// run); the union is `[Blue]`. P1's Wastes alone leaves no color, so the
+    /// result is empty (CR 106.5).
     #[test]
-    fn opponent_land_color_options_excludes_colorless_across_opponents() {
+    fn opponent_land_colors_census_excludes_colorless_across_opponents() {
+        use crate::game::layers::flush_layers;
         use crate::types::format::FormatConfig;
+
+        let opponent_land_colors = |state: &GameState| {
+            could_produce::census(
+                state,
+                could_produce::CouldProducePopulation::OpponentLands {
+                    controller: PlayerId(0),
+                },
+                could_produce::CouldProduceMeasure::Colors,
+            )
+        };
 
         let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
         let wastes = create_object(
@@ -5797,41 +5698,32 @@ mod tests {
             "Wastes".to_string(),
             Zone::Battlefield,
         );
+        let wastes_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
         let obj = state.objects.get_mut(&wastes).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
-        Arc::make_mut(&mut obj.abilities).push(
-            AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::Mana {
-                    produced: ManaProduction::Colorless {
-                        count: QuantityExpr::Fixed { value: 1 },
-                    },
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                    target: None,
-                },
-            )
-            .cost(AbilityCost::Tap),
-        );
+        obj.base_card_types = obj.card_types.clone();
+        Arc::make_mut(&mut obj.abilities).push(wastes_ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(wastes_ability);
 
         // Only a colorless land: no color can be defined.
         assert_eq!(
-            mana_options_from_production(
-                &state,
-                PlayerId(1),
-                wastes,
-                &ManaProduction::Colorless {
-                    count: QuantityExpr::Fixed { value: 1 },
-                },
-            ),
+            could_produce::could_produce(&state, wastes),
             vec![ManaType::Colorless],
             "reach guard: the surveyed Wastes really could produce {{C}}"
         );
-        assert_eq!(
-            opponent_land_color_options(&state, PlayerId(0)),
-            Vec::<ManaColor>::new()
-        );
+        assert_eq!(opponent_land_colors(&state), Vec::<ManaType>::new());
 
         // A second opponent's Island contributes its color.
         let island = create_object(
@@ -5844,10 +5736,15 @@ mod tests {
         let obj = state.objects.get_mut(&island).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.subtypes.push("Island".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        state.layers_dirty.mark_full();
+        flush_layers(&mut state);
         assert_eq!(
-            opponent_land_color_options(&state, PlayerId(0)),
-            vec![ManaColor::Blue]
+            could_produce::could_produce(&state, wastes),
+            vec![ManaType::Colorless],
+            "reach guard: the Wastes still could produce {{C}} after layers run"
         );
+        assert_eq!(opponent_land_colors(&state), vec![ManaType::Blue]);
     }
 
     #[test]
