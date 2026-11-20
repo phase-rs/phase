@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::game::combat::AttackTarget;
+use crate::game::combat::{live_transient_block_restrictions, AttackTarget};
 use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
 use crate::game::layers::transient_effect_is_live;
@@ -1417,6 +1417,12 @@ impl LegalityPoisonGates {
                 && transient_effect_is_live(state, tce)
         }) {
             g.has_declare_attacker = true;
+        }
+
+        // CR 509.1b: A live blocker restriction can distinguish attackers
+        // whose object fingerprints match.
+        if !g.has_declare_blocker {
+            g.has_declare_blocker = live_transient_block_restrictions(state).next().is_some();
         }
 
         // One battlefield scan: goaded creatures (CR 508.1d remote

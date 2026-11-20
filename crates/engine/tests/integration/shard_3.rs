@@ -369,6 +369,7 @@ mod incredible_hulk_enrage_attacking;
 mod indestructible_survives_destroy;
 mod inevitable_betrayal_no_mana_cost;
 mod infantry_shield_mobilize_grant;
+mod infect_wither_excess_redirect;
 mod inherent_rule_trigger_display_name;
 mod inkshield_prevented_this_way_token_rider;
 mod inside_information;
