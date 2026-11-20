@@ -1177,7 +1177,13 @@ fn n1_in_window_random_mode_does_not_drain_mid_batch() {
     let positions = trigger_positions(state, tar_pit);
     assert_eq!(positions.len(), 1, "Count(Tar Pit) = {}", positions.len());
     assert!(positions[0] > valiant_index);
-    assert!(trigger_positions(state, ascension)
+    let ascension_positions = trigger_positions(state, ascension);
+    assert_eq!(
+        ascension_positions.len(),
+        2,
+        "both Ascension firings must reach the stack: {ascension_positions:?}"
+    );
+    assert!(ascension_positions
         .iter()
         .all(|position| *position < valiant_index));
 }

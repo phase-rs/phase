@@ -2230,6 +2230,44 @@ fn assert_triggered_stack(state: &GameState, expected: &[Pick], what: &str) {
     );
 }
 
+/// Whether `items` and `expected` match one to one, in any order (each pick
+/// consumes one item).
+fn matches_in_any_order<T>(
+    items: &[T],
+    expected: &[Pick],
+    matches: impl Fn(&T, Pick) -> bool,
+) -> bool {
+    let mut used = vec![false; items.len()];
+    items.len() == expected.len()
+        && expected.iter().all(|pick| {
+            let found = (0..items.len()).find(|&i| !used[i] && matches(&items[i], *pick));
+            found.map(|i| used[i] = true).is_some()
+        })
+}
+
+/// CR 603.3b + CR 101.4: assert the triggered stack entries, bottom→top, are
+/// `groups` in this order, the abilities of each group in any order. A group
+/// is a set of abilities its controller may put on the stack in any order, so
+/// only the order of the groups is asserted.
+fn assert_triggered_stack_groups(state: &GameState, groups: &[&[Pick]], what: &str) {
+    let entries = triggered_entries(state);
+    let total: usize = groups.iter().map(|group| group.len()).sum();
+    let mut rest = entries.as_slice();
+    let matches = entries.len() == total
+        && groups.iter().all(|group| {
+            let (bottom, above) = rest.split_at(group.len());
+            rest = above;
+            matches_in_any_order(bottom, group, |(source, event, description), pick| {
+                pick_matches(pick, *source, event.as_ref(), description.as_deref())
+            })
+        });
+    assert!(
+        matches,
+        "{what}: expected the groups {groups:?} bottom→top, got {:?}",
+        stack_reading(state)
+    );
+}
+
 /// The contexts the open `OrderTriggers` prompt lists, in prompt order (the
 /// first unordered group of `pending_trigger_order`).
 fn prompt_contexts(state: &GameState) -> Vec<PendingTriggerContext> {
@@ -2244,14 +2282,9 @@ fn prompt_contexts(state: &GameState) -> Vec<PendingTriggerContext> {
 /// Whether the open prompt lists exactly the contexts `expected` picks (in
 /// any order).
 fn prompt_lists_exactly(state: &GameState, expected: &[Pick]) -> bool {
-    let contexts = prompt_contexts(state);
-    let mut used = vec![false; contexts.len()];
-    contexts.len() == expected.len()
-        && expected.iter().all(|pick| {
-            let found =
-                (0..contexts.len()).find(|&i| !used[i] && context_matches(&contexts[i], *pick));
-            found.map(|i| used[i] = true).is_some()
-        })
+    matches_in_any_order(&prompt_contexts(state), expected, |ctx, pick| {
+        context_matches(ctx, pick)
+    })
 }
 
 /// CR 603.3b: submit the order whose first listed contexts are `first` (each
@@ -2631,6 +2664,11 @@ fn enter_observers_of_two_players_follow_every_first_part_trigger_in_apnap_order
         prompts.push(player);
         assert_eq!(triggers.len(), 2);
         let contexts = prompt_contexts(runner.state());
+        assert_eq!(
+            contexts.len(),
+            triggers.len(),
+            "the open order group lists the prompt's two firings"
+        );
         assert!(contexts
             .iter()
             .all(
@@ -3421,6 +3459,38 @@ fn triggered_targets(state: &GameState) -> Vec<Vec<TargetRef>> {
         .collect()
 }
 
+/// The targets of each triggered stack entry of `source`, bottom→top.
+fn triggered_targets_of(state: &GameState, source: ObjectId) -> Vec<Vec<TargetRef>> {
+    triggered_stack_sources(state)
+        .into_iter()
+        .zip(triggered_targets(state))
+        .filter(|(entry_source, _)| *entry_source == source)
+        .map(|(_, targets)| targets)
+        .collect()
+}
+
+/// The bottom→top index, among the triggered stack entries, of the only entry
+/// of `source` with exactly `targets`.
+fn triggered_index(state: &GameState, source: ObjectId, targets: &[TargetRef]) -> usize {
+    let found: Vec<usize> = triggered_stack_sources(state)
+        .into_iter()
+        .zip(triggered_targets(state))
+        .enumerate()
+        .filter(|(_, (entry_source, entry_targets))| {
+            *entry_source == source && entry_targets.as_slice() == targets
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "one entry of #{} targeting {targets:?}: {:?}",
+        source.0,
+        stack_reading(state)
+    );
+    found[0]
+}
+
 fn set_dungeon(runner: &mut GameRunner, room: u8) {
     let progress = runner.state_mut().dungeon_progress.entry(P0).or_default();
     progress.current_dungeon = Some(engine::game::dungeon::DungeonId::LostMineOfPhandelver);
@@ -3572,14 +3642,19 @@ fn doubled_room_instances_are_placed_before_what_the_first_instance_triggered() 
     select(&mut runner, vec![object(hama)]);
 
     assert_completion_boundary(&runner, "after the second instance");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
-        &[Pick::Of(room), Pick::Of(room), Pick::Of(tar_pit)],
+        &[&[Pick::Of(room), Pick::Of(room)], &[Pick::Of(tar_pit)]],
         "CR 603.3b: both instances, then Tar Pit",
     );
+    // CR 603.3b: P0 may order the two instances; each keeps its own target.
+    let room_targets = triggered_targets_of(runner.state(), room);
+    assert_eq!(room_targets.len(), 2, "{room_targets:?}");
+    assert!(room_targets.contains(&vec![object(tar_pit)]));
+    assert!(room_targets.contains(&vec![object(hama)]));
     assert_eq!(
-        triggered_targets(runner.state()),
-        vec![vec![object(tar_pit)], vec![object(hama)], vec![]]
+        triggered_targets_of(runner.state(), tar_pit),
+        vec![Vec::<TargetRef>::new()]
     );
 }
 
@@ -3624,20 +3699,20 @@ fn second_room_instance_places_both_becomes_target_triggers_in_apnap_order() {
     select(&mut runner, vec![object(ours)]);
 
     assert_completion_boundary(&runner, "after the second instance");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
         &[
-            Pick::Of(room),
-            Pick::Of(room),
-            Pick::Of(ours),
-            Pick::Of(theirs),
+            &[Pick::Of(room), Pick::Of(room)],
+            &[Pick::Of(ours)],
+            &[Pick::Of(theirs)],
         ],
         "CR 603.3b + CR 101.4: both instances, then P0's Tar Pit, then P1's",
     );
-    assert_eq!(
-        triggered_targets(runner.state())[..2],
-        [vec![object(theirs)], vec![object(ours)]]
-    );
+    // CR 603.3b: P0 may order the two instances; each keeps its own target.
+    let room_targets = triggered_targets_of(runner.state(), room);
+    assert_eq!(room_targets.len(), 2, "{room_targets:?}");
+    assert!(room_targets.contains(&vec![object(theirs)]));
+    assert!(room_targets.contains(&vec![object(ours)]));
 }
 
 /// The board of the Acererak tests: P0's Flaming Fist Officer and Tar Pit
@@ -3693,10 +3768,10 @@ fn room_ability_is_placed_with_an_earlier_trigger_of_its_resolution() {
     select(&mut runner, vec![object(tar_pit)]);
 
     assert_completion_boundary(&runner, "after Storeroom's target");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
-        &[Pick::Of(room), Pick::Of(officer), Pick::Of(tar_pit)],
-        "CR 603.3b: the room, the Officer, then Tar Pit",
+        &[&[Pick::Of(room), Pick::Of(officer)], &[Pick::Of(tar_pit)]],
+        "CR 603.3b: the room and the Officer, then Tar Pit",
     );
 }
 
@@ -3734,20 +3809,20 @@ fn doubled_room_and_an_earlier_trigger_of_its_resolution_are_ordered_together() 
     select(&mut runner, vec![object(hama)]);
 
     assert_completion_boundary(&runner, "after the second instance");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
         &[
-            Pick::Of(room),
-            Pick::Of(officer),
-            Pick::Of(room),
-            Pick::Of(tar_pit),
+            &[Pick::Of(room), Pick::Of(officer), Pick::Of(room)],
+            &[Pick::Of(tar_pit)],
         ],
-        "CR 603.3b: first instance, P0's chosen order, then Tar Pit",
+        "CR 603.3b: both instances and the Officer, then Tar Pit",
     );
-    assert_eq!(
-        triggered_targets(runner.state())[2],
-        vec![object(hama)],
-        "the second instance targets Hama Pashar"
+    let state = runner.state();
+    triggered_index(state, room, &[object(tar_pit)]);
+    assert!(
+        triggered_index(state, officer, &[]) < triggered_index(state, room, &[object(hama)]),
+        "CR 603.3b: P0's chosen order puts the Officer below the second instance: {:?}",
+        stack_reading(state)
     );
 }
 
@@ -3849,10 +3924,10 @@ fn reflexive_ability_is_placed_with_an_earlier_trigger_of_its_resolution() {
     select(&mut runner, vec![object(tar_pit)]);
 
     assert_completion_boundary(&runner, "after the reflexive target");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
-        &[Pick::Of(bolg), Pick::Of(dissenter), Pick::Of(tar_pit)],
-        "CR 603.3b: reflexive, the Dissenter, then Tar Pit",
+        &[&[Pick::Of(bolg), Pick::Of(dissenter)], &[Pick::Of(tar_pit)]],
+        "CR 603.3b: the reflexive ability and the Dissenter, then Tar Pit",
     );
 }
 
@@ -3877,15 +3952,14 @@ fn reflexive_ability_and_earlier_triggers_of_both_players_precede_what_it_trigge
     select(&mut runner, vec![object(tar_pit)]);
 
     assert_completion_boundary(&runner, "after the reflexive target");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
         &[
-            Pick::Of(bolg),
-            Pick::Of(dissenter),
-            Pick::Of(beetle),
-            Pick::Of(tar_pit),
+            &[Pick::Of(bolg), Pick::Of(dissenter)],
+            &[Pick::Of(beetle)],
+            &[Pick::Of(tar_pit)],
         ],
-        "CR 603.3b + CR 101.4: reflexive, P0's, P1's, then Tar Pit",
+        "CR 603.3b + CR 101.4: P0's two, then P1's, then Tar Pit",
     );
 }
 
@@ -3949,7 +4023,11 @@ fn earlier_targeted_trigger_of_a_resolution_places_both_becomes_target_triggers_
     assert_eq!(queued.len(), 1, "only P1's Tar Pit trigger is queued");
     assert_eq!(queued[0].pending.source_id, theirs);
     assert!(!queued_under_way(&queued[0]), "it stays a fresh context");
-    assert_eq!(triggered_stack_sources(runner.state()), vec![bolg, myr]);
+    let mut placed = triggered_stack_sources(runner.state());
+    placed.sort();
+    let mut batch = vec![bolg, myr];
+    batch.sort();
+    assert_eq!(placed, batch, "the reflexive ability and the Myr's trigger");
     assert!(
         runner.state().resolving_stack_entry.is_some(),
         "Bolg's ETB is still resolving"
@@ -3959,19 +4037,22 @@ fn earlier_targeted_trigger_of_a_resolution_places_both_becomes_target_triggers_
     select(&mut runner, vec![object(ours)]);
 
     assert_completion_boundary(&runner, "after the Myr's target");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
         &[
-            Pick::Of(bolg),
-            Pick::Of(myr),
-            Pick::Of(ours),
-            Pick::Of(theirs),
+            &[Pick::Of(bolg), Pick::Of(myr)],
+            &[Pick::Of(ours)],
+            &[Pick::Of(theirs)],
         ],
-        "CR 603.3b + CR 101.4: reflexive, the Myr, then P0's Tar Pit, then P1's",
+        "CR 603.3b + CR 101.4: the reflexive ability and the Myr, then P0's Tar Pit, then P1's",
     );
     assert_eq!(
-        triggered_targets(runner.state())[..2],
-        [vec![object(theirs)], vec![object(ours)]]
+        triggered_targets_of(runner.state(), bolg),
+        vec![vec![object(theirs)]]
+    );
+    assert_eq!(
+        triggered_targets_of(runner.state(), myr),
+        vec![vec![object(ours)]]
     );
 }
 
@@ -4061,10 +4142,13 @@ fn modal_reflexive_ability_is_placed_with_an_earlier_trigger_of_its_resolution()
     choose_draw_and_damage(&mut runner);
 
     assert_completion_boundary(&runner, "after the modes");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
-        &[Pick::Of(caesar), Pick::Of(dissenter), Pick::Of(deepmuck)],
-        "CR 603.3b: reflexive, the Dissenter, then the crime trigger",
+        &[
+            &[Pick::Of(caesar), Pick::Of(dissenter)],
+            &[Pick::Of(deepmuck)],
+        ],
+        "CR 603.3b: the reflexive ability and the Dissenter, then the crime trigger",
     );
 }
 
@@ -4080,15 +4164,14 @@ fn modal_reflexive_ability_and_earlier_triggers_of_both_players_precede_its_crim
     choose_draw_and_damage(&mut runner);
 
     assert_completion_boundary(&runner, "after the modes");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
         &[
-            Pick::Of(caesar),
-            Pick::Of(dissenter),
-            Pick::Of(beetle),
-            Pick::Of(deepmuck),
+            &[Pick::Of(caesar), Pick::Of(dissenter)],
+            &[Pick::Of(beetle)],
+            &[Pick::Of(deepmuck)],
         ],
-        "CR 603.3b + CR 101.4: reflexive, P0's, P1's, then the crime trigger",
+        "CR 603.3b + CR 101.4: P0's two, then P1's, then the crime trigger",
     );
 }
 
@@ -4166,10 +4249,17 @@ fn spell_resolution_room_instance_is_ordered_with_a_trigger_of_the_spell_going_t
     select(&mut runner, vec![object(hama)]);
 
     assert_completion_boundary(&runner, "after the second instance");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
-        &[Pick::Of(room), Pick::Of(void), Pick::Of(room)],
-        "CR 603.3b: first instance, then P0's chosen order",
+        &[&[Pick::Of(room), Pick::Of(void), Pick::Of(room)]],
+        "CR 603.3b: both instances and Planar Void",
+    );
+    let state = runner.state();
+    triggered_index(state, room, &[object(bears)]);
+    assert!(
+        triggered_index(state, void, &[]) < triggered_index(state, room, &[object(hama)]),
+        "CR 603.3b: P0's chosen order puts Planar Void below the second instance: {:?}",
+        stack_reading(state)
     );
 }
 
@@ -4208,10 +4298,17 @@ fn spell_resolution_room_instance_is_ordered_with_an_earlier_trigger_of_the_spel
     select(&mut runner, vec![object(hama)]);
 
     assert_completion_boundary(&runner, "after the second instance");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
-        &[Pick::Of(room), Pick::Of(tomb), Pick::Of(room)],
-        "CR 603.3b: first instance, then P0's chosen order",
+        &[&[Pick::Of(room), Pick::Of(tomb), Pick::Of(room)]],
+        "CR 603.3b: both instances and the Tomb",
+    );
+    let state = runner.state();
+    triggered_index(state, room, &[object(bears)]);
+    assert!(
+        triggered_index(state, tomb, &[]) < triggered_index(state, room, &[object(hama)]),
+        "CR 603.3b: P0's chosen order puts the Tomb below the second instance: {:?}",
+        stack_reading(state)
     );
 }
 
@@ -4266,9 +4363,16 @@ fn spell_resolution_reflexive_batch_orders_an_earlier_and_a_later_trigger_togeth
     order_by_identity(&mut runner, &[Pick::Of(tomb)]);
 
     assert_completion_boundary(&runner, "after the order");
-    assert_triggered_stack(
+    assert_triggered_stack_groups(
         runner.state(),
-        &[Pick::Of(spell), Pick::Of(tomb), Pick::Of(void)],
-        "CR 603.3b: the reflexive fight, then P0's chosen order",
+        &[&[Pick::Of(spell), Pick::Of(tomb), Pick::Of(void)]],
+        "CR 603.3b: the reflexive fight, the Tomb and Planar Void",
+    );
+    let state = runner.state();
+    triggered_index(state, spell, &[object(bear_1)]);
+    assert!(
+        triggered_index(state, tomb, &[]) < triggered_index(state, void, &[]),
+        "CR 603.3b: P0's chosen order puts the Tomb below Planar Void: {:?}",
+        stack_reading(state)
     );
 }
