@@ -2452,6 +2452,9 @@
     "optionalTriggers": "Opcjonalne zdolności wyzwalane ({{count, number}})",
     "replacementChoices": "Wybory zastępowania ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Przytrzymaj, aby zobaczyć całą kartę"
+  },
   "optionalEffect": {
     "sourceFallback": "Efekt",
     "title": "{{name}} - Efekt opcjonalny",

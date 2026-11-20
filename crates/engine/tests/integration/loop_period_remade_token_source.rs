@@ -397,10 +397,19 @@ fn pass_to_the_next_step(state: &mut GameState, answers: &Answers) {
 
 /// The top-level fields in which `taken`, read with detection off, and `reference` differ once
 /// each is serialized whole.
+///
+/// CR 732.1b: a take retires its repetitions' action-scoped journal entries, which the hand game
+/// keeps, so both journals are read with every action-scoped entry retired. Everything else in
+/// them (node slots and metadata, mana provenance, the turn-retained commands and both
+/// allocators) is still compared exactly.
 pub(crate) fn differing_fields(taken: &GameState, reference: &GameState) -> BTreeSet<String> {
-    let fields = |state: &GameState| match serde_json::to_value(state) {
-        Ok(serde_json::Value::Object(fields)) => fields,
-        other => panic!("a state serialized to {other:?}"),
+    let fields = |state: &GameState| {
+        let mut state = state.clone();
+        state.resolved_rules_journal.retire_action_scoped_since(0);
+        match serde_json::to_value(&state) {
+            Ok(serde_json::Value::Object(fields)) => fields,
+            other => panic!("a state serialized to {other:?}"),
+        }
     };
     let (taken, reference) = (
         fields(&in_mode(taken, LoopDetectionMode::Off)),

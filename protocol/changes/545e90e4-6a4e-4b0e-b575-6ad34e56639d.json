@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "The resolved-rules journal retires the action-scoped commands (stack push/removal, trigger collection, non-leave zone changes and the other kinds read only by cast-scoped classification) that each committed repetition of a taken loop shortcut records, so GameState.resolved_rules_journal command ordinals may now skip. An older peer's load validator requires contiguous ordinals and rejects such a journal as invalid. Full-game peers and P2P move in lockstep; no lobby carrier names it."
+}
