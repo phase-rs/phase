@@ -8,6 +8,7 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagn
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
+use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
@@ -3795,6 +3796,506 @@ fn tamiyo_flip_return_transformed_binds_to_self_ref() {
              not TriggeringSource — otherwise the CardDrawn event has no source and \
              Tamiyo is stranded in exile"
     );
+}
+
+fn parse_printed_card(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> Vec<TriggerDefinition> {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    parse_oracle_text(text, name, &[], &owned(types), &owned(subtypes)).triggers
+}
+
+/// Every effect the trigger reaches, its delayed payloads and modes included.
+fn trigger_effects(trigger: &TriggerDefinition) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    let _ = crate::types::ability_visit::visit_trigger(trigger, &mut |effect: &Effect| {
+        effects.push(effect.clone());
+        std::ops::ControlFlow::Continue(())
+    });
+    effects
+}
+
+const NORIN_THE_WARY: &str = "When a player casts a spell or a creature attacks, exile Norin. Return it to the battlefield under its owner's control at the beginning of the next end step.";
+
+/// CR 608.2c + CR 201.5c: Norin the Wary — "exile Norin. Return it …". The
+/// return's bare "it" names the object the previous instruction named (the
+/// source), on BOTH halves of the compound trigger. On the spell-cast half the
+/// trigger condition also introduced the cast spell (CR 109.2b), which must not
+/// capture the pronoun.
+#[test]
+fn norin_both_delayed_returns_bind_the_source() {
+    let triggers = parse_printed_card(
+        NORIN_THE_WARY,
+        "Norin the Wary",
+        &["Creature"],
+        &["Human", "Warrior"],
+    );
+    let modes: Vec<_> = triggers.iter().map(|t| t.mode.clone()).collect();
+    assert_eq!(modes, vec![TriggerMode::SpellCast, TriggerMode::Attacks]);
+    for trigger in &triggers {
+        // The delayed return still reads Norin's battlefield zone as the firing zone.
+        assert_eq!(
+            trigger.trigger_zones,
+            vec![Zone::Battlefield],
+            "{trigger:?}"
+        );
+        let execute = trigger.execute.as_deref().expect("Norin trigger body");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "head exiles Norin: {:?}",
+            execute.effect
+        );
+        let effects = trigger_effects(trigger);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+            "{effects:?}"
+        );
+        let payloads: Vec<&Effect> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::CreateDelayedTrigger { effect, .. } => Some(&*effect.effect),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(
+                payloads.as_slice(),
+                [Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }]
+            ),
+            "{:?} delayed return must name Norin: {payloads:?}",
+            trigger.mode
+        );
+    }
+}
+
+/// One printed card whose "it" follows an instruction naming the source.
+struct SourceNamedAnaphorRow {
+    name: &'static str,
+    text: &'static str,
+    types: &'static [&'static str],
+    subtypes: &'static [&'static str],
+    /// The effect that binds the source (doubles as the reach guard).
+    bound: fn(&Effect) -> bool,
+    /// The same effect bound to the trigger-condition object instead.
+    misbound: fn(&Effect) -> bool,
+}
+
+fn untaps_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            state: TapStateChange::Untap,
+            ..
+        }
+    )
+}
+
+fn untaps_triggering_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    )
+}
+
+fn source_deals_damage(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            damage_source: None,
+            ..
+        }
+    )
+}
+
+fn triggering_source_deals_damage(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            damage_source: Some(DamageSource::TriggeringSource),
+            ..
+        }
+    )
+}
+
+fn grants_to(effect: &Effect, filter: &TargetFilter) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect { static_abilities, .. }
+            if static_abilities
+                .iter()
+                .any(|grant| grant.affected.as_ref() == Some(filter))
+    )
+}
+
+/// CR 608.2c + CR 201.5: across the class, a bare "it" after an instruction
+/// that names the source (`~` / "this creature") binds the source, not the
+/// object the trigger condition introduced (the cast spell, CR 109.2b) or the
+/// trigger subject. CR 113.7a: the source still deals the damage after it is
+/// sacrificed (Mogg Bombers).
+#[test]
+fn source_named_then_bare_it_binds_the_source_across_the_class() {
+    use crate::types::zones::EtbTapState;
+
+    let rows = [
+        SourceNamedAnaphorRow {
+            name: "Blistercoil Weird",
+            text: "Whenever you cast an instant or sorcery spell, this creature gets +1/+1 until end of turn. Untap it.",
+            types: &["Creature"],
+            subtypes: &["Weird"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Gwenna, Eyes of Gaea",
+            text: "{T}: Add two mana in any combination of colors. Spend this mana only to cast creature spells or activate abilities of creature sources.\nWhenever you cast a creature spell with power 5 or greater, put a +1/+1 counter on Gwenna and untap it.",
+            types: &["Creature"],
+            subtypes: &["Elf", "Druid", "Scout"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Prize Pig",
+            text: "Whenever you gain life, put that many ribbon counters on this creature. Then if there are three or more ribbon counters on this creature, remove those counters and untap it.\n{T}: Add one mana of any color.",
+            types: &["Creature"],
+            subtypes: &["Boar"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Tactical Officer",
+            text: "Whenever you attack while creatures you control have total power 8 or greater, put a +1/+1 counter on this creature. Untap it.",
+            types: &["Creature"],
+            subtypes: &["Human", "Officer"],
+            bound: untaps_source,
+            misbound: untaps_triggering_source,
+        },
+        SourceNamedAnaphorRow {
+            name: "Primal Amulet",
+            text: "Instant and sorcery spells you cast cost {1} less to cast.\nWhenever you cast an instant or sorcery spell, put a charge counter on this artifact. Then if there are four or more charge counters on it, you may remove those counters and transform it.",
+            types: &["Artifact"],
+            subtypes: &[],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::Transform {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            },
+            misbound: |effect| {
+                matches!(
+                    effect,
+                    Effect::Transform {
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+        SourceNamedAnaphorRow {
+            name: "Hikari, Twilight Guardian",
+            text: "Flying\nWhenever you cast a Spirit or Arcane spell, you may exile Hikari. If you do, return it to the battlefield under its owner's control at the beginning of the next end step.",
+            types: &["Creature"],
+            subtypes: &["Spirit"],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::CreateDelayedTrigger { effect, .. }
+                        if matches!(
+                            &*effect.effect,
+                            Effect::ChangeZone {
+                                destination: Zone::Battlefield,
+                                target: TargetFilter::SelfRef,
+                                ..
+                            }
+                        )
+                )
+            },
+            misbound: |effect| {
+                matches!(
+                    effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::ParentTarget | TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+        SourceNamedAnaphorRow {
+            name: "Mogg Bombers",
+            text: "When another creature enters, sacrifice this creature and it deals 3 damage to target player or planeswalker.",
+            types: &["Creature"],
+            subtypes: &["Goblin"],
+            bound: source_deals_damage,
+            misbound: triggering_source_deals_damage,
+        },
+        SourceNamedAnaphorRow {
+            name: "Aria of Flame",
+            text: "When this enchantment enters, each opponent gains 10 life.\nWhenever you cast an instant or sorcery spell, put a verse counter on this enchantment, then it deals damage equal to the number of verse counters on it to target player or planeswalker.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            bound: source_deals_damage,
+            misbound: triggering_source_deals_damage,
+        },
+        SourceNamedAnaphorRow {
+            name: "Captain Ripley Vance",
+            text: "Whenever you cast your third spell each turn, put a +1/+1 counter on Captain Ripley Vance, then it deals damage equal to its power to any target.",
+            types: &["Creature"],
+            subtypes: &["Human", "Pirate"],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::DealDamage {
+                        damage_source: None,
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Source
+                            }
+                        },
+                        ..
+                    }
+                )
+            },
+            misbound: triggering_source_deals_damage,
+        },
+        SourceNamedAnaphorRow {
+            name: "Estinien Varlineau",
+            text: "Whenever you cast a noncreature spell, put a +1/+1 counter on Estinien Varlineau. It gains flying until end of turn.\nAt the beginning of your second main phase, you draw X cards and lose X life, where X is the number of your opponents who were dealt combat damage by Estinien Varlineau or a Dragon this turn.",
+            types: &["Creature"],
+            subtypes: &["Elf", "Warrior"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Bloodsky Berserker",
+            text: "Whenever you cast your second spell each turn, put two +1/+1 counters on this creature. It gains menace until end of turn. (It can't be blocked except by two or more creatures.)",
+            types: &["Creature"],
+            subtypes: &["Human", "Berserker"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Infernal Pet",
+            text: "Whenever you cast your second spell each turn, put a +1/+1 counter on this creature and it gains flying until end of turn.",
+            types: &["Creature"],
+            subtypes: &["Imp"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Sahagin",
+            text: "Whenever you cast a noncreature spell, if at least four mana was spent to cast it, put a +1/+1 counter on this creature and it can't be blocked this turn.",
+            types: &["Creature"],
+            subtypes: &["Merfolk", "Warrior"],
+            bound: |effect| grants_to(effect, &TargetFilter::SelfRef),
+            misbound: |effect| grants_to(effect, &TargetFilter::TriggeringSource),
+        },
+        SourceNamedAnaphorRow {
+            name: "Ojutai Exemplars",
+            text: "Whenever you cast a noncreature spell, choose one \u{2014}\n\u{2022} Tap target creature.\n\u{2022} This creature gains first strike and lifelink until end of turn.\n\u{2022} Exile this creature, then return it to the battlefield tapped under its owner's control.",
+            types: &["Creature"],
+            subtypes: &["Human", "Monk"],
+            bound: |effect| {
+                matches!(
+                    effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::SelfRef,
+                        enter_tapped: EtbTapState::Tapped,
+                        ..
+                    }
+                )
+            },
+            misbound: |effect| {
+                matches!(
+                    effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+    ];
+    for row in rows {
+        let triggers = parse_printed_card(row.text, row.name, row.types, row.subtypes);
+        let effects: Vec<Effect> = triggers.iter().flat_map(trigger_effects).collect();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+            "{}: {effects:?}",
+            row.name
+        );
+        assert!(
+            effects.iter().any(row.bound),
+            "{}: the effect after the source-naming instruction must bind the source: {effects:?}",
+            row.name
+        );
+        assert!(
+            !effects.iter().any(row.misbound),
+            "{}: \"it\" must not bind the trigger-condition object: {effects:?}",
+            row.name
+        );
+    }
+}
+
+/// One printed card whose spell anaphor must keep naming the cast spell or the
+/// entering creature (CR 109.2b / CR 608.2k).
+struct SpellAnaphorRow {
+    name: &'static str,
+    text: &'static str,
+    types: &'static [&'static str],
+    subtypes: &'static [&'static str],
+    /// Reach guard: the preceding instruction that names the source, so the
+    /// new rung's precondition holds. `None` for a bare "it" with no such clause.
+    names_source_first: Option<fn(&Effect) -> bool>,
+    /// The effect that must keep naming the trigger-condition object.
+    anaphor: fn(&Effect) -> bool,
+}
+
+fn sacrifices_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
+fn counters_cast_spell(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Counter {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    )
+}
+
+fn copies_cast_spell(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CopySpell {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    )
+}
+
+/// CR 109.2b + CR 608.2k: the named-source rung rebinds only a bare object
+/// pronoun. "copy it" with no earlier source-naming instruction keeps the cast
+/// spell, and demonstratives ("that spell", "that creature") keep the
+/// trigger-condition object even directly after an instruction naming the
+/// source.
+#[test]
+fn spell_and_demonstrative_anaphors_keep_the_trigger_condition_object() {
+    let rows = [
+        SpellAnaphorRow {
+            name: "Thousand-Year Storm",
+            text: "Whenever you cast an instant or sorcery spell, copy it for each other instant and sorcery spell you've cast before it this turn. You may choose new targets for the copies.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            names_source_first: None,
+            anaphor: copies_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Hesitation",
+            text: "When a player casts a spell, sacrifice this enchantment and counter that spell.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            names_source_first: Some(sacrifices_source),
+            anaphor: counters_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Lunar Force",
+            text: "When an opponent casts a spell, sacrifice this enchantment and counter that spell.",
+            types: &["Enchantment"],
+            subtypes: &[],
+            names_source_first: Some(sacrifices_source),
+            anaphor: counters_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Ominous Lockbox",
+            text: "As Ominous Lockbox enters, secretly choose a number between 1 and 20.\nWhen an opponent casts a spell with mana value equal to the chosen number, sacrifice Ominous Lockbox. If you do, copy that spell, and you may choose new targets for the copy.\n{2}, Sacrifice Ominous Lockbox: Draw a card.",
+            types: &["Artifact"],
+            subtypes: &["Clue"],
+            names_source_first: Some(sacrifices_source),
+            anaphor: copies_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Verazol, the Split Current",
+            text: "Verazol enters with a +1/+1 counter on it for each mana spent to cast it.\nWhenever you cast a kicked spell, you may remove two +1/+1 counters from Verazol. If you do, copy that spell. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)",
+            types: &["Creature"],
+            subtypes: &["Serpent"],
+            names_source_first: Some(|effect| {
+                matches!(
+                    effect,
+                    Effect::RemoveCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            }),
+            anaphor: copies_cast_spell,
+        },
+        SpellAnaphorRow {
+            name: "Flame-Kin War Scout",
+            text: "When another creature enters, sacrifice this creature. If you do, this creature deals 4 damage to that creature.",
+            types: &["Creature"],
+            subtypes: &["Elemental", "Scout"],
+            names_source_first: Some(sacrifices_source),
+            anaphor: |effect| {
+                matches!(
+                    effect,
+                    Effect::DealDamage {
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    }
+                )
+            },
+        },
+    ];
+    for row in rows {
+        let triggers = parse_printed_card(row.text, row.name, row.types, row.subtypes);
+        let effects: Vec<Effect> = triggers.iter().flat_map(trigger_effects).collect();
+        if let Some(names_source_first) = row.names_source_first {
+            assert!(
+                effects.iter().any(names_source_first),
+                "{}: reach guard, the source-naming instruction is present: {effects:?}",
+                row.name
+            );
+        }
+        assert!(
+            effects.iter().any(row.anaphor),
+            "{}: the anaphor must keep naming the trigger-condition object: {effects:?}",
+            row.name
+        );
+    }
 }
 
 /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
@@ -17745,6 +18246,131 @@ fn find_effect_boundary_skips_spell_quality_comma() {
         &suffix[..expected.len()],
         expected,
         "boundary should follow the spell-quality clause, got {suffix:?}"
+    );
+}
+
+const SARKHANS_UNSEALING_LIST_LINE: &str = "Whenever you cast a creature spell with power 4, 5, or 6, this enchantment deals 4 damage to any target.";
+const SARKHANS_UNSEALING_SEVEN_LINE: &str = "Whenever you cast a creature spell with power 7 or greater, this enchantment deals 4 damage to each opponent and each creature and planeswalker they control.";
+const KOZILEKS_UNSEALING_LIST_LINE: &str = "Whenever you cast a creature spell with mana value 4, 5, or 6, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"";
+const KOZILEKS_UNSEALING_SEVEN_LINE: &str =
+    "Whenever you cast a creature spell with mana value 7 or greater, draw three cards.";
+
+/// CR 603.1: the commas inside an exact-value number list in the trigger
+/// condition are list separators; the condition/effect boundary is the comma
+/// after the list's last leg.
+#[test]
+fn find_effect_boundary_skips_number_list_commas() {
+    for (line, expected) in [
+        (SARKHANS_UNSEALING_LIST_LINE, ", this enchantment deals"),
+        (KOZILEKS_UNSEALING_LIST_LINE, ", create two"),
+        // Bakersbane Duo: a single number right before the effect comma is not
+        // a list, so the boundary stays at that comma.
+        (
+            "Whenever you expend 4, this creature gets +1/+1 until end of turn. (You expend 4 as you spend your fourth total mana to cast spells during a turn.)",
+            ", this creature gets",
+        ),
+    ] {
+        let lower = line.to_lowercase();
+        let boundary = find_effect_boundary(&lower).expect("effect boundary");
+        let suffix = &lower[boundary..];
+        assert_eq!(
+            &suffix[..expected.len()],
+            expected,
+            "boundary of {line:?} should precede {expected:?}, got {suffix:?}"
+        );
+    }
+}
+
+/// CR 208.1 + CR 603.1: Sarkhan's Unsealing's first trigger reads "power 4,
+/// 5, or 6" whole — an `AnyOf` of three power EQ comparisons — and its effect
+/// is the plain 4 damage to any target, with no `Unimplemented` link.
+#[test]
+fn sarkhans_unsealing_power_value_list_trigger() {
+    let trigger = parse_trigger_line(SARKHANS_UNSEALING_LIST_LINE, "Sarkhan's Unsealing");
+    assert_eq!(trigger.mode, TriggerMode::SpellCast);
+    let power_eq = |value| FilterProp::PtComparison {
+        stat: PtStat::Power,
+        scope: PtValueScope::Current,
+        comparator: Comparator::EQ,
+        value: QuantityExpr::Fixed { value },
+    };
+    let expected = FilterProp::AnyOf {
+        props: vec![power_eq(4), power_eq(5), power_eq(6)],
+    };
+    let valid_card = trigger.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(valid_card, &|prop| *prop == expected),
+        "valid_card must hold the power value list, got {valid_card:?}"
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_no_unimplemented(execute);
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "expected 4 damage to any target, got {:?}",
+        execute.effect
+    );
+
+    // Reach-guard: the 7+ line still parses through the same path.
+    let seven = parse_trigger_line(SARKHANS_UNSEALING_SEVEN_LINE, "Sarkhan's Unsealing");
+    assert_eq!(seven.mode, TriggerMode::SpellCast);
+    let seven_card = seven.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(seven_card, &|prop| *prop
+            == FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            }),
+        "7+ line must keep power GE 7, got {seven_card:?}"
+    );
+}
+
+/// CR 202.3 + CR 603.1: Kozilek's Unsealing's first trigger reads "mana value
+/// 4, 5, or 6" whole — an `AnyOf` of three mana-value EQ comparisons — and its
+/// effect creates two Eldrazi Spawn, with no `Unimplemented` link.
+#[test]
+fn kozileks_unsealing_mana_value_list_trigger() {
+    let trigger = parse_trigger_line(KOZILEKS_UNSEALING_LIST_LINE, "Kozilek's Unsealing");
+    assert_eq!(trigger.mode, TriggerMode::SpellCast);
+    let mv_eq = |value| FilterProp::Cmc {
+        comparator: Comparator::EQ,
+        value: QuantityExpr::Fixed { value },
+    };
+    let expected = FilterProp::AnyOf {
+        props: vec![mv_eq(4), mv_eq(5), mv_eq(6)],
+    };
+    let valid_card = trigger.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(valid_card, &|prop| *prop == expected),
+        "valid_card must hold the mana value list, got {valid_card:?}"
+    );
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_no_unimplemented(execute);
+    let Effect::Token { name, count, .. } = execute.effect.as_ref() else {
+        panic!("expected a token effect, got {:?}", execute.effect);
+    };
+    assert_eq!(name, "Eldrazi Spawn");
+    assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+
+    // Reach-guard: the 7+ line still parses through the same path.
+    let seven = parse_trigger_line(KOZILEKS_UNSEALING_SEVEN_LINE, "Kozilek's Unsealing");
+    assert_eq!(seven.mode, TriggerMode::SpellCast);
+    let seven_card = seven.valid_card.as_ref().expect("spell filter");
+    assert!(
+        filter_contains_filter_prop(seven_card, &|prop| *prop
+            == FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 7 },
+            }),
+        "7+ line must keep mana value GE 7, got {seven_card:?}"
     );
 }
 
@@ -36577,11 +37203,10 @@ fn reanimator_aura_grant_etb_lowers_to_grant_chain() {
 /// #5253 (Railway Brawler): "Whenever another creature you control enters, put
 /// X +1/+1 counters on it, where X is its power." The "its" in the count clause
 /// is the ENTERING creature (the counter recipient), not the ability carrier.
-/// The `parse_self_power_ref` combinator lowers "its power" to
-/// `Power { scope: Source }` (carrier), so an enters-trigger lift remaps the
-/// count to `EventSource` when the counter target is itself the event object.
-/// Reverting the lift leaves `scope: Source` — the count would read Railway
-/// Brawler's power instead of the entering creature's (the #5253 bug).
+/// The where-X characteristic rung binds the count to the entering creature
+/// (`EventSource`); a count read off the source would read Railway Brawler's
+/// power (the #5253 bug), and this assertion goes red. The count is not clamped
+/// (a count slot, CR 107.1b is the handler's).
 #[test]
 fn railway_brawler_counter_count_reads_entering_creature_power() {
     let parsed = parse_oracle_text(
@@ -36633,12 +37258,9 @@ fn railway_brawler_counter_count_reads_entering_creature_power() {
     );
 }
 
-/// Negative reach-guard for the #5253 lift: a genuine self-power counter read —
+/// Negative reach-guard for #5253: a genuine self-power counter read —
 /// "Whenever ~ attacks, put a number of +1/+1 counters on ~ equal to its power"
-/// — must KEEP `scope: Source`. The lift only fires on a single-object
-/// zone-change trigger whose counter target is the event object; an attacks
-/// trigger putting counters on the source (`SelfRef`) is untouched, so the
-/// carrier's own power is preserved.
+/// — must KEEP `scope: Source`, so the carrier's own power is preserved.
 #[test]
 fn self_power_counter_on_source_keeps_source_scope() {
     let parsed = parse_oracle_text(
@@ -36660,7 +37282,7 @@ fn self_power_counter_on_source_keeps_source_scope() {
 
     // Whether or not this exact phrasing fully parses, if it DOES produce a
     // PutCounter with a per-object power ref, that ref must stay Source-scoped
-    // (an attacks trigger is not a zone-change trigger, so the lift is inert).
+    // (on an attacks trigger, "its" is the carrier).
     if let Some(QuantityExpr::Ref {
         qty: QuantityRef::Power { scope },
     }) = count
@@ -44692,6 +45314,377 @@ fn received_damage_siblings_without_windows_keep_no_condition() {
     assert_eq!(galleon.mode, TriggerMode::ExcessDamageAll);
     assert_eq!(galleon.damage_kind, DamageKindFilter::NoncombatOnly);
     assert_eq!(galleon.condition, None);
+}
+
+/// Every quantity slot a where-X definition can fill in the six class cards'
+/// trigger bodies, labeled by its consumer, walked over the whole ability tree
+/// (`sub_ability`, `else_ability`, nested definitions). `Fixed` values are
+/// skipped (Arahbo's Eminence "+3/+3").
+fn where_x_consumer_slots(def: &AbilityDefinition, out: &mut Vec<(&'static str, QuantityExpr)>) {
+    let mut push = |label: &'static str, value: &QuantityExpr| {
+        if !matches!(value, QuantityExpr::Fixed { .. }) {
+            out.push((label, value.clone()));
+        }
+    };
+    match def.effect.as_ref() {
+        Effect::PayCost {
+            cost: AbilityCost::PayLife { amount },
+            ..
+        } => push("PayLife", amount),
+        Effect::Draw { count, .. } => push("Draw", count),
+        Effect::GainLife { amount, .. } => push("GainLife", amount),
+        Effect::LoseLife { amount, .. } => push("LoseLife", amount),
+        Effect::Token { count, .. } => push("Token", count),
+        Effect::Dig { count, .. } => push("Dig", count),
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => {
+            for (label, value) in [("PumpPower", power), ("PumpToughness", toughness)] {
+                if let PtValue::Quantity(value) = value {
+                    push(label, value);
+                }
+            }
+        }
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for modification in static_abilities.iter().flat_map(|s| &s.modifications) {
+                match modification {
+                    ContinuousModification::AddDynamicPower { value } => {
+                        push("AddDynamicPower", value)
+                    }
+                    ContinuousModification::AddDynamicToughness { value } => {
+                        push("AddDynamicToughness", value)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    for next in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        where_x_consumer_slots(next, out);
+    }
+    def.effect
+        .for_each_nested_definition(&mut |_, nested| where_x_consumer_slots(nested, out));
+}
+
+/// Collect every serialized node's `type` tag, and the scope of every
+/// `Power`/`Toughness` reference, under `value`.
+fn walk_serialized_types(
+    value: &serde_json::Value,
+    scopes: &mut Vec<serde_json::Value>,
+    types: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(kind)) = map.get("type") {
+                types.push(kind.clone());
+                if kind == "Power" || kind == "Toughness" {
+                    if let Some(scope) = map.get("scope") {
+                        scopes.push(scope.clone());
+                    }
+                }
+            }
+            map.values()
+                .for_each(|v| walk_serialized_types(v, scopes, types));
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|v| walk_serialized_types(v, scopes, types)),
+        _ => {}
+    }
+}
+
+/// Every `Power`/`Toughness` reference scope and every quantity node type in a
+/// parsed face, read from its serialized form so no slot is missed.
+fn serialized_characteristic_scopes_and_types(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    let mut scopes = Vec::new();
+    let mut types = Vec::new();
+    for value in [
+        serde_json::to_value(&parsed.triggers).unwrap(),
+        serde_json::to_value(&parsed.abilities).unwrap(),
+        serde_json::to_value(&parsed.statics).unwrap(),
+    ] {
+        walk_serialized_types(&value, &mut scopes, &mut types);
+    }
+    (scopes, types)
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+/// #7851, CR 608.2k + CR 608.2h + CR 603.10a: in a trigger body whose "it" names
+/// the trigger event's object (the dying enchanted/equipped creature, the
+/// attacking Cat), "where X is its power/toughness" reads THAT object
+/// (`ObjectScope::EventSource`, departure LKI at runtime), never the Aura,
+/// Equipment or Arahbo. Every X slot of each card binds it — the lowering path
+/// and the count slot alike. Only Arahbo's X, which a "+X/+X" adds, is clamped
+/// at zero (CR 107.1b; Arahbo ruling: "If the attacking Cat's power is negative
+/// at that time, X is 0."). Verbatim Oracle text.
+#[test]
+fn where_x_its_characteristic_binds_trigger_event_object() {
+    type SlotCase<'a> = (
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        Vec<(&'a str, QuantityExpr)>,
+    );
+    let event = |qty: fn(ObjectScope) -> QuantityRef| QuantityExpr::Ref {
+        qty: qty(ObjectScope::EventSource),
+    };
+    let power = event(|scope| QuantityRef::Power { scope });
+    let toughness = event(|scope| QuantityRef::Toughness { scope });
+    let clamped_power = QuantityExpr::ClampMin {
+        inner: Box::new(power.clone()),
+        minimum: 0,
+    };
+    let cases: [SlotCase<'_>; 6] = [
+        (
+            "Mask of Griselbrand",
+            "Equipped creature has flying and lifelink.\nWhenever equipped creature dies, you may pay X life, where X is its power. If you do, draw X cards.\nEquip {3}",
+            &["Artifact"],
+            &["Equipment"],
+            vec![("PayLife", power.clone()), ("Draw", power.clone())],
+        ),
+        (
+            "Dying Wish",
+            "Enchant creature you control\nWhen enchanted creature dies, target player loses X life and you gain X life, where X is its power.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("LoseLife", power.clone()), ("GainLife", power.clone())],
+        ),
+        (
+            "Fruit of the First Tree",
+            "Enchant creature\nWhen enchanted creature dies, you gain X life and draw X cards, where X is its toughness.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("GainLife", toughness.clone()), ("Draw", toughness.clone())],
+        ),
+        (
+            "Murder Investigation",
+            "Enchant creature you control\nWhen enchanted creature dies, create X 1/1 white Soldier creature tokens, where X is its power.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("Token", power.clone())],
+        ),
+        (
+            "Necrosynthesis",
+            "Enchant creature\nEnchanted creature has \"Whenever another creature dies, put a +1/+1 counter on this creature.\"\nWhen enchanted creature dies, look at the top X cards of your library, where X is its power. Put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+            &["Enchantment"],
+            &["Aura"],
+            vec![("Dig", power.clone())],
+        ),
+        (
+            "Arahbo, Roar of the World",
+            "Eminence — At the beginning of combat on your turn, if Arahbo is in the command zone or on the battlefield, another target Cat you control gets +3/+3 until end of turn.\nWhenever another Cat you control attacks, you may pay {1}{G}{W}. If you do, it gains trample and gets +X/+X until end of turn, where X is its power.",
+            &["Creature"],
+            &["Cat", "Avatar"],
+            vec![
+                ("AddDynamicPower", clamped_power.clone()),
+                ("AddDynamicToughness", clamped_power.clone()),
+            ],
+        ),
+    ];
+    for (name, text, types, subtypes, expected) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        let mut slots = Vec::new();
+        for trigger in &parsed.triggers {
+            let execute = trigger
+                .execute
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name}: trigger without execute"));
+            // Reach guard: the body parsed to concrete effects.
+            assert!(!has_unimplemented(execute), "{name}: {execute:#?}");
+            where_x_consumer_slots(execute, &mut slots);
+        }
+        // Arahbo's "+X/+X" may lower as a `Pump` instead of a continuous grant;
+        // both carry the same signed amount.
+        let normalized: Vec<(&str, QuantityExpr)> = slots
+            .into_iter()
+            .map(|(label, value)| match label {
+                "PumpPower" => ("AddDynamicPower", value),
+                "PumpToughness" => ("AddDynamicToughness", value),
+                _ => (label, value),
+            })
+            .collect();
+        assert_eq!(normalized, expected, "{name}");
+    }
+}
+
+/// #7851 preservation, CR 201.5 + CR 113.7: an explicit self-reference
+/// ("Ratatwotwo's power", "this creature's power") names the ability's source
+/// even when the trigger's "it" names another object; the rung never touches
+/// it and no clamp is added. Verbatim Oracle text. Ratatwotwo's trigger mode
+/// stays `TriggerMode::Unknown`, but its body's "it" is still the trigger
+/// event's object (its Pump target is `TriggeringSource`, asserted below), so
+/// the characteristic rung is active and the explicit "Ratatwotwo's power" must
+/// still read `Source`. Esper Sentinel's "unless that player pays {X}, where X
+/// is this creature's power" is hoisted by the context-free
+/// `extract_unless_pay_modifier`, so that row guards the face only.
+#[test]
+fn where_x_explicit_self_reference_keeps_source_under_event_subject() {
+    let source = serde_json::to_value(ObjectScope::Source).unwrap();
+    for (name, text, types, subtypes, event_object_body) in [
+        (
+            "Ratatwotwo",
+            "When Ratatwotwo enters the battlefield, create a Chef Role token attached to up to one other target creature you control. (Enchanted creature gets +1/+1 and has \"Whenever this creature attacks, create a Food token.\")\nWhenever a creature you control enchanted by a Chef Role attacks or blocks, it gets +X/+X until end of turn, where X is Ratatwotwo's power.",
+            &["Creature"][..],
+            &["Rat"][..],
+            true,
+        ),
+        (
+            "Esper Sentinel",
+            "Whenever an opponent casts their first noncreature spell each turn, draw a card unless that player pays {X}, where X is this creature's power.",
+            &["Artifact", "Creature"][..],
+            &["Human", "Soldier"][..],
+            false,
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        if event_object_body {
+            assert!(
+                parsed.triggers.iter().any(|trigger| matches!(
+                    trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+                    Some(Effect::Pump {
+                        target: TargetFilter::TriggeringSource,
+                        ..
+                    })
+                )),
+                "{name}: {:#?}",
+                parsed.triggers
+            );
+        }
+        let (scopes, types) = serialized_characteristic_scopes_and_types(&parsed);
+        // Reach guard: the self-reference was read at all.
+        assert!(!scopes.is_empty(), "{name}: no power reference parsed");
+        assert!(scopes.iter().all(|scope| *scope == source), "{name}: {scopes:?}");
+        assert!(!types.iter().any(|t| t == "ClampMin"), "{name}: {types:?}");
+    }
+}
+
+/// #7851 preservation, CR 608.2k + CR 608.2h: where the trigger's "it" is the
+/// ability's own object (self-departure and phase triggers), "its power" keeps
+/// reading the source (its LKI); "equal to its power" in Death Watch keeps its
+/// own anaphoric binding. Verbatim Oracle text.
+#[test]
+fn where_x_its_characteristic_keeps_source_on_self_and_phase_triggers() {
+    let source = serde_json::to_value(ObjectScope::Source).unwrap();
+    for (name, text, types, subtypes) in [
+        (
+            "Bloated Processor",
+            "Sacrifice another Phyrexian: Put a +1/+1 counter on this creature.\nWhen this creature dies, incubate X, where X is its power. (Create an Incubator token with X +1/+1 counters on it and \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact creature.)",
+            &["Creature"][..],
+            &["Phyrexian"][..],
+        ),
+        (
+            "Elenda's Hierophant",
+            "Flying\nWhenever you gain life, put a +1/+1 counter on this creature.\nWhen this creature dies, create X 1/1 white Vampire creature tokens with lifelink, where X is its power.",
+            &["Creature"][..],
+            &["Vampire", "Cleric"][..],
+        ),
+        (
+            "Ukkima, Stalking Shadow",
+            "Partner with Cazur, Ruthless Stalker (When this creature enters, target player may put Cazur into their hand from their library, then shuffle.)\nUkkima can't be blocked.\nWhen Ukkima leaves the battlefield, it deals X damage to target player and you gain X life, where X is its power.",
+            &["Creature"][..],
+            &["Whale", "Wolf"][..],
+        ),
+        (
+            "Rip, Spawn Hunter",
+            "Survival — At the beginning of your second main phase, if Rip is tapped, reveal the top X cards of your library, where X is its power. Put any number of creature and/or Vehicle cards with different powers from among them into your hand. Put the rest on the bottom of your library in a random order.",
+            &["Creature"][..],
+            &["Human", "Survivor"][..],
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        let (scopes, _) = serialized_characteristic_scopes_and_types(&parsed);
+        assert!(!scopes.is_empty(), "{name}: no power reference parsed");
+        assert!(scopes.iter().all(|scope| *scope == source), "{name}: {scopes:?}");
+    }
+
+    let death_watch = parse_oracle_text(
+        "Enchant creature\nWhen enchanted creature dies, its controller loses life equal to its power and you gain life equal to its toughness.",
+        "Death Watch",
+        &[],
+        &strings(&["Enchantment"]),
+        &strings(&["Aura"]),
+    );
+    let (scopes, _) = serialized_characteristic_scopes_and_types(&death_watch);
+    let anaphoric = serde_json::to_value(ObjectScope::Anaphoric).unwrap();
+    assert_eq!(scopes.len(), 2, "{scopes:?}");
+    assert!(scopes.iter().all(|scope| *scope == anaphoric), "{scopes:?}");
+}
+
+/// #7851 containment, CR 107.1b: the zero clamp is confined to an X the
+/// characteristic rung bound. A signed pump whose X is a count (Altar of the
+/// Goyf) or a difference (Doran, Besieged by Time) under a non-self attack
+/// trigger is nonnegative already and gains no `ClampMin`. Verbatim Oracle text.
+#[test]
+fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
+    for (name, text, types, subtypes, expected_node) in [
+        (
+            "Altar of the Goyf",
+            "Whenever a creature you control attacks alone, it gets +X/+X until end of turn, where X is the number of card types among cards in all graveyards.\nLhurgoyf creatures you control have trample.",
+            &["Kindred", "Artifact"][..],
+            &["Lhurgoyf"][..],
+            "Ref",
+        ),
+        (
+            "Doran, Besieged by Time",
+            "Each creature spell you cast with toughness greater than its power costs {1} less to cast.\nWhenever a creature you control attacks or blocks, it gets +X/+X until end of turn, where X is the difference between its power and toughness.",
+            &["Creature"][..],
+            &["Treefolk", "Druid"][..],
+            "Difference",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &strings(types), &strings(subtypes));
+        assert!(
+            parsed.triggers.iter().any(|trigger| matches!(
+                trigger.execute.as_deref().map(|execute| execute.effect.as_ref()),
+                Some(Effect::Pump {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                })
+            )),
+            "{name}: {:#?}",
+            parsed.triggers
+        );
+        let mut slots = Vec::new();
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_deref() {
+                assert!(!has_unimplemented(execute), "{name}: {execute:#?}");
+                where_x_consumer_slots(execute, &mut slots);
+            }
+        }
+        // Reach guard: the pump amount was found and bound to a dynamic quantity.
+        assert_eq!(slots.len(), 2, "{name}: {slots:?}");
+        for (label, value) in &slots {
+            let mut types = Vec::new();
+            walk_serialized_types(
+                &serde_json::to_value(value).unwrap(),
+                &mut Vec::new(),
+                &mut types,
+            );
+            assert!(
+                types.iter().any(|t| t == expected_node),
+                "{name} {label}: {value:?}"
+            );
+            assert!(
+                !types.iter().any(|t| t == "ClampMin"),
+                "{name} {label}: {value:?}"
+            );
+        }
+    }
 }
 
 /// CR 603.2 + CR 508.3d/e: the "you attack" head classifies its whole tail.

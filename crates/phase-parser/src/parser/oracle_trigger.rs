@@ -53,7 +53,7 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
     split_sentence_units,
 };
-use super::oracle_nom::quantity::parse_using_mana_produced_by_self;
+use super::oracle_nom::quantity::{parse_number_disjunction, parse_using_mana_produced_by_self};
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_nom::target::CostChannel;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
@@ -89,12 +89,12 @@ use crate::types::ability::{
     ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold,
     DamageChannel, DamageKindFilter, DelayedTriggerCondition, DestinationConstraint,
     DieResultFilter, Effect, EffectScope, FilterProp, IllegalTargetsDisposition,
-    ManaAbilityProducedFilter, NameStickerSet, ObjectScope, OriginConstraint, ParsedCondition,
-    PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SpentColor, StaticCondition, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
+    PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement,
+    SharedQuality, SpentColor, StaticCondition, TapCreaturesRequirement, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerLimitSpend,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -3593,12 +3593,6 @@ pub(crate) fn lower_trigger_ir_with_provenance(
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
             lift_shared_quality_parent_target_to_triggering_source_in_ability(execute);
-            // CR 608.2k: "put X +1/+1 counters on it, where X is its power" —
-            // "its" is the entering object (the counter recipient), not the
-            // ability carrier (#5253, Railway Brawler). Run after the
-            // parent-target lift so the counter recipient is already
-            // `TriggeringSource` when this checks the target.
-            lift_counter_count_self_scope_to_event_source_in_ability(execute);
             // CR 603.6 + CR 400.7e: a self-departure trigger returning its
             // source must find the card in the public zone it moved to. An
             // enters-the-battlefield trigger can instead retrieve a different
@@ -4626,106 +4620,6 @@ fn demote_becomes_target_delayed_payloads(ability: &mut AbilityDefinition) {
     }
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
         demote_becomes_target_delayed_payloads(else_ability);
-    }
-}
-
-/// CR 608.2k + CR 122.1: On a single-object enters/zone-change trigger,
-/// "put X +1/+1 counters on it, where X is its power" refers to the ENTERING
-/// object for both "it" (the counter recipient) and "its" (the per-object
-/// characteristic X reads). The recipient is lifted to `TriggeringSource` by
-/// `lift_parent_target_to_triggering_source`; this companion lifts the count's
-/// self-scoped per-object refs the same way.
-///
-/// The `where X is its power` clause parses "its power" via
-/// `parse_self_power_ref`, which emits `ObjectScope::Source` (the ability
-/// carrier — Railway Brawler) because that combinator also serves the genuine
-/// self-read forms (`~'s power`, `this card's power`, Scavenge). On an enters
-/// trigger the anaphor is the event object, not the carrier, so the count reads
-/// the wrong creature's power (#5253). When the counter effect's `target` is
-/// itself the event object (`TriggeringSource`/`ParentTarget`), the "its" in
-/// the count clause is the SAME object as the "it" recipient, so its
-/// `Source`-scoped per-object refs are remapped to `EventSource` (the entering
-/// object, resolved live-then-LKI at runtime). Genuine self-reads are untouched:
-/// they only reach this remap on an enters trigger whose counter target is the
-/// event object, where "its" cannot mean the carrier.
-fn lift_counter_count_self_scope_to_event_source(effect: &mut Effect) {
-    let (count, target) = match effect {
-        Effect::PutCounter { count, target, .. } | Effect::PutCounterAll { count, target, .. } => {
-            (count, &*target)
-        }
-        _ => return,
-    };
-    if matches!(
-        target,
-        TargetFilter::TriggeringSource | TargetFilter::ParentTarget
-    ) {
-        remap_self_scope_to_event_source_in_quantity(count);
-    }
-}
-
-/// Remap `Source`-scoped per-object quantity refs (power, toughness, mana value,
-/// …) to `EventSource`, recursing through arithmetic wrappers. Exhaustive over
-/// `QuantityExpr` so a new wrapper forces a compile error here rather than
-/// silently skipping a nested per-object ref.
-fn remap_self_scope_to_event_source_in_quantity(expr: &mut QuantityExpr) {
-    match expr {
-        QuantityExpr::Ref { qty } => remap_self_scope_to_event_source_in_ref(qty),
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => remap_self_scope_to_event_source_in_quantity(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs
-                .iter_mut()
-                .for_each(remap_self_scope_to_event_source_in_quantity);
-        }
-        QuantityExpr::Difference { left, right } => {
-            remap_self_scope_to_event_source_in_quantity(left);
-            remap_self_scope_to_event_source_in_quantity(right);
-        }
-        QuantityExpr::Fixed { .. } => {}
-    }
-}
-
-/// Retarget a single per-object `QuantityRef` whose scope is `Source` to
-/// `EventSource`. Mirrors `rebind_anaphoric_ref`'s per-object arm set. Leaves
-/// every non-`Source` scope and every non-per-object ref untouched.
-fn remap_self_scope_to_event_source_in_ref(qty: &mut QuantityRef) {
-    let scope = match qty {
-        QuantityRef::Power { scope }
-        | QuantityRef::BasePower { scope }
-        | QuantityRef::Toughness { scope }
-        | QuantityRef::ObjectManaValue { scope }
-        | QuantityRef::ObjectColorCount { scope }
-        | QuantityRef::ObjectNameWordCount { scope }
-        | QuantityRef::NameStickerLetterCount {
-            stickers: NameStickerSet::OnObject { scope },
-            letters: _,
-        }
-        | QuantityRef::ObjectTypelineComponentCount { scope }
-        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
-        | QuantityRef::CountersOn { scope, .. } => scope,
-        _ => return,
-    };
-    if *scope == ObjectScope::Source {
-        *scope = ObjectScope::EventSource;
-    }
-}
-
-/// Recurse `lift_counter_count_self_scope_to_event_source` through an ability's
-/// effect and every chained `sub_ability`/`else_ability`, mirroring the descent
-/// of the sibling parent-target lifts.
-fn lift_counter_count_self_scope_to_event_source_in_ability(ability: &mut AbilityDefinition) {
-    lift_counter_count_self_scope_to_event_source(ability.effect.as_mut());
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        lift_counter_count_self_scope_to_event_source_in_ability(sub);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        lift_counter_count_self_scope_to_event_source_in_ability(else_ability);
     }
 }
 
@@ -13439,6 +13333,28 @@ fn continues_spell_color_disjunction(after_comma: &str) -> bool {
     rest.is_empty() || tag::<_, _, OracleError<'_>>(",").parse(rest).is_ok()
 }
 
+/// CR 603.1: a triggered ability is "[When/Whenever/At] [trigger condition or
+/// event], [effect]"; a comma INSIDE an exact-value number list in the
+/// condition ("with power 4, 5, or 6" — Sarkhan's Unsealing; "with mana value
+/// 4, 5, or 6" — Kozilek's Unsealing) separates list legs and is never that
+/// boundary. True iff some number list (`parse_number_disjunction`, the single
+/// list authority) starts before `comma_pos` and ends after it.
+fn continues_number_disjunction(text: &str, comma_pos: usize) -> bool {
+    nom_primitives::scan_at_word_boundaries(text, |i| {
+        let start = text.len() - i.len();
+        if start >= comma_pos {
+            return Err(oracle_err(i));
+        }
+        let (rest, _) = parse_number_disjunction(i)?;
+        if text.len() - rest.len() > comma_pos {
+            Ok((rest, ()))
+        } else {
+            Err(oracle_err(i))
+        }
+    })
+    .is_some()
+}
+
 pub(crate) fn find_effect_boundary(lower: &str) -> Option<usize> {
     use super::oracle_nom::primitives::split_once_on;
     let mut search_start = 0;
@@ -13451,6 +13367,7 @@ pub(crate) fn find_effect_boundary(lower: &str) -> Option<usize> {
             && !continues_serial_event_condition(after)
             && !continues_spell_quality_disjunction(after)
             && !continues_spell_color_disjunction(after)
+            && !continues_number_disjunction(lower, comma_pos)
         {
             return Some(comma_pos);
         }
@@ -22216,15 +22133,21 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // sugar whose internal commas belong to the payload). Naive
         // first-comma truncation collapsed such filters to their first leg,
         // so the trigger fired only on the first listed type (issue #5324,
-        // Sram, Senior Edificer).
+        // Sram, Senior Edificer). Commas inside an exact-value number list in a
+        // stat qualifier belong to the payload too ("a creature spell with
+        // power 4, 5, or 6" — Sarkhan's Unsealing; "… with mana value 4, 5, or
+        // 6" — Kozilek's Unsealing).
         let payload = {
             let mut scan = after;
             let mut cut = after;
             while let Ok((_, (_, rest))) = nom_primitives::split_once_on(scan, ", ") {
-                if starts_with_type_list_continuation(rest) {
+                let comma_pos = after.len() - rest.len() - ", ".len();
+                if starts_with_type_list_continuation(rest)
+                    || continues_number_disjunction(after, comma_pos)
+                {
                     scan = rest;
                 } else {
-                    cut = &after[..after.len() - rest.len() - ", ".len()];
+                    cut = &after[..comma_pos];
                     break;
                 }
             }

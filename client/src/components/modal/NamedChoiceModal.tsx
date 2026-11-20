@@ -6,11 +6,11 @@ import { motion } from "framer-motion";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { getCardNames } from "../../services/cardNames.ts";
-import { useGameStore } from "../../stores/gameStore.ts";
 import {
   getPlayerDisplayName,
   useMultiplayerStore,
@@ -337,6 +337,7 @@ const FILTERABLE_OPTION_THRESHOLD = 12;
 function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: string }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
+  const suggestions = useGameStore((s) => s.gameState?.derived?.named_choice_suggestions);
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -359,10 +360,17 @@ function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: st
   const showFilter = !isPlayerChoice && data.options.length > FILTERABLE_OPTION_THRESHOLD;
 
   const visibleOptions = useMemo(() => {
-    if (!showFilter || query.trim() === "") return data.options;
+    if (query.trim() === "") {
+      // Suggestions only lead a list the player can also search, so every
+      // legal option stays reachable.
+      return showFilter && typeKey === "CreatureType" && suggestions?.length
+        ? suggestions
+        : data.options;
+    }
+    if (!showFilter) return data.options;
     const lower = query.trim().toLowerCase();
     return data.options.filter((option) => option.toLowerCase().includes(lower));
-  }, [showFilter, query, data.options]);
+  }, [showFilter, query, data.options, suggestions, typeKey]);
 
   return (
     <ChoiceOverlay
