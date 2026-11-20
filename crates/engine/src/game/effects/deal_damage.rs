@@ -1602,12 +1602,11 @@ pub(crate) fn emit_damage_dealt_and_record(
 ///
 /// Ambiguous remainder: when the history is not complete and no trusted combat
 /// record exists, the save cannot prove whether the incarnation dealt combat
-/// damage in an earlier turn. Nothing is invented. An object whose own statics
-/// read the per-kind history (Ruric Thar's "hasn't dealt combat damage yet"
-/// hexproof) cannot be evaluated correctly, so the restore is refused
-/// ([`PersistedRestoreError::AmbiguousLegacyDamageHistory`]); an object that
-/// reads no kind keeps its recovered (possibly empty) latch, which only
-/// `DamageKindFilter::Any` readers, answered by the Any set, ever consult.
+/// damage in an earlier turn. Nothing is invented: the restore is refused
+/// ([`PersistedRestoreError::AmbiguousLegacyDamageHistory`]) whatever the
+/// object's current statics, because a later copy or grant can give it a
+/// kind-reading ability (CR 707.2a + CR 611.3a: a static's effect is not
+/// locked in).
 ///
 /// The direct `GameState` serde path (`GameStateDecodeMode::DirectCurrentRaw`)
 /// is deliberately not migrated: it is limited to the current canonical

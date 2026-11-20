@@ -19525,9 +19525,9 @@ pub enum PersistedRestoreError {
     LegacyPendingCastNotRestorable(String),
     /// CR 120.2a + CR 120.2b + CR 400.7: a save written before the per-kind
     /// damage latch cannot prove whether this object dealt combat damage in an
-    /// earlier turn, and its own static reads that history ("hasn't dealt
-    /// combat damage yet"). The history is never inferred, so the save is
-    /// refused rather than loaded with an invented kind.
+    /// earlier turn. The history is never inferred, so the save is refused
+    /// rather than loaded with an invented kind, whatever the object's current
+    /// statics.
     #[error("persisted damage history of {object_id:?} is ambiguous: the save cannot prove whether it has dealt combat damage")]
     AmbiguousLegacyDamageHistory { object_id: ObjectId },
 }
