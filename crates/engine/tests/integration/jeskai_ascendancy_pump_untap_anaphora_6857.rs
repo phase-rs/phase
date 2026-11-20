@@ -349,7 +349,6 @@ fn motivated_pony_untaps_only_the_attacking_creatures_it_pumped() {
             supertypes: vec![],
             colors: vec![],
             keywords: vec![],
-            face_down: false,
             controller: P0,
             face_state: FaceState::FaceUp,
         });

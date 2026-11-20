@@ -66,7 +66,6 @@ fn record_creature_entry(state: &mut GameState, object_id: u64, controller: Play
             supertypes: vec![],
             colors: vec![],
             keywords: vec![],
-            face_down: false,
             controller,
             face_state: FaceState::FaceUp,
         });
