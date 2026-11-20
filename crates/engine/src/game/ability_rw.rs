@@ -10503,9 +10503,10 @@ mod tests {
     }
 
     /// CR 603.2 + CR 608.2h: an event-bound `TargetMatchesFilter` whose properties only compare
-    /// mana value is an event-object read, not a board P/T read, so two observers of one event that each put counters on THEMSELVES (Prismari
-    /// Apprentice, Herald of Ilharg) commute. A predicate that does read P/T or counters, a
-    /// sibling that writes the event object, and a non-event subject all stay dependent.
+    /// mana value is an event-object read, not a board P/T read, so two observers of one event
+    /// that each put counters on THEMSELVES (Prismari Apprentice, Herald of Ilharg) commute. A
+    /// predicate that does read P/T or counters, a sibling that writes the event object, and a
+    /// non-event subject all stay dependent.
     #[test]
     fn event_bound_mana_value_predicate_is_an_event_read_not_a_board_pt_read() {
         let mv_at_least_5 = || {
