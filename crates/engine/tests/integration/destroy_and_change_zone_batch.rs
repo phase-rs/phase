@@ -1870,15 +1870,21 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
         .expect("the staged owner is parked")
         .logical_zone_change_group
         .logical_group_id;
+    use engine::types::resolution::ResolutionFrame;
+
     let marker = state
-        .ability_continuation_at_top_or_parent()
-        .expect("the dependent continuation is parked beside the staged batch")
-        .pending
-        .chain
-        .context
-        .pending_forwarded_zone_result
-        .clone()
-        .expect("F6 records the pending forwarded result");
+        .resolution_stack
+        .iter()
+        .find_map(|frame| match frame {
+            ResolutionFrame::AbilityContinuation(frame) => frame
+                .pending
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .as_ref(),
+            _ => None,
+        })
+        .expect("the staged batch parks the dependent result");
     assert_eq!(
         marker.group,
         Some(group_id),
@@ -1906,14 +1912,11 @@ fn c12_forwarded_zone_result_binds_staged_arrivals_after_pause() {
         );
     }
     assert!(
-        state
-            .ability_continuation_at_top_or_parent()
-            .is_none_or(|frame| frame
-                .pending
-                .chain
-                .context
-                .pending_forwarded_zone_result
-                .is_none()),
+        !state.resolution_stack.iter().any(|frame| matches!(
+            frame,
+            ResolutionFrame::AbilityContinuation(frame)
+                if frame.pending.chain.context.pending_forwarded_zone_result.is_some()
+        )),
         "settlement clears the pending marker"
     );
     // The forwarded population emits exactly one `ChangeZone` resolution at

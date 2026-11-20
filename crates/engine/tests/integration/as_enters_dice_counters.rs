@@ -7330,11 +7330,10 @@ fn a_mass_return_co_entrant_does_not_see_the_roll() {
     }
 }
 
-/// R21b (review 5 F2, the parked mass owner). R21's board with Grumgully, the
-/// Generous resident, the Dwarf delivered first + CR 616.1 + CR 603.6a +
-/// CR 614.12a: Hammer Jammer's entry asks its replacement order, so the mass
-/// owner is parked on its `ChangeZone` frame when the roll is made. The Dwarf is
-/// already on the battlefield and still does not see the roll.
+/// R21b (review 5 F2): Grumgully, the Generous gives Hammer Jammer an entry
+/// replacement order choice (CR 616.1). The staged return pauses before moving
+/// either card. Brazen Dwarf still cannot see the roll during their simultaneous
+/// entry (CR 603.6a, 603.6d, 614.12a).
 #[test]
 fn a_parked_mass_return_co_entrant_does_not_see_the_roll() {
     reset_triggers_seen();
@@ -7343,15 +7342,15 @@ fn a_parked_mass_return_co_entrant_does_not_see_the_roll() {
     let mut events = Vec::new();
     cast_and_pass(&mut board.runner, board.spell, None, None, &mut events);
     let state = board.runner.state();
-    assert_eq!(stack_frames(state), vec![FrameKind::ChangeZone]);
     assert_eq!(paused_owner_member(state), Some(board.jammer));
-    assert_eq!(zone(state, board.newcomer), Zone::Battlefield);
+    assert_eq!(zone(state, board.newcomer), Zone::Graveyard);
     assert!(
         die_results(&events).is_empty(),
         "the roll follows the prompt"
     );
     order_entry(&mut board.runner, "Hammer Jammer", &mut events);
     settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+    assert!(battlefield_entry_index(&events, board.newcomer).unwrap() < first_roll_index(&events));
     assert_co_entry_settled(&board, &events, p1_before, 1, "R21b");
 }
 
@@ -7385,12 +7384,11 @@ fn a_targeted_co_entrant_does_not_see_the_roll() {
     }
 }
 
-/// R22b (review 5 F2, the parked targeted owner). R22's board with Grumgully,
-/// the Generous resident, the Dwarf targeted first + CR 616.1 + CR 603.6a +
-/// CR 614.12a: Hammer Jammer's entry asks its replacement order, so the targeted
-/// owner is parked on its `ChangeZone` frame, beneath the spell's continuation,
-/// when the roll is made. The Dwarf is already on the battlefield and still does
-/// not see the roll.
+/// R22b (review 5 F2): Grumgully, the Generous gives Hammer Jammer an entry
+/// replacement order choice (CR 616.1). The targeted batch pauses before
+/// delivering either target. The staged return and its chained instruction
+/// must settle without the co-entering Dwarf seeing the roll (CR 603.6a,
+/// 603.6d, 614.12a).
 #[test]
 fn a_parked_targeted_co_entrant_does_not_see_the_roll() {
     reset_triggers_seen();
@@ -7400,18 +7398,15 @@ fn a_parked_targeted_co_entrant_does_not_see_the_roll() {
     let mut events = Vec::new();
     cast_ever_after(&mut board, &targets, &mut events);
     let state = board.runner.state();
-    assert_eq!(
-        stack_frames(state),
-        vec![FrameKind::AbilityContinuation, FrameKind::ChangeZone]
-    );
     assert_eq!(paused_owner_member(state), Some(board.jammer));
-    assert_eq!(zone(state, board.newcomer), Zone::Battlefield);
+    assert_eq!(zone(state, board.newcomer), Zone::Graveyard);
     assert!(
         die_results(&events).is_empty(),
         "the roll follows the prompt"
     );
     order_entry(&mut board.runner, "Hammer Jammer", &mut events);
     settle(&mut board.runner, &mut events, DEFAULT_ANSWERS);
+    assert!(battlefield_entry_index(&events, board.newcomer).unwrap() < first_roll_index(&events));
     assert_co_entry_settled(&board, &events, p1_before, 1, "R22b");
 }
 
@@ -7581,15 +7576,17 @@ fn seed_creature_types(runner: &mut GameRunner) {
     ];
 }
 
-/// Answer the entry prompts that come before Hammer Jammer's roll, in delivery
-/// order: an entry's replacement ordering (the entrant's own replacement first,
-/// then Grumgully's) and Roaming Throne's creature type (Dwarf). Returns how many
-/// ordering prompts were answered.
+/// Answer the staged decision order, each entrant's own replacement before
+/// Grumgully's, and Roaming Throne's creature type (Dwarf). Returns the number
+/// of per-entrant replacement choices answered.
 fn answer_pre_roll_entry_prompts(runner: &mut GameRunner, events: &mut Vec<GameEvent>) -> usize {
     let mut ordering_prompts = 0;
     for _ in 0..8 {
         let state = runner.state();
         let action = match &state.waiting_for {
+            WaitingFor::ReplacementDecisionOrder { objects, .. } => GameAction::SelectCards {
+                cards: vec![objects[0]],
+            },
             WaitingFor::NamedChoice {
                 choice_type: ChoiceType::CreatureType { .. },
                 ..
@@ -7831,9 +7828,8 @@ fn a_mass_return_co_entrant_doubler_does_not_double_the_roll() {
     run_throne_co_entry(ThroneOwner::Rise, ThroneCoEntry::Inline);
 }
 
-/// R23c-ordered. R23c behind Grumgully, the Generous's ordering prompts
-/// (CR 616.1): the mass owner is parked on its `ChangeZone` frame when the roll
-/// is made.
+/// R23c-ordered. Before either creature enters, Rise parks the co-entrants'
+/// replacement decisions for the affected player to order (CR 101.4c, 616.1).
 #[test]
 fn a_parked_mass_return_co_entrant_doubler_does_not_double_the_roll() {
     run_throne_co_entry(ThroneOwner::Rise, ThroneCoEntry::Ordered);
