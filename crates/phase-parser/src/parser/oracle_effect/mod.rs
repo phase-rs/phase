@@ -21657,9 +21657,10 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return Some(parsed_clause(effect));
     }
 
-    // CR 111.11: "create [token description] for each X" → Token with dynamic count.
+    // CR 701.7a: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
-    // types, colors, keywords). Replace the embedded count with the for-each quantity.
+    // types, colors, keywords). The embedded count multiplies the for-each quantity, as in the
+    // numeric and damage arms.
     //
     // The base may carry a subject ("You create a Treasure token …" — You've Been
     // Caught Stealing). Try the raw base first (preserves subject-bearing forms
@@ -21667,7 +21668,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // the correct owner), then fall back to the subject-stripped imperative so a
     // leading "you " no longer strands the for-each quantity.
     //
-    // CR 109.5 + CR 111.11: the stripped fallback is CONTROLLER-only. This arm
+    // CR 109.5 + CR 111.2: the stripped fallback is CONTROLLER-only. This arm
     // early-returns from `try_parse_for_each_effect` and so never runs the
     // subject→owner rebinding used by the numeric/targeted arms, and
     // `try_parse_token` defaults `Effect::Token.owner` to
@@ -21703,7 +21704,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 supertypes,
                 static_abilities,
                 enter_with_counters,
-                count: _,
+                count: base_count,
             } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
@@ -21715,8 +21716,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 // base (name/P/T/types) from `base_tp` — the text BEFORE "for
                 // each" — so `try_parse_token`'s own "this way" dispatch never
                 // sees the "for each" clause here; `scoped_count` above, from
-                // this function's OWN `quantity`, is the only count this path
-                // ever produces. A bare "card put into a graveyard this way"
+                // this function's OWN `quantity`, is the only for-each count this
+                // path ever produces. A bare "card put into a graveyard this way"
                 // counts only tracked cards delivered to Graveyard (CR 614.6);
                 // this is the normal path for Pinnacle Starcage's one-pile move.
                 // When a preceding Dig puts the rest into Graveyard, re-resolve
@@ -21755,7 +21756,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     supertypes,
                     static_abilities,
                     enter_with_counters,
-                    count,
+                    count: replace_fixed_quantity(base_count, count),
                 }
             }
             other => other,
