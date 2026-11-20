@@ -523,6 +523,9 @@ function allocateGroups(groups: AllocatableGroup[], columnCount: number): void {
   });
 }
 
+/** The most groups any sort axis has (type sort: seven types plus other). */
+const MAX_AXIS_GROUPS = 8;
+
 /**
  * Whether the allocator could itself have put every group of `shared` in one
  * column. The board is sorted once and then edited, so a group may appear or
@@ -533,10 +536,14 @@ function allocateGroups(groups: AllocatableGroup[], columnCount: number): void {
  * columns) fits no plan and stays rejected.
  */
 function allocatorCouldShareColumn(
-  axis: readonly DraftPoolGroupKind[],
+  rawAxis: readonly DraftPoolGroupKind[],
   shared: readonly DraftPoolGroupKind[],
   columnCount: number,
 ): boolean {
+  // The groups come from the host's pool data, so bound the subset search: an
+  // axis holds each kind at most once, and there are only a handful of kinds.
+  const axis = rawAxis.filter((kind, index) => rawAxis.indexOf(kind) === index);
+  if (axis.length > MAX_AXIS_GROUPS) return false;
   if (shared.some((kind) => !axis.includes(kind))) return false;
   const optional = axis.filter((kind) => !shared.includes(kind));
   for (let mask = 0; mask < 2 ** optional.length; mask += 1) {
