@@ -49781,12 +49781,9 @@ mod tests {
             .objects
             .get_mut(&id)
             .expect("fixture object exists")
-            .printing = DisplayOnly::new(printing.map(|tag| {
-            SharedPrinting::new(CardPrinting {
-                set_code: tag.to_string(),
-                collector_number: "7".to_string(),
-            })
-        }));
+            .printing = DisplayOnly::new(
+            printing.map(|tag| SharedPrinting::new(CardPrinting::owner(tag, "7"))),
+        );
         let record = state.objects[&id].snapshot_for_zone_change(
             id,
             Some(Zone::Battlefield),

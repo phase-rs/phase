@@ -560,6 +560,7 @@ fn bind_printing_rows<'a>(
         row.count = u64::from(row.count).min(budget.remaining) as u32;
         if row.count != 0 {
             budget.remaining -= u64::from(row.count);
+            row.printing.automatic_art_catalog_version = None;
             payload.printings.push(row);
         }
     }
@@ -4338,10 +4339,7 @@ mod tests {
             section: DeckSection::MainDeck,
             name: name.to_string(),
             count,
-            printing: CardPrinting {
-                set_code: tag.to_string(),
-                collector_number: "1".to_string(),
-            },
+            printing: CardPrinting::owner(tag, "1"),
         }
     }
 
@@ -4377,6 +4375,7 @@ mod tests {
             ],
             ..Default::default()
         };
+        payload.printings[0].printing.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
         normalize_deck_printings(&db, &mut payload);
         assert_eq!(
             payload.printings,
@@ -4386,8 +4385,12 @@ mod tests {
             ],
             "reach: each homonym's clamp is its own copies"
         );
+        let mut forged_retained = payload.clone();
+        forged_retained.printings[0]
+            .printing
+            .automatic_art_catalog_version = std::num::NonZeroU8::new(1);
         let pool = PlayerDeckPool {
-            printings: retained_printing_record(&payload),
+            printings: retained_printing_record(&forged_retained),
             ..Default::default()
         };
 

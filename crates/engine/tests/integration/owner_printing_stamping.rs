@@ -213,10 +213,7 @@ fn choice(section: DeckSection, name: &str, count: u32, tag: &str) -> DeckPrinti
         section,
         name: name.into(),
         count,
-        printing: CardPrinting {
-            set_code: tag.into(),
-            collector_number: "1".into(),
-        },
+        printing: CardPrinting::owner(tag, "1"),
     }
 }
 
@@ -367,6 +364,49 @@ fn normalization_is_lenient_section_bound_ordered_and_capped() {
         .get("printings")
         .is_none());
     start(&mut state);
+}
+
+#[test]
+fn typed_owner_rows_bind_without_automatic_provenance() {
+    let db = database();
+    let mut payload = resolve_deck_list(
+        &db,
+        &engine::database::ComboTable::default(),
+        &reference_list(),
+    );
+    let mut first = choice(DeckSection::MainDeck, "Forest", 2, "m21");
+    first.printing.collector_number = "272".into();
+    let mut adjacent = first.clone();
+    adjacent.count = 1;
+    adjacent.printing.collector_number = "273".into();
+    let expected = vec![first.clone(), adjacent.clone()];
+    first.printing.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
+    payload.player.printings = vec![first, adjacent];
+    engine::game::deck_loading::normalize_deck_printings(&db, &mut payload.player);
+    assert_eq!(payload.player.printings, expected);
+    let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
+    load_and_hydrate_decks(&mut state, &payload, Some(&db));
+    assert_eq!(
+        state.deck_pools[0].printings.get().as_ref().unwrap().rows(),
+        expected.as_slice()
+    );
+    let mut collectors = Vec::new();
+    for object in state
+        .objects
+        .values()
+        .filter(|object| object.owner == PlayerId(0) && object.name == "Forest")
+    {
+        assert_eq!(object.printing.get(), object.base_printing.get());
+        if let Some(printing) = object.printing.get() {
+            assert_eq!(printing.set_code, "m21");
+            assert_eq!(printing.automatic_art_catalog_version, None);
+            collectors.push(printing.collector_number.as_str());
+        } else {
+            collectors.push("");
+        }
+    }
+    collectors.sort_unstable();
+    assert_eq!(collectors, ["", "", "272", "272", "273"]);
 }
 
 fn stamps(

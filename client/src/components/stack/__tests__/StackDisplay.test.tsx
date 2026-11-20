@@ -185,6 +185,27 @@ describe("StackDisplay real grouped surfaces", () => {
     vi.restoreAllMocks();
   });
 
+  it("splits one Forest printing by delivered provenance", () => {
+    const owner = { set_code: "m21", collector_number: "272" };
+    const automatic = { ...owner, automatic_art_catalog_version: 1 };
+    const state = seed({ printings: [owner, automatic], legalIds: [], holdCatalog: true });
+    for (const details of Object.values(state.derived!.stack_entry_details!)) {
+      details.source_name = "Forest";
+      details.printed_ref = { oracle_id: "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6", face_name: "Forest" };
+    }
+    render(<StackDisplay effectiveMultiplayerBoardLayout="focused" />);
+    expect(renderedIds()).toEqual([10, 11]);
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+    expect(renderedIds()).toEqual([10]);
+    expect(screen.getByText("×2")).toBeInTheDocument();
+    act(() => {
+      seed({ printings: [automatic, automatic], legalIds: [], holdCatalog: true });
+      usePreferencesStore.getState().setShowOwnerPrintings(true);
+    });
+    expect(renderedIds()).toEqual([10]);
+    expect(screen.getByText("×2")).toBeInTheDocument();
+  });
+
   it("splits A/A/B before admission, preserves member order and cycles live without replacing state", async () => {
     const state = seed({ holdCatalog: true });
     const { container } = render(<StackDisplay effectiveMultiplayerBoardLayout="focused" />);

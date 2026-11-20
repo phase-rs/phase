@@ -30,17 +30,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 fn s1() -> SharedPrinting {
-    SharedPrinting::new(CardPrinting {
-        set_code: "SNTA".to_string(),
-        collector_number: "1".to_string(),
-    })
+    SharedPrinting::new(CardPrinting::owner("SNTA", "1"))
 }
 
 fn s2() -> SharedPrinting {
-    SharedPrinting::new(CardPrinting {
-        set_code: "SNTB".to_string(),
-        collector_number: "2".to_string(),
-    })
+    SharedPrinting::new(CardPrinting::owner("SNTB", "2"))
 }
 
 /// The three printing states every contract is checked across: none, S1, S2.
@@ -537,6 +531,41 @@ fn persisted_state_keeps_every_printing() {
     // Sibling: an object that never had a printing restores without one.
     let plain = object_in(&restored, plain);
     assert!(plain.printing.get().is_none() && plain.base_printing.get().is_none());
+}
+
+#[test]
+fn restored_display_printing_accepts_legacy_and_nonzero_provenance() {
+    let (state, id) = base_state();
+    let wire = serde_json::to_value(&state).unwrap();
+    let id = id.0.to_string();
+    let unprinted = serde_json::from_value::<PersistedGameState>(wire.clone())
+        .unwrap()
+        .into_game_state()
+        .unwrap();
+    let unprinted = serde_json::to_value(unprinted).unwrap();
+    for carrier in ["printing", "base_printing"] {
+        assert!(unprinted["objects"][&id].get(carrier).is_none());
+    }
+    for version in [None, Some(1), Some(0)] {
+        let mut printing = serde_json::json!({"set_code":"m21","collector_number":"272"});
+        if let Some(version) = version {
+            printing["automatic_art_catalog_version"] = version.into();
+        }
+        let mut snapshot = wire.clone();
+        for carrier in ["printing", "base_printing"] {
+            snapshot["objects"][&id][carrier] = printing.clone();
+        }
+        let decoded = serde_json::from_value::<PersistedGameState>(snapshot);
+        if version == Some(0) {
+            assert!(decoded.is_err());
+            continue;
+        }
+        let restored = decoded.unwrap().into_game_state().unwrap();
+        let serialized = serde_json::to_value(restored).unwrap();
+        for carrier in ["printing", "base_printing"] {
+            assert_eq!(serialized["objects"][&id][carrier], printing);
+        }
+    }
 }
 
 /// CR 203.1 + CR 206.1: last-known information carries no printing on any production capture

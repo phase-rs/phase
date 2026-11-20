@@ -1022,6 +1022,167 @@ describe("normal history and admission boundary", () => {
 });
 
 describe("owner authority invalidation", () => {
+  it.each([false, true])("handles a missing admitted exact image offline, automatic=%s", async (automatic) => {
+    const env = await setup({ offline: true });
+    const oracleId = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+    const forest = { ...env.data.main[A], oracle_id: oracleId, name: "Forest", face_names: ["forest"],
+      layout: "normal", faces: [{ normal: "/forest.jpg", orientation: "portrait" as const }] };
+    const catalog = { [oracleId]: [printing(O1, "m21", "272"), printing(O2, "m21", "273"),
+      printing(P, "pin", "3")] };
+    const main = { [oracleId]: forest, forest };
+    vi.stubGlobal("caches", { match: vi.fn(async (url: string) =>
+      json(url.includes("printings") ? catalog : main)) });
+    env.preferences.setState({ artOverrides: {
+      [oracleId]: { scryfallId: P, setCode: "pin", collectorNumber: "3" },
+    } });
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O2, "/second-exact.jpg");
+    const pair = { set_code: "m21", collector_number: "272",
+      ...(automatic ? { automatic_art_catalog_version: 1 } : {}) };
+    const hook = renderHook(({ printing }) => env.useCardImage("Forest", {
+      oracleId, ownerPrintedRef: { oracle_id: oracleId, face_name: "Forest" },
+      ownerPrinting: printing, showOwnerPrintings: true,
+    }), { initialProps: { printing: { ...pair, collector_number: "unadmitted" } } });
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+    await settle();
+    expect(env.ownerCalls()).toEqual([]);
+    hook.rerender({ printing: pair });
+    await waitFor(() => expect(env.ownerCalls()).toHaveLength(1));
+    const requestedPrintings = env.ownerCalls()[0].groups
+      .flatMap((group) => group.requested)
+      .map(decodeCandidateKey)
+      .flatMap(([kind, [id]]) => kind === "english_printing" ? [id] : []);
+    expect(requestedPrintings).toContain(O1);
+    await settle();
+    expect(hook.result.current).toMatchObject({ src: automatic ? "/viewer.jpg" : null, isLoading: false });
+    expect(env.ownerCalls().every((request) => !request.allowRemote)).toBe(true);
+    expect(env.fetcher).not.toHaveBeenCalled();
+    hook.rerender({ printing: { ...pair, collector_number: "273" } });
+    await waitFor(() => expect(hook.result.current.src).toBe("/second-exact.jpg"));
+  });
+
+  it.each([false, true])("applies the viewer toggle to exact art, automatic=%s", async (automatic) => {
+    const env = await setup();
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/exact.jpg");
+    const printing = automatic ? { ...owner, automatic_art_catalog_version: 1 } : owner;
+    const hook = renderHook(({ enabled }) => env.useCardImage("Alpha", {
+      oracleId: A, ownerPrinting: printing, showOwnerPrintings: enabled,
+    }), { initialProps: { enabled: false } });
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+    hook.rerender({ enabled: true });
+    await waitFor(() => expect(hook.result.current.src).toBe("/exact.jpg"));
+    hook.rerender({ enabled: false });
+    expect(hook.result.current.src).toBe("/viewer.jpg");
+  });
+
+  it("keeps ordinary art during a pending exact lookup and discards a superseded provenance lookup", async () => {
+    const env = await setup({ offline: true });
+    vi.stubGlobal("caches", { match: vi.fn(async (url: string) =>
+      json(url.includes("printings") ? env.data.catalog : env.data.main)) });
+    env.installPrinting(P, "/viewer.jpg");
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let exactCalls = 0;
+    env.blockBackend(async (keys) => {
+      if (keys.some((key) => key.kind === "candidate" && decodeCandidateKey(key.key)[1][0] === O1)) {
+        if (++exactCalls === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+      }
+    });
+    const automatic: CardPrinting = { ...owner, automatic_art_catalog_version: 1 };
+    const hook = renderHook(({ pair }: { pair: CardPrinting }) => env.useCardImage("Alpha", {
+      oracleId: A, ownerPrinting: pair, showOwnerPrintings: true,
+    }), { initialProps: { pair: automatic } });
+    await entered.promise;
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+    env.installPrinting(O1, "/current.jpg");
+    hook.rerender({ pair: owner });
+    await waitFor(() => expect(hook.result.current.src).toBe("/current.jpg"));
+    const calls = env.ownerCalls().length;
+    env.installPrinting(O1, "/stale.jpg", 0, "full_card", "Qg");
+    await act(async () => { release.resolve(); });
+    await settle();
+    expect(hook.result.current.src).toBe("/current.jpg");
+    expect(hook.result.current.cardArtFailed).toBe(false);
+    expect(env.ownerCalls()).toHaveLength(calls);
+    act(() => hook.result.current.advanceFailedSource?.("/current.jpg"));
+    await waitFor(() => expect(hook.result.current.src).toBeNull());
+    hook.unmount();
+    env.installed.clear();
+    env.installPrinting(P, "/viewer.jpg");
+    const remount = renderHook(() => env.useCardImage("Alpha", {
+      oracleId: A, ownerPrinting: automatic, showOwnerPrintings: true,
+    }));
+    expect(remount.result.current.src).not.toBe("/current.jpg");
+    expect(remount.result.current.src).not.toBe("/stale.jpg");
+    await waitFor(() => {
+      expect(env.ownerCalls().length).toBeGreaterThan(calls);
+      expect(remount.result.current.src).toBe("/viewer.jpg");
+    });
+    expect(env.ownerCalls().every((request) => !request.allowRemote)).toBe(true);
+  });
+
+  it("returns ordinary failure and reload behavior after automatic exact art exhausts offline", async () => {
+    const env = await setup({ offline: true });
+    vi.stubGlobal("caches", { match: vi.fn(async (url: string) =>
+      json(url.includes("printings") ? env.data.catalog : env.data.main)) });
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/exact.jpg");
+    const hook = renderHook(() => env.useCardImage("Alpha", {
+      oracleId: A, showOwnerPrintings: true,
+      ownerPrinting: { ...owner, automatic_art_catalog_version: 1 },
+    }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/exact.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/exact.jpg"));
+    await waitFor(() => expect(hook.result.current.src).toBe("/viewer.jpg"));
+    expect(hook.result.current.cardArtFailed).toBe(false);
+    expect(hook.result.current.reload).toBeUndefined();
+    act(() => hook.result.current.advanceFailedSource?.("/viewer.jpg"));
+    await waitFor(() => expect(hook.result.current).toMatchObject({ src: null, cardArtFailed: true }));
+    expect(hook.result.current.reload).toBeTypeOf("function");
+    act(() => hook.result.current.reload?.());
+    await waitFor(() => expect(hook.result.current.src).toBe("/exact.jpg"));
+  });
+
+  it("discards an old callback when only provenance changes", async () => {
+    const env = await setup();
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/exact.jpg");
+    const hook = renderHook(({ pair }: { pair: CardPrinting }) => env.useCardImage("Alpha", {
+      oracleId: A, ownerPrinting: pair, showOwnerPrintings: true,
+    }), { initialProps: { pair: owner } });
+    await waitFor(() => expect(hook.result.current.src).toBe("/exact.jpg"));
+    const oldFailure = hook.result.current.advanceFailedSource;
+    const oldCalls = env.ownerCalls().length;
+    hook.rerender({ pair: { ...owner, automatic_art_catalog_version: 1 } });
+    await waitFor(() => {
+      expect(env.ownerCalls().length).toBeGreaterThan(oldCalls);
+      expect(hook.result.current.src).toBe("/exact.jpg");
+    });
+    const newCalls = env.ownerCalls().length;
+    act(() => oldFailure?.("/exact.jpg"));
+    await settle();
+    expect(hook.result.current.src).toBe("/exact.jpg");
+    expect(hook.result.current.cardArtFailed).toBe(false);
+    expect(env.ownerCalls()).toHaveLength(newCalls);
+    const remote = deferred<void>();
+    env.blockBackend(async (keys) => {
+      if (keys.some((key) => key.kind === "candidate" && decodeCandidateKey(key.key)[1][0] === O1)) {
+        await remote.promise;
+      }
+    });
+    act(() => hook.result.current.advanceFailedSource?.("/exact.jpg"));
+    await waitFor(() => {
+      expect(env.ownerCalls().some((request) => request.allowRemote)).toBe(true);
+      expect(hook.result.current.src).toBe("/viewer.jpg");
+    });
+    await act(async () => { remote.resolve(); });
+    await waitFor(() => expect(hook.result.current.src).toContain("https://img.example/"));
+  });
+
   it("terminates missing admitted art instead of retaining an unrelated installed printing", async () => {
     const env = await setup();
     env.installPrinting(P, "/viewer.jpg");

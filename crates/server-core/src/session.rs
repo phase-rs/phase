@@ -3259,6 +3259,56 @@ mod tests {
         assert_eq!(token2.len(), 32);
     }
 
+    #[test]
+    fn native_session_serializes_marked_art_only_for_disclosed_faces() {
+        use engine::game::zones::create_object;
+        use engine::types::{display_only::DisplayOnly, identifiers::CardId, zones::Zone};
+
+        let mut mgr = SessionManager::new();
+        let (code, host_token) = mgr.create_game(make_deck(), None);
+        let (guest_token, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let marked = serde_json::json!({
+            "set_code":"m21","collector_number":"272","automatic_art_catalog_version":1
+        });
+        let [public, hand, foretold] = {
+            let mut session = mgr.try_session(&code).unwrap();
+            [Zone::Battlefield, Zone::Hand, Zone::Exile].map(|zone| {
+                let id = create_object(
+                    &mut session.state,
+                    CardId(271),
+                    PlayerId(0),
+                    "Forest".into(),
+                    zone,
+                );
+                let object = session.state.objects.get_mut(&id).unwrap();
+                if zone == Zone::Exile {
+                    object.face_down = true;
+                    object.foretold = true;
+                }
+                let printing = serde_json::from_value(marked.clone()).unwrap();
+                object.printing = DisplayOnly::new(Some(std::sync::Arc::new(printing)));
+                object.base_printing = object.printing.clone();
+                id
+            })
+        };
+        for (token, sees_hand) in [(&host_token, true), (&guest_token, false)] {
+            let state = handle_reconnect(&mut mgr, &code, token).unwrap();
+            let wire = serde_json::to_value(state).unwrap();
+            for carrier in ["printing", "base_printing"] {
+                assert_eq!(wire["objects"][public.0.to_string()][carrier], marked);
+                for id in [hand, foretold] {
+                    let private = &wire["objects"][id.0.to_string()];
+                    assert!(private.is_object());
+                    if sees_hand {
+                        assert_eq!(private[carrier], marked);
+                    } else {
+                        assert!(private.get(carrier).is_none());
+                    }
+                }
+            }
+        }
+    }
+
     /// `GameState::new` leaves `interaction_session_id` as `None`, and while it is
     /// unset every `derive_viewer_interaction` call returns `AuthorityUnbound` with
     /// zero opportunities. Nothing self-heals it: `ensure_interaction_authority`
@@ -10209,10 +10259,7 @@ mod tests {
             section: DeckSection::MainDeck,
             name: "Forest".to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: "lea".to_string(),
-                collector_number: "294".to_string(),
-            },
+            printing: CardPrinting::owner("lea", "294"),
         }];
 
         let resolver = ConvertingResolver;

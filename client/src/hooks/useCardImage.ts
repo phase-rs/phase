@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { CardPrinting, PrintedRef } from "../adapter/types.ts";
 import { matchSourcePrinting } from "../services/artSelection.ts";
+import { automaticArtCatalogVersion } from "../services/cardImageLookup.ts";
 import { createOwnerArtCatalogReader, deriveImageUrl, imageUrlSize } from "../services/scryfall.ts";
 import type { ImageSize, OwnerArtCatalogReader, OwnerArtAuthority } from "../services/scryfall.ts";
 import { cardCandidateGroups } from "../services/visualPacks/candidateKeys.ts";
@@ -279,11 +280,10 @@ function useOwnerCardImageOverlay(input: OwnerInput | null, reload: (() => void)
 
 /**
  * Normal rendering runs unchanged, including while owner art is pending or displayed.
- * An admitted exact owner printing replaces it when ready. Missing admitted art is
- * terminal null/nonloading, never a substitution from another printing. Toggle off
- * immediately reveals the still-live normal result; pending/rejected owners do not
- * blank it or add a loading flag. Owner admission requires identity delivered with
- * its carrier (`ownerPrintedRef`, or the caller's `oracleId`); never a name lookup.
+ * A usable exact image takes precedence. When automatic exact art is pending or
+ * exhausted, the normal result stays visible. Admitted owner art retains its exact
+ * overlay through exhaustion. Admission uses the carrier's identity
+ * (`ownerPrintedRef`, or the caller's `oracleId`).
  */
 export function useCardImage(cardName: string, options?: UseCardImageOptions): CardImageResult {
   let legacyOptions: Parameters<typeof useLegacyCardImage>[1] = options;
@@ -293,6 +293,7 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): C
   }
   const normal = useLegacyCardImage(cardName, legacyOptions);
   const owner = options?.ownerPrinting;
+  const catalogVersion = automaticArtCatalogVersion(owner);
   const eligible = typeof owner?.set_code === "string" && owner.set_code.length > 0
     && typeof owner.collector_number === "string" && owner.collector_number.length > 0;
   const enabled = usePreferencesStore((state) =>
@@ -319,6 +320,7 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): C
         faceIndex,
         setCode,
         collectorNumber,
+        catalogVersion,
         size,
         language,
         offline,
@@ -331,7 +333,7 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): C
   const overlay = useOwnerCardImageOverlay(input, ownerArt.reload);
   // Whether some surface of the card failed is the card's, read under the owner
   // art's own oracle id, and another surface's failure is worth a reload too.
-  const result = overlay
+  const result = overlay && (catalogVersion === null || overlay.src)
     ? {
         ...overlay,
         cardArtFailed: ownerArt.failed,
