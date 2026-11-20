@@ -1225,6 +1225,23 @@ fn split_for_each_marker(lower: &str) -> Option<(&str, &str)> {
     Some((&lower[..prefix_len], &lower[remainder_start..]))
 }
 
+/// The pinned MTGJSON AtomicCards corpus has no printed predicate with a
+/// quoted "for every" count followed by an outer "for every" power modifier.
+/// This combines Biorganic Carapace's quoted count shape with Dark Matter
+/// Manipulator's outer wording to exercise the marker scan across the quote.
+#[cfg(test)]
+#[test]
+fn split_for_each_marker_skips_quoted_count_and_finds_outer_count() {
+    let predicate = r#"has "{t}: draw a card for every seven cards in your graveyard." and gets +2/+0 for every seven cards in your graveyard"#;
+    assert_eq!(
+        split_for_each_marker(predicate),
+        Some((
+            r#"has "{t}: draw a card for every seven cards in your graveyard." and gets +2/+0 "#,
+            "seven cards in your graveyard",
+        ))
+    );
+}
+
 /// CR 613.4c: A compound of repeated dynamic pump terms — "gets +N/+M for each X
 /// and +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
 /// by its own count. Either term may also use "for every". Splits on the " and "

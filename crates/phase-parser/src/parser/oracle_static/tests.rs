@@ -189,49 +189,48 @@ fn dynamic_for_each_pump_recovers_trailing_quoted_ability() {
     );
 }
 
-/// CR 107.1a + CR 608.2c + CR 613.4c: "for every N" counts complete groups
-/// before the printed P/T coefficient is applied, and shares the grammar with
-/// the established "for each N" spelling.
+/// Dark Matter Manipulator's printed static counts complete groups of seven.
+/// CR 109.5 binds "your" to the current controller. The +2 power modifier
+/// applies in layer 7c (CR 613.4c).
 #[test]
 fn dynamic_for_every_pt_counts_complete_groups() {
+    let defs = parse_static_line_multi(
+        "This creature gets +2/+0 for every seven cards in your graveyard.",
+    );
     let expected = QuantityExpr::Multiply {
-        factor: 3,
+        factor: 2,
         inner: Box::new(QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::ZoneCardCount {
                     zone: ZoneRef::Graveyard,
-                    card_types: vec![TypeFilter::Land],
+                    card_types: vec![],
                     scope: CountScope::Controller,
                     filter: None,
                 },
             }),
-            divisor: 2,
+            divisor: 7,
             rounding: RoundingMode::Down,
         }),
     };
 
-    for marker in ["every", "each"] {
-        let line =
-            format!("This creature gets +3/+0 for {marker} two land cards in your graveyard.");
-        let defs = parse_static_line_multi(&line);
-        assert_eq!(defs.len(), 1, "one self-static must parse: {line}");
-        assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef), "{line}");
-        assert_eq!(
-            defs[0].modifications,
-            vec![ContinuousModification::AddDynamicPower {
-                value: expected.clone(),
-            }],
-            "must count complete groups, then apply +3 power: {line}"
-        );
-    }
+    assert_eq!(defs.len(), 1, "one self-static must parse");
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddDynamicPower { value: expected }],
+        "each complete group of seven cards must add +2 power and leave toughness intact"
+    );
 }
 
-/// CR 107.1a + CR 613.4c: repeated P/T terms may use either marker and retain
-/// their own count expressions and source order.
+/// Eidolon of Countless Battles repeats "for each" in a P/T pump. Dark Matter
+/// Manipulator uses "for every". The pinned MTGJSON AtomicCards corpus has no
+/// printed repeated pump that mixes the two spellings. This fixture uses
+/// "for every" in the second term to exercise the repeated-term boundary.
+/// Both power modifiers apply in layer 7c (CR 613.4c).
 #[test]
 fn dynamic_for_each_and_for_every_pt_terms_keep_order() {
     let defs = parse_static_line_multi(
-        "This creature gets +1/+0 for every three cards in your graveyard and +2/+0 for each land card in your graveyard.",
+        "This creature gets +2/+0 for each land card in your graveyard and +1/+0 for every three cards in your graveyard.",
     );
     assert_eq!(defs.len(), 1, "one self-static must parse");
     assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
@@ -247,6 +246,21 @@ fn dynamic_for_each_and_for_every_pt_terms_keep_order() {
     assert_eq!(power_values.len(), 2, "both dynamic terms must survive");
     assert_eq!(
         power_values[0],
+        &QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Land],
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+        },
+        "the leading for-each term keeps its +2 coefficient and land filter"
+    );
+    assert_eq!(
+        power_values[1],
         &QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::ZoneCardCount {
@@ -259,27 +273,15 @@ fn dynamic_for_each_and_for_every_pt_terms_keep_order() {
             divisor: 3,
             rounding: RoundingMode::Down,
         },
-        "the leading for-every term counts full groups of three cards"
-    );
-    assert_eq!(
-        power_values[1],
-        &QuantityExpr::Multiply {
-            factor: 2,
-            inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::ZoneCardCount {
-                    zone: ZoneRef::Graveyard,
-                    card_types: vec![TypeFilter::Land],
-                    scope: CountScope::Controller,
-                    filter: None,
-                },
-            }),
-        },
-        "the second for-each term keeps its +2 coefficient and land filter"
+        "the second for-every term counts complete groups of three cards"
     );
 }
 
-/// CR 613.4c: a quoted activated ability owns its inner "for every" marker. It
-/// must not turn a fixed outer pump into a dynamic graveyard count.
+/// Biorganic Carapace grants a quoted ability that uses "for each". The pinned
+/// MTGJSON AtomicCards corpus has no fixed P/T pump with a quoted ability using
+/// "for every", so this fixture exercises that combination. The quoted count
+/// belongs to the activated ability's effect (CR 602.1). The outer fixed P/T
+/// modifier applies in layer 7c (CR 613.4c).
 #[test]
 fn fixed_pt_keeps_quoted_for_every_count_inside_granted_ability() {
     let defs = parse_static_line_multi(

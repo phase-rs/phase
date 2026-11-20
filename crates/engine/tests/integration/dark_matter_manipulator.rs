@@ -4,9 +4,10 @@
 //! > When this creature enters, mill three cards.
 //! > This creature gets +2/+0 for every seven cards in your graveyard.
 //!
-//! CR 107.1a + CR 608.2c: only complete groups of seven count. CR 109.5 binds
-//! "your" in this static ability to its current controller. CR 611.3a-b and
-//! CR 613.4c: the +2 power effect updates continuously as the graveyard changes.
+//! The printed text counts complete groups of seven. CR 109.5 binds "your" to
+//! this creature's current controller. The power modifier applies in layer 7c
+//! (CR 613.4c) and updates as the graveyard changes while this creature remains
+//! on the battlefield and has the ability (CR 604.2 + CR 611.3a + CR 611.3b).
 //! The ETB mill sentence remains in the fixture so it carries the card's full
 //! Oracle text while this test isolates the static ability.
 
