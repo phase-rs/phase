@@ -206,6 +206,7 @@ mod ivory_gargoyle_temporal_and_skip_tail;
 mod jace_multiverse_architect;
 mod jace_vryns_prodigy_transform;
 mod jace_wielder_empty_library_win;
+mod jadar_ghoulcaller_intervening_if;
 mod jagged_lightning_each_of_two_targets;
 mod jaws_of_defeat;
 mod jeskai_ascendancy_pump_untap_anaphora_6857;
