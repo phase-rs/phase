@@ -1555,7 +1555,6 @@
     },
     "search": {
       "title": "Procurar no Grimório",
-      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Escolha {{count}} carta",
       "subtitleExact_other": "Escolha {{count}} cartas",
       "subtitleUpTo_one": "Escolha até {{count}} carta",
@@ -2026,7 +2025,8 @@
     "scrollLeft": "Rolar para a esquerda",
     "scrollRight": "Rolar para a direita",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2598,6 +2598,9 @@
     "partitionSubtitle": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma.",
     "partitionSubtitleRemaining_one": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogador a mais depois de você)",
     "partitionSubtitleRemaining_other": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogadores a mais depois de você)",
+    "partitionInstruction": "{{chooser}} escolhe uma",
+    "partitionInstructionRemaining_one": "{{chooser}} escolhe uma ({{count}} jogador a mais depois de você)",
+    "partitionInstructionRemaining_other": "{{chooser}} escolhe uma ({{count}} jogadores a mais depois de você)",
     "pileALabel": "Pilha A:",
     "pileBLabel": "Pilha B:",
     "pileAria": "{{name}} — pilha {{pile}}",
