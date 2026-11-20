@@ -8348,7 +8348,10 @@ fn refine_swallow_text(face: &CardFace, gap_details: &mut [GapDetail]) {
                     description,
                     ..
                 } if warned == detector => Some(description.as_str()),
-                _ => None,
+                OracleDiagnostic::SwallowedClause { .. }
+                | OracleDiagnostic::TargetFallback { .. }
+                | OracleDiagnostic::IgnoredRemainder { .. }
+                | OracleDiagnostic::CascadeLoss { .. } => None,
             });
         if let Some(clause) = description.and_then(|text| swallow_clause_text(text, oracle)) {
             gap.source_text = Some(clause);
