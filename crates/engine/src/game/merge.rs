@@ -673,7 +673,8 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// split into (CR 730.3) must receive the same action too — otherwise a flicker
 /// returns only the survivor and strands the other components in exile.
 ///
-/// Given the objects a *continuity* reference resolved to, append each survivor's
+/// Given the objects a *continuity* reference (`ParentTarget`,
+/// `TriggeringSource`, `ExiledBySource`) resolved to, append each survivor's
 /// co-departed sibling components that are still co-located in the same zone, in
 /// deterministic id order. The caller (the `ChangeZone` return loop, or
 /// `ChangeZoneAll`'s linked-exile return) then applies its move to the whole
@@ -686,6 +687,9 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// resolved object is a former survivor with co-located components. A freshly
 /// chosen target (Riftsweeper choosing one exiled card; reanimating one specific
 /// card) carries no departure evidence for that object and must not over-return.
+/// A tracked-set filter expands per resolved referent from the set's recorded
+/// departures ([`expand_tracked_set_referents`]); co-location is not evidence
+/// for a tracked set (CR 730.3c).
 pub(crate) fn expand_returned_merge_components(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -707,12 +711,80 @@ pub(crate) fn expand_returned_merge_components(
         }
         return expanded;
     }
+    // CR 730.3c + CR 400.7: a tracked-set referent's components come from the
+    // set's recorded battlefield departures (D2), per resolved referent; never
+    // from co-location.
+    if matches!(
+        target_filter,
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+    ) {
+        return expand_tracked_set_referents(state, ability, resolved, target_filter);
+    }
     let mut expanded = resolved.clone();
     for &survivor_id in &resolved {
         if !referent_records_departure(state, ability, target_filter, survivor_id) {
             continue;
         }
         let components = co_split_components(state, survivor_id, &expanded);
+        expanded.extend(components);
+    }
+    expanded
+}
+
+/// CR 730.3c + CR 400.7 + CR 608.2c: the bound move path over a tracked set.
+/// Each resolved referent that is a member of the bound set, and whose
+/// battlefield departure the set recorded, expands to the objects split at that
+/// departure: a split object that is itself a member is found as a member; any
+/// other only through the reader's D7 gate and its member's producer action
+/// ([`tracked_set_finds_component`]). Expansion is per referent, never
+/// set-wide: a referent the set did not move (a chosen card) and a set that
+/// recorded no battlefield departure (a membership-only set) expand to nothing.
+/// The referent object need not still exist (CR 704.5d): the recorded
+/// departure, not the survivor, is the evidence.
+fn expand_tracked_set_referents(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    resolved: Vec<ObjectId>,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let (set_id, caused_by) =
+        match targeting::resolve_tracked_set_sentinel(state, target_filter.clone()) {
+            TargetFilter::TrackedSet { id } => (id, None),
+            TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (id, caused_by),
+            // The combat-damage source rung yields a source filter, not a set:
+            // no recorded departure to read (E3), no expansion.
+            _ => return resolved,
+        };
+    let Some(members) = state.tracked_object_sets.get(&set_id) else {
+        return resolved;
+    };
+    let mut expanded = resolved.clone();
+    for referent in resolved {
+        if !members.contains(&referent) {
+            continue;
+        }
+        let Some(successor) = member_departure_successor(state, set_id, referent) else {
+            continue;
+        };
+        let mut components: Vec<ObjectId> = state
+            .objects
+            .iter()
+            .filter(|(id, obj)| {
+                obj.split_from_merge_survivor == Some(successor) && !expanded.contains(id)
+            })
+            .map(|(id, _)| *id)
+            .filter(|id| {
+                members.contains(id)
+                    || tracked_set_finds_component(
+                        state,
+                        set_id,
+                        *id,
+                        Some(ability),
+                        caused_by.as_ref(),
+                    )
+            })
+            .collect();
+        components.sort_by_key(|id| id.0);
         expanded.extend(components);
     }
     expanded
@@ -750,8 +822,12 @@ fn is_terminal_shuffle_move(effect: &Effect) -> bool {
 ///   other object is not evidence for this one.
 /// * `TriggeringSource`: the trigger event is this referent's own departure
 ///   from the battlefield.
-/// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
-///   earlier move in the chain; those already record a departure.
+/// * `ExiledBySource` is formed by an earlier move in the chain and records a
+///   departure.
+///
+/// Tracked-set filters never reach this function:
+/// [`expand_tracked_set_referents`] answers them from the set's recorded
+/// departures.
 ///
 /// `SelfRef` is answered separately by [`recorded_departure_components`],
 /// which requires the trigger's own departure event.
@@ -787,9 +863,7 @@ fn referent_records_departure(
                         && pin.incarnation.checked_add(1) == Some(current.incarnation)
                 })
         }
-        TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ExiledBySource => true,
+        TargetFilter::ExiledBySource => true,
         TargetFilter::TriggeringSource => matches!(
             state.current_trigger_event.as_ref(),
             Some(GameEvent::ZoneChanged {

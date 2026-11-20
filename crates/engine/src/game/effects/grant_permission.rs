@@ -105,20 +105,25 @@ pub fn resolve(
         // `effects::publish_tracked_set`. Deliberately not routed through
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
+        // CR 730.3c + CR 608.2c (D7, B1): the highest-id binding is the chain
+        // rung only when it is `chain_tracked_set_id` (`targeting::chain_rung_root`);
+        // then E1's static count over this grant's own chain decides the finding.
+        // Any other binding finds raw members.
         TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         } => state
             .tracked_object_sets
-            .iter()
-            .max_by_key(|(id, _)| id.0)
-            .map(|(id, objects)| (objects.clone(), Some(*id)))
+            .keys()
+            .max_by_key(|id| id.0)
+            .map(|id| {
+                (
+                    crate::game::merge::tracked_set_found_objects(state, *id, Some(ability), None),
+                    Some(*id),
+                )
+            })
             .unwrap_or_default(),
         TargetFilter::TrackedSet { id } => (
-            state
-                .tracked_object_sets
-                .get(id)
-                .cloned()
-                .unwrap_or_default(),
+            crate::game::merge::tracked_set_found_objects(state, *id, Some(ability), None),
             Some(*id),
         ),
         TargetFilter::ParentTarget => {
@@ -1431,6 +1436,276 @@ mod tests {
                 &state.objects[&exiled].mana_cost
             ),
             "AnyTypeOrColor should let red mana pay for a blue spell"
+        );
+    }
+
+    /// R-RR. Reno and Rude: "Menace\nWhenever Reno and Rude deals combat damage
+    /// to a player, exile the top card of that player's library. Then you may
+    /// sacrifice another creature or artifact. If you do, you may play the
+    /// exiled card this turn, and mana of any type can be spent to cast it."
+    ///
+    /// Board: a Soldier token with Gemrazer merged under it; Rest in Peace ("When
+    /// this enchantment enters, exile all graveyards.\nIf a card or token would
+    /// be put into a graveyard from anywhere, exile it instead."); the damaged
+    /// player's library is empty. The trigger exiles nothing and sacrifices the
+    /// token (CR 701.21a); Rest in Peace exiles the token and its component
+    /// instead (CR 614.1a, CR 730.3). The set holds only the token.
+    ///
+    /// CR 730.3c + CR 608.2c: "the exiled card" is what the library exile
+    /// produced; the line has two publishers (`ExileTop`, `Sacrifice`), so the
+    /// grant's chain rung refuses the finding (D7, B1) and Gemrazer, an exiled
+    /// card the trigger never exiled from the library, gains no permission.
+    ///
+    /// START (`78d7440488`): Gemrazer has no `PlayFromExile` (raw grant).
+    /// Mutation (r5's grant-as-E2: a grant reader skips the chain rung and the
+    /// publisher count and keeps only the stamp veto): Gemrazer gains `PlayFromExile`.
+    #[test]
+    fn reno_and_rude_grant_does_not_reach_a_sacrificed_tokens_component() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::merge_tests::finding::{merge_under, GEMRAZER};
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::ThisWayCause;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        const RENO_AND_RUDE: &str = "Menace\nWhenever Reno and Rude deals combat damage to a player, exile the top card of that player's library. Then you may sacrifice another creature or artifact. If you do, you may play the exiled card this turn, and mana of any type can be spent to cast it.";
+        const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C"]);
+        let reno = scenario
+            .add_creature_from_oracle(P0, "Reno and Rude", 2, 1, RENO_AND_RUDE)
+            .with_subtypes(vec!["Human", "Assassin"])
+            .id();
+        let token = scenario
+            .add_creature(P0, "Soldier", 1, 1)
+            .with_subtypes(vec!["Soldier"])
+            .id();
+        let gemrazer = scenario
+            .add_creature_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
+            .with_subtypes(vec!["Beast"])
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+        merge_under(&mut runner, gemrazer, token);
+        {
+            // SYNTHETIC STEP: Reno and Rude may attack this turn.
+            let turn = runner.state().turn_number;
+            let reno_object = runner.state_mut().objects.get_mut(&reno).unwrap();
+            reno_object.summoning_sick = false;
+            reno_object.entered_battlefield_turn = Some(turn.saturating_sub(1));
+        }
+        assert!(
+            runner.state().players[1].library.is_empty(),
+            "reach guard: the damaged player's library is empty"
+        );
+
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(reno, AttackTarget::Player(P1))])
+            .expect("Reno and Rude attacks");
+        let _ = runner.combat_damage();
+        // The trigger's "you may sacrifice" prompt is P0's; `DecideOptionalEffect`
+        // is accepted only while that prompt is pending, so the answer itself
+        // proves the prompt kind (the CR 603.5 prompt census pins every source
+        // site that names the prompt variant, so this fixture does not).
+        assert_eq!(
+            runner.state().waiting_for.acting_player(),
+            Some(P0),
+            "the trigger's optional sacrifice is offered to its controller"
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("sacrifice the token");
+
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty(),
+            "the trigger resolved: {:?}",
+            state.waiting_for
+        );
+        let set = state
+            .chain_tracked_set_id
+            .expect("reach guard: the trigger published its chain set");
+        assert_eq!(
+            state.tracked_object_sets.get(&set),
+            Some(&vec![token]),
+            "reach guard: the set holds only the sacrificed token"
+        );
+        assert_eq!(
+            state
+                .tracked_set_member_causes
+                .get(&set)
+                .and_then(|causes| causes.get(&token))
+                .copied(),
+            Some(ThisWayCause::Sacrificed),
+            "reach guard: the token is stamped Sacrificed (CR 701.21a)"
+        );
+        assert!(
+            !state.objects.contains_key(&token),
+            "CR 704.5d: the token ceased to exist"
+        );
+        let gem = &state.objects[&gemrazer];
+        assert_eq!(
+            gem.zone,
+            Zone::Exile,
+            "CR 614.1a: Rest in Peace exiled the component instead"
+        );
+        assert_eq!(
+            gem.split_from_merge_survivor,
+            Some(ObjectIncarnationRef {
+                object_id: token,
+                incarnation: 1,
+            }),
+            "reach guard: Gemrazer is pinned to the token's successor"
+        );
+        assert!(
+            !gem.casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::PlayFromExile { .. })),
+            "CR 730.3c + CR 608.2c: two publishers, so the grant does not find Gemrazer: {:?}",
+            gem.casting_permissions
+        );
+    }
+
+    fn play_from_exile_grant(single_use: bool) -> Effect {
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
+                duration: Duration::UntilEndOfTurn,
+                granted_to: PlayerId(0),
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: Some(
+                    crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+                ),
+                card_filter: None,
+                single_use_group: None,
+                single_use,
+                cast_cost_modifier: None,
+                alt_ability_cost: None,
+                without_paying_mana_cost: false,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
+            },
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            grantee: PermissionGrantee::AbilityController,
+        }
+    }
+
+    fn single_use_groups(
+        state: &GameState,
+        id: crate::types::identifiers::ObjectId,
+    ) -> Vec<Option<TrackedSetId>> {
+        state.objects[&id]
+            .casting_permissions
+            .iter()
+            .filter_map(|p| match p {
+                CastingPermission::PlayFromExile {
+                    single_use: true,
+                    single_use_group,
+                    ..
+                } => Some(*single_use_group),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// R9. CR 730.3c + CR 611.2a: a single-use grant over a chain set stamps
+    /// every object the set finds, the component of a sacrificed merged member
+    /// included, and spending the grant strips every stamp wherever it sits; a
+    /// membership-only set stamps its members only.
+    ///
+    /// Nearest printed card: Heartless Conscription ("Exile all creatures. For
+    /// each card exiled this way, you may play that card for as long as it
+    /// remains exiled, and mana of any type can be spent to cast that spell.
+    /// Exile Heartless Conscription."). SYNTHETIC: every printed grant over a
+    /// tracked set reads an exile set, whose components are already members, or
+    /// has two or more publishers, so no printed grant finds a non-member
+    /// component; the graveyard board is staged by hand.
+    ///
+    /// START (`78d7440488`): the rider carries no stamp after the grant.
+    /// Mutations: revert the grant routing -> rider unstamped; restore the
+    /// sweep's "members + exile" legs -> the graveyard rider keeps its stamp.
+    #[test]
+    fn r9_single_use_grant_stamps_and_the_sweep_strips_a_found_component() {
+        use crate::game::merge_tests::finding::{departed_merged, install_chain, sacrifice_effect};
+
+        for membership_only in [false, true] {
+            let mut d = departed_merged(false);
+            if membership_only {
+                d.state.tracked_set_member_origins.remove(&d.set);
+            }
+            let reader = install_chain(
+                &mut d.state,
+                vec![sacrifice_effect(), play_from_exile_grant(true)],
+            );
+            let mut events = Vec::new();
+            resolve(&mut d.state, &reader, &mut events).expect("the grant resolves");
+            assert_eq!(
+                single_use_groups(&d.state, d.host),
+                vec![Some(d.set)],
+                "the member carries the group"
+            );
+            assert_eq!(
+                single_use_groups(&d.state, d.rider),
+                if membership_only {
+                    vec![]
+                } else {
+                    vec![Some(d.set)]
+                },
+                "membership_only {membership_only}"
+            );
+            crate::game::casting::consume_single_use_play_from_exile(&mut d.state, d.set);
+            assert_eq!(single_use_groups(&d.state, d.host), vec![]);
+            assert_eq!(
+                single_use_groups(&d.state, d.rider),
+                vec![],
+                "the sweep strips the group wherever it sits"
+            );
+        }
+    }
+
+    /// R-RR-B. R-RR's positive control. CR 730.3c + CR 608.2c: from a line with
+    /// ONE publisher before the grant, the chain rung admits the finding, so the
+    /// grant stamps the component of a sacrificed token-topped merged member.
+    ///
+    /// Nearest printed card: Reno and Rude. SYNTHETIC: every printed grant over
+    /// a tracked set has an exile producer or two or more publishers, so no
+    /// printed card shows a single non-exile publisher before a grant.
+    ///
+    /// START (`78d7440488`): the rider carries no stamp (raw grant).
+    /// Mutation: revert the grant routing -> the same.
+    #[test]
+    fn r_rr_b_one_publisher_grant_finds_the_component() {
+        use crate::game::merge_tests::finding::{
+            departed_merged_to, install_chain, sacrifice_effect,
+        };
+
+        let mut d = departed_merged_to(true, Zone::Exile);
+        let reader = install_chain(
+            &mut d.state,
+            vec![sacrifice_effect(), play_from_exile_grant(false)],
+        );
+        let mut events = Vec::new();
+        resolve(&mut d.state, &reader, &mut events).expect("the grant resolves");
+        let has_permission = |id| {
+            d.state.objects[&id]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::PlayFromExile { .. }))
+        };
+        assert!(has_permission(d.host), "the member is granted");
+        assert!(
+            has_permission(d.rider),
+            "one publisher: the component the member split into is found (CR 730.3c)"
         );
     }
 }

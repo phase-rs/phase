@@ -2515,17 +2515,21 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         }
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
             let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
+            // CR 730.3c (D2 enumeration form): the members, then the components
+            // the reader finds under its D7 gate; the retain below is the same
+            // predicate (`filter.rs`), read with the same reader.
             let target_ids: Vec<ObjectId> = match &effective_filter {
-                TargetFilter::TrackedSet { id } => state
-                    .tracked_object_sets
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_default(),
-                TargetFilter::TrackedSetFiltered { id, .. } => state
-                    .tracked_object_sets
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_default(),
+                TargetFilter::TrackedSet { id } => {
+                    super::merge::tracked_set_found_objects(state, *id, ctx.ability, None)
+                }
+                TargetFilter::TrackedSetFiltered { id, caused_by, .. } => {
+                    super::merge::tracked_set_found_objects(
+                        state,
+                        *id,
+                        ctx.ability,
+                        caused_by.as_ref(),
+                    )
+                }
                 _ => state.battlefield.iter().copied().collect(),
             };
             target_ids

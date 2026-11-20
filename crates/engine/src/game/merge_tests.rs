@@ -1906,6 +1906,11 @@ pub(crate) mod finding {
     /// stamped `Sacrificed` (so the producing origin records the battlefield
     /// departure). `token_topped` makes the host a token with the rider beneath it.
     pub(crate) fn departed_merged(token_topped: bool) -> Departed {
+        departed_merged_to(token_topped, Zone::Graveyard)
+    }
+
+    /// [`departed_merged`] with the survivor's destination zone chosen.
+    pub(crate) fn departed_merged_to(token_topped: bool, destination: Zone) -> Departed {
         let (mut state, host, rider, _p0) = two_creatures();
         state.battlefield.retain(|&id| id != rider);
         let mut events = Vec::new();
@@ -1916,7 +1921,7 @@ pub(crate) mod finding {
             MergeSide::Top
         };
         merge_object_onto(&mut state, rider, host, side, &mut events);
-        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, host, destination, &mut events);
         effects::publish_tracked_set_with_causes(
             &mut state,
             vec![(host, Some(ThisWayCause::Sacrificed))],
@@ -2306,5 +2311,475 @@ pub(crate) mod finding {
             Vec::<(ObjectId, ObjectId)>::new(),
             "the fast path: no battlefield-departure origin, no components"
         );
+    }
+
+    // ---- Phase 3 synthetic building-block rows (R2g, R-CS) ----
+
+    fn tracked_set_0() -> TargetFilter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        }
+    }
+
+    /// R2g. CR 730.3c (D2 enumeration form): the targeting enumerator over a
+    /// tracked-set filter returns the members, then the components its reader
+    /// finds, and agrees with the filter predicate for every object.
+    ///
+    /// Nearest printed card: Bringer of the Last Gift (sacrifice, then return
+    /// those). SYNTHETIC: no printed card exhibits a discriminating board for
+    /// the enumerator alone, and the merge, the sacrifice and the resolution
+    /// carrier are staged by hand.
+    ///
+    /// START (`78d7440488`): the enumerator returns `[host]` for the first three
+    /// filters while the predicate admits both (disagreement).
+    /// Mutation: revert the targeting enumerator's routing → `[host]`.
+    #[test]
+    fn r2g_enumerator_agrees_with_the_predicate() {
+        use crate::game::filter::{matches_target_filter, FilterContext};
+
+        let mut d = departed_merged(false);
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        let tsf = |caused_by| TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter: Box::new(TargetFilter::Any),
+            caused_by,
+        };
+        let cases = [
+            (tracked_set_0(), vec![d.host, d.rider]),
+            (tsf(None), vec![d.host, d.rider]),
+            (tsf(Some(ThisWayCause::Sacrificed)), vec![d.host, d.rider]),
+            (tsf(Some(ThisWayCause::Exiled)), vec![]),
+        ];
+        let ctx = FilterContext::from_ability(&reader);
+        for (filter, expected) in cases {
+            let found =
+                crate::game::targeting::resolved_object_ids_for_filter(&d.state, &reader, &filter);
+            assert_eq!(found, expected, "enumerator over {filter:?}");
+            let bound =
+                crate::game::targeting::resolve_tracked_set_sentinel(&d.state, filter.clone());
+            for id in [d.host, d.rider] {
+                assert_eq!(
+                    found.contains(&id),
+                    matches_target_filter(&d.state, id, &bound, &ctx),
+                    "enumerator and predicate agree on {id:?} over {filter:?}"
+                );
+            }
+        }
+
+        // Membership-only control: no recorded battlefield departure, no component.
+        let mut m = departed_merged(false);
+        m.state.tracked_set_member_origins.remove(&m.set);
+        let reader = install_chain(&mut m.state, vec![sacrifice_effect(), reader_effect()]);
+        assert_eq!(
+            crate::game::targeting::resolved_object_ids_for_filter(
+                &m.state,
+                &reader,
+                &tracked_set_0()
+            ),
+            vec![m.host],
+            "a membership-only set finds its members only"
+        );
+    }
+
+    fn return_to_battlefield() -> Effect {
+        let mut effect = reader_effect();
+        if let Effect::ChangeZone { target, .. } = &mut effect {
+            *target = tracked_set_0();
+        }
+        effect
+    }
+
+    /// R-CS. CR 730.3c + CR 400.7 + CR 704.5d: the bound move path expands a
+    /// tracked-set referent from the set's recorded battlefield departure, not
+    /// from the survivor object, so a ceased token survivor still yields its
+    /// component; two publishers before the reader are E3 and find nothing.
+    ///
+    /// Nearest printed card: Victimize, the one printed bound-path reader whose
+    /// chain has a single publisher that records a battlefield departure.
+    /// SYNTHETIC: within the publishing resolution a token survivor still exists
+    /// (a token ceases only at a state-based-action check, CR 704.3), so the row
+    /// runs the check by hand.
+    ///
+    /// START (`78d7440488`): token-topped one publisher `[host]` (the component
+    /// is missed: `co_split_components` needs the survivor object); card-topped
+    /// two publishers `[host, rider]` (co-location under E3).
+    /// Mutation: revert step 1 → those two values.
+    #[test]
+    fn r_cs_bound_path_follows_the_recorded_departure_of_a_ceased_survivor() {
+        for token_topped in [false, true] {
+            let mut d = departed_merged(token_topped);
+            let mut events = Vec::new();
+            crate::game::sba::check_state_based_actions(&mut d.state, &mut events);
+            assert_eq!(
+                d.state.objects.contains_key(&d.host),
+                !token_topped,
+                "reach guard: a token survivor ceased (CR 704.5d), a card survivor did not"
+            );
+            let bound =
+                crate::game::targeting::resolve_tracked_set_sentinel(&d.state, tracked_set_0());
+            let mut one = install_chain(
+                &mut d.state,
+                vec![sacrifice_effect(), return_to_battlefield()],
+            );
+            one.targets = vec![crate::types::ability::TargetRef::Object(d.host)];
+            assert_eq!(
+                crate::game::effects::change_zone::bound_move_members(&d.state, &one, &bound),
+                vec![d.host, d.rider],
+                "one publisher, token_topped={token_topped}"
+            );
+            let mut two = install_chain(
+                &mut d.state,
+                vec![
+                    sacrifice_effect(),
+                    sacrifice_effect(),
+                    return_to_battlefield(),
+                ],
+            );
+            two.targets = vec![crate::types::ability::TargetRef::Object(d.host)];
+            assert_eq!(
+                crate::game::effects::change_zone::bound_move_members(&d.state, &two, &bound),
+                vec![d.host],
+                "two publishers are E3: no component, token_topped={token_topped}"
+            );
+        }
+    }
+
+    // ---- Phase 3 real-card rows (R-VZ, R-GM, R-FL) and the shared staging helper ----
+
+    use crate::game::scenario::GameRunner;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
+
+    /// Gemrazer, verbatim (MTGJSON `AtomicCards.json`): the rider of every
+    /// real-card merged row.
+    pub(crate) const GEMRAZER: &str = "Mutate {1}{G}{G} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nReach, trample\nWhenever this creature mutates, destroy target artifact or enchantment an opponent controls.";
+    const MURDER: &str = "Destroy target creature.";
+    const VICTIMIZE: &str = "Choose two target creature cards in your graveyard. Sacrifice a creature. If you do, return the chosen cards to the battlefield tapped.";
+    const GRUESOME_MENAGERIE: &str = "Choose a creature card with mana value 1 in your graveyard, then do the same for creature cards with mana value 2 and 3. Return those cards to the battlefield.";
+    const EPHEMERATE: &str = "Exile target creature you control, then return it to the battlefield under its owner's control.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
+
+    fn pool(color: ManaType, count: usize) -> Vec<ManaUnit> {
+        (0..count)
+            .map(|_| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect()
+    }
+
+    /// SYNTHETIC STEP (precedent: `tests/integration/tracked_set_zone_scan_merged.rs`):
+    /// merge `rider` under `host` with `merge_object_onto` instead of a real
+    /// mutate cast (CR 730.2); the rider leaves hand and battlefield first, as a
+    /// resolving mutate spell would.
+    pub(crate) fn merge_under(runner: &mut GameRunner, rider: ObjectId, host: ObjectId) {
+        let state = runner.state_mut();
+        for player in state.players.iter_mut() {
+            player.hand.retain(|&id| id != rider);
+        }
+        state.battlefield.retain(|&id| id != rider);
+        let mut events = Vec::new();
+        merge_object_onto(state, rider, host, MergeSide::Bottom, &mut events);
+        state.battlefield.retain(|&id| id != rider);
+        assert_eq!(
+            state.objects[&host].merged_components.len(),
+            2,
+            "reach guard: the survivor is a merged permanent of two components"
+        );
+    }
+
+    fn assert_settled(runner: &GameRunner) {
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                && runner.state().stack.is_empty(),
+            "resolution completed: {:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// R-VZ. Victimize: "Choose two target creature cards in your graveyard.
+    /// Sacrifice a creature. If you do, return the chosen cards to the
+    /// battlefield tapped."
+    ///
+    /// Board: a host with Gemrazer merged under it is destroyed by Murder
+    /// ("Destroy target creature.", CR 701.8a), so both cards are in the
+    /// graveyard and Gemrazer is pinned to the host's successor (CR 730.3). A
+    /// second creature card is in the graveyard; one fodder creature is on the
+    /// battlefield. Victimize targets the host card and the other card and
+    /// sacrifices the fodder (CR 701.21a), which is the set's one member.
+    ///
+    /// CR 730.3c + CR 400.7: "the chosen cards" are two targeted graveyard
+    /// cards, not "the new object that a merged permanent becomes as it leaves
+    /// the battlefield". Exactly those two return; Gemrazer stays.
+    ///
+    /// START (`78d7440488`): Gemrazer also returns (co-location over-find).
+    /// Mutation: revert steps 1a and 1c together → Gemrazer returns (1a alone leaves this row green).
+    #[test]
+    fn victimize_returns_only_the_chosen_cards() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, pool(ManaType::Black, 6));
+        scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C"]);
+        let victimize = scenario
+            .add_spell_to_hand_from_oracle(P0, "Victimize", false, VICTIMIZE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Black],
+            })
+            .id();
+        let murder = scenario
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            })
+            .id();
+        let host = scenario
+            .add_creature(P0, "Host Beast", 2, 2)
+            .with_subtypes(vec!["Beast"])
+            .id();
+        let gemrazer = scenario
+            .add_creature_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
+            .with_subtypes(vec!["Beast"])
+            .id();
+        let fodder = scenario.add_creature(P0, "Fodder", 1, 1).id();
+        let other = scenario.add_creature_to_graveyard(P0, "Other", 2, 2).id();
+        let mut runner = scenario.build();
+        merge_under(&mut runner, gemrazer, host);
+
+        let _ = runner.cast(murder).target_object(host).resolve();
+        assert_settled(&runner);
+        {
+            let state = runner.state();
+            assert_eq!(state.objects[&host].zone, Zone::Graveyard);
+            assert_eq!(
+                state.objects[&gemrazer].zone,
+                Zone::Graveyard,
+                "CR 730.3: the component went to the graveyard with the host"
+            );
+            assert_eq!(
+                state.objects[&gemrazer].split_from_merge_survivor,
+                Some(ObjectIncarnationRef::from_object(&state.objects[&host])),
+                "reach guard: Gemrazer is pinned to the host's successor (co-located)"
+            );
+        }
+
+        let outcome = runner
+            .cast(victimize)
+            .target_objects(&[host, other])
+            .effect_zone(&[fodder])
+            .resolve();
+        assert_settled(&runner);
+        assert_eq!(
+            outcome.zone_of(fodder),
+            Zone::Graveyard,
+            "reach guard: the fodder was sacrificed (CR 701.21a)"
+        );
+        assert_eq!(
+            [outcome.zone_of(host), outcome.zone_of(other)],
+            [Zone::Battlefield, Zone::Battlefield],
+            "the two chosen cards return"
+        );
+        assert_eq!(
+            outcome.zone_of(gemrazer),
+            Zone::Graveyard,
+            "CR 730.3c + CR 400.7: Gemrazer was not chosen and stays in the graveyard"
+        );
+    }
+
+    /// R-GM. Gruesome Menagerie: "Choose a creature card with mana value 1 in
+    /// your graveyard, then do the same for creature cards with mana value 2
+    /// and 3. Return those cards to the battlefield."
+    ///
+    /// Board: a mana value 1 host creature card with Gemrazer merged under it is
+    /// destroyed by Murder ("Destroy target creature.", CR 701.8a), so both
+    /// cards are in the graveyard and Gemrazer is pinned to the host's
+    /// successor. Gruesome Menagerie's chooser publishes the chosen host as a
+    /// membership-only set: no battlefield departure is recorded.
+    ///
+    /// CR 730.3c + CR 400.7: "those cards" are the chosen cards. A card freshly
+    /// chosen from the graveyard is a new object, not the object a merged
+    /// permanent became as it left the battlefield, so Gemrazer is not found
+    /// and stays in the graveyard.
+    ///
+    /// START (`78d7440488`): Gemrazer also returns (co-location over-find).
+    /// Mutation: revert steps 1a and 1c together → Gemrazer returns.
+    #[test]
+    fn gruesome_menagerie_returns_only_the_chosen_card() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, pool(ManaType::Black, 8));
+        scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C"]);
+        let menagerie = scenario
+            .add_spell_to_hand_from_oracle(P0, "Gruesome Menagerie", false, GRUESOME_MENAGERIE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            })
+            .id();
+        let murder = scenario
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            })
+            .id();
+        let host = scenario
+            .add_creature(P0, "Host Beast", 1, 1)
+            .with_subtypes(vec!["Beast"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let gemrazer = scenario
+            .add_creature_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
+            .with_subtypes(vec!["Beast"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let mut runner = scenario.build();
+        merge_under(&mut runner, gemrazer, host);
+
+        let _ = runner.cast(murder).target_object(host).resolve();
+        assert_settled(&runner);
+        {
+            let state = runner.state();
+            assert_eq!(state.objects[&host].zone, Zone::Graveyard);
+            assert_eq!(
+                state.objects[&gemrazer].zone,
+                Zone::Graveyard,
+                "CR 730.3: the component went to the graveyard with the host"
+            );
+            assert_eq!(
+                state.objects[&gemrazer].split_from_merge_survivor,
+                Some(ObjectIncarnationRef::from_object(&state.objects[&host])),
+                "reach guard: Gemrazer is pinned to the host's successor (co-located)"
+            );
+        }
+
+        // The driver does not answer this chooser; the prompt is required.
+        let _ = runner.cast(menagerie).try_resolve();
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, P0);
+                assert_eq!(
+                    cards,
+                    &vec![host],
+                    "the mana value 1 creature card is offered"
+                );
+            }
+            other => panic!("expected Gruesome Menagerie's choice, got {other:?}"),
+        }
+        runner
+            .act(GameAction::SelectCards { cards: vec![host] })
+            .expect("choose the host card");
+        assert_settled(&runner);
+        let state = runner.state();
+        let set = state
+            .chain_tracked_set_id
+            .expect("reach guard: the chooser published its chain set");
+        assert_eq!(
+            state.tracked_object_sets.get(&set),
+            Some(&vec![host]),
+            "reach guard: the chain set is the chosen card"
+        );
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&set)
+                .is_none_or(|origins| origins.is_empty()),
+            "reach guard: a membership-only set records no battlefield departure"
+        );
+        assert_eq!(
+            state.objects[&host].zone,
+            Zone::Battlefield,
+            "the chosen card returns"
+        );
+        assert_eq!(
+            state.objects[&gemrazer].zone,
+            Zone::Graveyard,
+            "CR 730.3c + CR 400.7: Gemrazer was not chosen and stays in the graveyard"
+        );
+    }
+
+    /// R-FL. Ephemerate: "Exile target creature you control, then return it to
+    /// the battlefield under its owner's control.\nRebound (If you cast this
+    /// spell from your hand, exile it as it resolves. At the beginning of your
+    /// next upkeep, you may cast this card from exile without paying its mana
+    /// cost.)"
+    ///
+    /// CR 730.3c: "return it" finds every object the exiled merged creature
+    /// became. Card-topped: the host card and Gemrazer both return, unmerged.
+    /// Token-topped: Gemrazer returns; the token stays in exile (CR 111.8) and
+    /// ceases to exist (CR 704.5d). CR 702.88a: cast from hand, Ephemerate is
+    /// exiled as it resolves (Rebound).
+    ///
+    /// Preservation control: START (`78d7440488`) gives the same result. The
+    /// exile harvest makes both components members, so the per-referent bound
+    /// path finds them as members (no gate).
+    #[test]
+    fn ephemerate_returns_every_component_of_a_merged_creature() {
+        for token_topped in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_mana_pool(P0, pool(ManaType::White, 1));
+            scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C"]);
+            let ephemerate = scenario
+                .add_spell_to_hand_from_oracle(P0, "Ephemerate", true, EPHEMERATE)
+                .from_oracle_text_with_keywords(&["Rebound"], EPHEMERATE)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::White],
+                })
+                .id();
+            let host = scenario
+                .add_creature(P0, "Host Beast", 2, 2)
+                .with_subtypes(vec!["Beast"])
+                .id();
+            let gemrazer = scenario
+                .add_creature_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER)
+                .with_subtypes(vec!["Beast"])
+                .id();
+            let mut runner = scenario.build();
+            if token_topped {
+                runner.state_mut().objects.get_mut(&host).unwrap().is_token = true;
+            }
+            merge_under(&mut runner, gemrazer, host);
+
+            let outcome = runner.cast(ephemerate).target_object(host).resolve();
+            assert_settled(&runner);
+            assert_eq!(
+                outcome.zone_of(ephemerate),
+                Zone::Exile,
+                "reach guard: CR 702.88a: Rebound exiled Ephemerate as it resolved"
+            );
+            assert_eq!(
+                outcome.zone_of(gemrazer),
+                Zone::Battlefield,
+                "token_topped={token_topped}: CR 730.3c: Gemrazer returns"
+            );
+            let state = runner.state();
+            assert_eq!(
+                state.objects[&gemrazer].split_from_merge_survivor, None,
+                "token_topped={token_topped}: Gemrazer returned as its own object"
+            );
+            if token_topped {
+                assert!(
+                    !state.objects.contains_key(&host),
+                    "CR 111.8 + CR 704.5d: the token did not return and ceased"
+                );
+            } else {
+                assert_eq!(
+                    outcome.zone_of(host),
+                    Zone::Battlefield,
+                    "CR 730.3c: the host card returns"
+                );
+                assert!(
+                    state.objects[&host].merged_components.is_empty(),
+                    "CR 730.3: the components return unmerged"
+                );
+            }
+        }
     }
 }

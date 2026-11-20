@@ -94,13 +94,17 @@ fn tracked_set_cast_candidates(
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     let bound = crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
-    let (TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. }) = bound
-    else {
-        return Vec::new();
+    let (id, caused_by) = match &bound {
+        TargetFilter::TrackedSet { id } => (*id, None),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (*id, caused_by.as_ref()),
+        _ => return Vec::new(),
     };
-    let Some(members) = state.tracked_object_sets.get(&id) else {
+    if !state.tracked_object_sets.contains_key(&id) {
         return Vec::new();
-    };
+    }
+    // CR 730.3c: the members, then the components this cast reader finds (D2, D7, D4).
+    let members =
+        crate::game::merge::tracked_set_found_objects(state, id, Some(ability), caused_by);
     let mut seen = HashSet::new();
     let deduped: Vec<ObjectId> = members
         .iter()
@@ -130,6 +134,10 @@ fn tracked_set_cast_candidates(
 ///
 /// Return the live source-linked exile members of the active resolution's
 /// tracked set, preserving publication order and exact current membership.
+///
+/// CR 607.2a: restricted to the linked-exile ledger, which never records a
+/// merged component (`ZoneMoveRequest::merged_component`), so a found component
+/// could not pass.
 fn resolution_window_linked_batch_candidates(
     state: &GameState,
     source_id: ObjectId,
