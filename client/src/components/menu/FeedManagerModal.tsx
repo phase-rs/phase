@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { menuButtonClass } from "./buttonStyles";
+import { FeedAttribution } from "./FeedAttribution";
 import { FEED_REGISTRY } from "../../data/feedRegistry";
 import {
   FEED_ERROR_KEYS,
@@ -169,19 +170,7 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                       {source.description && (
                         <p className="mt-0.5 text-xs text-slate-500">{source.description}</p>
                       )}
-                      {source.attribution && (
-                        <p className="mt-0.5 text-xs text-slate-500">
-                          {t("feedManager.dataProvidedBy")}{" "}
-                          <a
-                            href={source.attribution.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-slate-300 underline hover:text-white"
-                          >
-                            {source.attribution.name}
-                          </a>
-                        </p>
-                      )}
+                      {source.attribution && <FeedAttribution attribution={source.attribution} />}
                       {sub && (
                         <p className="mt-0.5 text-[10px] text-slate-600">
                           {t("feedManager.lastRefreshed", { date: new Date(sub.lastRefreshedAt).toLocaleDateString() })}

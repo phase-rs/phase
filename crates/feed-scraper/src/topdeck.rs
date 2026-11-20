@@ -10,7 +10,7 @@
 //! shown; the client renders it from the feed registry's `attribution`.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -118,7 +118,20 @@ fn select_top_decks(tournaments: &[Tournament], top_n: usize) -> Vec<FeedDeck> {
 
     placings.sort_by_key(|p| (p.standing, Reverse(p.event_size), &p.tournament.tid));
 
-    placings.iter().take(top_n).map(to_feed_deck).collect()
+    // Saved decks are keyed by name. A recurring event can repeat its name
+    // with the same winning commander, so a repeat takes its event's TID.
+    let mut names = HashSet::new();
+    placings
+        .iter()
+        .take(top_n)
+        .map(|placing| {
+            let mut deck = to_feed_deck(placing);
+            if !names.insert(deck.name.clone()) {
+                deck.name = format!("{} [{}]", deck.name, placing.tournament.tid);
+            }
+            deck
+        })
+        .collect()
 }
 
 fn to_feed_deck(placing: &Placing) -> FeedDeck {
@@ -134,8 +147,7 @@ fn to_feed_deck(placing: &Placing) -> FeedDeck {
         .collect();
 
     FeedDeck {
-        // Saved decks are keyed by name, so the event and placing keep two
-        // decks with the same commander apart.
+        // The event and placing keep two decks with the same commander apart.
         name: format!(
             "{} ({} #{})",
             commander.join(" / "),
@@ -225,6 +237,29 @@ mod tests {
         assert_eq!(decks.len(), 1);
         assert_eq!(decks[0].name, "Vivi Ornitier (event #2)");
         assert_eq!(decks[0].author, "Pilot");
+    }
+
+    #[test]
+    fn disambiguates_same_named_events_by_tid() {
+        let event = |tid: &str| -> Tournament {
+            serde_json::from_value(json!({
+                "TID": tid,
+                "tournamentName": "Weekly",
+                "standings": [decklisted("Pilot", "Vivi Ornitier")],
+            }))
+            .expect("valid tournament")
+        };
+
+        let decks = select_top_decks(&[event("week-1"), event("week-2")], 16);
+        let names: Vec<&str> = decks.iter().map(|d| d.name.as_str()).collect();
+
+        assert_eq!(
+            names,
+            [
+                "Vivi Ornitier (Weekly #1)",
+                "Vivi Ornitier (Weekly #1) [week-2]"
+            ]
+        );
     }
 
     #[test]
