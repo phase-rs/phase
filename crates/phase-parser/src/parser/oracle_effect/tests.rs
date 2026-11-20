@@ -106592,3 +106592,196 @@ fn incite_hysteria_grant_has_characteristic_origin() {
         assert_eq!(definition.origin, DefinitionOrigin::Characteristic);
     }
 }
+
+/// Immortal Obligation's verbatim Oracle text (MTGJSON 5.3.0+20261016).
+const IMMORTAL_OBLIGATION_ORACLE: &str = "Return target creature card from an opponent's graveyard to the battlefield under their control with a duty counter on it. For as long as that creature has a duty counter on it, it is goaded, can't attack you or a permanent you control, and can't block creatures you control.";
+
+/// Immortal Obligation's first sentence and the leading duration of its
+/// second, shared by the synthetic decline variants below.
+const IMMORTAL_OBLIGATION_HEAD: &str = "Return target creature card from an opponent's graveyard to the battlefield under their control with a duty counter on it. For as long as that creature has a duty counter on it, ";
+
+fn parse_immortal_obligation_line(text: &str) -> ParsedAbilities {
+    parse_oracle_text(
+        text,
+        "Immortal Obligation",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    )
+}
+
+fn parsed_unimplemented_names(parsed: &ParsedAbilities) -> Vec<String> {
+    let mut defs = Vec::new();
+    collect_parsed_roots(parsed, true, &mut defs);
+    defs.into_iter()
+        .filter_map(|def| unimplemented_name(def).map(str::to_string))
+        .collect()
+}
+
+/// CR 608.2c + CR 110.2a + CR 122.6 + CR 611.2b (SHAPE): Immortal Obligation's
+/// whole line is the spell's effect chain (not a whole-line static). The return
+/// enters under the card's owner with one duty counter and forwards the
+/// returned permanent (CR 400.7), and the second sentence is one durationed
+/// effect over it: the goad graft, the caster-latched attack prohibition, and
+/// the block whitelist.
+#[test]
+fn immortal_obligation_parses_return_then_duty_counter_bound_restrictions() {
+    let parsed = parse_immortal_obligation_line(IMMORTAL_OBLIGATION_ORACLE);
+    // Reach: nothing in the tree is an honest refusal, and nothing was swallowed.
+    assert_eq!(
+        parsed_unimplemented_names(&parsed),
+        Vec::<String>::new(),
+        "{:#?}",
+        parsed.abilities
+    );
+    assert!(parsed.statics.is_empty(), "{:?}", parsed.statics);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:#?}", parsed.abilities);
+    let root = &parsed.abilities[0];
+    match &*root.effect {
+        Effect::ChangeZone {
+            destination,
+            target,
+            enters_under,
+            enter_with_counters,
+            ..
+        } => {
+            assert_eq!(*destination, Zone::Battlefield);
+            assert_eq!(*enters_under, Some(ControllerRef::ParentTargetOwner));
+            assert_eq!(
+                *enter_with_counters,
+                vec![(
+                    crate::types::counter::CounterType::Generic("duty".to_string()),
+                    QuantityExpr::Fixed { value: 1 }
+                )]
+            );
+            let TargetFilter::Typed(typed) = target else {
+                panic!("expected a typed creature-card target, got {target:?}");
+            };
+            assert!(
+                typed.type_filters.contains(&TypeFilter::Creature),
+                "{typed:?}"
+            );
+            assert!(
+                typed.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent
+                }),
+                "{typed:?}"
+            );
+            assert!(
+                typed.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }),
+                "{typed:?}"
+            );
+        }
+        other => panic!("expected the ChangeZone return, got {other:?}"),
+    }
+    assert!(root.forward_result, "the return must forward its permanent");
+    let sub = root
+        .sub_ability
+        .as_deref()
+        .expect("the duty-counter sentence");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected one GenericEffect, got {:?}", sub.effect);
+    };
+    assert_eq!(*target, Some(TargetFilter::ParentTarget));
+    assert!(
+        matches!(
+            duration,
+            Some(Duration::ForAsLongAs {
+                condition: StaticCondition::RecipientHasCounters { minimum: 1, .. },
+            })
+        ),
+        "{duration:?}"
+    );
+    assert_eq!(static_abilities.len(), 3, "{static_abilities:?}");
+    assert!(static_abilities
+        .iter()
+        .all(|def| def.affected == Some(TargetFilter::ParentTarget)));
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded,
+        }]
+    );
+    match static_abilities[1].modifications.as_slice() {
+        [ContinuousModification::GrantStaticAbility { definition }] => {
+            assert_eq!(definition.mode, StaticMode::CantAttack);
+            assert_eq!(definition.origin, DefinitionOrigin::Resolution);
+            assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+            assert_eq!(
+                definition.attack_defended,
+                Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
+            );
+        }
+        other => panic!("expected the CantAttack grant, got {other:?}"),
+    }
+    assert_eq!(
+        static_abilities[2].modifications,
+        vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::BlockRestriction {
+                filter: TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You)
+                    )),
+                },
+            },
+        }]
+    );
+}
+
+/// The goaded-with-restrictions tail declines (honest red, no `Goaded`
+/// anywhere) when a conjunct is not a whole restriction. Synthetic input: no
+/// printed card has this shape; nearest printed card Immortal Obligation, whose
+/// verbatim text it alters in its last conjunct only. Reach-guard: the verbatim
+/// card, which differs only in that conjunct, lowers fully
+/// (`immortal_obligation_parses_return_then_duty_counter_bound_restrictions`).
+#[test]
+fn goaded_restriction_tail_declines_a_non_restriction_conjunct() {
+    let parsed = parse_immortal_obligation_line(&format!(
+        "{IMMORTAL_OBLIGATION_HEAD}it is goaded, can't attack you or a permanent you control, and gains flying."
+    ));
+    assert_goaded_restriction_tail_declined(&parsed);
+}
+
+/// A rider on the block conjunct is not dropped: the tail declines. Synthetic
+/// input: no printed card has this shape; nearest printed card Immortal
+/// Obligation, whose verbatim text it alters in its last conjunct only; the
+/// rider is verbatim from Heat Wave ("Nonblue creatures can't block creatures
+/// you control unless their controller pays 1 life for each blocking creature
+/// they control.").
+#[test]
+fn goaded_restriction_tail_declines_a_rider() {
+    let parsed = parse_immortal_obligation_line(&format!(
+        "{IMMORTAL_OBLIGATION_HEAD}it is goaded, can't attack you or a permanent you control, and can't block creatures you control unless their controller pays 1 life for each blocking creature they control."
+    ));
+    assert_goaded_restriction_tail_declined(&parsed);
+}
+
+fn assert_goaded_restriction_tail_declined(parsed: &ParsedAbilities) {
+    assert!(parsed.statics.is_empty(), "{:?}", parsed.statics);
+    let names = parsed_unimplemented_names(parsed);
+    assert!(
+        names.iter().any(|name| name == "unbound_subject"),
+        "{names:?}: {:#?}",
+        parsed.abilities
+    );
+    let rendered = format!("{:?}", parsed.abilities);
+    assert!(!rendered.contains("Goaded"), "{rendered}");
+    // Reach: the return still lowered, so the decline is the tail's own.
+    assert!(matches!(
+        parsed.abilities.first().map(|def| &*def.effect),
+        Some(Effect::ChangeZone { .. })
+    ));
+}

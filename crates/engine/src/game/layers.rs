@@ -11694,12 +11694,16 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// than the carrier's controller, so the graft has to snapshot
 /// `effect.controller` as the definition's anchor.
 ///
-/// Two member classes today:
+/// Three member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
 ///   Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter relative
 ///   to the target's controller.
+/// - `BlockRestriction` carrying a controller-relative attacker filter ("can't
+///   block creatures you control"), grafted onto another player's creature by a
+///   resolving spell (Immortal Obligation). Both consumers read the anchor
+///   through `combat::blocker_filter_context`.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
 ///
@@ -11718,6 +11722,11 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // (Maximum Carnage chapter I), so re-deriving it from the carrier would
         // avoid the wrong player.
         StaticMode::MustAttackAwayFromSource => true,
+        // CR 109.5 + CR 509.1b + CR 608.2c: a "can't block <object>" whitelist
+        // grafted by a resolving spell onto another player's creature reads
+        // "you" as that spell's controller (Immortal Obligation: "can't block
+        // creatures you control").
+        StaticMode::BlockRestriction { filter } => target_filter_controller_is_relative(filter),
         _ => false,
     }
 }

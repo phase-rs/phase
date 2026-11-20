@@ -31963,6 +31963,42 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     }));
 }
 
+/// CR 508.1b + CR 310.5: the singular "you or a permanent you control"
+/// (Immortal Obligation) names the same defended set as the plural
+/// "you or permanents you control" (Willie Lumpkin, Postman), and the nested
+/// " you or " prefix keeps the planeswalker-only, planeswalker and bare-player
+/// scopes distinct.
+#[test]
+fn defended_scope_reads_singular_permanent() {
+    use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
+    use crate::types::triggers::AttackTargetFilter;
+    for (input, expected) in [
+        (
+            " you or a permanent you control",
+            AttackTargetFilter::PlayerOrPermanents,
+        ),
+        (
+            " you or permanents you control",
+            AttackTargetFilter::PlayerOrPermanents,
+        ),
+        (
+            " you or planeswalkers you control",
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            " planeswalkers you control",
+            AttackTargetFilter::Planeswalker { subtype: None },
+        ),
+        (" you", AttackTargetFilter::Player),
+    ] {
+        assert_eq!(
+            parse_cant_attack_defended_scope_nom(input).map_err(|e| format!("{e:?}")),
+            Ok(("", Some(expected))),
+            "{input:?}"
+        );
+    }
+}
+
 /// CR 508.1h + CR 118.12a: mixed casing must follow the same nom grammar and
 /// retain both the planeswalker-only defender and relative per-attacker tax.
 #[test]
