@@ -2300,24 +2300,34 @@ pub(crate) fn attacked_player_for_target(target: AttackTarget) -> Option<PlayerI
 /// per-candidate `_from_precomputed` filters run without re-walking the whole
 /// battlefield for every attacker. Mirrors the filter in
 /// `block_restriction_statics_against`.
-pub fn collect_block_restriction_statics(state: &GameState) -> BlockRestrictions {
+pub fn collect_block_restriction_statics(state: &GameState) -> BlockRestrictions<'_> {
+    BlockRestrictions {
+        statics: collect_functioning_block_restriction_statics(state),
+        transients: live_transient_block_restrictions(state).collect(),
+    }
+}
+
+/// CR 509.1b: Resolution-created blocker restrictions read directly at declaration.
+pub(crate) fn live_transient_block_restrictions(
+    state: &GameState,
+) -> impl Iterator<Item = &TransientContinuousEffect> {
     use super::layers::{transient_effect_is_live, transient_relative_blocker_filter};
 
-    let transients = state
-        .transient_continuous_effects
-        .iter()
-        .filter(|tce| {
-            tce.modifications
-                .iter()
-                .any(|m| transient_relative_blocker_filter(m).is_some())
-                && transient_effect_is_live(state, tce)
-        })
-        .cloned()
-        .collect();
+    state.transient_continuous_effects.iter().filter(|tce| {
+        tce.modifications
+            .iter()
+            .any(|modification| transient_relative_blocker_filter(modification).is_some())
+            && transient_effect_is_live(state, tce)
+    })
+}
 
+/// Collect the functioning statics for queries about projected restrictions.
+pub(crate) fn collect_functioning_block_restriction_statics(
+    state: &GameState,
+) -> Vec<(ObjectId, StaticDefinition)> {
     // CR 509.1b: O(1) presence gate — no CantBeBlocked* discriminant present means the
     // filtered sweep yields nothing, so return empty without walking the battlefield.
-    let statics = if !(static_kind_present(state, StaticModeKind::CantBeBlocked)
+    if !(static_kind_present(state, StaticModeKind::CantBeBlocked)
         || static_kind_present(state, StaticModeKind::CantBeBlockedExceptBy)
         || static_kind_present(state, StaticModeKind::CantBeBlockedBy)
         || static_kind_present(state, StaticModeKind::CantBeBlockedByMoreThan)
@@ -2338,10 +2348,6 @@ pub fn collect_block_restriction_statics(state: &GameState) -> BlockRestrictions
             })
             .map(|(src, def)| (src.id, def.clone()))
             .collect()
-    };
-    BlockRestrictions {
-        statics,
-        transients,
     }
 }
 
@@ -2410,10 +2416,9 @@ pub fn collect_must_be_blocked_statics(state: &GameState) -> Vec<(ObjectId, Stat
 fn block_restriction_statics_against_from_precomputed<'a>(
     state: &GameState,
     attacker_id: ObjectId,
-    precomputed: &'a BlockRestrictions,
+    precomputed: &'a [(ObjectId, StaticDefinition)],
 ) -> Vec<(&'a StaticDefinition, ObjectId)> {
     precomputed
-        .statics
         .iter()
         .filter_map(|(src_id, def)| {
             let src = state.objects.get(src_id)?;
@@ -2446,9 +2451,9 @@ fn block_restriction_statics_against_from_precomputed<'a>(
 }
 
 /// A snapshot of the attacker-side restrictions for one combat legality pass.
-pub struct BlockRestrictions {
+pub struct BlockRestrictions<'a> {
     statics: Vec<(ObjectId, StaticDefinition)>,
-    transients: Vec<TransientContinuousEffect>,
+    transients: Vec<&'a TransientContinuousEffect>,
 }
 
 /// CR 102.3 + CR 109.5: Evaluate the admitted tree against the live blocker,
@@ -2492,13 +2497,15 @@ fn pair_block_restriction(
     state: &GameState,
     attacker_id: ObjectId,
     blocker: &GameObject,
-    restrictions: &BlockRestrictions,
+    restrictions: &BlockRestrictions<'_>,
 ) -> Option<&'static str> {
     use super::layers::{evaluate_condition_with_recipient, transient_relative_blocker_filter};
 
-    for (def, source) in
-        block_restriction_statics_against_from_precomputed(state, attacker_id, restrictions)
-    {
+    for (def, source) in block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &restrictions.statics,
+    ) {
         let context = FilterContext::from_source(state, source);
         match &def.mode {
             StaticMode::CantBeBlocked => return Some("can't be blocked"),
@@ -2549,7 +2556,7 @@ fn pair_block_restriction(
 /// affected-filter and recipient-condition evaluation; richer `CantBeBlocked*`
 /// restrictions intentionally remain distinct.
 pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> bool {
-    let restrictions = collect_block_restriction_statics(state);
+    let restrictions = collect_functioning_block_restriction_statics(state);
     has_cant_be_blocked_static_from_precomputed(state, attacker_id, &restrictions)
 }
 
@@ -2558,7 +2565,7 @@ pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> b
 pub fn has_cant_be_blocked_static_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
-    restrictions: &BlockRestrictions,
+    restrictions: &[(ObjectId, StaticDefinition)],
 ) -> bool {
     block_restriction_statics_against_from_precomputed(state, attacker_id, restrictions)
         .into_iter()
@@ -2935,7 +2942,7 @@ fn creature_has_must_block_requirement(
     player: PlayerId,
     has_must_block_static: bool,
     blocker_restriction: &[(ObjectId, StaticDefinition)],
-    block_restriction: &BlockRestrictions,
+    block_restriction: &BlockRestrictions<'_>,
     blocker_allowed: &[(ObjectId, StaticDefinition)],
     can_block_shadow_exists: bool,
 ) -> bool {
@@ -3954,7 +3961,7 @@ fn validate_blockers_core(
         let has_unless_all = block_restriction_statics_against_from_precomputed(
             state,
             *attacker_id,
-            &block_restriction,
+            &block_restriction.statics,
         )
         .into_iter()
         .any(|(def, _src_id)| def.mode == StaticMode::CantBeBlockedUnlessAllBlock);
@@ -8293,7 +8300,7 @@ pub fn can_block_pair_with_precomputed(
     blocker_id: ObjectId,
     attacker_id: ObjectId,
     blocker_restriction: &[(ObjectId, StaticDefinition)],
-    block_restriction: &BlockRestrictions,
+    block_restriction: &BlockRestrictions<'_>,
     blocker_allowed: &[(ObjectId, StaticDefinition)],
     can_block_shadow_exists: bool,
 ) -> bool {
@@ -8533,7 +8540,7 @@ pub fn min_blockers_required(state: &GameState, attacker_id: ObjectId) -> u32 {
 pub fn min_blockers_required_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
-    block_restriction: &BlockRestrictions,
+    block_restriction: &BlockRestrictions<'_>,
 ) -> u32 {
     let mut min = 1;
     if state
@@ -8543,9 +8550,11 @@ pub fn min_blockers_required_from_precomputed(
     {
         min = min.max(2);
     }
-    for (def, _src_id) in
-        block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
-    {
+    for (def, _src_id) in block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &block_restriction.statics,
+    ) {
         if let StaticMode::CantBeBlockedExceptBy {
             kind: BlockExceptionKind::MinBlockers { min: n },
         } = &def.mode
@@ -8563,7 +8572,7 @@ pub fn min_blockers_required_from_precomputed(
 fn min_blockers_sources_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
-    block_restriction: &BlockRestrictions,
+    block_restriction: &BlockRestrictions<'_>,
 ) -> Vec<ObjectId> {
     let mut sources = Vec::new();
     if state
@@ -8576,9 +8585,11 @@ fn min_blockers_sources_from_precomputed(
         // keyword is projected onto it) — same accepted limitation as F3.
         sources.push(attacker_id);
     }
-    for (def, src_id) in
-        block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
-    {
+    for (def, src_id) in block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &block_restriction.statics,
+    ) {
         if let StaticMode::CantBeBlockedExceptBy {
             kind: BlockExceptionKind::MinBlockers { min },
         } = &def.mode
@@ -8611,15 +8622,19 @@ pub fn max_blockers_allowed(state: &GameState, attacker_id: ObjectId) -> Option<
 pub fn max_blockers_allowed_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
-    block_restriction: &BlockRestrictions,
+    block_restriction: &BlockRestrictions<'_>,
 ) -> Option<u32> {
-    block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
-        .into_iter()
-        .filter_map(|(def, _src_id)| match def.mode {
-            StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
-            _ => None,
-        })
-        .min()
+    block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &block_restriction.statics,
+    )
+    .into_iter()
+    .filter_map(|(def, _src_id)| match def.mode {
+        StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
+        _ => None,
+    })
+    .min()
 }
 
 /// For one defending player, the per-attacker minimum-blocker requirement for

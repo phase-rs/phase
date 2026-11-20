@@ -1,6 +1,8 @@
 //! Issue #3861. Exercise Rikku's resolved restriction through the combat prompt,
 //! precomputed pair legality, and public blocker declaration.
 
+use engine::ai_support::filter::{FilterPipeline, SimulationFilter};
+use engine::ai_support::{ActionMetadata, CandidateAction, TacticalClass};
 use engine::game::combat::{
     can_block_pair_with_precomputed, collect_block_restriction_statics,
     collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
@@ -387,6 +389,51 @@ fn v2_counter_actor() {
     grow_featured(&mut candidate, P0, true);
     grow_featured(&mut control, P1, false);
     split(&candidate, &control);
+}
+
+#[test]
+fn rikku_distinguishes_equally_grown_attackers_in_blocker_simulation() {
+    let mut board = multiplayer(true);
+    grow_featured(&mut board, P0, true);
+    let alternative = board.alternative;
+    place_counter(&mut board, P1, alternative, false);
+    complete(&mut board.runner);
+
+    combat_fork(&board, board.featured, P2, false, |runner| {
+        let state = runner.state();
+        let blocker = board.blockers[P2.0 as usize];
+        let candidate = |attacker| CandidateAction {
+            action: GameAction::DeclareBlockers {
+                assignments: vec![(blocker, attacker)],
+            },
+            metadata: ActionMetadata::for_actor(Some(P2), TacticalClass::Block),
+        };
+        let restricted = candidate(board.featured);
+        let legal = candidate(alternative);
+        let pipeline = FilterPipeline::new(vec![Box::new(SimulationFilter)]);
+
+        // CR 109.5 + CR 509.1b: P2 is an opponent of the trigger's
+        // controller, so only the Bears grown by P1 can be blocked.
+        assert!(!pipeline.accepts(state, &restricted));
+        assert!(pipeline.accepts(state, &legal));
+
+        for candidates in [
+            [restricted.clone(), legal.clone()],
+            [legal.clone(), restricted],
+        ] {
+            let expected: Vec<_> = candidates
+                .iter()
+                .filter(|candidate| pipeline.accepts(state, candidate))
+                .map(|candidate| candidate.action.clone())
+                .collect();
+            let actual: Vec<_> = pipeline
+                .apply(state, candidates)
+                .into_iter()
+                .map(|candidate| candidate.action)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    });
 }
 
 #[test]
