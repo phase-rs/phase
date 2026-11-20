@@ -923,6 +923,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("controlled by {}", fmt_player_filter(player)))
             }
             FilterProp::WasPlayed => parts.push("was played".into()),
+            FilterProp::CastThisTurn { caster } => {
+                parts.push(format!("cast this turn ({})", fmt_controller(caster)))
+            }
             FilterProp::Attacking { defender } => match defender {
                 None => parts.push("attacking".into()),
                 Some(ControllerRef::You) => parts.push("attacking you".into()),

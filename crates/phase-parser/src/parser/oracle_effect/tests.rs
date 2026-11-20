@@ -22268,6 +22268,107 @@ fn compound_tap_and_put_counter_lowercase_trigger_context() {
     );
 }
 
+/// CR 608.2c: in a targeted compound's anaphoric continuation, a bare "it"
+/// names the object the primary instruction announced (CR 115.1d), not the
+/// trigger subject or the ability's source. Grappling Kraken (landfall, a typed
+/// land subject), Fear of Sleep Paralysis (eerie, an `Or{SelfRef, Typed}`
+/// subject) and Mjölnir, Storm Hammer ("equipped creature", `AttachedTo`) all
+/// print this clause under a typed trigger subject. Reverting the typed-referent
+/// continuation pin in `try_split_targeted_compound` makes the sub `SelfRef`.
+#[test]
+fn compound_tap_and_put_counter_binds_parent_target_under_typed_trigger_subject() {
+    for subject in [
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+        TargetFilter::AttachedTo,
+    ] {
+        let clause = parse_effect_clause(
+            "tap target creature an opponent controls and put a stun counter on it",
+            &mut ParseContext {
+                subject: Some(subject.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "primary should tap the announced typed target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Stun,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "stun counter should go on the tapped target under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
+}
+
+/// Synthetic boundary probe: no printed card has this targeted compound under
+/// a typed trigger subject. The nearest printed card is Defiant Vanguard:
+/// "When this creature blocks, at end of combat, destroy it and all creatures
+/// it blocked this turn." This probe checks preservation of the existing
+/// fail-closed boundary.
+///
+/// CR 509.1g + CR 608.2i: the typed-referent continuation pin never reaches a
+/// block-history clause. "it" in "all creatures it blocked this turn" names this
+/// same instruction's target, not an earlier instruction's, so the clause
+/// declines and the continuation fails closed under a typed trigger subject
+/// exactly as it does without one (where the post-parse anaphor rewrite, not
+/// the pin, handles the continuation). Reverting the history-clause guard on
+/// the pin in `try_split_targeted_compound` binds the clause instead and the
+/// typed-subject row's sub becomes a `DestroyAll`.
+#[test]
+fn compound_typed_referent_pin_does_not_bind_block_history_clause() {
+    for subject in [
+        None,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )),
+    ] {
+        let clause = parse_effect_clause(
+            "destroy target creature and all creatures it blocked this turn",
+            &mut ParseContext {
+                subject: subject.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reach guard: the primary destroys the announced target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "the history continuation must fail closed under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
+}
+
 #[test]
 fn compound_exile_own_and_control_not_split() {
     let clause = parse_effect_clause(
@@ -60625,16 +60726,26 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
             cant_counter.effect
         );
     };
+    // CR 611.2c + CR 109.5: the rule effect covers spells on the stack that
+    // the caster of Veil controls, read live at counter time.
     assert!(static_abilities
         .iter()
         .any(|sd| sd.mode == StaticMode::CantBeCountered
-            && matches!(
-                sd.affected,
-                Some(TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::You),
-                    ..
-                }))
-            )));
+            && sd.affected
+                == Some(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        }),
+                    ],
+                })
+            && sd.modifications
+                == vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeCountered,
+                }]));
 
     let hexproof = cant_counter
         .sub_ability
@@ -73073,6 +73184,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -104991,6 +105103,125 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
         alternative_amount, primary_amount,
         "the alternative's amount must share the primary damage quantity"
     );
+}
+
+// SHAPE: synthetic qualifier combinations exercise the grammar class represented
+// by Domri, Anarch of Bolas, Determined, and Veil of Summer.
+#[test]
+fn counter_prohibition_spell_subject_grammar() {
+    let rows: [(&str, Vec<TypeFilter>, Vec<FilterProp>); 5] = [
+        ("", vec![], vec![]),
+        ("Creature ", vec![TypeFilter::Creature], vec![]),
+        (
+            "Green ",
+            vec![],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        (
+            "Green creature ",
+            vec![TypeFilter::Creature],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        ("Artifact ", vec![TypeFilter::Artifact], vec![]),
+    ];
+    for (qualifier, type_filters, qualifier_props) in rows {
+        for other in ["", "Other "] {
+            for cast in [false, true] {
+                let relative = if cast { "cast this turn" } else { "control" };
+                let suffix = if cast { "" } else { " this turn" };
+                let text =
+                    format!("{other}{qualifier}spells you {relative} can't be countered{suffix}.");
+                let def = parse_effect_chain(&text, AbilityKind::Spell);
+                assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+                let Effect::GenericEffect {
+                    static_abilities,
+                    duration,
+                    target,
+                    ..
+                } = &*def.effect
+                else {
+                    panic!("{text}: expected a rule effect, got {def:#?}");
+                };
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn), "{text}");
+                assert!(
+                    target.is_none(),
+                    "broadcast subjects do not declare a target"
+                );
+                // CR 109.5 + CR 601.2i: "you control" reads the current
+                // controller; "you cast this turn" reads the cast journal.
+                let mut properties = qualifier_props.clone();
+                if !other.is_empty() {
+                    properties.push(FilterProp::Another);
+                }
+                if cast {
+                    properties.push(FilterProp::CastThisTurn {
+                        caster: ControllerRef::You,
+                    });
+                }
+                let expected = TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: type_filters.clone(),
+                            controller: (!cast).then_some(ControllerRef::You),
+                            properties,
+                        }),
+                    ],
+                };
+                assert_eq!(static_abilities.len(), 1, "{text}");
+                assert_eq!(
+                    static_abilities[0].affected.as_ref(),
+                    Some(&expected),
+                    "{text}"
+                );
+                assert_eq!(
+                    static_abilities[0].modifications,
+                    vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeCountered
+                    }],
+                    "{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn counter_prohibition_rejects_unrepresented_restrictions() {
+    // The positive sibling proves this reached the spell-subject grammar.
+    assert!(!ability_chain_has_unimplemented(&parse_effect_chain(
+        "Creature spells you cast this turn can't be countered.",
+        AbilityKind::Spell,
+    )));
+    for text in [
+        "Creature spells you cast this turn yesterday can't be countered.",
+        "Spells you control can't be countered by blue or black spells this turn.",
+        "Spells you control can't be countered by blue or black spells this turn, and creatures you control can't be the targets of blue or black spells this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+    }
+}
+
+#[test]
+fn domri_full_oracle_plus_one_has_mana_and_counter_prohibition() {
+    let parsed = parse_oracle_text(
+        "Creatures you control get +1/+0.\n[+1]: Add {R} or {G}. Creature spells you cast this turn can't be countered.\n[−2]: Target creature you control fights target creature you don't control.",
+        "Domri, Anarch of Bolas", &[], &["Planeswalker".to_string()], &["Domri".to_string()],
+    );
+    let plus = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::Mana { .. }))
+        .expect("Domri's +1 starts with mana");
+    assert!(!ability_chain_has_unimplemented(plus), "{plus:#?}");
+    assert!(collect_chain_effects(plus)
+        .iter()
+        .any(|effect| matches!(effect, Effect::GenericEffect { .. })));
 }
 
 /// CR 500: the player-scope rebind of "the life they lost" (`Target` -> `ScopedPlayer`) rebuilds

@@ -34513,7 +34513,8 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
             .as_ref()
             .is_some_and(|x| player_filter_reads_chosen_target(x, read)),
-        FilterProp::Owned { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::Owned { controller }
         | FilterProp::ProtectorMatches { controller }
         | FilterProp::AttachedTo {
             to: AttachmentReferent::Player { player: controller },

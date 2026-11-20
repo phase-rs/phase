@@ -7323,6 +7323,11 @@ pub enum FilterProp {
     /// (land play) or cast (spell), excluding tokens put directly onto the
     /// battlefield without a prior zone.
     WasPlayed,
+    /// CR 601.2i + CR 707.10: the candidate was cast by the scoped player
+    /// in the current turn's journal; an uncast spell copy does not qualify.
+    CastThisTurn {
+        caster: ControllerRef,
+    },
     /// CR 508.1b: Matches attacking creatures, optionally scoped by which player
     /// the creature is attacking.
     Attacking {
@@ -8062,6 +8067,7 @@ impl FilterProp {
             | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
             | FilterProp::Attacking { .. }
             | FilterProp::Blocking
             | FilterProp::BlockingSource
@@ -9286,6 +9292,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -9540,6 +9547,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -9841,6 +9849,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
             | FilterProp::Attacking { .. }
             | FilterProp::Blocking
             | FilterProp::BlockingSource
@@ -10504,6 +10513,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -12977,7 +12987,8 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
             }
             AttachmentReferent::Source | AttachmentReferent::Recipient => false,
         },
-        FilterProp::ProtectorMatches { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
         | FilterProp::MostPrevalentCreatureTypeIn {
             scope: controller, ..
@@ -29622,6 +29633,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource

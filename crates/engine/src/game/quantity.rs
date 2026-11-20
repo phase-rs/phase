@@ -4990,14 +4990,7 @@ fn current_cast_occurrence_matches(
     {
         return false;
     }
-    let Ok(index) = usize::try_from(occurrence.turn_journal_index) else {
-        return false;
-    };
-    state
-        .spells_cast_this_turn_by_player
-        .get(&occurrence.caster)
-        .and_then(|records| records.get(index))
-        .is_some_and(|record| record.spell_object_id == Some(ability.source_id))
+    crate::game::ledger::cast_occurrence_is_current(state, occurrence, ability.source_id)
 }
 
 #[allow(clippy::too_many_arguments)]

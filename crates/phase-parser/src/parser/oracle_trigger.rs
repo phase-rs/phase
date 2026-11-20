@@ -53,7 +53,7 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
     split_sentence_units,
 };
-use super::oracle_nom::quantity::parse_using_mana_produced_by_self;
+use super::oracle_nom::quantity::{parse_number_disjunction, parse_using_mana_produced_by_self};
 use super::oracle_nom::target::parse_type_phrase as parse_type_phrase_nom;
 use super::oracle_nom::target::CostChannel;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
@@ -13552,6 +13552,28 @@ fn continues_spell_color_disjunction(after_comma: &str) -> bool {
     rest.is_empty() || tag::<_, _, OracleError<'_>>(",").parse(rest).is_ok()
 }
 
+/// CR 603.1: a triggered ability is "[When/Whenever/At] [trigger condition or
+/// event], [effect]"; a comma INSIDE an exact-value number list in the
+/// condition ("with power 4, 5, or 6" — Sarkhan's Unsealing; "with mana value
+/// 4, 5, or 6" — Kozilek's Unsealing) separates list legs and is never that
+/// boundary. True iff some number list (`parse_number_disjunction`, the single
+/// list authority) starts before `comma_pos` and ends after it.
+fn continues_number_disjunction(text: &str, comma_pos: usize) -> bool {
+    nom_primitives::scan_at_word_boundaries(text, |i| {
+        let start = text.len() - i.len();
+        if start >= comma_pos {
+            return Err(oracle_err(i));
+        }
+        let (rest, _) = parse_number_disjunction(i)?;
+        if text.len() - rest.len() > comma_pos {
+            Ok((rest, ()))
+        } else {
+            Err(oracle_err(i))
+        }
+    })
+    .is_some()
+}
+
 pub(crate) fn find_effect_boundary(lower: &str) -> Option<usize> {
     use super::oracle_nom::primitives::split_once_on;
     let mut search_start = 0;
@@ -13564,6 +13586,7 @@ pub(crate) fn find_effect_boundary(lower: &str) -> Option<usize> {
             && !continues_serial_event_condition(after)
             && !continues_spell_quality_disjunction(after)
             && !continues_spell_color_disjunction(after)
+            && !continues_number_disjunction(lower, comma_pos)
         {
             return Some(comma_pos);
         }
@@ -22435,15 +22458,21 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // sugar whose internal commas belong to the payload). Naive
         // first-comma truncation collapsed such filters to their first leg,
         // so the trigger fired only on the first listed type (issue #5324,
-        // Sram, Senior Edificer).
+        // Sram, Senior Edificer). Commas inside an exact-value number list in a
+        // stat qualifier belong to the payload too ("a creature spell with
+        // power 4, 5, or 6" — Sarkhan's Unsealing; "… with mana value 4, 5, or
+        // 6" — Kozilek's Unsealing).
         let payload = {
             let mut scan = after;
             let mut cut = after;
             while let Ok((_, (_, rest))) = nom_primitives::split_once_on(scan, ", ") {
-                if starts_with_type_list_continuation(rest) {
+                let comma_pos = after.len() - rest.len() - ", ".len();
+                if starts_with_type_list_continuation(rest)
+                    || continues_number_disjunction(after, comma_pos)
+                {
                     scan = rest;
                 } else {
-                    cut = &after[..after.len() - rest.len() - ", ".len()];
+                    cut = &after[..comma_pos];
                     break;
                 }
             }
