@@ -451,6 +451,7 @@ mod wise_mothman_milled_trigger;
 mod wise_mothman_target_distinctness;
 mod wish_outside_game_scope;
 mod witchs_oven_food_tokens;
+mod wither_deathtouch_counter_form_sba;
 mod wizards_rockets_announced_x_mana;
 mod wolverine_best_there_is_dealt_damage_counter;
 mod woodwork_prodigy_upkeep_becomes_prepared;
