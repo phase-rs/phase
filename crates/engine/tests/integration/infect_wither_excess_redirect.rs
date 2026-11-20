@@ -35,6 +35,11 @@ const TYPHOID_RATS: &str =
     "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)";
 const DARKSTEEL_MYR: &str = "Indestructible (Damage and effects that say \"destroy\" don't \
 destroy this creature. If its toughness is 0 or less, it still dies.)";
+const SARKHAN: &str = "Whenever a creature attacks you or a planeswalker you control, each Dragon you control deals 1 damage to that creature.\n[+1]: Until end of turn, each planeswalker you control becomes a 4/4 red Dragon creature and gains flying.\n[\u{2212}3]: Create a 4/4 red Dragon creature token with flying.";
+const HEROIC_INTERVENTION: &str =
+    "Permanents you control gain hexproof and indestructible until end of turn.";
+const PIGMENT_STORM: &str = "Pigment Storm deals 5 damage to target creature. Excess damage is \
+dealt to that creature's controller instead.";
 const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
 
@@ -242,6 +247,7 @@ fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
     runner.advance_until_stack_empty();
 
     assert_eq!(minus_counter_adds(&events, bears), vec![5]);
+    assert_eq!(dealt_to(&events, TargetRef::Player(P1)), vec![(9, 0)]);
     assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
     assert_settled(runner.state());
 }
@@ -323,4 +329,53 @@ fn deathtouch_single_damage_is_never_excess() {
     assert_eq!(outcome.state().objects[&myr].damage_marked, 2);
     outcome.assert_life_delta(P1, 0);
     assert!(dealt_to(outcome.events(), TargetRef::Player(P1)).is_empty());
+}
+
+/// R9 — CR 120.4a + CR 120.3c: a creature planeswalker's excess is the greatest
+/// per-type amount, and only the non-excess part is dealt to it. Sarkhan the
+/// Masterless animated to a 4/4 at loyalty 6 takes 5: excess max(1, 0) = 1 goes
+/// to its controller, so it marks 4 and loses 4 loyalty.
+#[test]
+fn excess_redirect_on_creature_planeswalker_removes_only_dealt_loyalty() {
+    let mut scenario = new_scenario();
+    let sarkhan = scenario
+        .add_planeswalker_from_oracle(P0, "Sarkhan the Masterless", "Sarkhan", 5, SARKHAN)
+        .id();
+    let intervention = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Heroic Intervention",
+            true,
+            HEROIC_INTERVENTION,
+        );
+        b.with_mana_cost(ManaCost::generic(0));
+        b.id()
+    };
+    let storm = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Pigment Storm", false, PIGMENT_STORM);
+        b.with_mana_cost(ManaCost::generic(0));
+        b.id()
+    };
+    let mut runner = scenario.build();
+    runner.activate(sarkhan, 0).resolve();
+    runner.cast(intervention).resolve();
+    let sark = &runner.state().objects[&sarkhan];
+    assert_eq!(
+        (sark.power, sark.toughness, sark.loyalty),
+        (Some(4), Some(4), Some(6))
+    );
+
+    let outcome = runner.cast(storm).target_objects(&[sarkhan]).resolve();
+
+    assert_eq!(
+        dealt_to(outcome.events(), TargetRef::Player(P0)),
+        vec![(1, 0)]
+    );
+    outcome.assert_life_delta(P0, -1);
+    let sark = &outcome.state().objects[&sarkhan];
+    assert_eq!(sark.zone, Zone::Battlefield);
+    assert_eq!(sark.damage_marked, 4);
+    assert_eq!(sark.loyalty, Some(2));
+    assert_settled(outcome.state());
 }

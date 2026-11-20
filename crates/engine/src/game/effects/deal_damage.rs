@@ -714,16 +714,16 @@ fn damage_excess_beyond_lethal(
             .map(|obj| {
                 let mut excess = 0;
 
-                if obj.card_types.core_types.contains(&CoreType::Creature) {
-                    if let Some(toughness) = obj.toughness {
-                        let lethal = if has_deathtouch {
-                            // CR 120.4a: damage greater than 1 from a deathtouch source is excess, whatever damage is already marked.
-                            1
-                        } else {
-                            (toughness as u32).saturating_sub(obj.damage_marked)
-                        };
-                        excess = excess.max(actual_amount.saturating_sub(lethal));
-                    }
+                if obj.card_types.core_types.contains(&CoreType::Creature)
+                    && obj.toughness.is_some()
+                {
+                    // CR 120.4a: lethal counts damage already marked, and is 1 from a deathtouch source.
+                    let lethal = crate::game::combat_damage::lethal_damage_needed(
+                        state,
+                        *obj_id,
+                        has_deathtouch,
+                    );
+                    excess = excess.max(actual_amount.saturating_sub(lethal));
                 }
 
                 if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
@@ -792,7 +792,7 @@ pub(crate) fn apply_damage_after_replacement(
     // hit on a 2-toughness creature would mark 4 on the creature AND deal 2 to the
     // controller (6 total); the rules-correct outcome is 2 marked + 2 redirected
     // (4 total). Reduce the primary hit to the lethal portion for the creature's
-    // marked damage, DamageDealt event, and damage record; lifelink and the return
+    // marked damage, loyalty/defense removal, DamageDealt event, and damage record; lifelink and the return
     // value keep `actual_amount` because the total damage dealt is unchanged.
     // CR 120.4a "that creature's controller": the rider only redirects when the
     // damaged permanent is a creature (real class cards all read "target creature").
@@ -830,7 +830,7 @@ pub(crate) fn apply_damage_after_replacement(
                     state,
                     *obj_id,
                     CounterType::Loyalty,
-                    actual_amount,
+                    primary_amount,
                     events,
                 );
             }
@@ -843,7 +843,7 @@ pub(crate) fn apply_damage_after_replacement(
                     state,
                     *obj_id,
                     CounterType::Defense,
-                    actual_amount,
+                    primary_amount,
                     events,
                 );
             }
