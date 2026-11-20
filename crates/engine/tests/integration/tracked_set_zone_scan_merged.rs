@@ -3,7 +3,7 @@
 //! rows pin where that finding must NOT happen: readers whose tracked-set
 //! reference is cause-bound to a different action (D4), reads through a carried
 //! set rather than the resolution's own chain (the D7 gate), and a delayed
-//! trigger's bound set. After the D8 revision (cr1 plan, §2.3) Day's rows hold by
+//! trigger's bound set. After the D8 revision (a return printed on the source binds the source's linked exile, CR 607.2a) Day's rows hold by
 //! `ExiledBySource` scoping; the D4 guards are the Timothar row (one-card path) and the
 //! Living Death row (zone scan).
 //!

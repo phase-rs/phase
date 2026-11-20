@@ -10313,7 +10313,7 @@ fn stays_on_resolution_line(def: &AbilityDefinition) -> bool {
 /// is created (CR 603.7c), and the sweep clears its marks. A boon's trigger is not
 /// entered from here either: it is a `Trigger` node, which the sweep walks as its own
 /// root. A draw-replacement substitute resolves later as a chain of its own, so it starts a
-/// fresh line, and an effect creates it, so it is a `CreatedByEffect` host (CR 607.1d).
+/// fresh line, and an effect creates it, so it is not printed on the source (CR 607.1) and is a fail-closed `CreatedByEffect` host.
 ///
 /// `host` is where the ability holding `def` is written (CR 607.1). A same-resolution
 /// branch, a mode, an `else_ability` and the next instruction are the same printed ability,
@@ -10340,8 +10340,8 @@ fn bind_linked_exile_returns_on_line(
             // A boon's trigger is a `Trigger` node; the sweep walks it as its own root (no
             // creation binding; digital-only, no CR entry).
             NestedDefinitionEdge::CreateBoonTrigger => {}
-            // CR 607.1d: an effect creates the substitute; no printed card reaches this edge,
-            // so it fails closed with the other created-by-effect returns.
+            // An effect creates the substitute, so it is not printed on the source (CR 607.1);
+            // no printed card reaches this edge, so it fails closed with the other created-by-effect returns.
             NestedDefinitionEdge::CreateDrawReplacementEffect => {
                 bind_linked_exile_returns_on_line(
                     nested,
@@ -10381,8 +10381,8 @@ fn bind_linked_exile_returns_on_line(
 ///
 /// Printed on the source (`PrintedOnSource`, CR 607.1 + CR 607.2a): the return names the
 /// source's linked exile (`ExiledBySource`), and every sentinel shape lowers set-wide
-/// through `return_all_to_zone_effect`, which forces `origin: Exile`. A `Bounce` cannot
-/// move a card out of exile (CR 607.2a + CR 400.3), and a singular linked anaphor acts on
+/// through `return_all_to_zone_effect`, which forces `origin: Exile`. `bounce::resolve` never
+/// moves a card out of exile, so a `Bounce` return becomes a set-wide move to its owners' hands (CR 400.3), and a singular linked anaphor acts on
 /// each exiled card (CR 607.3), as the set-wide promotion `ltb_return_of_exiled_by_source`
 /// makes for the O-ring class. Created by an effect (`CreatedByEffect`, CR 607.1d): the
 /// move keeps its shape and names the narrowed chain set.
@@ -10398,78 +10398,97 @@ fn settle_linked_exile_return(
     let Some(bound) = crate::parser::oracle_target::linked_exile_return_binding(prior, host) else {
         return;
     };
-    let is_sentinel = |target: &TargetFilter| {
-        matches!(
-            target,
-            TargetFilter::TrackedSet {
-                id: crate::types::identifiers::TrackedSetId(0)
-            }
-        )
-    };
-    let set_wide = match (host, &mut *def.effect) {
+    // CR 607.1: the host decides which return shapes are rewritten. Each host arm names
+    // its own effect shapes, so a future host (the CR 607.5 pair) must be given an arm.
+    let set_wide = match host {
         // CR 607.2a + CR 400.3: the printed linked exile's cards go to their owners'
         // hands as a set: the Tidehollow Sculler shape.
-        (
-            LinkedExileReturnHost::PrintedOnSource,
+        LinkedExileReturnHost::PrintedOnSource => match &mut *def.effect {
             Effect::Bounce {
                 target,
                 destination,
                 ..
+            } if is_sentinel_tracked_set(target) => {
+                super::oracle_effect::imperative::return_all_to_zone_effect(
+                    None,
+                    destination.unwrap_or(Zone::Hand),
+                    bound,
+                    None,
+                    crate::types::zones::EtbTapState::Unspecified,
+                    Vec::new(),
+                )
+            }
+            other => match lower_set_wide_zone_move(other, bound) {
+                Some(effect) => effect,
+                None => return,
             },
-        ) if is_sentinel(target) => super::oracle_effect::imperative::return_all_to_zone_effect(
-            None,
-            destination.unwrap_or(Zone::Hand),
-            bound,
-            None,
-            crate::types::zones::EtbTapState::Unspecified,
-            Vec::new(),
-        ),
+        },
         // CR 607.1d + CR 607.2a: one card, or the whole set moved to a hand: the move
         // keeps its shape and names the narrowed set.
-        (LinkedExileReturnHost::CreatedByEffect, Effect::Bounce { target, .. })
-            if is_sentinel(target) =>
-        {
-            *target = bound;
-            return;
-        }
-        (LinkedExileReturnHost::CreatedByEffect, Effect::ChangeZone { target, .. })
-            if is_sentinel(target) && mark == LinkedExileReturn::OneCard =>
-        {
-            *target = bound;
-            return;
-        }
-        // CR 607.2a + CR 607.3 + CR 400.7: the whole linked set moves together.
-        (
-            _,
-            Effect::ChangeZone {
-                target,
-                destination,
-                enters_under,
-                enter_tapped,
-                enter_with_counters,
-                origin,
-                ..
+        LinkedExileReturnHost::CreatedByEffect => match &mut *def.effect {
+            Effect::Bounce { target, .. } if is_sentinel_tracked_set(target) => {
+                *target = bound;
+                return;
             }
-            | Effect::ChangeZoneAll {
-                target,
-                destination,
-                enters_under,
-                enter_tapped,
-                enter_with_counters,
-                origin,
-                ..
+            Effect::ChangeZone { target, .. }
+                if is_sentinel_tracked_set(target) && mark == LinkedExileReturn::OneCard =>
+            {
+                *target = bound;
+                return;
+            }
+            other => match lower_set_wide_zone_move(other, bound) {
+                Some(effect) => effect,
+                None => return,
             },
-        ) if is_sentinel(target) => super::oracle_effect::imperative::return_all_to_zone_effect(
-            *origin,
-            *destination,
-            bound,
-            enters_under.take(),
-            *enter_tapped,
-            std::mem::take(enter_with_counters),
-        ),
-        _ => return,
+        },
     };
     *def.effect = set_wide;
+}
+
+/// Whether `target` is the unbound `TrackedSet` sentinel a linked-exile return lowers to.
+fn is_sentinel_tracked_set(target: &TargetFilter) -> bool {
+    matches!(
+        target,
+        TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0)
+        }
+    )
+}
+
+/// CR 607.2a + CR 607.3 + CR 400.7: the whole linked set moves together. Lowers a sentinel
+/// `ChangeZone` / `ChangeZoneAll` to the set-wide move over `bound`; any other shape is
+/// not a linked-exile return and yields `None`.
+fn lower_set_wide_zone_move(effect: &mut Effect, bound: TargetFilter) -> Option<Effect> {
+    match effect {
+        Effect::ChangeZone {
+            target,
+            destination,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            origin,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            target,
+            destination,
+            enters_under,
+            enter_tapped,
+            enter_with_counters,
+            origin,
+            ..
+        } if is_sentinel_tracked_set(target) => {
+            Some(super::oracle_effect::imperative::return_all_to_zone_effect(
+                *origin,
+                *destination,
+                bound,
+                enters_under.take(),
+                *enter_tapped,
+                std::mem::take(enter_with_counters),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// CR-neutral hygiene for parser-scratch marks (`unlowered_guard`, `linked_exile_return`):

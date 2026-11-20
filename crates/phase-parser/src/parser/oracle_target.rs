@@ -405,11 +405,13 @@ pub(crate) enum LinkedExileReturnHost {
     /// ability printed on the same object, so the phrase names the cards that
     /// object's linked exile put into exile.
     PrintedOnSource,
-    /// CR 607.1d: written inside an ability an effect creates (a granted trigger
-    /// or ability, a granted static's definition, a draw-replacement substitute).
+    /// Written inside an ability an effect creates (a granted trigger or ability,
+    /// a granted static's definition, a draw-replacement substitute), so not
+    /// printed on the source (CR 607.1). For Timothar's Bat, a token the
+    /// source's ability created, CR 607.1d links the grant to that ability.
     /// The phrase names the cards exiled by the resolution that created it
     /// (Timothar's ruling, 2021-11-19), which only a creation-time binding can
-    /// fix; until the filed Timothar granted-binding issue lands, it narrows the
+    /// fix; until #11123 (Timothar's creation-time binding) lands, it narrows the
     /// resolving chain's set to its `Exiled`-caused members.
     CreatedByEffect,
 }
@@ -425,7 +427,7 @@ pub(crate) enum LinkedExileReturnHost {
 /// - created by an effect (CR 607.1d; Timothar's ruling 2021-11-19, "Timothar's
 ///   last ability is linked to the ability it grants the Bat token"): the
 ///   creating resolution's `Exiled`-caused members, pending creation-time
-///   binding (the filed Timothar granted-binding issue).
+///   binding (#11123).
 ///
 /// `None` keeps the sentinel: with no prior publisher (the O-ring LTB shape
 /// `detect_etb_exile_ltb_return` pairs) or over a same-chain exile producer.

@@ -463,6 +463,8 @@ fn the_spot_dies_returns_the_exiled_cards_to_their_owners_hands() {
     let murder = scenario
         .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
         .id();
+    // A known filler card, so "the bottom of the library" is distinguishable from the top.
+    scenario.with_library_top(P0, &["Grizzly Bears"]);
     let mut runner = scenario.build();
 
     runner.cast(spot).target_objects(&[bears, child]).resolve();
@@ -473,10 +475,16 @@ fn the_spot_dies_returns_the_exiled_cards_to_their_owners_hands() {
 
     assert_settled(&runner, "S1");
     let state = runner.state();
+    assert_eq!(state.players[0].library.len(), 2);
     assert_eq!(
         state.players[0].library.last(),
         Some(&spot),
         "The Spot is on the bottom of its owner's library"
+    );
+    assert_ne!(
+        state.players[0].library.front(),
+        Some(&spot),
+        "the filler card, not The Spot, is on top"
     );
     assert_eq!(state.objects[&bears].zone, Zone::Hand);
     assert!(
@@ -610,7 +618,7 @@ fn timothar_granted_return_binds_exiled_caused_sentinel() {
 
 /// R4 — The Spot's plural hand return, printed on the card, lowers to a set-wide
 /// `ChangeZoneAll` from exile to the owners' hands over the source's linked exile
-/// (`ExiledBySource`): a `Bounce` cannot move a card out of exile (CR 607.2a + CR 400.3).
+/// (`ExiledBySource`, CR 607.2a), to their owners' hands (CR 400.3): `bounce::resolve` never moves a card out of exile.
 /// The "If you do" gate stays.
 #[test]
 fn the_spot_dies_return_binds_exiled_by_source_set_wide() {
