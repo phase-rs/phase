@@ -225,7 +225,7 @@ describe("StackDisplay under a targeting prompt", () => {
   it("moves a deep stack pinned at the top inset below the prompt", () => {
     // Ten entries make a 436px panel (112x156 cards, the size floor, and a
     // 24px stagger), taller than the viewport, so with no prompt it pins at
-    // the 12px top inset and the bottom of its pile spills off.
+    // the 12px top inset and its pile scrolls.
     mockPromptEdges(() => FOCUSED_PROMPT);
     seed({ entryCount: 10 });
     render(board());
@@ -250,7 +250,7 @@ describe("StackDisplay under a targeting prompt", () => {
 
     // Below the expanded prompt the 273px panel no longer fits above the
     // bottom inset, so it pins under the prompt with its header in view and
-    // the bottom of its pile spilling off the bottom of the viewport.
+    // its pile scrolls in the room left above the inset.
     fireEvent.click(screen.getByRole("button", { name: `Show the full description: ${DESCRIPTION}` }));
     expect(panelTop()).toBe(expandedBottom + PROMPT_GAP);
 
