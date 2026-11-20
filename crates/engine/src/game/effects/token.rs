@@ -711,16 +711,29 @@ pub fn resolve(
     resolve_with_host_override(state, ability, events, None)
 }
 
-/// `resolve` with a pre-chosen token host. `Some` resumes a "one of them"
-/// host choice the first pass paused for (`WaitingFor::ChooseTokenHost`):
-/// the choice binds the host and the pause branch is skipped, so a resumed
-/// resolution never prompts twice. `None` is the ordinary first pass.
-pub(crate) fn resolve_with_host_override(
+/// CR 608.2f: one seat's token-batch proposal for a simultaneous multi-seat
+/// creation. Builds the seat's single-batch `CreateToken` event without
+/// running the replacement pipeline or delivering anything, so a coordinator
+/// can assemble every seat's batch into one compound event (one pipeline run,
+/// one one-shot consumption). This IS the single-seat path's proposal
+/// sequence (shared, not duplicated): `resolve_with_host_override` below
+/// calls it and then runs the pipeline, delivery, and bookkeeping.
+pub(crate) enum TokenBatchProposal {
+    /// The seat's single-batch event, ready for the replacement pipeline.
+    Ready(ProposedEvent),
+    /// CR 608.2b: no token can be created (the owner failed to resolve); the
+    /// caller emits the shared `no_token` outcome.
+    NoToken,
+    /// A "one of them" host choice was parked (`WaitingFor::ChooseTokenHost`);
+    /// nothing was proposed or mutated. The caller returns to the waiter.
+    Parked,
+}
+
+pub(crate) fn propose_token_batch(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
     host_override: Option<AttachTarget>,
-) -> Result<(), EffectError> {
+) -> TokenBatchProposal {
     let (
         script_name,
         fallback_power,
@@ -793,7 +806,7 @@ pub(crate) fn resolve_with_host_override(
         resolve_token_batch(state, ability, count, enters_attacking, &attack_destination);
     // CR 608.2b: a declared player whose target was illegal creates no token.
     let Some(token_owner) = resolve_token_owner(state, ability, owner_filter) else {
-        return no_token(state, ability, events);
+        return TokenBatchProposal::NoToken;
     };
 
     // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
@@ -821,7 +834,7 @@ pub(crate) fn resolve_with_host_override(
                     legal_targets: candidates,
                     pending_ability: Box::new(ability.clone()),
                 };
-                return Ok(());
+                return TokenBatchProposal::Parked;
             }
             // Zero or one legal entrant: `Unbound` (→ CR 303.4i denial for
             // Aura tokens) or auto-bound. No prompt either way.
@@ -877,7 +890,7 @@ pub(crate) fn resolve_with_host_override(
 
     // CR 614.1a: Propose entire token batch for replacement pipeline.
     // Replacement effects (Doubling Season, Primal Vigor) modify count.
-    let proposed = ProposedEvent::CreateToken {
+    TokenBatchProposal::Ready(ProposedEvent::CreateToken {
         owner: token_owner,
         spec: Box::new(spec),
         copy: None,
@@ -888,55 +901,73 @@ pub(crate) fn resolve_with_host_override(
             .post_replacement_token_choice_applied
             .clone()
             .unwrap_or_default(),
-    };
+    })
+}
 
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            // CR 614.1a + CR 608.2c: the delivery authority publishes the whole
-            // event's created referent, appended batches included.
-            let completed = apply_create_token_after_replacement(state, event, events);
-            if !completed {
-                return Ok(());
+/// `resolve` with a pre-chosen token host. `Some` resumes a "one of them"
+/// host choice the first pass paused for (`WaitingFor::ChooseTokenHost`):
+/// the choice binds the host and the pause branch is skipped, so a resumed
+/// resolution never prompts twice. `None` is the ordinary first pass.
+pub(crate) fn resolve_with_host_override(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    host_override: Option<AttachTarget>,
+) -> Result<(), EffectError> {
+    match propose_token_batch(state, ability, host_override) {
+        TokenBatchProposal::Parked => Ok(()),
+        TokenBatchProposal::NoToken => no_token(state, ability, events),
+        TokenBatchProposal::Ready(proposed) => {
+            match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    // CR 614.1a + CR 608.2c: the delivery authority publishes the whole
+                    // event's created referent, appended batches included.
+                    let completed = apply_create_token_after_replacement(state, event, events);
+                    if !completed {
+                        return Ok(());
+                    }
+                }
+                ReplacementResult::Prevented => {
+                    // CR 609.3: nothing was created, so the previous result must not read as this one's.
+                    state.last_created_token_ids = Vec::new();
+                }
+                ReplacementResult::NeedsChoice(player) => {
+                    state.waiting_for =
+                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    return Ok(());
+                }
             }
-        }
-        ReplacementResult::Prevented => {
-            // CR 609.3: nothing was created, so the previous result must not read as this one's.
-            state.last_created_token_ids = Vec::new();
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            return Ok(());
+
+            // CR 608.2c: Consume the tracked set after reading its size for "this way" counting.
+            if matches!(
+                &ability.effect,
+                Effect::Token {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    },
+                    ..
+                }
+            ) {
+                if let Some((&id, _)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+                {
+                    state.tracked_object_sets.remove(&id);
+                    // CR 608.2c: drop the consumed set's member-cause provenance too so
+                    // the side map never outlives its `tracked_object_sets` entry.
+                    state.tracked_set_member_causes.remove(&id);
+                    state.tracked_set_participants.remove(&id);
+                    state.tracked_set_member_origins.remove(&id);
+                }
+            }
+
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+
+            Ok(())
         }
     }
-
-    // CR 608.2c: Consume the tracked set after reading its size for "this way" counting.
-    if matches!(
-        &ability.effect,
-        Effect::Token {
-            count: QuantityExpr::Ref {
-                qty: QuantityRef::TrackedSetSize
-            },
-            ..
-        }
-    ) {
-        if let Some((&id, _)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) {
-            state.tracked_object_sets.remove(&id);
-            // CR 608.2c: drop the consumed set's member-cause provenance too so
-            // the side map never outlives its `tracked_object_sets` entry.
-            state.tracked_set_member_causes.remove(&id);
-            state.tracked_set_participants.remove(&id);
-            state.tracked_set_member_origins.remove(&id);
-        }
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
 }
 
 /// CR 508.4 + CR 608.2h: how many tokens a token instruction creates, whether

@@ -6668,6 +6668,30 @@ pub(super) fn strip_each_player_subject(
     }
 
     let lower = text.to_lowercase();
+    // CR 115.1a + CR 601.2c: "each player other than <declaring anchor>" names
+    // its exclusion through a cast-time player target ("target player" /
+    // "target opponent" — Death by Dragons), which this
+    // `(Option<PlayerFilter>, String)` seam cannot carry; stripping here would
+    // emit a scope without its declaration. Decline with `(None, whole)` so
+    // the intact shape reaches `try_parse_each_player_other_than_target` (the
+    // whole-clause distributor in `mod.rs`), which reads the anchor through
+    // `parse_target` and wraps the scoped body in a `TargetOnly` head.
+    // Non-declaring anchors ("its controller") keep the arm below. The anchor
+    // decision reads `declared_player_controller_ref`, the same authority the
+    // distributor uses, so guard and interceptor cannot drift. The guard also
+    // requires a body after the anchor, mirroring the interceptor's own
+    // degenerate-input check, so both agree on the shape's domain.
+    if let Ok((anchor_lower, _)) =
+        tag::<_, _, OracleError<'_>>("each player other than ").parse(lower.as_str())
+    {
+        let consumed = lower.len() - anchor_lower.len();
+        let (anchor_filter, anchor_rest) = parse_target(&text[consumed..]);
+        if !anchor_rest.trim().is_empty()
+            && declared_player_controller_ref(&anchor_filter).is_some()
+        {
+            return (None, text.to_string());
+        }
+    }
     // CR 102.2 + CR 608.2c + CR 109.4: "each of your other opponents/foes" —
     // the partitive + "other" spelling (Surrender Your Thoughts, Feed the
     // Machine, May Civilization Collapse). Unlike bare "each other player"
@@ -15859,6 +15883,41 @@ mod tests {
         assert_eq!(
             residual, "create a token that's a copy of it.",
             "residual must be the deconjugated imperative with the exclusion stripped"
+        );
+    }
+
+    // CR 115.1a + CR 601.2c: "each player other than target player/opponent
+    // <verb>" DECLARES a cast-time player target, which the
+    // `(Option<PlayerFilter>, String)` strip seam cannot carry — a scope
+    // without its declaration would misresolve. The strip declines with
+    // `(None, whole)` so the intact shape reaches
+    // `try_parse_each_player_other_than_target` (the whole-clause distributor
+    // in `mod.rs`), which wraps the scoped body in a `TargetOnly` head.
+    // Building block for Death by Dragons and the declaring-anchor half of
+    // the "each player other than <ref>" class.
+    #[test]
+    fn each_player_other_than_target_player_declines_strip() {
+        use crate::types::ability::PlayerFilter;
+        for text in [
+            "each player other than target player creates a 5/5 red Dragon creature token with flying.",
+            "each player other than target opponent creates a 1/1 white Soldier creature token.",
+        ] {
+            let (scope, residual) = super::strip_each_player_subject(text, false);
+            assert_eq!(
+                scope, None,
+                "declaring-anchor shape must decline the strip: {text}"
+            );
+            assert_eq!(residual, text, "residual must be the intact text: {text}");
+        }
+        // Reach-guard: the guard is narrow — the non-declaring anchor keeps
+        // its existing strip route (mirrors the sibling test above).
+        let (scope, _) = super::strip_each_player_subject(
+            "each player other than its controller creates a token that's a copy of it.",
+            false,
+        );
+        assert!(
+            matches!(scope, Some(PlayerFilter::AllExcept { .. })),
+            "its-controller anchor must still strip"
         );
     }
 

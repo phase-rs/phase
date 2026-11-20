@@ -5,18 +5,19 @@ use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityDefinition, AttachCardinality, AttachSelection, ChosenAttribute, CopyTargetPurpose,
-    Effect, EffectKind, PostReplacementContinuation, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef,
+    Effect, EffectKind, PostReplacementContinuation, PtValue, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TokenAttackDestination,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
-use crate::types::events::{GameEvent, ManaTapState};
+use crate::types::events::{GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     CounterCostRootSubtree, DeferredLifeCostResume, DrainStatus, GameState, ParkedEntry,
-    ParkedEntryState, PendingCostMoveResume, PendingCounterPostAction, PendingEffectResolved,
-    PendingReplacement, PostReplacementDrain, PostReplacementDrainStack, TokenEntryEventEmission,
-    UnrepresentablePolicy, WaitingFor,
+    ParkedEntryState, PendingCostMoveResume, PendingCounterPostAction,
+    PendingEffectResolutionEvent, PendingEffectResolved, PendingReplacement, PostReplacementDrain,
+    PostReplacementDrainStack, SeatCreatedTokens, TokenEntryEventEmission, UnrepresentablePolicy,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -42,7 +43,9 @@ use super::effects::life::{
 };
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
-use super::effects::token::apply_create_token_after_replacement;
+use super::effects::token::{
+    apply_create_token_after_replacement, apply_create_token_after_replacement_with_created_ids,
+};
 use super::engine::EngineError;
 use super::life_costs::PayLifeCostResult;
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
@@ -383,6 +386,200 @@ pub(super) fn resume_active_draw_sequences(
         state.remove_empty_active_post_replacement_frame();
     }
     None
+}
+
+/// CR 608.2f + CR 614.5 (F1/F2): readiness gate for the deferred publication
+/// of a paused simultaneous multi-seat token clause. The clause finishes only
+/// once its record is installed, no replacement or entry choice is live, no
+/// compound cursor, copy owner, unfinished resolving owner on top (the resumer
+/// loop's own set) or uncommitted entry remains, and the action is back at
+/// Priority. Evaluated at every pass boundary of the common priority resumer.
+/// Single-fire: the finish takes the record.
+fn simultaneous_token_clause_is_ready(state: &GameState) -> bool {
+    // CR 614.6: a post-replacement drain still on top is the replaced event's
+    // modified event still occurring, so the clause finishes after it. An entry
+    // not yet committed (a parked liminal entry or token battlefield entry)
+    // would be missing from the published union.
+    if state.pending_simultaneous_token_clause.is_none()
+        || state.pending_replacement.is_some()
+        || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || state.active_copy_token().is_some()
+        || super::engine::top_frame_owes_resolving_work(state)
+        || state.pending_liminal_entry_resume.is_some()
+        || state.pending_token_battlefield_entry.is_some()
+    {
+        return false;
+    }
+    // No live pre-entry choice of the parked entry (subsumed by the Priority
+    // + no-pending conjuncts above; kept as defense in depth).
+    if super::replacement::pending_entry_named_choice_is_live(state)
+        || super::replacement::pending_entry_payment_is_live(state)
+    {
+        return false;
+    }
+    // No compound cursor outstanding on the active counter completion.
+    !state
+        .active_counter_additions()
+        .and_then(|queue| queue.completion.as_ref())
+        .is_some_and(|completion| {
+            completion.post_actions.iter().any(|action| {
+                matches!(
+                    action,
+                    PendingCounterPostAction::ContinueTokenEventDelivery { .. }
+                )
+            })
+        })
+}
+
+/// CR 608.2f + CR 608.2c + CR 609.3 (F1/F2): deferred publication of a paused
+/// simultaneous multi-seat token clause — the reunion the synchronous Done
+/// path performs inline. Appends the completing action's buffer, emits one
+/// terminal event per instructed seat, records the deduped player actions,
+/// publishes the shared clause results, attributes the deduped union to seats
+/// by controller, publishes the created referent, and takes the record.
+fn finish_simultaneous_token_clause(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // B-final: the completing action's own buffer joins the clause span.
+    effects::counters::feed_simultaneous_token_clause(state, events);
+    let Some(record) = state.pending_simultaneous_token_clause.as_ref() else {
+        return;
+    };
+    let source_id = record.source_id;
+    let seats = record.seats.clone();
+    // One terminal event per instructed seat, mirroring the Done path.
+    let terminal: Vec<GameEvent> = seats
+        .iter()
+        .map(|_| GameEvent::EffectResolved {
+            kind: EffectKind::Token,
+            source_id,
+            subject: None,
+        })
+        .collect();
+    events.extend(terminal.iter().cloned());
+    // The clause span for every publication below: every fed buffer plus the
+    // terminal events just emitted (mirrors the Done path's clause window).
+    let mut span = state
+        .pending_simultaneous_token_clause
+        .as_ref()
+        .map(|record| record.accumulated.clone())
+        .unwrap_or_default();
+    span.extend(terminal);
+    // The union over the span (self-deduping by object id).
+    let union = effects::created_token_union_from_events(state, &span);
+    // Deduped player-action recording: the fed buffers overlap (entry+exit
+    // feeds), and the turn ledger blind-pushes — dedup BEFORE recording.
+    let mut seen: HashSet<(PlayerId, PlayerActionKind)> = HashSet::new();
+    let mut firsts: Vec<GameEvent> = Vec::new();
+    for event in &span {
+        if let GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } = event
+        {
+            if seen.insert((*player_id, *action)) {
+                firsts.push(event.clone());
+            }
+        }
+    }
+    effects::record_player_actions_performed(state, &firsts);
+    // Shared clause publication. The gate pins the template (bare Token, no
+    // tail, no tracked-set consumer), so a minimal synthesized ability reads
+    // identically through every helper the publication consults (kind-level
+    // count/amount channels, zone-change ledger, no tracked set, discarded
+    // linked-exile batch).
+    let template = ResolvedAbility::new(
+        Effect::Token {
+            name: String::new(),
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            types: Vec::new(),
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        },
+        Vec::new(),
+        source_id,
+        seats.first().copied().unwrap_or(state.active_player),
+    );
+    let ledger_before_clause = state.last_zone_changed_ids.clone();
+    effects::publish_player_scope_clause_results(
+        state,
+        &template,
+        &template,
+        &seats,
+        false,
+        &span,
+        ledger_before_clause,
+    );
+    // Attribute the deduped union to seats by token controller (the gate pins
+    // the controller to the instructed seat), then publish the referent.
+    let mut seat_results: Vec<SeatCreatedTokens> = Vec::new();
+    for seat in &seats {
+        effects::begin_seat_created_tokens_if_absent(&mut seat_results, *seat);
+    }
+    for pin in union {
+        let holder = state
+            .objects
+            .get(&pin.object_id)
+            .map(|object| object.controller)
+            .unwrap_or(seats.first().copied().unwrap_or(state.active_player));
+        effects::extend_seat_created_tokens(&mut seat_results, holder, vec![pin]);
+    }
+    effects::publish_created_token_union(state, &seat_results);
+    // The clause completed: clear its frozen values (mirrors the synchronous
+    // driver postlude; a gated token clause captures none) and take the
+    // record so this finish single-fires.
+    state.clause_minimum_snapshot = None;
+    state.pending_simultaneous_token_clause = None;
+}
+
+/// CR 608.2f + CR 608.2c (F1/F2): the single finish authority of a paused
+/// simultaneous token clause, called only from the common priority boundary
+/// (`engine::resume_pending_continuation_pass`). Single-fire: the finish takes
+/// the record.
+pub(super) fn finish_simultaneous_token_clause_if_ready(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    if simultaneous_token_clause_is_ready(state) {
+        finish_simultaneous_token_clause(state, events);
+    }
+}
+
+/// The paused simultaneous token clause's identity at an action boundary:
+/// its creating instruction's source. One definition for the start capture
+/// and the end check of `feed_paused_token_clause_after_action`.
+pub(super) fn paused_token_clause_source(state: &GameState) -> Option<ObjectId> {
+    state
+        .pending_simultaneous_token_clause
+        .as_deref()
+        .map(|record| record.source_id)
+}
+
+/// The action-boundary feed of a paused simultaneous token clause: every
+/// action after the installing one belongs to the clause span until its
+/// finish, whatever it answered — a replacement choice, an as-enters or
+/// branch choice, a copy target, a payment, a trigger prompt — so its whole
+/// event buffer joins `accumulated`. Keyed on the record this action began
+/// with: the installing action (fed by its own clause slice) and a record
+/// another instruction installed during this action are never fed pre-clause
+/// events, and a clause that finished inside this action (whose finish fed
+/// the buffer itself) is gone. Called once per action, from
+/// `engine::apply_action_boundary_core`.
+pub(super) fn feed_paused_token_clause_after_action(
+    state: &mut GameState,
+    clause_at_start: Option<ObjectId>,
+    events: &[GameEvent],
+) {
+    if clause_at_start.is_some() && paused_token_clause_source(state) == clause_at_start {
+        effects::counters::feed_simultaneous_token_clause(state, events);
+    }
 }
 
 /// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
@@ -1521,7 +1718,22 @@ fn handle_replacement_choice_inner(
                     // CR 614.1a + CR 608.2c: the delivery authority publishes this
                     // event's whole referent, and hands it to a resident CopyToken
                     // frame, whose drain below assigns the ledger.
-                    let completed = apply_create_token_after_replacement(state, create, events);
+                    // CR 608.2f (F2): a paused simultaneous clause's compound
+                    // owes no terminal event of its own — the deferred
+                    // publication emits one per instructed seat.
+                    let compound_is_paused = state.pending_simultaneous_token_clause.is_some()
+                        && create.has_appended_token_batches();
+                    let completed = if compound_is_paused {
+                        apply_create_token_after_replacement_with_created_ids(
+                            state,
+                            create,
+                            Vec::new(),
+                            PendingEffectResolutionEvent::Suppress,
+                            events,
+                        )
+                    } else {
+                        apply_create_token_after_replacement(state, create, events)
+                    };
                     if !completed {
                         return Ok(state.waiting_for.clone());
                     }
@@ -2126,6 +2338,7 @@ fn handle_replacement_choice_inner(
                 // this call site adds none.
                 finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
 
+                // CR 608.2f: a paused simultaneous token clause finishes inside the resumer below (its first pass boundary), not here.
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 waiting_for = state.waiting_for.clone();
             }
@@ -2191,6 +2404,15 @@ fn handle_replacement_choice_inner(
             }))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 608.2f (F1/F2): a fully prevented compound abandons the
+            // paused clause — take the record so the deferred publication
+            // never runs, and clear the ledger. First, and guarded: the
+            // clause is dead on every sub-path below, but this arm is shared
+            // by every replacement answer, so the ledger must clear only
+            // while the clause is actually installed.
+            if state.pending_simultaneous_token_clause.is_some() {
+                super::replacement::abort_simultaneous_token_clause(state);
+            }
             if let Some(object_id) = parked_zone_change_object_id {
                 record_parked_land_play_completion(state, object_id);
             }

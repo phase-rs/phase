@@ -1618,6 +1618,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // surface, so no viewer — including the choosing player — needs the carrier
     // itself.
     filtered.pending_combat_lifelink = None;
+    // CR 608.2f + CR 400.2: a paused simultaneous token clause's record is server
+    // authority. Its `accumulated` span holds every event of each action taken
+    // while the clause is paused — a departure's hidden-zone moves among them
+    // (CR 800.4a) — which `filter_events_for_viewer` would redact in the live
+    // stream. The projected prompt is the complete viewer-facing surface.
+    filtered.pending_simultaneous_token_clause = None;
     // CR 608.2h: a paused player-scope clause retains its frozen aggregate in
     // authoritative state so save/restore resumes the same application. The
     // value can encode hidden-zone information (for example, hand sizes), so it

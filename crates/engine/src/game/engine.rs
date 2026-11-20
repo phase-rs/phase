@@ -1481,10 +1481,10 @@ fn apply_action_boundary_core(
     // dispatcher's cleanup, and the sweep's exhaustive match pops only
     // `Dispatching`.
     //
-    // This is the OUTER action funnel — `apply_action_boundary_core` has exactly
-    // three call sites: two public/simulation entry points and one internal
-    // clone-local life-safety preview. Deliberately NOT `apply_action`, which
-    // the auto-pass and shortcut loops re-enter twelve further ways.
+    // This is the OUTER action funnel: every reducer action (public, simulation,
+    // prospective, replay, Resolve-All, and the clone-local life-safety preview)
+    // passes through `apply_action_boundary_core`. Deliberately NOT
+    // `apply_action`, its reducer.
     //
     // BEFORE `boundary_snapshot`, deliberately: every failure path restores that
     // same snapshot, and removing an impossible state is not part of the action
@@ -1618,6 +1618,9 @@ fn apply_action_boundary_core(
         && action.is_submitter_scoped()
         && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
     .then(|| (action.clone(), authenticated_actor));
+    // The paused token clause this action begins with (if any): it is fed this
+    // action's whole buffer at the end of the core, after the follow-up below.
+    let token_clause_at_start = super::engine_replacement::paused_token_clause_source(state);
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1873,6 +1876,14 @@ fn apply_action_boundary_core(
             }
             None
         };
+    // A paused simultaneous token clause owns every later action's events until
+    // it finishes, whatever the action answered; the follow-up above can still
+    // realize its token entries, so this runs after it.
+    super::engine_replacement::feed_paused_token_clause_after_action(
+        state,
+        token_clause_at_start,
+        &result.events,
+    );
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -8915,6 +8926,8 @@ pub(crate) fn cost_includes_draw_instruction(cost: &crate::types::ability::Abili
 /// replaced is still resolving). That repeat follows the whole pass, so the
 /// pass's entry commits (CR 614.12a) land before the exposed owner completes.
 /// A repeat needs the position to strictly decrease, so the loop ends.
+/// Every pass starts and ends with the paused-token-clause finish
+/// (`finish_simultaneous_token_clause_if_ready`).
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -8923,24 +8936,11 @@ pub(super) fn resume_pending_continuation_if_priority(
         let before = state.resolution_stack.position();
         resume_pending_continuation_pass(state, events)?;
         let after = state.resolution_stack.position();
-        // CR 117.2e + CR 608.2 + CR 614.6: a pass that shrinks the subtree and
-        // leaves a copy owner or a post-replacement drain on top has exposed it (a
-        // substitute's drain retired, or an inner copy owner completed). The work
-        // that frame belongs to is unfinished (for a copy owner, the ability whose
-        // creation the substitute replaced is still resolving), so no player may
-        // receive priority: pass again. The repeat follows the whole pass, so that
-        // pass's entry commits land first (CR 614.12a).
-        // CR 608.2c: a retired as-enters dispatch can also expose the zone-move
-        // owner above the spell's parked tail. Finish that move before returning
-        // priority, so its later instructions resume in this same action.
-        let exposes_resolving_owner = matches!(
-            state.resolution_stack.last(),
-            Some(
-                ResolutionFrame::CopyToken(_)
-                    | ResolutionFrame::PostReplacement(_)
-                    | ResolutionFrame::ChangeZone(_)
-            )
-        );
+        // A pass that shrinks the subtree and leaves an owner with unfinished
+        // resolving work on top has exposed it: no player may receive priority, so
+        // pass again. The repeat follows the whole pass, so that pass's entry
+        // commits land first (CR 614.12a).
+        let exposes_resolving_owner = top_frame_owes_resolving_work(state);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. })
             || (state.counter_cost_root_subtree() != CounterCostRootSubtree::Unfinished
                 && !exposes_resolving_owner)
@@ -8966,6 +8966,25 @@ pub(super) fn resume_pending_continuation_if_priority(
     }
 }
 
+/// CR 117.2e + CR 608.2 + CR 614.6: whether the frame on top owes unfinished
+/// resolving work — a copy owner or a post-replacement drain (a substitute's
+/// drain retired, or an inner copy owner completed). The work that frame belongs
+/// to is unfinished (for a copy owner, the ability whose creation the substitute
+/// replaced is still resolving), so no player may receive priority.
+/// CR 608.2c: a retired as-enters dispatch can also expose the zone-move owner
+/// above the spell's parked tail; that move finishes before priority returns, so
+/// its later instructions resume in the same action.
+pub(super) fn top_frame_owes_resolving_work(state: &GameState) -> bool {
+    matches!(
+        state.resolution_stack.last(),
+        Some(
+            ResolutionFrame::CopyToken(_)
+                | ResolutionFrame::PostReplacement(_)
+                | ResolutionFrame::ChangeZone(_)
+        )
+    )
+}
+
 /// CR 601.2h + CR 605.3b + CR 608.2c + CR 616.1: once a parked counter-cost
 /// root's replacement subtree has retired, resume that root at this boundary
 /// before any further frame, liminal-entry or phase-transition work.
@@ -8986,6 +9005,10 @@ fn resume_pending_continuation_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    // CR 608.2f + CR 608.2c: a paused simultaneous token clause whose every seat
+    // has committed finishes here, at the common priority boundary every answer
+    // reaches, before the outer continuation resumes.
+    super::engine_replacement::finish_simultaneous_token_clause_if_ready(state, events);
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // CR 118.3b + CR 119.4 + CR 616.1: A life-payment replacement child
         // drains to its recorded resolution boundary before the paid outer
@@ -9087,6 +9110,10 @@ fn resume_pending_continuation_pass(
             }
         }
     }
+    // CR 608.2f: and once more after this pass, which may have retired the
+    // clause's last resolving owner; the loop repeats only while an owner stays
+    // exposed, so the clause is never left for an unrelated later action.
+    super::engine_replacement::finish_simultaneous_token_clause_if_ready(state, events);
     settle_resolving_stack_entry_after_continuation_resume(state);
     Ok(())
 }

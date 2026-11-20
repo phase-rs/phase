@@ -14,6 +14,7 @@ mod darkness_crystal_exiled_with_activation_8164;
 mod darksteel_angel_cant_have_counters;
 mod dawnbreak_reclaimer;
 mod dazzling_beauty_become_blocked;
+mod death_by_dragons;
 mod death_priest_myrkul_oxford_anthem;
 mod debug_create_intrinsic_counters;
 mod debug_modify_pt_counters;

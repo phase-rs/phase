@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameState gains the PendingSimultaneousTokenClause pause record for multi-seat simultaneous token clauses"
+}

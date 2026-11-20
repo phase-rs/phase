@@ -13054,6 +13054,14 @@ fn parse_effect_clause_inner_with_damage_context(
         return clause;
     }
 
+    // CR 115.1a + CR 608.2c: "each player other than target <player|opponent>
+    // <body>" — the exclusion anchor declares a cast-time target, so the whole
+    // shape parses here (TargetOnly head + AllExcept-scoped body) rather than
+    // through the scope-only strip seam (which declines it; see lower.rs guard).
+    if let Some(clause) = try_parse_each_player_other_than_target(text, ctx) {
+        return clause;
+    }
+
     // Eye to Eye / Mouth to Mouth: "you and <player> have a <kind> contest".
     if let Some(clause) = try_parse_physical_contest(text, ctx) {
         return clause;
@@ -28154,6 +28162,129 @@ fn try_parse_compound_subject_each(
         history,
         crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
     );
+    Some(clause)
+}
+
+/// CR 115.1a + CR 601.2c + CR 608.2c: "each player other than target
+/// <player|opponent> <body>" — a subject-position player-scope exclusion whose
+/// anchor DECLARES a cast-time player target (Death by Dragons). The
+/// scope-only strip seam (`strip_each_player_subject`) declines this shape
+/// (see the guard there), so the whole clause arrives here intact and lowers
+/// to a `TargetOnly` head over an `AllExcept { TargetPlayer, All }`-scoped
+/// body — the same head-over-scoped-body construction as
+/// `bind_coordinated_player_set`, whose guards and history bookkeeping this
+/// mirrors step for step. Returns `None` for non-declaring anchors ("its
+/// controller" keeps its existing peel route) and fails closed with a named
+/// gap for prefix-matched-but-unmodelable shapes (never `None`, so downstream
+/// arms cannot misroute the full text).
+fn try_parse_each_player_other_than_target(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // CR 115.1a: match the declaring-exclusion prefix; slice the anchor+body
+    // span from the original-case text by consumed offset (mirror :27446).
+    let lower = text.to_lowercase();
+    let prefix_len =
+        match tag::<_, _, OracleError<'_>>("each player other than ").parse(lower.as_str()) {
+            Ok((rest, _)) => lower.len() - rest.len(),
+            Err(_) => return None,
+        };
+    let anchor_span = &text[prefix_len..];
+    // Anchor → declaring filter through THE target-noun authority (never a
+    // hand-rolled noun list, so this reader and the strip guard cannot drift).
+    let (declaring_filter, body_rest) = parse_target(anchor_span);
+    // Non-declaring anchors keep their existing peel route.
+    declared_player_controller_ref(&declaring_filter)?;
+    // CR 115.1 + CR 608.2b chain guard (mirror `coordinated_player_member`
+    // :34073): `TargetPlayer` reads the FIRST declared player slot, so an
+    // earlier player slot (or an indeterminate registry, or an already-declared
+    // player) would shadow the head's own slot. Fail closed with a named gap.
+    let earlier_slots_name_only_objects = matches!(
+        &ctx.chain_declared_slots,
+        DeclaredSlotRegistry::Known(entries)
+            if entries.iter().all(|entry| entry.filter.denotes_battlefield_objects())
+    );
+    if !(earlier_slots_name_only_objects && ctx.declared_player_scope.is_none()) {
+        return Some(parsed_clause(Effect::unimplemented(
+            "excluded_target_player_shadowed",
+            text,
+        )));
+    }
+    let body_text = body_rest.trim();
+    if body_text.is_empty() {
+        return None;
+    }
+    // CR 608.2c: parse the body with the shared nested-chain surface (mirror
+    // :27455; throwaway ctx — the parsed body is kept, `body_ctx` is dropped).
+    let mut body_ctx = ctx.clone_throwaway();
+    let lowered_body = parse_nested_effect_chain_with_damage_context_and_provenance(
+        body_text,
+        AbilityKind::Spell,
+        &mut body_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let parsed_body = lowered_body.value;
+    let body_history = lowered_body.history;
+    // A body gap surfaces the body's own gap name over the whole clause: the
+    // subject is bound, the verb is the gap (mirror :27635).
+    if let Effect::Unimplemented { name, .. } = &*parsed_body.effect {
+        return Some(parsed_clause(Effect::unimplemented(name.clone(), text)));
+    }
+    // A body that already carries its own iteration scope is refused — the
+    // exclusion never overwrites that scope (mirror :27468). No halves
+    // fallback exists here; fail closed, named.
+    let body_scope_free =
+        std::iter::successors(Some(&parsed_body), |link| link.sub_ability.as_deref())
+            .all(|link| link.player_scope.is_none());
+    if !body_scope_free {
+        return Some(parsed_clause(Effect::unimplemented(
+            "excluded_target_player_scoped_body",
+            text,
+        )));
+    }
+    // Per-seat processing must be unobservable (mirror :27638).
+    if !seat_order_is_unobservable(&parsed_body) {
+        return Some(parsed_clause(Effect::unimplemented(
+            subject::UNBOUND_SUBJECT_GAP,
+            text,
+        )));
+    }
+    // CR 608.2c + CR 109.5: per-link cursor (mirror :27658): bind the body's
+    // implicit recipient to the iterating seat and stamp the exclusion scope.
+    let mut body = parsed_body;
+    let scope = PlayerFilter::AllExcept {
+        exclude: Box::new(PlayerFilter::TargetPlayer),
+        relation: PlayerRelation::All,
+    };
+    let mut cursor = Some(&mut body);
+    while let Some(link) = cursor {
+        rebind_subject_only_body_recipient(&mut link.effect);
+        link.player_scope = Some(scope.clone());
+        cursor = link.sub_ability.as_deref_mut();
+    }
+    // CR 115.1 + CR 601.2c: wrap in the declaring `TargetOnly` head. The head
+    // span runs through the consumed anchor (mirroring the caller-side
+    // `owner_text` stamp at :27477-27479, not the `None` inside :27664), plus
+    // body-history relocation with `SubAbility` prepend (mirror :27480-27486).
+    let head_text = Some(text[..prefix_len + (anchor_span.len() - body_rest.len())].to_string());
+    let mut clause = ParsedEffectClause {
+        history: Vec::new(),
+        head_text,
+        sub_ability: Some(Box::new(body)),
+        ..parsed_clause(Effect::TargetOnly {
+            target: declaring_filter,
+        })
+    };
+    clause.history = body_history
+        .into_iter()
+        .map(|record| {
+            let mut pending =
+                crate::parser::oracle_ir::history_provenance::PendingHistory::relocated(record);
+            pending
+                .prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+            pending
+        })
+        .collect();
     Some(clause)
 }
 
