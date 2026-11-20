@@ -209,6 +209,10 @@ fn assert_reach(b: &Board) {
         offers_play_land(state, b.forest_in_batch),
         "reach guard: the grant admits the batch's plain land"
     );
+    assert!(
+        offers_play_land(state, b.recovery),
+        "reach guard: the grant admits the modal land back face"
+    );
 }
 
 /// CR 701.18b + CR 712.12: the legal land back face is offered and played from
@@ -551,16 +555,18 @@ fn a_cast_only_grant_does_not_admit_the_modal_land_back_face() {
     );
 }
 
-/// Documented current limitation, not a rules fence: Ark of Hunger's "Mill a
-/// card. You may play that card this turn." puts Bala Ged Recovery into the
-/// graveyard with a Play permission. The rules allow a milled modal card's land
-/// face to be played from there (CR 712.12, CR 701.18b), but the engine's
-/// graveyard land scan finds lands by their front face, so the modal land back
-/// is neither offered nor playable from the graveyard and only the spell front
-/// is castable. This test pins that limitation so a later change to graveyard
-/// discovery is a deliberate one.
+/// Ark of Hunger's "Mill a card. You may play that card this turn." puts Bala
+/// Ged Recovery into the graveyard with a Play permission, and the rules let a
+/// milled modal card's land face be played from there: CR 701.18b (to play a
+/// card is to play it as a land or cast it as a spell) and CR 712.12 (a player
+/// playing a modal double-faced card as a land chooses one of its faces that
+/// is a land, and it enters with that face up). The engine's graveyard land
+/// discovery finds lands by their front face, so the modal land back is not
+/// offered from the graveyard and this positive witness fails at the offer
+/// assertion; the spell front is castable, which the reach guards establish.
 #[test]
-fn a_milled_modal_card_keeps_its_land_back_face_refused_in_the_graveyard() {
+#[ignore = "known limitation (tracked in the PR description): a modal double-faced card's land back face is not offered for play from the graveyard under a Play permission (CR 701.18b + CR 712.12)"]
+fn a_milled_modal_card_plays_its_land_back_face_from_the_graveyard() {
     let Some(db) = load_db() else { return };
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
@@ -587,13 +593,23 @@ fn a_milled_modal_card_keeps_its_land_back_face_refused_in_the_graveyard() {
         offers_cast(state, recovery),
         "reach guard: the milled spell front is castable under the grant"
     );
-    assert!(!offers_play_land(state, recovery));
-    assert_refused_and_unchanged(
-        state,
-        P0,
-        play_land_action(state, recovery),
-        "a graveyard modal card's land face is not admitted",
+    assert_eq!(
+        lands_played(state, P0),
+        0,
+        "reach guard: land drop available"
     );
+    assert!(
+        offers_play_land(state, recovery),
+        "the land back face of the milled modal card is offered"
+    );
+    let action = play_land_action(state, recovery);
+    runner.act(action).expect("playing the land back face");
+    let state = runner.state();
+    let played = &state.objects[&recovery];
+    assert_eq!(played.zone, Zone::Battlefield);
+    assert_eq!(played.name, "Bala Ged Sanctuary", "the back face entered");
+    assert!(played.modal_back_face);
+    assert_eq!(lands_played(state, P0), 1, "one land drop spent");
 }
 
 /// A static exile permission reaches the land back through the same authority:
