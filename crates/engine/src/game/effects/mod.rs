@@ -19840,42 +19840,99 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
             if !crate::game::casting_costs::cost_has_x(cost))
 }
 
+/// What the steps of "you may <A> and <B>" before a conjunct have done to the
+/// pools a later conjunct draws from: the objects they move away, and the
+/// zones they may add objects to.
+struct ConjunctionPrefix {
+    departed: Vec<ObjectId>,
+    graveyard_may_grow: bool,
+    hand_may_grow: bool,
+}
+
+impl ConjunctionPrefix {
+    /// CR 400.7: an object an earlier step moves leaves the pool it came from
+    /// and may join the pool of the zone it moves to.
+    fn record_move(&mut self, departed: Vec<ObjectId>, destination: Zone) {
+        self.departed.extend(departed);
+        match destination {
+            Zone::Graveyard => self.graveyard_may_grow = true,
+            Zone::Hand => self.hand_may_grow = true,
+            Zone::Library | Zone::Battlefield | Zone::Stack | Zone::Exile | Zone::Command => {}
+        }
+    }
+}
+
+/// The modeled head of "you may <A> and <B>" and what it does to later pools,
+/// or `None` for a head whose effect on later pools the walk does not know.
+fn optional_conjunction_head(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<ConjunctionPrefix> {
+    let mut prefix = ConjunctionPrefix {
+        departed: Vec::new(),
+        graveyard_may_grow: false,
+        hand_may_grow: false,
+    };
+    match &ability.effect {
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
+            ..
+        } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            let (departed, destination) =
+                change_zone::referent_move_departures(state, effective.as_ref())?;
+            prefix.record_move(departed, destination);
+            Some(prefix)
+        }
+        // CR 118.12 + CR 119.4: "you may pay N life and <B>" — paying life
+        // moves no object.
+        Effect::PayCost {
+            cost: AbilityCost::PayLife { .. },
+            scale: None,
+            ..
+        } => Some(prefix),
+        // CR 118.12 + CR 605.3a: "you may pay {N} and <B>" moves no object
+        // itself, but a mana ability activated to pay it may sacrifice a
+        // permanent into the graveyard. The hand is read as it is now, the
+        // same pool the resolution payment authority's pre-gate reads for a
+        // conjoined discard cost (`costs::can_pay` on `Composite`).
+        Effect::PayCost {
+            cost: AbilityCost::Mana { .. },
+            scale: None,
+            ..
+        } => {
+            prefix.graveyard_may_grow = true;
+            Some(prefix)
+        }
+        _ => None,
+    }
+}
+
 /// CR 118.12 + CR 118.3 + CR 608.2d: "you may <A> and <B>" is one option, a
 /// cost paid on resolution, so it can be chosen only if every conjoined step
 /// ([`is_step_of_optional_instruction`]) can be performed in full from what
 /// the earlier steps leave. A step's resources are judged after the earlier
 /// steps' departures (Lamplight Phoenix ruling: it can't be exiled as
-/// evidence for its own trigger; CR 701.59b). The walk models only earlier
-/// steps whose effect on later pools it knows — today a referent move, whose
-/// movers depart; any other step, or a move INTO the graveyard, may add to a
-/// later pool, so it answers `false` and the option is offered.
+/// evidence for its own trigger; CR 701.59b). The walk models only heads and
+/// steps whose effect on later pools it knows ([`optional_conjunction_head`],
+/// [`ConjunctionPrefix`]): a referent move, whose movers depart, and a mana
+/// or life payment. A conjunct whose pool an earlier step may have added to,
+/// or any other step, answers `false` and the option is offered.
 ///
-/// COUPLING: a head kind this walk admits must be in `resolve_chain_body`'s
-/// `auto_decline_infeasible_optional` set (`ChangeZone` is), so an
-/// infeasible conjunction is declined rather than resolved.
+/// Covered heads: "you may exile it and collect evidence N" (Lamplight
+/// Phoenix), "you may pay {1} and discard a card" (Banon, the Returners'
+/// Leader; Conspiracy Theorist; Wolf of Devil's Breach — ruling: "You can't
+/// choose to discard a card without also paying {1}{R}") and "you may pay
+/// {1} / 2 life and exile it" (Timothar, Baron of Bats; Kinzu of the Bleak
+/// Coven — ruling: "If you can't exile the card, … you can't pay {1}").
+///
+/// COUPLING: `resolve_chain_body` routes an infeasible conjunction to the
+/// optional-decline authority for every head, so an impossible conjunct is
+/// declined rather than its head being performed alone.
 fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
-    // Only a referent-move head is modeled; every other head skips the
-    // hydration clone below.
-    if !matches!(
-        &ability.effect,
-        Effect::ChangeZone {
-            target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
-            ..
-        }
-    ) {
-        return false;
-    }
-    let effective = hydrate_event_context_targets(state, ability);
-    let Some((departed, destination)) =
-        change_zone::referent_move_departures(state, effective.as_ref())
-    else {
+    let Some(mut prefix) = optional_conjunction_head(state, ability) else {
         return false;
     };
-    // CR 400.7 + CR 701.59a: a move into the graveyard adds to the evidence
-    // pool, which this walk does not model.
-    if destination == Zone::Graveyard {
-        return false;
-    }
     let Some(first) = ability
         .sub_ability
         .as_ref()
@@ -19893,16 +19950,63 @@ fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbili
             // impossible. An optional, scoped or repeated evidence step is not
             // a single committed payment and falls to the stop arm.
             Effect::CollectEvidence { amount }
-                if !step.optional && step.player_scope.is_none() && step.repeat_for.is_none() =>
+                if !prefix.graveyard_may_grow
+                    && !step.optional
+                    && step.player_scope.is_none()
+                    && step.repeat_for.is_none() =>
             {
                 if !collect_evidence::can_collect_evidence_without(
                     state,
                     step.controller,
-                    &departed,
+                    &prefix.departed,
                     *amount,
                 ) {
                     return true;
                 }
+            }
+            // CR 118.3 + CR 701.9a: a discard the player can't pay in full
+            // from the hand the earlier steps leave makes the whole option
+            // impossible. Earlier departures only shrink that hand, so a
+            // shortfall now is a shortfall then. The discarded cards then join
+            // the graveyard.
+            Effect::Discard { .. } if !prefix.hand_may_grow => {
+                let effective = hydrate_event_context_targets(state, step);
+                if discard::optional_discard_is_infeasible(state, effective.as_ref()) {
+                    return true;
+                }
+                prefix.graveyard_may_grow = true;
+            }
+            // CR 400.7 + CR 608.2d: "and exile it" can't be performed once its
+            // referent left the zone it is expected in; no earlier step can
+            // bring that object back (a returned card is a new object).
+            Effect::ChangeZone {
+                origin,
+                target: target @ (TargetFilter::SelfRef | TargetFilter::TriggeringSource),
+                ..
+            } => {
+                let effective = hydrate_event_context_targets(state, step);
+                let infeasible = if matches!(target, TargetFilter::SelfRef) {
+                    change_zone::optional_self_move_is_infeasible(
+                        state,
+                        effective.as_ref(),
+                        *origin,
+                    )
+                } else {
+                    change_zone::optional_triggering_source_move_is_infeasible(
+                        state,
+                        effective.as_ref(),
+                        *origin,
+                    )
+                };
+                if infeasible {
+                    return true;
+                }
+                let Some((departed, destination)) =
+                    change_zone::referent_move_departures(state, effective.as_ref())
+                else {
+                    return false;
+                };
+                prefix.record_move(departed, destination);
             }
             // A step this walk does not model may change what later steps can
             // use, so the option is offered.
@@ -27243,7 +27347,15 @@ fn resolve_chain_body(
     // CR 608.2d + CR 603.5: an optional instruction on a source's host with no
     // live host is likewise a declined option ("you may have that player gain
     // control of equipped creature. If you do, untap it." — no rider runs).
-    if optional_is_infeasible && (auto_decline_infeasible_optional || host_effect_impossible) {
+    // CR 118.12 + CR 118.3: an impossible conjunct makes the whole "you may
+    // <A> and <B>" a declined option whatever its head, so a payable head
+    // ("pay {1}" before an impossible "discard a card") is not paid alone and
+    // its "If you do" rider stays gated.
+    if optional_is_infeasible
+        && (auto_decline_infeasible_optional
+            || host_effect_impossible
+            || optional_conjunction_is_infeasible(state, ability))
+    {
         return resolve_optional_effect_decision_step(
             state,
             ability.clone(),
@@ -65702,6 +65814,104 @@ mod tests {
             "reach: the source on the battlefield can move"
         );
         assert!(!optional_effect_is_infeasible(&state, &bury_and_collect));
+    }
+
+    /// CR 118.12 + CR 118.3 + CR 608.2d: a payment head ("you may pay 2 life /
+    /// {1} and discard a card") is one option with its conjunct: an empty hand
+    /// makes it impossible even though the payment alone is affordable, and a
+    /// card in hand makes it offerable. A conjunct whose pool an earlier step
+    /// may add to is not decided: a mana payment may sacrifice a permanent into
+    /// the graveyard, and a move into the hand adds to the discard pool.
+    #[test]
+    fn optional_payment_conjunction_judges_its_conjunct() {
+        let pay = |cost: AbilityCost| {
+            let mut head = ResolvedAbility::new(
+                Effect::PayCost {
+                    cost,
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            head.optional = true;
+            head
+        };
+        let discard_step = || {
+            let mut step =
+                optional_discard(QuantityExpr::Fixed { value: 1 }, TargetFilter::Controller);
+            step.optional = false;
+            step.sub_link = SubAbilityLink::ContinuationStep;
+            step
+        };
+        let life = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut pay_and_discard = pay(life.clone());
+        pay_and_discard.sub_ability = Some(Box::new(discard_step()));
+        assert!(
+            !optional_effect_is_infeasible(&state, &pay(life.clone())),
+            "reach: 2 life alone is payable at 20 life"
+        );
+        assert!(
+            optional_effect_is_infeasible(&state, &pay_and_discard),
+            "no card can be discarded, so the conjoined payment is impossible"
+        );
+        add_hand_card(&mut state, PlayerId(0), 10);
+        assert!(!optional_effect_is_infeasible(&state, &pay_and_discard));
+
+        // Gated: "you may pay 2 life. If you do, discard a card" — the discard is
+        // a later instruction, not part of the option.
+        let state = GameState::new_two_player(42);
+        let mut gated = pay_and_discard.clone();
+        gated.sub_ability.as_mut().expect("sub").condition =
+            Some(AbilityCondition::effect_performed());
+        assert!(!optional_effect_is_infeasible(&state, &gated));
+
+        // A mana payment may sacrifice a permanent into the graveyard, so a
+        // later evidence pool is not decided from the graveyard as it is now.
+        let mut pay_and_collect = pay(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::zero(),
+        });
+        let mut evidence = ResolvedAbility::new(
+            Effect::CollectEvidence { amount: 4 },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        evidence.sub_link = SubAbilityLink::ContinuationStep;
+        pay_and_collect.sub_ability = Some(Box::new(evidence));
+        assert!(!optional_effect_is_infeasible(&state, &pay_and_collect));
+
+        // A move into the hand adds to the discard pool.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let mut return_and_discard = optional_referent_move(TargetFilter::SelfRef, None, source);
+        return_and_discard.source_incarnation = Some(state.objects[&source].incarnation);
+        if let Effect::ChangeZone {
+            destination,
+            enters_under,
+            ..
+        } = &mut return_and_discard.effect
+        {
+            *destination = Zone::Hand;
+            *enters_under = None;
+        }
+        return_and_discard.sub_ability = Some(Box::new(discard_step()));
+        assert!(
+            !change_zone::optional_self_move_is_infeasible(&state, &return_and_discard, None),
+            "reach: the source in the graveyard can return to the hand"
+        );
+        assert!(!optional_effect_is_infeasible(&state, &return_and_discard));
     }
 
     /// CR 118.3: "you may discard two cards. If you do, draw three cards." with one

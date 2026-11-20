@@ -1,0 +1,373 @@
+//! Issue #10951: CR 118.12 + CR 118.3 + CR 608.2d — "you may pay <cost> and
+//! <B>" is one option, a cost paid on resolution. It can be chosen only if the
+//! payment AND the conjoined step can both be performed in full, so with an
+//! impossible conjunct the option is not offered, the payment is not made and
+//! the "If you do" rider does not happen.
+//!
+//! Rulings: Wolf of Devil's Breach — "You can't choose to discard a card
+//! without also paying {1}{R}." Timothar, Baron of Bats — "If you can't exile
+//! the card, perhaps because another effect moved the card before the
+//! triggered ability started resolving, you can't pay {1} and won't create a
+//! token."
+
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::triggers::process_triggers;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+use engine::types::ability::TargetRef;
+use engine::types::actions::GameAction;
+use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaColor;
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+use super::rules::AttackTarget;
+
+const CONSPIRACY_THEORIST: &str = "Whenever this creature attacks, you may pay {1} and discard a card. If you do, draw a card.\nWhenever you discard one or more nonland cards, you may exile one of them from your graveyard. If you do, you may cast it this turn.";
+
+const WOLF_OF_DEVILS_BREACH: &str = "Whenever this creature attacks, you may pay {1}{R} and discard a card. If you do, this creature deals damage to target creature or planeswalker equal to the discarded card's mana value.";
+
+const KINZU: &str = "Flying\nWhenever another nontoken creature you control dies, you may pay 2 life and exile it. If you do, create a token that's a copy of that creature, except it's 1/1 and has toxic 1. (Players dealt combat damage by it also get a poison counter.)";
+
+const TIMOTHAR: &str = "Ward—Discard a card.\nWhenever another nontoken Vampire you control dies, you may pay {1} and exile it. If you do, create a 1/1 black Bat creature token with flying. It gains \"When this token deals combat damage to a player, sacrifice it and return the exiled card to the battlefield tapped.\"";
+
+fn untapped_lands(runner: &GameRunner, lands: &[ObjectId]) -> usize {
+    lands
+        .iter()
+        .filter(|id| !runner.state().objects[*id].tapped)
+        .count()
+}
+
+fn tokens_controlled_by(runner: &GameRunner, player: PlayerId) -> usize {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let obj = &runner.state().objects[*id];
+            obj.is_token && obj.controller == player
+        })
+        .count()
+}
+
+/// Declares `attacker` attacking P1, answers a trigger target prompt with
+/// `target` and stops at the first other prompt or once the attack trigger has
+/// left the stack.
+fn attack_with(runner: &mut GameRunner, attacker: ObjectId, target: Option<ObjectId>) {
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare the attack");
+    if let (WaitingFor::TriggerTargetSelection { .. }, Some(target)) =
+        (&runner.state().waiting_for, target)
+    {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("target the creature");
+    }
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach: the attack trigger is on the stack; got {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+}
+
+/// Kills `creature` with a game-effect move and puts the dies triggers on the
+/// stack.
+fn dies(runner: &mut GameRunner, creature: ObjectId) {
+    let mut events = Vec::new();
+    assert!(!move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(creature, Zone::Graveyard, creature),
+        &mut events,
+    ));
+    process_triggers(runner.state_mut(), &events);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the dies trigger fired and is on the stack"
+    );
+}
+
+/// Accepts the offer and answers every payment and discard prompt until the
+/// trigger has finished resolving.
+fn accept_and_finish(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept the optional payment");
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pay the mana from untapped lands");
+            }
+            WaitingFor::DiscardChoice { cards, count, .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: cards.into_iter().take(count).collect(),
+                    })
+                    .expect("discard the chosen card");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => runner.advance_until_stack_empty(),
+            other => panic!("unexpected prompt while resolving the accepted offer: {other:?}"),
+        }
+    }
+    panic!(
+        "the accepted offer did not finish; waiting_for={:?}",
+        runner.state().waiting_for
+    );
+}
+
+fn assert_resolved_as_declined(runner: &GameRunner) {
+    let state = runner.state();
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+        "the impossible conjoined payment is not offered; got {:?}",
+        state.waiting_for
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the trigger resolved as declined; got {:?}",
+        state.waiting_for
+    );
+    assert!(state.stack.is_empty(), "nothing of the trigger is left");
+}
+
+/// Conspiracy Theorist with an empty hand and an untapped Mountain: the {1} is
+/// payable but no card can be discarded, so "pay {1} and discard a card" is
+/// impossible. No prompt, the Mountain stays untapped and no card is drawn.
+#[test]
+fn conspiracy_theorist_with_empty_hand_is_not_offered_and_pays_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theorist = scenario
+        .add_creature(P0, "Conspiracy Theorist", 2, 2)
+        .from_oracle_text(CONSPIRACY_THEORIST)
+        .id();
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_spell_to_library_top(P0, "Library Card", false);
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().players[P0.0 as usize].hand.is_empty(),
+        "reach: the hand is empty"
+    );
+    let library_before = runner.state().players[P0.0 as usize].library.len();
+
+    attack_with(&mut runner, theorist, None);
+
+    assert_resolved_as_declined(&runner);
+    assert_eq!(
+        untapped_lands(&runner, &[mountain]),
+        1,
+        "the {{1}} is not paid alone"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].library.len(),
+        library_before,
+        "the \"If you do\" draw does not happen"
+    );
+}
+
+/// Control: with a card in hand the same option is offered, and accepting pays
+/// {1}, discards the card and draws.
+#[test]
+fn conspiracy_theorist_with_a_card_in_hand_is_offered_and_completes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theorist = scenario
+        .add_creature(P0, "Conspiracy Theorist", 2, 2)
+        .from_oracle_text(CONSPIRACY_THEORIST)
+        .id();
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+    // A land, so the discard does not also fire the second ability's
+    // "nonland cards" trigger.
+    let card = scenario.add_land_to_hand(P0, "Forest").id();
+    let drawn = scenario
+        .add_spell_to_library_top(P0, "Library Card", false)
+        .id();
+    let mut runner = scenario.build();
+
+    attack_with(&mut runner, theorist, None);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "a payable conjunction is offered; got {:?}",
+        runner.state().waiting_for
+    );
+    accept_and_finish(&mut runner);
+
+    assert_eq!(untapped_lands(&runner, &[mountain]), 0, "{{1}} was paid");
+    assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&drawn].zone,
+        Zone::Hand,
+        "the \"If you do\" draw happened"
+    );
+}
+
+/// Wolf of Devil's Breach with an empty hand and {1}{R} available: the option
+/// is not offered (ruling: no discard without paying, and no payment without
+/// the discard), no mana is spent and the opposing creature takes no damage.
+#[test]
+fn wolf_of_devils_breach_with_empty_hand_is_not_offered() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wolf = scenario
+        .add_creature(P0, "Wolf of Devil's Breach", 5, 5)
+        .from_oracle_text(WOLF_OF_DEVILS_BREACH)
+        .id();
+    let lands = [
+        scenario.add_basic_land(P0, ManaColor::Red),
+        scenario.add_basic_land(P0, ManaColor::Red),
+    ];
+    let bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+
+    attack_with(&mut runner, wolf, Some(bear));
+
+    assert_resolved_as_declined(&runner);
+    assert_eq!(untapped_lands(&runner, &lands), 2, "{{1}}{{R}} is not paid");
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&bear].damage_marked,
+        0,
+        "the \"If you do\" damage does not happen"
+    );
+}
+
+/// Kinzu of the Bleak Coven: the dead creature is exiled by another effect
+/// while the trigger waits, so "pay 2 life and exile it" is impossible. No
+/// prompt, no life is paid and no token copy is created.
+#[test]
+fn kinzu_with_the_card_gone_is_not_offered_and_pays_no_life() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Kinzu of the Bleak Coven", 5, 4)
+        .from_oracle_text(KINZU);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+
+    dies(&mut runner, bear);
+    let mut events = Vec::new();
+    assert!(!move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(bear, Zone::Exile, bear),
+        &mut events,
+    ));
+    runner.advance_until_stack_empty();
+
+    assert_resolved_as_declined(&runner);
+    assert_eq!(runner.life(P0), life_before, "2 life is not paid alone");
+    assert_eq!(tokens_controlled_by(&runner, P0), 0, "no token copy");
+}
+
+/// Control: with the card still in the graveyard Kinzu's option is offered,
+/// and accepting pays 2 life, exiles the card and creates the copy.
+#[test]
+fn kinzu_with_the_card_in_the_graveyard_is_offered_and_completes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Kinzu of the Bleak Coven", 5, 4)
+        .from_oracle_text(KINZU);
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    let life_before = runner.life(P0);
+
+    dies(&mut runner, bear);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "a payable conjunction is offered; got {:?}",
+        runner.state().waiting_for
+    );
+    accept_and_finish(&mut runner);
+
+    assert_eq!(runner.life(P0), life_before - 2, "2 life was paid");
+    assert_eq!(runner.state().objects[&bear].zone, Zone::Exile);
+    assert_eq!(tokens_controlled_by(&runner, P0), 1, "the copy was created");
+}
+
+/// Timothar, Baron of Bats: the dead Vampire is exiled by another effect while
+/// the trigger waits (the ruling's own example), so "pay {1} and exile it" is
+/// impossible. No prompt, the land stays untapped and no Bat is created.
+#[test]
+fn timothar_with_the_vampire_gone_is_not_offered_and_pays_no_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Timothar, Baron of Bats", 4, 4)
+        .from_oracle_text(TIMOTHAR);
+    let vampire = scenario
+        .add_creature(P0, "Vampire Lacerator", 2, 2)
+        .with_subtypes(vec!["Vampire"])
+        .id();
+    let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+    let mut runner = scenario.build();
+
+    dies(&mut runner, vampire);
+    let mut events = Vec::new();
+    assert!(!move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(vampire, Zone::Exile, vampire),
+        &mut events,
+    ));
+    runner.advance_until_stack_empty();
+
+    assert_resolved_as_declined(&runner);
+    assert_eq!(
+        untapped_lands(&runner, &[swamp]),
+        1,
+        "the {{1}} is not paid alone"
+    );
+    assert_eq!(tokens_controlled_by(&runner, P0), 0, "no Bat token");
+}
+
+/// Control: with the Vampire still in the graveyard Timothar's option is
+/// offered, and accepting pays {1}, exiles it and creates the Bat.
+#[test]
+fn timothar_with_the_vampire_in_the_graveyard_is_offered_and_completes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Timothar, Baron of Bats", 4, 4)
+        .from_oracle_text(TIMOTHAR);
+    let vampire = scenario
+        .add_creature(P0, "Vampire Lacerator", 2, 2)
+        .with_subtypes(vec!["Vampire"])
+        .id();
+    let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+    let mut runner = scenario.build();
+
+    dies(&mut runner, vampire);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "a payable conjunction is offered; got {:?}",
+        runner.state().waiting_for
+    );
+    accept_and_finish(&mut runner);
+
+    assert_eq!(untapped_lands(&runner, &[swamp]), 0, "{{1}} was paid");
+    assert_eq!(runner.state().objects[&vampire].zone, Zone::Exile);
+    assert_eq!(tokens_controlled_by(&runner, P0), 1, "the Bat was created");
+}
