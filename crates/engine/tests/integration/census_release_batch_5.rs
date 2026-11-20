@@ -1,26 +1,24 @@
-//! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 5: three cards whose
+//! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 5: two cards whose
 //! "until end of turn" clause the census marked `wrong_object`, but whose clause the engine already
 //! applies to the right object. Every released card is the printed card (printed cost, type line,
 //! P/T and verbatim Oracle text, loaded from the card database through `add_real_card`) and is
-//! driven through the public cast / activate / attack actions of `GameRunner`. Only textless filler
-//! creatures are synthetic.
+//! driven through the public cast / attack actions of `GameRunner`. Only textless filler creatures
+//! are synthetic.
 //!
 //! The shapes, one section each: "whenever one or more opponents are dealt noncombat damage,
-//! creatures you control get +1/+0 until end of turn" (Master of Barbs), "you may have this
+//! creatures you control get +1/+0 until end of turn" (Master of Barbs) and "you may have this
 //! creature's base power become equal to that creature's power until end of turn" (Belligerent
-//! Yearling) and "search your library for a Dragon permanent card and put it into your graveyard; if
-//! you do, <this> becomes a copy of that card until end of turn" (Scion of the Ur-Dragon). Every
-//! positive has a control that must stay unaffected, and every effect is shown to end with the turn
-//! (CR 514.2, 611.2a).
+//! Yearling). Every positive has a control that must stay unaffected, every effect is shown to end
+//! with the turn (CR 514.2, 611.2a), the Yearling's "you may" prompt is asserted with its actor and
+//! answered through the public `DecideOptionalEffect` action, and every witness and control ends
+//! with an empty stack and priority (or, after a whole turn cycle, the next declare-attackers prompt).
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::AbilityKind;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -68,7 +66,7 @@ fn drive_until(runner: &mut GameRunner, label: &str, done: impl Fn(&GameRunner) 
             WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
                 assignments: vec![],
             },
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::Priority { player: _ } => GameAction::PassPriority,
             ref other => panic!("{label}: unexpected prompt {other:?}"),
         };
         runner.act(action).expect(label);
@@ -81,7 +79,7 @@ fn drive_until(runner: &mut GameRunner, label: &str, done: impl Fn(&GameRunner) 
 fn to_end_step(runner: &mut GameRunner) {
     drive_until(runner, "end step", |r| {
         r.state().phase == Phase::End
-            && matches!(r.state().waiting_for, WaitingFor::Priority { .. })
+            && matches!(r.state().waiting_for, WaitingFor::Priority { player: _ })
     });
 }
 
@@ -98,6 +96,24 @@ fn to_next_turn(runner: &mut GameRunner) {
     });
 }
 
+/// After `to_next_turn` the run is parked at P0's declare-attackers prompt (a deliberate next
+/// prompt, not a suspended resolution) with nothing left on the stack.
+fn assert_next_turn_prompt(runner: &GameRunner, label: &str) {
+    assert!(
+        runner.state().stack.is_empty(),
+        "{label}: the stack is empty, found {:?}",
+        runner.state().stack
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player: P0, .. }
+        ),
+        "{label}: P0's declare-attackers prompt, found {:?}",
+        runner.state().waiting_for
+    );
+}
+
 fn power_toughness(runner: &GameRunner, id: ObjectId) -> (i32, i32) {
     let o = &runner.state().objects[&id];
     (o.power.unwrap_or(0), o.toughness.unwrap_or(0))
@@ -107,18 +123,20 @@ fn life(runner: &GameRunner, player: PlayerId) -> i32 {
     runner.state().players[player.0 as usize].life
 }
 
-fn ability_index_with_description(runner: &GameRunner, source: ObjectId, fragment: &str) -> usize {
-    runner.state().objects[&source]
-        .abilities
-        .iter()
-        .position(|ability| {
-            ability.kind == AbilityKind::Activated
-                && ability
-                    .description
-                    .as_deref()
-                    .is_some_and(|description| description.contains(fragment))
-        })
-        .unwrap_or_else(|| panic!("no activated ability whose text contains {fragment:?}"))
+/// The scenario ran to completion: nothing is left on the stack and `player` holds priority (a
+/// suspended resolution can leave the stack empty, so both are asserted).
+fn assert_settled(runner: &GameRunner, player: PlayerId, label: &str) {
+    assert!(
+        runner.state().stack.is_empty(),
+        "{label}: the stack is empty, found {:?}",
+        runner.state().stack
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player: p } if p == player),
+        "{label}: P{} has priority, found {:?}",
+        player.0,
+        runner.state().waiting_for
+    );
 }
 
 // ---- Shape 1: "Whenever one or more opponents are dealt noncombat damage, creatures you control get
@@ -148,6 +166,11 @@ fn master_of_barbs_pumps_creatures_you_control_when_an_opponent_is_dealt_noncomb
     assert_eq!(power_toughness(&runner, master), (2, 1), "printed 2/1");
 
     runner.cast(shock).target_player(P1).resolve();
+    assert_settled(
+        &runner,
+        P0,
+        "Shock and the Master of Barbs trigger resolved",
+    );
     // Reach-guard: Shock really dealt its 2 noncombat damage to the opponent (CR 120.3a).
     assert_eq!(life(&runner, P1), 18, "Shock dealt 2 damage to P1");
     assert_eq!(
@@ -167,6 +190,7 @@ fn master_of_barbs_pumps_creatures_you_control_when_an_opponent_is_dealt_noncomb
     );
 
     runner.cast(late).resolve();
+    assert_settled(&runner, P0, "the late creature resolved");
     assert_eq!(
         power_toughness(&runner, late),
         (2, 2),
@@ -174,12 +198,14 @@ fn master_of_barbs_pumps_creatures_you_control_when_an_opponent_is_dealt_noncomb
     );
 
     to_end_step(&mut runner);
+    assert_settled(&runner, P0, "end step");
     assert_eq!(
         power_toughness(&runner, master),
         (3, 1),
         "the +1/+0 lasts to the end step (until end of turn, not until end of combat)"
     );
     to_next_turn(&mut runner);
+    assert_next_turn_prompt(&runner, "next turn");
     assert_eq!(
         power_toughness(&runner, master),
         (2, 1),
@@ -201,6 +227,7 @@ fn master_of_barbs_ignores_damage_that_is_not_noncombat_damage_to_an_opponent() 
     s.with_mana_pool(P0, pool(&[(ManaType::Red, 1)]));
     let mut runner = s.build();
     runner.cast(shock).target_player(P0).resolve();
+    assert_settled(&runner, P0, "Shock at P0 resolved");
     assert_eq!(life(&runner, P0), 18, "reach-guard: P0 took the damage");
     assert_eq!(
         power_toughness(&runner, master),
@@ -216,6 +243,7 @@ fn master_of_barbs_ignores_damage_that_is_not_noncombat_damage_to_an_opponent() 
     s.with_mana_pool(P0, pool(&[(ManaType::Red, 1)]));
     let mut runner = s.build();
     runner.cast(shock).target_object(enemy).resolve();
+    assert_settled(&runner, P0, "Shock at the opponent's creature resolved");
     assert_eq!(
         runner.state().objects[&enemy].zone,
         Zone::Graveyard,
@@ -250,6 +278,7 @@ fn master_of_barbs_ignores_damage_that_is_not_noncombat_damage_to_an_opponent() 
     assert_eq!(life(&runner, P1), 18, "reach-guard: the Bears hit P1 for 2");
     // Let any trigger the combat damage caused go on the stack and resolve before looking.
     to_end_step(&mut runner);
+    assert_settled(&runner, P0, "end step after combat damage");
     assert_eq!(
         power_toughness(&runner, master),
         (2, 1),
@@ -268,6 +297,11 @@ fn master_of_barbs_triggers_once_for_one_damage_event_to_several_opponents() {
     s.with_mana_pool(P0, pool(&[(ManaType::Red, 3)]));
     let mut runner = s.build();
     runner.cast(whirler).resolve();
+    assert_settled(
+        &runner,
+        P0,
+        "Goblin Chainwhirler and the Master of Barbs trigger resolved",
+    );
     assert_eq!(
         runner.state().objects[&whirler].zone,
         Zone::Battlefield,
@@ -298,6 +332,48 @@ fn yearling_board(db: &CardDatabase, enterer: &str) -> (GameRunner, ObjectId, Ob
     (s.build(), yearling, enters)
 }
 
+/// Cast `enterer` (a Dinosaur P0 controls), let the spell resolve and the Yearling's trigger resolve
+/// up to its "you may" prompt, assert the prompt (actor P0, the Yearling's own ability, about its
+/// base power) and answer it through the public `DecideOptionalEffect` action: `accept` is the one
+/// accept/decline choice the prompt offers. Ends with an empty stack and P0's priority.
+fn cast_and_answer_yearling(
+    runner: &mut GameRunner,
+    yearling: ObjectId,
+    enterer: ObjectId,
+    accept: bool,
+) {
+    runner.cast(enterer).commit().stop_at_optional().resolve();
+    assert_eq!(
+        runner.state().objects[&enterer].zone,
+        Zone::Battlefield,
+        "reach-guard: the Dinosaur entered"
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalEffectChoice {
+            player,
+            decision_subject_id: _,
+            source_id,
+            description,
+            may_trigger_key: _,
+            same_card_may_trigger_choice_available: _,
+        } => {
+            assert_eq!(*player, P0, "the Yearling's controller decides");
+            assert_eq!(*source_id, yearling, "the prompt is the Yearling's trigger");
+            assert!(
+                description
+                    .as_deref()
+                    .is_some_and(|text| text.contains("base power")),
+                "the prompt describes the base power change, found {description:?}"
+            );
+        }
+        other => panic!("expected the Yearling's OptionalEffectChoice, found {other:?}"),
+    }
+    runner
+        .act(GameAction::DecideOptionalEffect { accept })
+        .expect("DecideOptionalEffect");
+    assert_settled(runner, P0, "after the Yearling's optional answer");
+}
+
 /// Accepting sets the Yearling's base power to the entering Dinosaur's power (6 from Colossal
 /// Dreadmaw, 2 from Ranging Raptors, so it is "equal to", not "at least"), leaves its toughness at
 /// the printed 2, composes with a pump (base 6 plus Giant Growth's +3 is 9, so it is the BASE power)
@@ -308,24 +384,21 @@ fn belligerent_yearling_base_power_becomes_the_entering_dinosaurs_power() {
 
     let (mut runner, yearling, dreadmaw) = yearling_board(db, "Colossal Dreadmaw");
     assert_eq!(power_toughness(&runner, yearling), (3, 2), "printed 3/2");
-    runner.cast(dreadmaw).accept_optional().resolve();
-    assert_eq!(
-        runner.state().objects[&dreadmaw].zone,
-        Zone::Battlefield,
-        "reach-guard: the Dinosaur entered"
-    );
+    cast_and_answer_yearling(&mut runner, yearling, dreadmaw, true);
     assert_eq!(
         power_toughness(&runner, yearling),
         (6, 2),
         "base power becomes 6; toughness stays 2"
     );
     to_end_step(&mut runner);
+    assert_settled(&runner, P0, "end step");
     assert_eq!(
         power_toughness(&runner, yearling),
         (6, 2),
         "the base power change lasts to the end step"
     );
     to_next_turn(&mut runner);
+    assert_next_turn_prompt(&runner, "next turn");
     assert_eq!(
         power_toughness(&runner, yearling),
         (3, 2),
@@ -333,12 +406,7 @@ fn belligerent_yearling_base_power_becomes_the_entering_dinosaurs_power() {
     );
 
     let (mut runner, yearling, raptors) = yearling_board(db, "Ranging Raptors");
-    runner.cast(raptors).accept_optional().resolve();
-    assert_eq!(
-        runner.state().objects[&raptors].zone,
-        Zone::Battlefield,
-        "reach-guard: the Dinosaur entered"
-    );
+    cast_and_answer_yearling(&mut runner, yearling, raptors, true);
     assert_eq!(
         power_toughness(&runner, yearling),
         (2, 2),
@@ -352,8 +420,9 @@ fn belligerent_yearling_base_power_becomes_the_entering_dinosaurs_power() {
     let growth = s.add_real_card(P0, "Giant Growth", Zone::Hand, db);
     s.with_mana_pool(P0, pool(&[(ManaType::Green, 3), (ManaType::Colorless, 4)]));
     let mut runner = s.build();
-    runner.cast(dreadmaw).accept_optional().resolve();
+    cast_and_answer_yearling(&mut runner, yearling, dreadmaw, true);
     runner.cast(growth).target_object(yearling).resolve();
+    assert_settled(&runner, P0, "Giant Growth resolved");
     assert_eq!(
         power_toughness(&runner, yearling),
         (9, 5),
@@ -362,32 +431,29 @@ fn belligerent_yearling_base_power_becomes_the_entering_dinosaurs_power() {
 }
 
 /// Controls: declining ("you may") changes nothing; a non-Dinosaur entering and a Dinosaur entering
-/// under the opponent's control do not trigger it.
+/// under the opponent's control do not trigger it (no prompt is raised: the spell resolves straight
+/// to an empty stack and priority even though the driver would stop at a prompt).
 #[test]
 fn belligerent_yearling_ignores_declines_other_creature_types_and_other_controllers() {
     let Some(db) = db() else { return };
 
     let (mut runner, yearling, dreadmaw) = yearling_board(db, "Colossal Dreadmaw");
-    runner.cast(dreadmaw).decline_optional().resolve();
-    assert_eq!(
-        runner.state().objects[&dreadmaw].zone,
-        Zone::Battlefield,
-        "reach-guard: the Dinosaur entered"
-    );
+    cast_and_answer_yearling(&mut runner, yearling, dreadmaw, false);
     assert_eq!(
         power_toughness(&runner, yearling),
         (3, 2),
         "declining the optional change leaves the base power alone"
     );
 
-    // Not a Dinosaur: Grizzly Bears (printed 2/2 Bear) does not trigger it even when it is accepted.
+    // Not a Dinosaur: Grizzly Bears (printed 2/2 Bear) does not trigger it, so there is no prompt to accept.
     let (mut runner, yearling, bears) = yearling_board(db, "Grizzly Bears");
-    runner.cast(bears).accept_optional().resolve();
+    runner.cast(bears).commit().stop_at_optional().resolve();
     assert_eq!(
         runner.state().objects[&bears].zone,
         Zone::Battlefield,
         "reach-guard: the Bears entered"
     );
+    assert_settled(&runner, P0, "the Bears resolved without a Yearling prompt");
     assert_eq!(
         power_toughness(&runner, yearling),
         (3, 2),
@@ -407,127 +473,20 @@ fn belligerent_yearling_ignores_declines_other_creature_types_and_other_controll
     for unit in pool(&[(ManaType::Green, 2), (ManaType::Colorless, 4)]) {
         runner.state_mut().players[1].mana_pool.add(unit);
     }
-    runner.cast(dreadmaw).accept_optional().resolve();
+    runner.cast(dreadmaw).commit().stop_at_optional().resolve();
     assert_eq!(
         runner.state().objects[&dreadmaw].zone,
         Zone::Battlefield,
         "reach-guard: the opponent's Dinosaur entered"
+    );
+    assert_settled(
+        &runner,
+        P1,
+        "the opponent's Dinosaur resolved without a prompt",
     );
     assert_eq!(
         power_toughness(&runner, yearling),
         (3, 2),
         "an opponent's Dinosaur does not trigger it"
     );
-}
-
-// ---- Shape 3: "{2}: Search your library for a Dragon permanent card and put it into your
-// graveyard. If you do, <this> becomes a copy of that card until end of turn." (Scion of the
-// Ur-Dragon). ----
-
-/// The Scion searches for a Dragon permanent only (a Bear in the library is not offered), puts the
-/// card into the graveyard, becomes a copy of that Dragon (name, printed 5/5, Flying, its {R}
-/// firebreathing, and no longer its own search ability, CR 707.2) and is the Scion again next turn.
-#[test]
-fn scion_of_the_ur_dragon_becomes_a_copy_of_the_dragon_it_put_into_the_graveyard() {
-    let Some(db) = db() else { return };
-    let mut s = scenario(2);
-    let scion = s.add_real_card(P0, "Scion of the Ur-Dragon", Zone::Battlefield, db);
-    let bears = s.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
-    let shivan = s.add_real_card(P0, "Shivan Dragon", Zone::Library, db);
-    s.with_mana_pool(P0, pool(&[(ManaType::Colorless, 2), (ManaType::Red, 1)]));
-    let mut runner = s.build();
-    assert_eq!(power_toughness(&runner, scion), (4, 4), "printed 4/4");
-
-    let search = ability_index_with_description(&runner, scion, "Search your library");
-    runner
-        .activate(scion, search)
-        .search_first_legal()
-        .resolve();
-
-    assert_eq!(
-        runner.state().objects[&shivan].zone,
-        Zone::Graveyard,
-        "the Dragon permanent card was put into the graveyard"
-    );
-    assert_eq!(
-        runner.state().objects[&bears].zone,
-        Zone::Library,
-        "the Bear was not a legal search result"
-    );
-    assert_eq!(
-        runner.state().players[P0.0 as usize].mana_pool.total(),
-        1,
-        "the {{2}} activation cost was paid from the pool, the red mana is left"
-    );
-    let copy = &runner.state().objects[&scion];
-    assert_eq!(copy.name, "Shivan Dragon", "it became a copy of that card");
-    assert_eq!(
-        power_toughness(&runner, scion),
-        (5, 5),
-        "copiable P/T (CR 707.2)"
-    );
-    assert!(copy.has_keyword(&Keyword::Flying), "the copy has Flying");
-    assert!(
-        copy.abilities.iter().all(|ability| ability
-            .description
-            .as_deref()
-            .is_none_or(|d| !d.contains("Search your library"))),
-        "the copy has the copied abilities, not the Scion's own"
-    );
-    let firebreathing = ability_index_with_description(&runner, scion, "+1/+0");
-    runner.activate(scion, firebreathing).resolve();
-    assert_eq!(
-        power_toughness(&runner, scion),
-        (6, 5),
-        "the copy carries Shivan Dragon's {{R}}: +1/+0 and it works"
-    );
-
-    to_end_step(&mut runner);
-    assert_eq!(
-        runner.state().objects[&scion].name,
-        "Shivan Dragon",
-        "the copy lasts to the end step"
-    );
-    to_next_turn(&mut runner);
-    let back = &runner.state().objects[&scion];
-    assert_eq!(
-        back.name, "Scion of the Ur-Dragon",
-        "the copy ends with the turn"
-    );
-    assert_eq!(power_toughness(&runner, scion), (4, 4), "printed 4/4 again");
-    ability_index_with_description(&runner, scion, "Search your library");
-}
-
-/// Control for "if you do": with no Dragon permanent card in the library nothing is put into the
-/// graveyard and the Scion does not become a copy of anything.
-#[test]
-fn scion_of_the_ur_dragon_stays_itself_when_the_search_finds_no_dragon() {
-    let Some(db) = db() else { return };
-    let mut s = scenario(2);
-    let scion = s.add_real_card(P0, "Scion of the Ur-Dragon", Zone::Battlefield, db);
-    let bears = s.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
-    s.with_mana_pool(P0, pool(&[(ManaType::Colorless, 2)]));
-    let mut runner = s.build();
-    let search = ability_index_with_description(&runner, scion, "Search your library");
-    runner
-        .activate(scion, search)
-        .search_first_legal()
-        .resolve();
-
-    assert_eq!(
-        runner.state().players[P0.0 as usize].mana_pool.total(),
-        0,
-        "reach-guard: the {{2}} was paid, so the ability resolved"
-    );
-    assert_eq!(
-        runner.state().objects[&bears].zone,
-        Zone::Library,
-        "nothing was found"
-    );
-    assert_eq!(
-        runner.state().objects[&scion].name,
-        "Scion of the Ur-Dragon",
-        "no card was put into the graveyard, so it does not become a copy"
-    );
-    assert_eq!(power_toughness(&runner, scion), (4, 4), "still printed 4/4");
 }

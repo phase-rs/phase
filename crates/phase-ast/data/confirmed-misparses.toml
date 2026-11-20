@@ -2077,6 +2077,7 @@ face = [
   { key = "scintillating encore", class = "wrong_duration", clauses = ["When that creature dies this turn, return it to the battlefield tapped under its owner's control."] },
   { key = "scion of darkness", class = "dropped_qualifier", clauses = ["Whenever this creature deals combat damage to a player, you may put target creature card from that player's graveyard onto the battlefield under your control."] },
   { key = "scion of shiv", class = "wrong_object", clauses = ["{2}{R}: Scion of Shiv perpetually gets +1/+0."] },
+  { key = "scion of the ur-dragon", class = "wrong_object", clauses = ["{2}: Search your library for a Dragon permanent card and put it into your graveyard.", "If you do, Scion of the Ur-Dragon becomes a copy of that card until end of turn."] },
   { key = "scour the desert", class = "wrong_object", clauses = ["Create X 1/1 white Bird creature tokens with flying, where X is the exiled card's toughness."] },
   { key = "scour the scene", class = "wrong_zone", clauses = ["Whenever you sacrifice an artifact, choose a creature card in your hand or a creature you control. It perpetually gets +1/+0."] },
   { key = "scourge of the throne", class = "trigger_wrong", clauses = ["Whenever this creature attacks for the first time each turn, if it's attacking the player with the most life or tied for most life, untap all attacking creatures."] },
