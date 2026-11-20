@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::layers::evaluate_condition;
+use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
 use crate::game::quantity::{
     resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
 };
@@ -268,7 +268,13 @@ fn evaluate_static_condition_for_ability(
         StaticCondition::Not { condition } => {
             !evaluate_static_condition_for_ability(state, condition, ability)
         }
-        _ => evaluate_condition(state, condition, ability.controller, ability.source_id),
+        _ => evaluate_condition_with_context(
+            state,
+            condition,
+            ability.controller,
+            ability.source_id,
+            ConditionContext::ability_holder(ability.controller),
+        ),
     }
 }
 
