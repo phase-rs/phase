@@ -52,9 +52,9 @@ fn algorithmic_ferocity_snapshots_filtered_hand_count_until_end_of_turn() {
         .id();
 
     let own = scenario
-        .add_creature(P0, "Own Base-Two Creature", 2, 2)
+        .add_creature(P0, "Own Base-Two Creature", 2, 1)
         .id();
-    let opponent = scenario.add_creature(P1, "Opponent Creature", 1, 1).id();
+    let opponent = scenario.add_creature(P1, "Opponent Creature", 2, 4).id();
     for _ in 0..10 {
         scenario.add_card_to_library_top(P0, "Plains");
     }
@@ -75,7 +75,7 @@ fn algorithmic_ferocity_snapshots_filtered_hand_count_until_end_of_turn() {
     );
     assert_eq!(runner.state().objects[&own].power, Some(4));
     assert!(runner.state().objects[&own].has_keyword(&Keyword::Indestructible));
-    assert_eq!(runner.state().objects[&own].damage_marked, 1);
+    assert_eq!(runner.state().objects[&own].damage_marked, 2);
     assert_eq!(runner.state().objects[&opponent].zone, Zone::Graveyard);
     assert_eq!(outcome.state().objects[&own].power, Some(4));
 

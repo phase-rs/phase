@@ -20,7 +20,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
+    PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, QuantityRef, StaticCondition,
     StaticDefinition, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::DayNight;
@@ -6172,6 +6172,49 @@ fn build_pt_choice_clause(
     })
 }
 
+/// CR 202.3: Identify the filtered zone-card quantities that need the
+/// postnominal mana-value grammar. This keeps the compound fallback narrow:
+/// other dynamic quantities (for example, cards drawn this turn) remain owned
+/// by their existing lowering path instead of being reinterpreted here.
+fn filter_prop_contains_cmc(property: &FilterProp) -> bool {
+    match property {
+        FilterProp::Cmc { .. } => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_contains_cmc),
+        FilterProp::Not { prop } => filter_prop_contains_cmc(prop),
+        _ => false,
+    }
+}
+
+fn target_filter_contains_cmc(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(filter_prop_contains_cmc),
+        TargetFilter::Not { filter } => target_filter_contains_cmc(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(target_filter_contains_cmc)
+        }
+        _ => false,
+    }
+}
+
+fn dynamic_modifications_include_cmc_zone_count(modifications: &[ContinuousModification]) -> bool {
+    modifications.iter().any(|modification| {
+        let value = match modification {
+            ContinuousModification::AddDynamicPower { value }
+            | ContinuousModification::AddDynamicToughness { value } => value,
+            _ => return false,
+        };
+        matches!(
+            value,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    filter: Some(filter),
+                    ..
+                }
+            } if target_filter_contains_cmc(filter)
+        )
+    })
+}
+
 /// Continuous-clause builder. Unstated durations default to Permanent at four
 /// keyword-driven arms: Suspend, in-addition-to-types, Licid attachable
 /// subtypes, and pure `GrantTrigger` grants (CR 611.2a).
@@ -6305,12 +6348,12 @@ fn build_continuous_clause(
         )
     });
     if !already_dynamic {
-        if let Some(dynamic_def) =
+        if let Some(mut dynamic_def) =
             parse_continuous_gets_has(predicate_text, affected.clone(), predicate_text)
         {
             let dynamic_modifications: Vec<_> = dynamic_def
                 .modifications
-                .into_iter()
+                .iter()
                 .filter(|modification| {
                     matches!(
                         modification,
@@ -6318,8 +6361,9 @@ fn build_continuous_clause(
                             | ContinuousModification::AddDynamicToughness { .. }
                     )
                 })
+                .cloned()
                 .collect();
-            if !dynamic_modifications.is_empty() {
+            if dynamic_modifications_include_cmc_zone_count(&dynamic_modifications) {
                 let mut combined = modifications;
                 combined.retain(|modification| {
                     !matches!(
@@ -6329,16 +6373,14 @@ fn build_continuous_clause(
                     )
                 });
                 combined.extend(dynamic_modifications);
+                dynamic_def.modifications = combined;
                 return Some(ParsedEffectClause {
                     history: Vec::new(),
                     head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
                     effect: Effect::GenericEffect {
-                        static_abilities: vec![StaticDefinition::continuous()
-                            .affected(affected)
-                            .modifications(combined)
-                            .description(predicate_text.to_string())],
+                        static_abilities: vec![dynamic_def],
                         duration: duration.clone(),
                         target: application.target,
                         end_cost: None,

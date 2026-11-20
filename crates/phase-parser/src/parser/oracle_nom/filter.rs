@@ -8,7 +8,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{alphanumeric1, space0, space1};
 use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
@@ -318,15 +318,15 @@ pub(crate) fn parse_mana_value_comparison_tail(input: &str) -> OracleResult<'_, 
     let (after_num_raw, value) = parse_quantity_expr_number(input)?;
     let after_num = after_num_raw.trim_start();
     let (after, (comparator, value)) = alt((
-        map(tag("or greater"), {
+        map(terminated(tag("or greater"), not(alphanumeric1)), {
             let value = value.clone();
             move |_| (Comparator::GE, value.clone())
         }),
-        map(tag("or less"), {
+        map(terminated(tag("or less"), not(alphanumeric1)), {
             let value = value.clone();
             move |_| (Comparator::LE, value.clone())
         }),
-        map(not(tag("or ")), move |_| (Comparator::EQ, value.clone())),
+        map(not(tag("or")), move |_| (Comparator::EQ, value.clone())),
     ))
     .parse(after_num)?;
     Ok((after, FilterProp::Cmc { comparator, value }))
@@ -1569,5 +1569,7 @@ mod tests {
             ))
         );
         assert!(parse_mana_value_comparison_tail("4 or blue").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or greaterish").is_err());
     }
 }
