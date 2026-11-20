@@ -169,6 +169,19 @@ export function FeedManagerModal({ open, onClose }: FeedManagerModalProps) {
                       {source.description && (
                         <p className="mt-0.5 text-xs text-slate-500">{source.description}</p>
                       )}
+                      {source.attribution && (
+                        <p className="mt-0.5 text-xs text-slate-500">
+                          {t("feedManager.dataProvidedBy")}{" "}
+                          <a
+                            href={source.attribution.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-slate-300 underline hover:text-white"
+                          >
+                            {source.attribution.name}
+                          </a>
+                        </p>
+                      )}
                       {sub && (
                         <p className="mt-0.5 text-[10px] text-slate-600">
                           {t("feedManager.lastRefreshed", { date: new Date(sub.lastRefreshedAt).toLocaleDateString() })}
