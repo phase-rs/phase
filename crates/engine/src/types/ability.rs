@@ -1922,6 +1922,12 @@ pub struct ParkedDamageBatch {
     /// settle together when it ends (`elimination::settle_event_outcomes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcomes: Option<EventOutcomes>,
+    /// CR 615.13 + CR 120.3: the batch's prevention so far, one entry per (shield, recipient),
+    /// in `sorted_prevention_entries` order. One prevention effect applying to simultaneous
+    /// damage is one application, so the batch publishes these once, after its damage, however
+    /// many pauses it spans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prevention_tally: Vec<crate::types::game_state::PreventedDamageEntry>,
 }
 
 /// CR 104.3e + CR 104.3f + CR 104.4a: the effect-stated wins and losses of one simultaneous
@@ -4884,6 +4890,32 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 113.7a + CR 602.2a + CR 608.2h + CR 400.7: pin the activation-time
+    /// source identity over this entire ability chain WITHOUT building
+    /// triggered provenance. Each node keeps its announcement-epoch
+    /// incarnation in `announced_source_incarnation` (the epoch the source had
+    /// before any cost was paid, CR 601.2h). `source_incarnation` is left
+    /// alone so the stack-push boundary stamps the post-cost epoch (stack.rs),
+    /// and `trigger_source` is left alone so `trigger_source.is_some()`
+    /// proxies keep their pre-pin activated arm (the `ability_utils` carrier
+    /// contract: activated carriers supply only incarnation epochs, never a
+    /// trigger latch). Plot never stack-pushes, so its `source_incarnation`
+    /// remains `None` and the `is_none_or` fail-open holds. Unlike
+    /// [`Self::set_trigger_source_recursive`], this never writes `controller`
+    /// / `original_controller`: for an activated ability the controller is the
+    /// activating player (CR 602.2a), so every `Controller`-relative consumer
+    /// keeps the activator binding. An existing `announced_source_incarnation`
+    /// capture is never overwritten: the earliest announcement wins.
+    pub fn set_departure_pin_recursive(&mut self, source_id: ObjectId, incarnation: u64) {
+        self.source_id = source_id;
+        if self.announced_source_incarnation.is_none() {
+            self.announced_source_incarnation = Some(incarnation);
+        }
+        for (_, child) in self.child_links_mut() {
+            child.set_departure_pin_recursive(source_id, incarnation);
+        }
+    }
+
     /// CR 400.7 + CR 113.7a: carry a random-result branch's source identity
     /// without changing its actor, targets, pins, or other resolution context.
     /// Different-source nodes bound the traversal, including their descendants;
@@ -5406,9 +5438,10 @@ impl ResolvedAbility {
 
     /// CR 400.7 + CR 602.2a: Propagate the source incarnation captured at an
     /// activation's announcement — before any cost is paid — to this ability
-    /// and every continuation branch. Called only by
-    /// `casting::record_activation_announcement`; stack placement and trigger
-    /// creation never touch it.
+    /// and every continuation branch. Called by
+    /// `casting::record_activation_announcement` and by the activation-time
+    /// departure pin (`set_departure_pin_recursive`); stack placement and
+    /// trigger creation never touch it.
     pub fn set_announced_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.announced_source_incarnation = incarnation;
         for (_, child) in self.child_links_mut() {

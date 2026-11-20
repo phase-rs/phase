@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeckPrinting, DeckSection } from "../../adapter/types";
 import { STORAGE_KEY_PREFIX } from "../../constants/storage";
-import { usePreferencesStore, type CardArtOverride } from "../../stores/preferencesStore";
+import { usePreferencesStore, type ArtChainEntry, type CardArtOverride } from "../../stores/preferencesStore";
 import { captureSubmissionArtPreferences, submitDeckList, submitParsedDeck, type SubmissionDeck } from "../deckSubmission";
 import { detectAndParseDeck, expandParsedDeck, type ParsedDeck } from "../deckParser";
 import { pileSeatDeck } from "../pileSource";
@@ -63,6 +63,163 @@ beforeEach(() => {
   localStorage.clear();
 });
 afterEach(() => { vi.useRealTimers(); });
+
+describe("catalog-covered basic land submission", () => {
+  const forest = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+  const imported: PrintingEntry = {
+    ...A, id: "3279314f-d639-4489-b2ab-3621bb3ca64b", set: "m21",
+    set_name: "Core Set 2021", collector_number: "272", released_at: "2020-07-03",
+  };
+  const pinned = { ...imported, id: "a4df3e89-610c-4f42-a93a-e694342307cc", collector_number: "273" };
+  const newest = { ...D, set: "zzz", collector_number: "003", released_at: "2026-01-01" };
+  const printings = [newest, pinned, imported];
+  const missingSet = { type: "set", setCode: "missing", label: "Missing" } as const;
+  const newestChain: ArtChainEntry[] = [{ type: "newest" }];
+  const stalePin = { [forest]: pin({ ...pinned, id: "absent" }) };
+  const list = { main_deck: Array<string>(4).fill("Forest"), sideboard: [] };
+
+  const parsedProjection = { ...expandParsedDeck({ main: [], sideboard: [] }), ...list };
+
+  beforeEach(() => {
+    io.face.mockResolvedValue({ scryfall_oracle_id: forest });
+    io.printings.mockResolvedValue(printings);
+  });
+
+  function entry(printing: PrintingEntry, count: number) {
+    return {
+      name: "Forest", count,
+      sourcePrinting: { setCode: printing.set, collectorNumber: printing.collector_number },
+    };
+  }
+
+  function expectRows(result: SubmissionDeck, projection: SubmissionDeck, rows: DeckPrinting[]) {
+    expect(result).toEqual({ ...projection, printings: rows });
+    expect(io.bounds).toHaveBeenLastCalledWith(rows);
+  }
+
+  it("prefers a valid pin by ID, then the import before the newest preference", async () => {
+    const deck = detectAndParseDeck("Deck\n4 Forest (M21) 272");
+    usePreferencesStore.setState({ artChain: newestChain, artOverrides: { [forest]: pin(pinned) } });
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, pinned)]);
+    usePreferencesStore.setState({ artOverrides: {} });
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, imported)]);
+  });
+
+  it("falls through a stale pin to the exact import or a matching preference", async () => {
+    usePreferencesStore.setState({ artChain: newestChain, artOverrides: stalePin });
+    const deck = detectAndParseDeck("Deck\n4 Forest (M21) 272");
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, imported)]);
+    const invalid = detectAndParseDeck("Deck\n4 Forest (M21) 999");
+    expectRows(await submitParsedDeck(invalid), parsedProjection, [row("main_deck", "Forest", 4, newest)]);
+    expectRows(await submitDeckList(list), list, [row("main_deck", "Forest", 4, newest)]);
+    expect(io.printings.mock.calls).toEqual([[forest], [forest], [forest]]);
+  });
+
+  it.each<{ chain: ArtChainEntry[]; printing: PrintingEntry }>([
+    { chain: newestChain, printing: newest },
+    { chain: [{ type: "oldest" }], printing: imported },
+    { chain: [missingSet, { type: "set", setCode: "m21", label: "Core Set 2021" }, ...newestChain], printing: pinned },
+  ])("stamps every copy using the first matching preference: $chain", async ({ chain, printing }) => {
+    usePreferencesStore.setState({ artChain: chain });
+    expectRows(await submitDeckList(list), list, [row("main_deck", "Forest", 4, printing)]);
+    const parsed: ParsedDeck = {
+      main: [{ name: "Forest", count: 4 }],
+      sideboard: [{ name: "Forest", count: 2 }],
+    };
+    expectRows(await submitParsedDeck(parsed), { ...parsedProjection, sideboard: ["Forest", "Forest"] }, [
+      row("main_deck", "Forest", 4, printing), row("sideboard", "Forest", 2, printing),
+    ]);
+  });
+
+  it("leaves vacancies for plain lists and unresolved choices, including a partially sourced pair", async () => {
+    expect(await submitDeckList(list)).toStrictEqual(list);
+    expect(io.face).not.toHaveBeenCalled();
+    expect(io.printings).not.toHaveBeenCalled();
+    expect(io.bounds).not.toHaveBeenCalled();
+
+    usePreferencesStore.setState({ artChain: [missingSet], artOverrides: stalePin });
+    const invalid = detectAndParseDeck("Deck\n4 Forest (M21) 999");
+    expect(await submitParsedDeck(invalid)).toStrictEqual(expandParsedDeck(invalid));
+    expect(io.printings).toHaveBeenCalledWith(forest);
+    expect(io.bounds).not.toHaveBeenCalled();
+
+    const partial: ParsedDeck = {
+      main: [{ name: "Forest", count: 1 }, entry(imported, 1)], sideboard: [],
+    };
+    expectRows(await submitParsedDeck(partial), expandParsedDeck(partial), [row("main_deck", "Forest", 1, imported)]);
+    usePreferencesStore.setState({ artChain: newestChain });
+    expectRows(await submitParsedDeck(invalid), expandParsedDeck(invalid), [row("main_deck", "Forest", 4, newest)]);
+  });
+
+  it("preserves A/B/A order, rejects the whole candidate at bounds, and coalesces equal choices", async () => {
+    const deck: ParsedDeck = { main: [entry(imported, 2), entry(pinned, 1), entry(imported, 1)], sideboard: [] };
+    const expected = [
+      row("main_deck", "Forest", 2, imported), row("main_deck", "Forest", 1, pinned), row("main_deck", "Forest", 1, imported),
+    ];
+    io.bounds.mockRejectedValueOnce(new Error("engine resource bound"));
+    expect(await submitParsedDeck(deck)).toStrictEqual(expandParsedDeck(deck));
+    expect(io.bounds).toHaveBeenLastCalledWith(expected);
+    expectRows(await submitParsedDeck(deck), parsedProjection, expected);
+    usePreferencesStore.setState({ artOverrides: { [forest]: pin(pinned) } });
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, pinned)]);
+  });
+
+  it("counts projected copies with a fractional parsed count and keeps sideboard rows separate", async () => {
+    const deck: ParsedDeck = { main: [entry(imported, 1.5)], sideboard: [entry(pinned, 1)] };
+    expectRows(await submitParsedDeck(deck), { ...parsedProjection, main_deck: ["Forest", "Forest"], sideboard: ["Forest"] }, [
+      row("main_deck", "Forest", 2, imported), row("sideboard", "Forest", 1, pinned),
+    ]);
+  });
+
+  it.each([[], [row("main_deck", "Forest", 1, imported)]].map((printings) => ({ printings })))(
+    "honors the existing sidecar with competing owner preferences: $printings",
+    async ({ printings }) => {
+      usePreferencesStore.setState({ artChain: newestChain, artOverrides: { [forest]: pin(pinned) } });
+      const deck = { ...list, printings };
+      const stateRead = vi.spyOn(usePreferencesStore, "getState");
+      try {
+        expect(await submitDeckList(deck)).toBe(deck);
+        expect(stateRead).not.toHaveBeenCalled();
+        expect(io.face).not.toHaveBeenCalled();
+        expect(io.printings).not.toHaveBeenCalled();
+        expect(io.bounds).not.toHaveBeenCalled();
+      } finally {
+        stateRead.mockRestore();
+      }
+      expectRows(await submitDeckList(list), list, [row("main_deck", "Forest", 4, pinned)]);
+    },
+  );
+
+  it("captures the parsed source and owner preferences while metadata is pending", async () => {
+    const deck: ParsedDeck = { main: [entry(imported, 4)], sideboard: [] };
+    usePreferencesStore.setState({ artChain: newestChain, artOverrides: stalePin });
+    const metadata = held<PrintingEntry[]>();
+    io.printings.mockReturnValueOnce(metadata.promise);
+    const submission = submitParsedDeck(deck);
+    await vi.waitFor(() => expect(io.printings).toHaveBeenCalledWith(forest));
+    deck.main[0].sourcePrinting!.collectorNumber = pinned.collector_number;
+    usePreferencesStore.setState({ artChain: [missingSet], artOverrides: { [forest]: pin(newest) } });
+    metadata.resolve(printings);
+    expectRows(await submission, parsedProjection, [row("main_deck", "Forest", 4, imported)]);
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, newest)]);
+    usePreferencesStore.setState({ artOverrides: {} });
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, pinned)]);
+  });
+
+  it("keeps renderer-aligned precedence for resolved Oracle IDs outside the catalog", async () => {
+    const deck = detectAndParseDeck("Deck\n4 Forest (M21) 272");
+    usePreferencesStore.setState({ artChain: newestChain });
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, imported)]);
+    const uncovered = "uncovered-oracle";
+    io.face.mockResolvedValue({ scryfall_oracle_id: uncovered });
+    expectRows(await submitParsedDeck(deck), parsedProjection, [row("main_deck", "Forest", 4, newest)]);
+    io.bounds.mockClear();
+    usePreferencesStore.setState({ artOverrides: { [uncovered]: stalePin[forest] } });
+    expect(await submitParsedDeck(deck)).toStrictEqual(expandParsedDeck(deck));
+    expect(io.printings.mock.calls).toEqual([[forest], [uncovered], [uncovered]]);
+    expect(io.bounds).not.toHaveBeenCalled();
+  });
+});
 
 describe("submission selection and source contexts (V1)", () => {
   it("selects every copy in its own supplied entry context without changing names", async () => {

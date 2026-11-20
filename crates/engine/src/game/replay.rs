@@ -122,6 +122,8 @@ fn reconstruct_initial_state_for_version(
     match (&header.deck_data, db) {
         (Some(deck_data), Some(db)) => {
             let payload = resolve_deck_list(db, combos, deck_data);
+            // Compatible action logs reconstruct basic-land art using the current
+            // catalog. Trusted full-state restore keeps the saved appearance.
             load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
             // CR 707.2 + CR 202.3: a replayed Momir game draws its random
