@@ -45,6 +45,7 @@ const PROFILE: LlmProfile = {
   temperature: null,
   decisionContext: "selfContained",
   enabled: true,
+  rememberApiKey: false,
 };
 
 const REQUEST = {

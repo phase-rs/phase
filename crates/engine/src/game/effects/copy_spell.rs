@@ -410,11 +410,13 @@ fn drain_spell_copied_observer_triggers(
     spell_copied_collected: bool,
 ) -> Result<(), EffectError> {
     if spell_copied_collected {
-        if let Some(wf) =
-            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
-                state, events,
-            )
-        {
+        // CR 603.2c: the resolving effect's buffer is the reducer action's, so
+        // the drain's window ranges are claimed for the post-action pipeline.
+        if let Some(wf) = crate::game::triggers::drain_on_action_buffer(
+            state,
+            events,
+            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+        ) {
             state.waiting_for = wf;
         }
     }

@@ -4616,8 +4616,9 @@ fn parse_self_characteristic_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// The owner-threaded twin of [`parse_self_characteristic_ref`]: identical
 /// characteristic arms, but the scope comes from the parse context (set by
 /// `parse_where_x_quantity_expression_with_owner` for boon-granted "it"/"that"
-/// tails, where the pronoun names the triggering object) instead of being
-/// hardcoded to `Source`.
+/// tails, or by the where-X antecedent rung in a trigger body whose "it" names
+/// the trigger event's object; in both the pronoun names the triggering
+/// object) instead of being hardcoded to `Source`.
 ///
 /// The pronoun set is DELIBERATELY narrower than [`parse_self_possessive`]:
 /// only the four genuinely anaphoric surfaces are accepted here. Explicit
@@ -5441,12 +5442,27 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         // (`oracle_effect/lower.rs`) requires the where-X expression to be
         // fully consumed, and this arm only matches when nothing follows
         // "damage dealt".
+        //
+        // CR 120.9 + CR 608.2c: the explicit "the amount of damage those
+        // creatures dealt to that player" (Quartzwood Crasher) names the
+        // triggering sources and recipient of a batched combat-damage trigger;
+        // it reads the same per-occurrence amount. Only the printed wording is
+        // admitted, so it requires "the amount of" and "to that player".
         value(
             QuantityRef::EventContextAmount,
-            preceded(
-                opt(alt((tag("the amount of "), tag("amount of "), tag("the ")))),
-                tag("damage dealt"),
-            ),
+            alt((
+                preceded(
+                    tag("the amount of "),
+                    preceded(
+                        tag("damage "),
+                        preceded(tag("those creatures dealt "), tag("to that player")),
+                    ),
+                ),
+                preceded(
+                    opt(alt((tag("the amount of "), tag("amount of "), tag("the ")))),
+                    tag("damage dealt"),
+                ),
+            )),
         ),
         // CR 701.47c: amass-specific definite phrases name the Army chosen by
         // the current amass instruction, not the generic demonstrative referent.
@@ -6994,7 +7010,10 @@ fn parse_counter_added_this_turn_condition_active(input: &str) -> OracleResult<'
 
 fn parse_counter_added_this_turn_condition_passive(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = parse_article(input)?;
-    let (rest, counters) = parse_typed_counter_match(rest)?;
+    // CR 122.1: "a counter was put on ~ this turn" (Wakka, Devoted Guardian)
+    // reads any counter kind, like the active form's generic arm.
+    let (rest, counters) =
+        alt((parse_typed_counter_match, parse_generic_counter_match)).parse(rest)?;
     let (rest, _) = tag(" was put on ").parse(rest)?;
     let (rest, target) = parse_counter_added_target(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
@@ -11450,6 +11469,24 @@ mod tests {
                 target: TargetFilter::Typed(
                     TypedFilter::permanent().controller(ControllerRef::You)
                 ),
+            }
+        );
+    }
+
+    /// CR 122.1: Wakka, Devoted Guardian's "a counter was put on ~ this turn"
+    /// is the passive form with a GENERIC counter: any kind, any actor, on the
+    /// source object.
+    #[test]
+    fn parse_counter_added_condition_accepts_passive_generic_counter() {
+        let (rest, q) =
+            parse_counter_added_this_turn_condition("a counter was put on ~ this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::CounterAddedThisTurn {
+                actor: CountScope::All,
+                counters: crate::types::counter::CounterMatch::Any,
+                target: TargetFilter::SelfRef,
             }
         );
     }

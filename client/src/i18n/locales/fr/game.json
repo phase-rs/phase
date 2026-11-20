@@ -1555,6 +1555,7 @@
     },
     "search": {
       "title": "Chercher dans la bibliothèque",
+      "instructionWithTitle": "{{title}} : {{instruction}}",
       "subtitleExact_one": "Choisissez {{count}} carte",
       "subtitleExact_other": "Choisissez {{count}} cartes",
       "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte",
@@ -2450,6 +2451,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
     "replacementChoices": "Choix de remplacement ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Maintenez appuyé pour voir la carte en entier"
   },
   "optionalEffect": {
     "sourceFallback": "Effet",

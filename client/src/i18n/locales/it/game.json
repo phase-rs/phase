@@ -1555,6 +1555,7 @@
     },
     "search": {
       "title": "Cerca nel grimorio",
+      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Scegli {{count}} carta",
       "subtitleExact_other": "Scegli {{count}} carte",
       "subtitleUpTo_one": "Scegli fino a {{count}} carta",
@@ -2450,6 +2451,9 @@
     "entryLabel": "{{source}} — {{decision}}",
     "optionalTriggers": "Abilità innescate facoltative ({{count, number}})",
     "replacementChoices": "Scelte di sostituzione ({{count, number}})"
+  },
+  "choiceModal": {
+    "holdForFullCard": "Tieni premuto per vedere la carta intera"
   },
   "optionalEffect": {
     "sourceFallback": "Effetto",

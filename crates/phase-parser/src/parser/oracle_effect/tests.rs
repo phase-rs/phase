@@ -54395,10 +54395,202 @@ fn maelstrom_pulse_destroys_only_same_named_permanents() {
         typed.properties
     );
     assert!(
-        typed.properties.contains(&FilterProp::Another),
-        "DestroyAll must exclude the targeted permanent itself, got {:?}",
+        typed
+            .properties
+            .contains(&FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }),
+        "DestroyAll must exclude the targeted permanent itself via DistinctFrom(ParentTarget), got {:?}",
         typed.properties
     );
+}
+
+/// CR 201.2 + CR 201.2a: Detention Sphere's "target nonland permanent not
+/// named Detention Sphere" keeps the name restriction on the target. The
+/// compound clause represents the "all other permanents with the same name as
+/// that permanent" mass exile as a sub-ability in the same AST chain (issue #10125).
+#[test]
+fn detention_sphere_keeps_not_named_target_and_same_name_mass_exile() {
+    let parsed = crate::parser::parse_oracle_text(
+        "When this enchantment enters, you may exile target nonland permanent not named Detention Sphere and all other permanents with the same name as that permanent.\nWhen this enchantment leaves the battlefield, return the exiled cards to the battlefield under their owner's control.",
+        "Detention Sphere",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let root = parsed.triggers[0].execute.as_deref().expect("ETB execute");
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(target),
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected targeted exile, got {:?}", root.effect);
+    };
+    assert_eq!(
+        target.type_filters,
+        vec![
+            TypeFilter::Permanent,
+            TypeFilter::Non(Box::new(TypeFilter::Land))
+        ]
+    );
+    assert_eq!(
+        target.properties,
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "detention sphere".to_string(),
+            }),
+        }],
+        "the target must exclude permanents named Detention Sphere"
+    );
+    let sub = root.sub_ability.as_ref().expect("same-name mass exile");
+    let Effect::ChangeZoneAll {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(mass),
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected ChangeZoneAll(Exile), got {:?}", sub.effect);
+    };
+    assert_eq!(mass.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(
+        mass.controller, None,
+        "\"all other permanents\" spans every controller"
+    );
+    assert!(
+        mass.properties.contains(&FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        }),
+        "mass exile must exclude the parent target, got {:?}",
+        mass.properties
+    );
+    assert!(mass
+        .properties
+        .contains(&FilterProp::SameNameAsParentTarget));
+}
+
+/// CR 608.2c: The Motherlode, Excavator's reflexive trigger targets only
+/// "target nonbasic land defending player controls". A rejected target-list
+/// extension does not widen the destroy target to include creatures (issue #10125).
+#[test]
+fn the_motherlode_excavator_destroy_target_excludes_creatures() {
+    use crate::types::card_type::Supertype;
+    let parsed = crate::parser::parse_oracle_text(
+        "Whenever The Motherlode attacks, you may pay {E}{E}{E}{E}. When you do, destroy target nonbasic land defending player controls, and creatures that player controls without flying can't block this turn.",
+        "The Motherlode, Excavator",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let mut found_destroy = false;
+    for trig in &parsed.triggers {
+        let mut cur = trig.execute.as_deref();
+        while let Some(node) = cur {
+            if let Effect::Destroy { target, .. } = &*node.effect {
+                let TargetFilter::Typed(typed) = target else {
+                    panic!("expected Typed filter for destroy target, got {target:?}");
+                };
+                assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
+                assert_eq!(typed.controller, Some(ControllerRef::DefendingPlayer));
+                assert_eq!(
+                    typed.properties,
+                    vec![FilterProp::NotSupertype {
+                        value: Supertype::Basic,
+                    }],
+                    "destroy target must be only nonbasic land defending player controls, got {typed:?}"
+                );
+                found_destroy = true;
+            }
+            cur = node.sub_ability.as_deref();
+        }
+    }
+    assert!(found_destroy, "reflexive destroy ability must be present");
+}
+
+/// CR 201.2 + CR 115.1: a "target <type> not named <name>" suffix lowers to
+/// `Not(Named)` on the target filter, ending the name at the shared clause
+/// boundary and leaving trailing text ("from a graveyard") to the caller.
+#[test]
+fn target_not_named_suffix_restricts_target_filter() {
+    for (name, types, text, expected_name, expected_origin) in [
+        (
+            "Clever Conjurer",
+            "Creature",
+            "Mage Hand — {T}: Untap target permanent not named Clever Conjurer. Activate only as a sorcery.",
+            "clever conjurer",
+            None,
+        ),
+        (
+            "Dutiful Replicator",
+            "Artifact",
+            "When this creature enters, you may pay {1}. When you do, create a token that's a copy of target token you control not named Dutiful Replicator.",
+            "dutiful replicator",
+            None,
+        ),
+        (
+            "Staff of Eden, Vault's Key",
+            "Artifact",
+            "When Staff of Eden enters, put target legendary permanent card not named Staff of Eden, Vault's Key from a graveyard onto the battlefield under your control.",
+            "staff of eden, vault's key",
+            Some(Zone::Graveyard),
+        ),
+    ] {
+        let parsed =
+            crate::parser::parse_oracle_text(text, name, &[], &[types.to_string()], &[]);
+        let root = parsed
+            .abilities
+            .first()
+            .or_else(|| parsed.triggers.first().and_then(|t| t.execute.as_deref()))
+            .unwrap_or_else(|| panic!("{name}: no ability"));
+        let (targeted, origin) = std::iter::successors(Some(root), |def| def.sub_ability.as_deref())
+            .find_map(|def| match &*def.effect {
+                Effect::SetTapState { target, .. } | Effect::CopyTokenOf { target, .. } => {
+                    Some((target.clone(), None))
+                }
+                Effect::ChangeZone { target, origin, .. } => Some((target.clone(), *origin)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: no targeted effect"));
+        let TargetFilter::Typed(typed) = targeted else {
+            panic!("{name}: expected Typed target, got {targeted:?}");
+        };
+        assert!(
+            typed.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::Named {
+                    name: expected_name.to_string(),
+                }),
+            }),
+            "{name}: target must exclude its name, got {:?}",
+            typed.properties
+        );
+        assert_eq!(origin, expected_origin, "{name}: origin zone");
+    }
+}
+
+/// CR 201.2 + CR 115.1: a coordinated "creature or planeswalker not named X"
+/// restricts every alternative, not just the last one.
+#[test]
+fn target_not_named_suffix_distributes_over_coordinated_types() {
+    let mut ctx = ParseContext::default();
+    let (filter, rest) = crate::parser::oracle_target::parse_target_with_ctx(
+        "target creature or planeswalker not named Foo",
+        &mut ctx,
+    );
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for f in &filters {
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected Typed branch, got {f:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "foo".to_string(),
+            }),
+        }));
+    }
+    assert!(rest.trim().is_empty(), "suffix consumed, got {rest:?}");
 }
 
 /// CR 608.2c + CR 201.2a: "<verb> target <object> an opponent
@@ -59875,16 +60067,26 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
             cant_counter.effect
         );
     };
+    // CR 611.2c + CR 109.5: the rule effect covers spells on the stack that
+    // the caster of Veil controls, read live at counter time.
     assert!(static_abilities
         .iter()
         .any(|sd| sd.mode == StaticMode::CantBeCountered
-            && matches!(
-                sd.affected,
-                Some(TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::You),
-                    ..
-                }))
-            )));
+            && sd.affected
+                == Some(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        }),
+                    ],
+                })
+            && sd.modifications
+                == vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeCountered,
+                }]));
 
     let hexproof = cant_counter
         .sub_ability
@@ -72328,6 +72530,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -104195,6 +104398,125 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
     );
 }
 
+// SHAPE: synthetic qualifier combinations exercise the grammar class represented
+// by Domri, Anarch of Bolas, Determined, and Veil of Summer.
+#[test]
+fn counter_prohibition_spell_subject_grammar() {
+    let rows: [(&str, Vec<TypeFilter>, Vec<FilterProp>); 5] = [
+        ("", vec![], vec![]),
+        ("Creature ", vec![TypeFilter::Creature], vec![]),
+        (
+            "Green ",
+            vec![],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        (
+            "Green creature ",
+            vec![TypeFilter::Creature],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        ("Artifact ", vec![TypeFilter::Artifact], vec![]),
+    ];
+    for (qualifier, type_filters, qualifier_props) in rows {
+        for other in ["", "Other "] {
+            for cast in [false, true] {
+                let relative = if cast { "cast this turn" } else { "control" };
+                let suffix = if cast { "" } else { " this turn" };
+                let text =
+                    format!("{other}{qualifier}spells you {relative} can't be countered{suffix}.");
+                let def = parse_effect_chain(&text, AbilityKind::Spell);
+                assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+                let Effect::GenericEffect {
+                    static_abilities,
+                    duration,
+                    target,
+                    ..
+                } = &*def.effect
+                else {
+                    panic!("{text}: expected a rule effect, got {def:#?}");
+                };
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn), "{text}");
+                assert!(
+                    target.is_none(),
+                    "broadcast subjects do not declare a target"
+                );
+                // CR 109.5 + CR 601.2i: "you control" reads the current
+                // controller; "you cast this turn" reads the cast journal.
+                let mut properties = qualifier_props.clone();
+                if !other.is_empty() {
+                    properties.push(FilterProp::Another);
+                }
+                if cast {
+                    properties.push(FilterProp::CastThisTurn {
+                        caster: ControllerRef::You,
+                    });
+                }
+                let expected = TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: type_filters.clone(),
+                            controller: (!cast).then_some(ControllerRef::You),
+                            properties,
+                        }),
+                    ],
+                };
+                assert_eq!(static_abilities.len(), 1, "{text}");
+                assert_eq!(
+                    static_abilities[0].affected.as_ref(),
+                    Some(&expected),
+                    "{text}"
+                );
+                assert_eq!(
+                    static_abilities[0].modifications,
+                    vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeCountered
+                    }],
+                    "{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn counter_prohibition_rejects_unrepresented_restrictions() {
+    // The positive sibling proves this reached the spell-subject grammar.
+    assert!(!ability_chain_has_unimplemented(&parse_effect_chain(
+        "Creature spells you cast this turn can't be countered.",
+        AbilityKind::Spell,
+    )));
+    for text in [
+        "Creature spells you cast this turn yesterday can't be countered.",
+        "Spells you control can't be countered by blue or black spells this turn.",
+        "Spells you control can't be countered by blue or black spells this turn, and creatures you control can't be the targets of blue or black spells this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+    }
+}
+
+#[test]
+fn domri_full_oracle_plus_one_has_mana_and_counter_prohibition() {
+    let parsed = parse_oracle_text(
+        "Creatures you control get +1/+0.\n[+1]: Add {R} or {G}. Creature spells you cast this turn can't be countered.\n[−2]: Target creature you control fights target creature you don't control.",
+        "Domri, Anarch of Bolas", &[], &["Planeswalker".to_string()], &["Domri".to_string()],
+    );
+    let plus = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::Mana { .. }))
+        .expect("Domri's +1 starts with mana");
+    assert!(!ability_chain_has_unimplemented(plus), "{plus:#?}");
+    assert!(collect_chain_effects(plus)
+        .iter()
+        .any(|effect| matches!(effect, Effect::GenericEffect { .. })));
+}
+
 /// CR 500: the player-scope rebind of "the life they lost" (`Target` -> `ScopedPlayer`) rebuilds
 /// the quantity, and the rebuilt value must carry the window across; a literal `ThisTurn` would
 /// silently reset a last-turn payload to this turn. The this-turn row is the paired control that
@@ -104612,4 +104934,29 @@ fn arcane_artisan_exile_from_hand_keeps_scoped_owner() {
     assert!(legs[0].properties.contains(&FilterProp::Owned {
         controller: ControllerRef::ScopedPlayer
     }));
+}
+
+/// CR 608.2c: "Otherwise, create one of those tokens" (Brood Birthing) names the
+/// tokens of the instruction it replaces; the else branch clones that token
+/// with count 1 through the shared "of those tokens" anaphor authority.
+#[test]
+fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
+    let parsed = parse_oracle_text(
+        "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, create one of those tokens.",
+        "Brood Birthing",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let otherwise = parsed.abilities[0]
+        .else_ability
+        .as_deref()
+        .expect("reach guard: the Otherwise branch parsed");
+    assert!(
+        matches!(&*otherwise.effect, Effect::Token { name, power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(1), count: QuantityExpr::Fixed { value: 1 }, .. }
+            if name == "Eldrazi Spawn"),
+        "{:?}",
+        otherwise.effect
+    );
 }

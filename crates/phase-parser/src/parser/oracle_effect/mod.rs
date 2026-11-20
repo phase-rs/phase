@@ -25086,6 +25086,30 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 201.2 + CR 608.2c: Same-name mass exile continuations ("exile target X
+    // and all other Xs with the same name as that X") must exclude the parent
+    // target, not the source. The "all other" quantifier adds FilterProp::Another
+    // (source exclusion), but for same-name continuations we need target-relative
+    // exclusion via DistinctFrom { ParentTarget }.
+    crate::parser::oracle_effect::each_target_filter_mut(&mut sub_clause.effect, &mut |target| {
+        if let TargetFilter::Typed(tf) = target {
+            let has_same_name = tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::SameNameAsParentTarget));
+            let has_another = tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another));
+            if has_same_name && has_another {
+                tf.properties.retain(|p| !matches!(p, FilterProp::Another));
+                tf.properties.push(FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                });
+            }
+        }
+    });
+
     // CR 608.2c + CR 701.8a: Self-reference carry-forward for compound actions.
     // "destroy that creature and ~" splits on " and " into sub-text "~" which
     // lacks a verb. Prepend the primary verb so it becomes "destroy ~" — parsed
@@ -44446,6 +44470,7 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
+        Effect::DestroyAll { target, .. } => f(target),
         // CR 608.2c: the move's named performer is rewritten with the moved
         // objects, so a rebind of "that player" (a replaced draw's drawer, a
         // scoped seat) reaches who performs the move as well as what moves.
@@ -56230,6 +56255,15 @@ fn try_parse_put_zone_change_parts(
                 Some(zones) => add_put_multi_origin_constraint(target, zones),
                 None => target,
             };
+            // CR 400.1 + CR 400.7: A put instruction whose own type phrase names
+            // more than one origin zone ("from your hand or from the command
+            // zone" — Next of Kin) carries that union on the TARGET filter. The
+            // single `origin` field cannot express it, and the literal
+            // hand/graveyard table above reaches only two spellings, so deriving
+            // multi-origin authority from the parsed zones is what keeps the
+            // producer and the resolver's scan set from disagreeing. Leave
+            // `origin: None` and let the resolver read `extract_zones()`.
+            let target_names_multiple_origins = target.extract_zones().len() > 1;
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
             // defining clause (Birthing Ritual: "...with mana value X or less
             // ..., where X is 1 plus the sacrificed creature's mana value")
@@ -56327,7 +56361,10 @@ fn try_parse_put_zone_change_parts(
                 // `origin: Some(Exile)` shape — `resolve_all` with
                 // `origin: None` would fall back to a Battlefield scan).
                 Some(Zone::Exile)
-            } else if is_tracked_anaphor || multi_origin_zones.is_some() {
+            } else if is_tracked_anaphor
+                || multi_origin_zones.is_some()
+                || target_names_multiple_origins
+            {
                 None
             } else {
                 let origin_text = format!("{}{}", before.lower, after.lower);

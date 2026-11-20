@@ -1023,6 +1023,33 @@ where
     None
 }
 
+/// Like [`scan_at_word_boundaries`] but returns the first successful match's
+/// byte offset and remaining input. Callers that need to split the original
+/// text around the match should use this instead of duplicating the cursor
+/// traversal locally.
+pub fn scan_at_word_boundaries_with_offset<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            return Some((offset, val, rest));
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    None
+}
+
 /// Like [`scan_at_word_boundaries`] but returns the **last** successful match,
 /// together with the byte offset where that match began.
 pub fn scan_last_at_word_boundaries_with_offset<'a, O, F>(

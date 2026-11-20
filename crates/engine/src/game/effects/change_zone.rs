@@ -16,8 +16,9 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
-    PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement, ZoneOpponentChooserPurpose,
+    PendingContinuation, PendingCounterPostAction, PendingMassLibraryOrderBatches,
+    PendingMassLibraryOrderChoice, PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -845,6 +846,9 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
+/// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
+/// effect's origin, or for an event referent the zone the trigger event put it
+/// in.
 fn expected_move_origin(
     state: &GameState,
     origin: Option<Zone>,
@@ -1182,6 +1186,73 @@ fn member_library_placement(
     } else {
         printed_position
     }
+}
+
+/// CR 400.1 + CR 110.1: whether a change's population is battlefield-scoped —
+/// the filter carries no explicitly written zone constraint (`TargetFilter::population_zones()`
+/// is empty; "permanent" defaults to the battlefield), or names the battlefield
+/// alone. A population this move does not read from the battlefield cannot join
+/// a battlefield-coordinated joint group.
+fn battlefield_scoped_population(target: &TargetFilter) -> bool {
+    matches!(
+        target.population_zones().as_slice(),
+        [] | [Zone::Battlefield]
+    )
+}
+
+/// CR 603.2c + CR 608.2c: Detect the coordinated same-name mass-exile conjunct —
+/// a `ChangeZone` to Exile whose chained sub_ability is the same sentence's
+/// "and all other permanents with the same name as that permanent" mass exile
+/// (a `ChangeZoneAll` to Exile over `FilterProp::SameNameAsParentTarget`): the
+/// targeted move and the conjunct announce and settle as one logical event.
+///
+/// CR 608.2c: only compatible COORDINATED moves coalesce. Both moves must be
+/// battlefield-scoped ([`battlefield_scoped_population`], and no explicit
+/// non-battlefield origin) — the conjunct reads "all other permanents", a
+/// CR 110.1 battlefield population. A same-name instruction that scans other
+/// zones (Eradicate's "search its controller's graveyard, hand, and library for
+/// all cards with the same name … and exile them") is an independent later
+/// instruction, not the conjunct: it stays on the ordinary `ChangeZoneAll`
+/// path, where every member is read through its own origin zone, so its
+/// zone-exit triggers and its own trailing instruction (Eradicate's shuffle)
+/// keep the written order.
+pub(crate) fn same_name_mass_exile_sub(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let sub = ability.sub_ability.as_deref()?;
+    let (parent_origin, parent_target) = match &ability.effect {
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            origin,
+            target,
+            ..
+        } => (*origin, target),
+        _ => return None,
+    };
+    if !battlefield_scoped_population(parent_target)
+        || parent_origin.is_some_and(|zone| zone != Zone::Battlefield)
+    {
+        return None;
+    }
+    let (sub_origin, sub_target) = match &sub.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin,
+            target,
+            ..
+        } => (*origin, target),
+        _ => return None,
+    };
+    if !matches!(
+        sub_target,
+        TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+    ) {
+        return None;
+    }
+    if !battlefield_scoped_population(sub_target)
+        || sub_origin.is_some_and(|zone| zone != Zone::Battlefield)
+    {
+        return None;
+    }
+    Some(sub)
 }
 
 pub fn resolve(
@@ -1643,7 +1714,7 @@ pub fn resolve(
                 .draw(RandomDraw::Outcome)
                 .random_range(0..eligible.len());
             let chosen = eligible[index];
-            // CR 400.3 + CR 608.2c: a zone-union choice moves from the
+            // CR 400.6 + CR 608.2c: a zone-union choice moves from the
             // selected object's zone, not the prompt's default scan zone.
             let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
@@ -1737,7 +1808,7 @@ pub fn resolve(
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
-            // CR 400.3 + CR 608.2c: the singleton can occupy any member
+            // CR 400.6 + CR 608.2c: the singleton can occupy any member
             // zone of the selection filter's union.
             let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
@@ -1829,6 +1900,14 @@ pub fn resolve(
             )));
         }
 
+        // CR 402.3: carry the producer's scan scope on the prompt only when it
+        // reaches a private zone. The scope is part of `waiting_for`, so it is
+        // retired atomically when an accepted answer replaces the prompt and
+        // cannot ride into a later prompt that never declared its own scope.
+        let privacy_zones = scan_zones
+            .iter()
+            .any(|zone| !zone.is_public())
+            .then_some(scan_zones.clone());
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: filter_controller,
             cards: eligible,
@@ -1837,7 +1916,14 @@ pub fn resolve(
             up_to: choice_up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::ChangeZone,
-            zone: scan_zone,
+            // A mixed scope with a private leg must report the private zone so
+            // visibility redaction can key on the choice's scope, not on which
+            // candidates happen to be eligible right now (CR 402.3).
+            zone: scan_zones
+                .iter()
+                .copied()
+                .find(|zone| !zone.is_public())
+                .unwrap_or(scan_zone),
             destination: Some(dest_zone),
             enter_tapped: effect_enter_tapped,
             enter_transformed: effect_enter_transformed,
@@ -1873,6 +1959,7 @@ pub fn resolve(
             // CR 608.2c: the selection credits the instruction's performer, as
             // the single-candidate and random shortcuts above do.
             performed_by: Some(performer),
+            privacy_zones,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -1898,20 +1985,77 @@ pub fn resolve(
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
+    // CR 603.2c + CR 608.2c: Detention Sphere pattern — "exile target [X] and all
+    // other permanents with the same name as that permanent". The targeted exile
+    // and the same-name mass exile form a single logical event.
+    // If this ChangeZone to Exile has a sub_ability that is a ChangeZoneAll to
+    // Exile with SameNameAsParentTarget, announce and deliver the target together
+    // with its same-name matches as one population through this logical zone-change
+    // group path.
+    let mut move_objects = targeted_objects.clone();
+    if let Some(sub) = same_name_mass_exile_sub(ability) {
+        if let Effect::ChangeZoneAll {
+            origin: sub_origin,
+            target: sub_target,
+            ..
+        } = &sub.effect
+        {
+            let origin_zones = change_zone_all_origin_zones(state, *sub_origin, sub_target);
+            let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
+            let mut matches: Vec<ObjectId> = state
+                .objects
+                .iter()
+                .filter(|(&id, obj)| {
+                    origin_zones.contains(&obj.zone)
+                        && obj.is_card_population_member()
+                        && !targeted_objects.contains(&id)
+                        && crate::game::filter::matches_target_filter_for_zone(
+                            state,
+                            id,
+                            obj.zone,
+                            sub_target,
+                            &filter_ctx,
+                        )
+                })
+                .map(|(&id, _)| id)
+                .collect();
+            matches.sort();
+            move_objects.extend(matches);
+            // CR 608.2c: the absorbed conjunct never runs as a chain step, but its
+            // own printed continuation ("Then that player reveals their hand and
+            // exiles all cards with that name …" — Legion's End; "That player
+            // investigates …" — Declaration in Stone) is a later instruction of this
+            // same resolution. Schedule it through the shared continuation authority:
+            // the head's targets and chain context bind the conjunct's own anaphora
+            // ("that player", "that name"). `drain_pending_continuation` resumes a
+            // pending change-zone iteration (CR 608.2c) BEFORE any parked
+            // continuation, so parking here keeps the written order on both the
+            // synchronous path and a mid-move paused group completion.
+            if let Some(trailing) = sub.sub_ability.as_deref() {
+                let mut tail = trailing.clone();
+                if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
+                    tail.mirror_targets_from(ability);
+                }
+                crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
+                state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+            }
+        }
+    }
+
     // CR 614.12a + CR 614.13a: same pre-loop snapshot as the mass path, for a
     // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
     // Captured before any member enters so every co-arriver (and the devourers
     // themselves) is excluded regardless of iteration order.
     crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
         state,
-        targeted_objects.iter().copied(),
+        move_objects.iter().copied(),
         dest_zone,
     );
 
     // CR 603.6a + CR 614.12: one event — every member's gates read the board
     // before any member moves.
     let members =
-        resolve_change_zone_member_entries(state, Some(ability), &entry_spec, &targeted_objects);
+        resolve_change_zone_member_entries(state, Some(ability), &entry_spec, &move_objects);
 
     // CR 608.2c: "that many" in a later instruction refers back to the number
     // of objects this targeted move actually relocated (e.g. Vengeful Regrowth:
@@ -1921,7 +2065,10 @@ pub fn resolve(
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
         state,
-        &ZoneChangeAnnouncement::all(&targeted_objects, dest_zone),
+        // CR 603.2c + CR 608.2c: the announcement covers the JOINT population —
+        // the chosen target and the absorbed same-name conjunct — so all of
+        // their moves announce together before any member moves.
+        &ZoneChangeAnnouncement::all(&move_objects, dest_zone),
     );
     let mut entrants =
         crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
@@ -2114,11 +2261,11 @@ pub fn resolve(
             .expect("completed ChangeZone owns the active frame");
     }
 
-    // CR 608.2c: record how many objects this targeted move relocated so a
-    // downstream sub-ability's `QuantityRef::EventContextAmount` ("that many")
-    // resolves to the actual count — mirrors the mass `resolve_all` tail and the
-    // single-object branches above. (The paused path defers this stamp to the
-    // drain, which owns the trailing `EffectResolved`.)
+    // CR 608.2c: record how many objects this move relocated so a downstream
+    // sub-ability's `QuantityRef::EventContextAmount` ("that many") resolves to
+    // the actual count — mirrors the mass `resolve_all` tail and the single-object
+    // branches above. (The paused path defers this stamp to the drain, which owns
+    // the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
 
     // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may
@@ -2676,6 +2823,7 @@ fn mass_library_order_effect_zone_choice(
         is_cost_payment: false,
         enters_modified_if: None,
         duration,
+        privacy_zones: None,
     }
 }
 
@@ -5759,6 +5907,58 @@ mod tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+        let WaitingFor::EffectZoneChoice {
+            privacy_zones: prompt_scope,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("the mixed choice must be open");
+        };
+        assert_eq!(
+            prompt_scope.as_deref(),
+            Some([Zone::Hand, Zone::Graveyard].as_slice()),
+            "the producer must carry the mixed scan scope on the prompt"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            count: observer_count,
+            min_count: observer_min_count,
+            up_to: observer_up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the mixed-scope prompt");
+        };
+        assert!(
+            observer_cards.is_empty(),
+            "a mixed private/public scope must not expose ids; got {observer_cards:?}"
+        );
+        assert_eq!(
+            (*observer_count, *observer_min_count, *observer_up_to),
+            (0, 0, true),
+            "the full observer envelope must be normalized"
+        );
+
+        // A rejected answer leaves the prompt (and its scope) pending.
+        assert!(
+            apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![opposing_land],
+                },
+            )
+            .is_err(),
+            "an ineligible pick must be rejected"
+        );
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("a rejected answer must keep the mixed choice open");
+        };
+        assert!(
+            privacy_zones.is_some(),
+            "a rejected answer must preserve the prompt's privacy scope"
+        );
+
         apply_as_current(
             &mut state,
             GameAction::SelectCards {
@@ -5767,11 +5967,113 @@ mod tests {
         )
         .expect("one resolution-time choice must be able to select both source zones");
 
+        assert!(
+            !matches!(
+                &state.waiting_for,
+                WaitingFor::EffectZoneChoice {
+                    privacy_zones: Some(_),
+                    ..
+                }
+            ),
+            "the answered prompt must retire its carried privacy scope"
+        );
+
         for id in [hand_land, graveyard_land] {
             assert_eq!(state.objects[&id].zone, Zone::Battlefield);
             assert!(state.objects[&id].tapped);
         }
         assert_eq!(state.objects[&opposing_land].zone, Zone::Graveyard);
+
+        // CR 402.3: a following public-only producer carries no scope; its
+        // chooser and observer envelopes must stay exact rather than inherit
+        // the answered prompt's private classification.
+        let second_grave = create_object(
+            &mut state,
+            CardId(14),
+            PlayerId(0),
+            "Second Graveyard Forest".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&second_grave)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut second = ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor: LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Land],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        second.multi_target = Some(crate::types::ability::MultiTargetSpec::up_to(
+            QuantityExpr::Fixed { value: 1 },
+        ));
+        second.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        resolve(&mut state, &second, &mut events).unwrap();
+
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("the following public choice must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public-only prompt must not carry a privacy scope"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            count: observer_count,
+            min_count: observer_min_count,
+            up_to: observer_up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the following public prompt");
+        };
+        assert_eq!(
+            observer_cards,
+            &vec![second_grave],
+            "public graveyard candidates stay visible to the observer"
+        );
+        assert_eq!(
+            (*observer_count, *observer_min_count, *observer_up_to),
+            (1, 0, true)
+        );
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![second_grave],
+            },
+        )
+        .expect("the chooser retains a legal answer for the next prompt");
+        assert_eq!(
+            state.objects[&second_grave].zone,
+            Zone::Hand,
+            "the next prompt's accepted answer must still resolve"
+        );
     }
 
     /// CR 608.2c: supplemental authority coverage for Unification's zone
@@ -5873,6 +6175,26 @@ mod tests {
             }
             other => panic!("expected graveyard EffectZoneChoice, got {other:?}"),
         }
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &choice_state.waiting_for else {
+            panic!("the public graveyard choice must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public-only graveyard scope must not be carried on the prompt"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&choice_state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the public graveyard prompt");
+        };
+        assert_eq!(
+            observer_cards,
+            &vec![graveyard_card],
+            "public graveyard candidates stay visible to the observer"
+        );
 
         let mut all_state = GameState::new_two_player(42);
         let all_graveyard_card = create_object(
@@ -15538,6 +15860,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let _ = apply_as_current(

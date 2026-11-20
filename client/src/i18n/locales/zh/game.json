@@ -892,6 +892,7 @@
       "title": "占卜"
     },
     "search": {
+      "instructionWithTitle": "{{title}}：{{instruction}}",
       "subtitleDistinctExact_one": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctExact_other": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctUpTo_one": "至多选择{{count}}张特性各不相同的牌",
@@ -2169,6 +2170,9 @@
       "pay": "承诺{{gift}}",
       "title": "承诺赠礼？"
     }
+  },
+  "choiceModal": {
+    "holdForFullCard": "长按查看整张牌"
   },
   "optionalEffect": {
     "dontAskAgain": "本局游戏不再询问",
