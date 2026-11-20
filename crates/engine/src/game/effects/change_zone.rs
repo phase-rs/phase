@@ -198,18 +198,26 @@ pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec
 /// — so a `ChangeZone` selecting "from among" such a set must scan the
 /// members' actual zones, not the battlefield default.
 ///
+/// CR 730.3c: the reader scans the zones of what its membership predicate
+/// accepts, so the components of a merged permanent the producer moved are
+/// scanned too ([`crate::game::merge::tracked_set_found_objects`]); `reader`
+/// carries the D7 provenance. A `None` reader scans raw members only.
+///
 /// The `TrackedSetId(0)` sentinel resolves through the same chain-first binding
 /// authority as `matches_target_filter`. Returns `None` when the filter is not
 /// tracked-set-backed or the set is empty/unbound.
-fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<Vec<Zone>> {
+fn tracked_set_member_zones(
+    state: &GameState,
+    filter: &TargetFilter,
+    reader: Option<&ResolvedAbility>,
+) -> Option<Vec<Zone>> {
     let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter.clone());
-    let id = match &filter {
-        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
+    let (id, caused_by) = match &filter {
+        TargetFilter::TrackedSet { id } => (*id, None),
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (*id, caused_by.as_ref()),
         _ => return None,
     };
-    let zones = state
-        .tracked_object_sets
-        .get(&id)?
+    let zones = crate::game::merge::tracked_set_found_objects(state, id, reader, caused_by)
         .iter()
         .filter_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
         .fold(Vec::new(), |mut zones, zone| {
@@ -224,17 +232,31 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
 /// Returns the zones scanned by a `ChangeZoneAll` before its target is resolved.
 /// Kept shared with compatibility validation so an archived mass-order prompt
 /// cannot admit cards from a zone the original producer would not have scanned.
+///
+/// No reader: no D7 provenance, so raw members (E3). The compatibility
+/// validator is that caller.
 pub(crate) fn change_zone_all_origin_zones(
     state: &GameState,
     origin: Option<Zone>,
     target: &TargetFilter,
+) -> Vec<Zone> {
+    change_zone_all_origin_zones_for_reader(state, origin, target, None)
+}
+
+/// [`change_zone_all_origin_zones`] for the resolving `reader`, which carries the
+/// CR 730.3c provenance that lets a merged permanent's components be scanned.
+pub(crate) fn change_zone_all_origin_zones_for_reader(
+    state: &GameState,
+    origin: Option<Zone>,
+    target: &TargetFilter,
+    reader: Option<&ResolvedAbility>,
 ) -> Vec<Zone> {
     let extracted = target.extract_zones();
     if !extracted.is_empty() {
         extracted
     } else if let Some(origin) = origin {
         vec![origin]
-    } else if let Some(zones) = tracked_set_member_zones(state, target) {
+    } else if let Some(zones) = tracked_set_member_zones(state, target, reader) {
         zones
     } else {
         vec![Zone::Battlefield]
@@ -1021,7 +1043,7 @@ fn untargeted_zone_pool(
             extracted
         } else if let Some(zone) = target_filter.extract_in_zone() {
             vec![zone]
-        } else if let Some(zones) = tracked_set_member_zones(state, target_filter) {
+        } else if let Some(zones) = tracked_set_member_zones(state, target_filter, Some(ability)) {
             zones
         } else {
             vec![Zone::Battlefield]
@@ -1365,8 +1387,9 @@ pub fn resolve(
                     // "exile that card" also binds ParentTarget in hand but has
                     // no library members in the tracked set and must exile the
                     // chosen hand card directly.
-                    let has_library_member = tracked_set_member_zones(state, &tracked_filter)
-                        .is_some_and(|zones| zones.contains(&Zone::Library));
+                    let has_library_member =
+                        tracked_set_member_zones(state, &tracked_filter, Some(ability))
+                            .is_some_and(|zones| zones.contains(&Zone::Library));
                     if has_library_member {
                         exile_tracked_set_library_only = true;
                         effective_target_filter = tracked_filter;
@@ -3359,7 +3382,8 @@ pub fn resolve_all(
             library_shuffle,
             random_order,
         } => {
-            let scan_zones = change_zone_all_origin_zones(state, *origin, target);
+            let scan_zones =
+                change_zone_all_origin_zones_for_reader(state, *origin, target, Some(ability));
             // CR 122.1 + CR 122.1h: Resolve each `QuantityExpr` counter count
             // to a concrete u32 once, mirroring the single-object `ChangeZone`
             // arm. Every entering object receives these counters (e.g. a
@@ -3453,9 +3477,9 @@ pub fn resolve_all(
     // battlefield before `chain_tracked_set_id` was populated (Zimone's
     // Experiment: kept cards live in the library until routed by type).
     let origin_zones = if matches!(&ability.effect, Effect::ChangeZoneAll { origin: None, .. }) {
-        if let Some(zones) = tracked_set_member_zones(state, &effective_filter) {
+        if let Some(zones) = tracked_set_member_zones(state, &effective_filter, Some(ability)) {
             zones
-        } else if let Some(zones) = tracked_set_member_zones(state, &target_filter) {
+        } else if let Some(zones) = tracked_set_member_zones(state, &target_filter, Some(ability)) {
             zones
         } else {
             origin_zones
@@ -16488,5 +16512,54 @@ mod exile_card_population_tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    /// CR 730.3c + CR 111.8 + CR 704.5d (U3, the B3 routed-zone row): the zone
+    /// projection scans the zones of what the reader's predicate accepts. The
+    /// token-topped survivor was sacrificed and ceased (state-based action), so
+    /// the one member of the set no longer exists; its component sits in the
+    /// graveyard. With the resolution's provenance the reader finds the
+    /// component and routes to `[Graveyard]`; with no reader (E3), or without a
+    /// finding, no member is live and there is nothing to route.
+    ///
+    /// Nearest printed card: Worlds Within Worlds ("Exile all creatures. Each
+    /// player may put any number of creature cards from their hand onto the
+    /// battlefield. Then put all cards exiled this way into their owners' hands.
+    /// Exile Worlds Within Worlds."), whose own cause-bound read cannot show the
+    /// finding. SYNTHETIC: the merge, the sacrifice and the carrier are staged by
+    /// hand.
+    #[test]
+    fn tracked_set_member_zones_routes_to_the_component_of_a_ceased_token_survivor() {
+        use crate::game::merge_tests::finding::{
+            departed_merged, install_chain, reader_effect, sacrifice_effect,
+        };
+        use crate::types::identifiers::TrackedSetId;
+        let mut d = departed_merged(true);
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut d.state, &mut events);
+        assert!(
+            !d.state.objects.contains_key(&d.host),
+            "reach guard: the token survivor ceased to exist"
+        );
+        assert_eq!(
+            d.state.objects[&d.rider].zone,
+            Zone::Graveyard,
+            "reach guard: the component is in the graveyard"
+        );
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        let filter = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+
+        assert_eq!(
+            tracked_set_member_zones(&d.state, &filter, None),
+            None,
+            "E3: no reader, no live member, nothing to route"
+        );
+        assert_eq!(
+            tracked_set_member_zones(&d.state, &filter, Some(&reader)),
+            Some(vec![Zone::Graveyard]),
+            "the reader finds the component and routes to its zone"
+        );
     }
 }

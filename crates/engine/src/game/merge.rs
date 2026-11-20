@@ -52,14 +52,15 @@ use std::sync::Arc;
 
 use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
+use crate::game::targeting;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     ContinuousModification, CopiableValues, Duration, Effect, LibraryPosition, LibraryShuffleMode,
-    ResolvedAbility, TargetFilter,
+    ResolvedAbility, TargetFilter, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::proposed_event::AppliedReplacementKey;
 use crate::types::zones::Zone;
 
@@ -847,7 +848,18 @@ pub(crate) fn co_split_components(
 /// CR 400.7: the incarnation the survivor holds once its leave move lands; that
 /// move bumps it exactly once, so a later zone change no longer matches.
 fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
-    ObjectIncarnationRef::of(survivor.id, survivor.incarnation + 1)
+    departure_successor(survivor.id, survivor.incarnation)
+}
+
+/// CR 400.7 + CR 730.3: the incarnation a leave move lands on, which is also the
+/// split pin every component of the departed merged permanent carries. The move
+/// bumps the departing object's incarnation exactly once, so the successor of
+/// departure incarnation `k` is `k + 1`.
+pub(crate) fn departure_successor(
+    object_id: ObjectId,
+    departure_incarnation: u64,
+) -> ObjectIncarnationRef {
+    ObjectIncarnationRef::of(object_id, departure_incarnation + 1)
 }
 
 /// CR 400.7e + CR 730.3c: the component cards of the merged permanent whose
@@ -883,7 +895,7 @@ fn recorded_departure_components(state: &GameState, ability: &ResolvedAbility) -
     if !recorded_by_source {
         return Vec::new();
     }
-    let successor = ObjectIncarnationRef::of(expected.object_id, expected.incarnation + 1);
+    let successor = departure_successor(expected.object_id, expected.incarnation);
     let mut components: Vec<ObjectId> = state
         .objects
         .iter()
@@ -892,6 +904,243 @@ fn recorded_departure_components(state: &GameState, ability: &ResolvedAbility) -
         .collect();
     components.sort_by_key(|id| id.0);
     components
+}
+
+/// CR 730.3c + CR 400.7: the successor incarnation a tracked-set member's
+/// battlefield departure landed on, read from the producer's recorded origin.
+/// `Some` only for a member that departed the battlefield: a component can be
+/// found only through a merged permanent's battlefield departure.
+fn member_departure_successor(
+    state: &GameState,
+    set_id: TrackedSetId,
+    member: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    let origin = state
+        .tracked_set_member_origins
+        .get(&set_id)?
+        .get(&member)
+        .filter(|origin| origin.departed_from == Zone::Battlefield)?;
+    Some(departure_successor(member, origin.departure_incarnation))
+}
+
+/// CR 730.3c: every non-member object split from a member of `set_id` at that
+/// member's recorded battlefield departure, as `(component, member)` pairs
+/// sorted by component id. Provenance is NOT applied here (see
+/// [`finding_admitted`]); this is the structural relation alone.
+///
+/// Equality is on the full [`ObjectIncarnationRef`], so a component split at an
+/// earlier departure of the same member id is not found (CR 400.7: the later
+/// object is a new object). Zone-agnostic by design: a component that changed
+/// zones has a cleared pin, so it is a new object (CR 400.7). A membership-only
+/// set (no battlefield-departure origin) returns empty without scanning objects.
+pub(crate) fn tracked_set_split_components(
+    state: &GameState,
+    set_id: TrackedSetId,
+) -> Vec<(ObjectId, ObjectId)> {
+    let Some(members) = state.tracked_object_sets.get(&set_id) else {
+        return Vec::new();
+    };
+    let successors: Vec<(ObjectIncarnationRef, ObjectId)> = members
+        .iter()
+        .filter_map(|member| {
+            member_departure_successor(state, set_id, *member).map(|pin| (pin, *member))
+        })
+        .collect();
+    if successors.is_empty() {
+        return Vec::new();
+    }
+    let mut components: Vec<(ObjectId, ObjectId)> = state
+        .objects
+        .iter()
+        .filter(|(id, _)| !members.contains(id))
+        .filter_map(|(id, obj)| {
+            let pin = obj.split_from_merge_survivor?;
+            successors
+                .iter()
+                .find(|(successor, _)| *successor == pin)
+                .map(|(_, member)| (*id, *member))
+        })
+        .collect();
+    components.sort_by_key(|(component, _)| component.0);
+    components
+}
+
+/// Whether `effect` is a tracked-set publisher in the census sense: an effect
+/// that publishes a tracked set when it resolves. The census of tracked-set
+/// readers is the source of truth for this list; its `CopyToken` token names no
+/// `Effect` variant (`Effect::CopyTokenOf` is the nearest, and the corpus has no
+/// effect under the census name), so the 24 `Effect` variants remain. Not keyed
+/// on `EffectKind`, which is lossy (`RevealTop` collapses into `Reveal`,
+/// `SetTapState` into `Tap`/`Untap`).
+fn is_census_publisher(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Sacrifice { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::Destroy { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Mill { .. }
+            | Effect::Discard { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::ExileTop { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::Dig { .. }
+            | Effect::RevealTop { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::SetTapState { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::Token { .. }
+            | Effect::GiveControl { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::Counter { .. }
+    )
+}
+
+/// CR 608.2c + CR 730.3c: whether a reader may find the components of `set_id`
+/// (the D7 gate). A merged permanent's components are found only by a reader
+/// that reads the set as the product of the action that moved the survivor.
+///
+/// - Provenance: the reader must be reading `set_id` through its own
+///   resolution's chain rung ([`targeting::chain_rung_root`]). A concrete id
+///   carried into the resolution (a delayed bound id, a cost-exile id) is
+///   allocated before any chain id of this resolution, so it never equals the
+///   chain id and is never admitted. No reader (the validator, legal-action
+///   enumeration) is never admitted.
+/// - Cause-bound (`caused_by` set): admitted; CR 608.2c + CR 614.6 the producer
+///   action is then checked per member by the caller (D4).
+/// - Cause-free: the reader must follow exactly one census publisher on the
+///   root's chain line, that publisher's declared action must be a zone
+///   transition, and every member of the set must carry that action's stamp
+///   (the veto: a set holding an unstamped or differently-caused member was not
+///   produced solely by that action). For a modal root the line is walked from
+///   the root, so a later-mode reader is conservatively not admitted.
+///
+/// No cost-exile branch: no marker persists that the resolution could recognize,
+/// so every carried concrete id is rejected (the safe direction).
+fn finding_admitted(
+    state: &GameState,
+    set_id: TrackedSetId,
+    reader: Option<&ResolvedAbility>,
+    caused_by: Option<&ThisWayCause>,
+) -> bool {
+    let Some(reader) = reader else {
+        return false;
+    };
+    let Some(root) = targeting::chain_rung_root(state, set_id, reader) else {
+        return false;
+    };
+    if caused_by.is_some() {
+        return true;
+    }
+    let line = || std::iter::successors(Some(root), |node| node.sub_ability.as_deref());
+    if line().filter(|node| node.effect == reader.effect).count() != 1 {
+        return false;
+    }
+    let mut publishers = line()
+        .take_while(|node| node.effect != reader.effect)
+        .filter(|node| is_census_publisher(&node.effect));
+    let (Some(publisher), None) = (publishers.next(), publishers.next()) else {
+        return false;
+    };
+    let Some(cause) = crate::game::effects::this_way_cause_for_effect(&publisher.effect)
+        .filter(|cause| cause.is_zone_transition())
+    else {
+        return false;
+    };
+    let (Some(members), Some(stamps)) = (
+        state.tracked_object_sets.get(&set_id),
+        state.tracked_set_member_causes.get(&set_id),
+    ) else {
+        return false;
+    };
+    members
+        .iter()
+        .all(|member| stamps.get(member) == Some(&cause))
+}
+
+/// CR 730.3c + CR 608.2c + CR 614.6: D4 — a component inherits its member's
+/// producer-action stamp. With no bound cause every component qualifies.
+fn member_cause_matches(
+    state: &GameState,
+    set_id: TrackedSetId,
+    member: ObjectId,
+    caused_by: Option<&ThisWayCause>,
+) -> bool {
+    caused_by.is_none_or(|bound| {
+        state
+            .tracked_set_member_causes
+            .get(&set_id)
+            .and_then(|stamps| stamps.get(&member))
+            == Some(bound)
+    })
+}
+
+/// CR 730.3c: membership form of "an effect that can find the new object a
+/// merged permanent becomes finds all of its components". Whether the
+/// non-member `object_id` is a component split from a member of `set_id` at that
+/// member's recorded battlefield departure, that the reader may find (the D7
+/// gate) and whose member's producer action matches `caused_by` (D4).
+///
+/// Cheap rejects first: an object with no split pin (every ordinary object) is
+/// rejected before any set work. Callers test direct membership first, so a
+/// member never reaches this.
+pub(crate) fn tracked_set_finds_component(
+    state: &GameState,
+    set_id: TrackedSetId,
+    object_id: ObjectId,
+    reader: Option<&ResolvedAbility>,
+    caused_by: Option<&ThisWayCause>,
+) -> bool {
+    let Some(pin) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.split_from_merge_survivor)
+    else {
+        return false;
+    };
+    let member = pin.object_id;
+    state
+        .tracked_object_sets
+        .get(&set_id)
+        .is_some_and(|members| members.contains(&member))
+        && member_departure_successor(state, set_id, member) == Some(pin)
+        && member_cause_matches(state, set_id, member, caused_by)
+        && finding_admitted(state, set_id, reader, caused_by)
+}
+
+/// CR 730.3c: enumeration form of [`tracked_set_finds_component`]. The raw
+/// members of `set_id` in set order (`caused_by` is not applied to them: that
+/// is the zone projection's existing semantics), followed by the found
+/// components sorted by id. The gate is evaluated once, and only when the
+/// structural relation is non-empty. Components are disjoint from the members.
+pub(crate) fn tracked_set_found_objects(
+    state: &GameState,
+    set_id: TrackedSetId,
+    reader: Option<&ResolvedAbility>,
+    caused_by: Option<&ThisWayCause>,
+) -> Vec<ObjectId> {
+    let mut found = state
+        .tracked_object_sets
+        .get(&set_id)
+        .cloned()
+        .unwrap_or_default();
+    let components = tracked_set_split_components(state, set_id);
+    if components.is_empty() || !finding_admitted(state, set_id, reader, caused_by) {
+        return found;
+    }
+    found.extend(
+        components
+            .into_iter()
+            .filter(|(_, member)| member_cause_matches(state, set_id, *member, caused_by))
+            .map(|(component, _)| component),
+    );
+    found
 }
 
 /// CR 730.3 + CR 712.21: Put a non-surviving merge component into `dest` as a

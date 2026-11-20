@@ -1868,3 +1868,439 @@ mod cast_pipeline {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// CR 730.3c: finding the components of a merged permanent that left the
+// battlefield (tracked-set membership predicates and zone projection).
+//
+// Every row below is SYNTHETIC: it stages the merge with `merge_object_onto`,
+// moves the survivor with `zones::move_to_zone`, publishes the tracked set with
+// `effects::publish_tracked_set_with_causes`, and installs the resolution
+// carrier by hand (`resolving_stack_entry`), as `targeting.rs` tests do. No
+// printed card can be staged this way without the cast pipeline, so each row
+// names its nearest printed card.
+// ---------------------------------------------------------------------------
+
+pub(crate) mod finding {
+    use super::*;
+    use crate::game::effects;
+    use crate::types::ability::{
+        Effect, LibraryInstructionActor, QuantityExpr, ResolvedAbility, ThisWayCause,
+    };
+    use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
+    use crate::types::identifiers::TrackedSetId;
+    use crate::types::zones::EtbTapState;
+
+    const SOURCE: ObjectId = ObjectId(900);
+
+    /// A merged permanent that left the battlefield and the set that recorded it.
+    pub(crate) struct Departed {
+        pub(crate) state: GameState,
+        pub(crate) host: ObjectId,
+        pub(crate) rider: ObjectId,
+        pub(crate) set: TrackedSetId,
+    }
+
+    /// Stage a merged permanent (P0's `host` with `rider`), move the survivor to
+    /// the graveyard, and publish the survivor as the one member of a chain set
+    /// stamped `Sacrificed` (so the producing origin records the battlefield
+    /// departure). `token_topped` makes the host a token with the rider beneath it.
+    pub(crate) fn departed_merged(token_topped: bool) -> Departed {
+        let (mut state, host, rider, _p0) = two_creatures();
+        state.battlefield.retain(|&id| id != rider);
+        let mut events = Vec::new();
+        let side = if token_topped {
+            state.objects.get_mut(&host).unwrap().is_token = true;
+            MergeSide::Bottom
+        } else {
+            MergeSide::Top
+        };
+        merge_object_onto(&mut state, rider, host, side, &mut events);
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+        effects::publish_tracked_set_with_causes(
+            &mut state,
+            vec![(host, Some(ThisWayCause::Sacrificed))],
+        );
+        let set = state
+            .chain_tracked_set_id
+            .expect("publication sets the chain id");
+        Departed {
+            state,
+            host,
+            rider,
+            set,
+        }
+    }
+
+    /// The reader node of a "Sacrifice ... then return those" line: an untargeted
+    /// `ChangeZone` over the most recent tracked set.
+    pub(crate) fn reader_effect() -> Effect {
+        Effect::ChangeZone {
+            actor: LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
+            origin: None,
+            destination: Zone::Battlefield,
+            target: TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: None,
+            },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    }
+
+    pub(crate) fn sacrifice_effect() -> Effect {
+        Effect::Sacrifice {
+            target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        }
+    }
+
+    fn mill_effect() -> Effect {
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            destination: Zone::Graveyard,
+            position: Default::default(),
+        }
+    }
+
+    fn node(effect: Effect) -> ResolvedAbility {
+        ResolvedAbility::new(effect, Vec::new(), SOURCE, PlayerId(0))
+    }
+
+    /// Chain `effects` as one ability line (the first is the root) and install it
+    /// as the resolution carrier. Returns the reader: a node carrying the LAST
+    /// effect, as the resolver hands it to the predicate arms.
+    pub(crate) fn install_chain(state: &mut GameState, effects: Vec<Effect>) -> ResolvedAbility {
+        let reader = node(effects.last().cloned().expect("a non-empty chain"));
+        let root = effects
+            .into_iter()
+            .rev()
+            .fold(None::<ResolvedAbility>, |tail, effect| {
+                let mut head = node(effect);
+                head.sub_ability = tail.map(Box::new);
+                Some(head)
+            })
+            .expect("a non-empty chain");
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(901),
+            source_id: SOURCE,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: SOURCE,
+                ability: Box::new(root),
+            },
+        });
+        reader
+    }
+
+    fn finds(d: &Departed, reader: &ResolvedAbility, caused_by: Option<&ThisWayCause>) -> bool {
+        tracked_set_finds_component(&d.state, d.set, d.rider, Some(reader), caused_by)
+    }
+
+    /// CR 730.3c: with the full E1 provenance (one publisher before the reader,
+    /// a zone-transition action, every member stamped by it) the component
+    /// split from the sacrificed member is found, in both forms. This control
+    /// holds in every row below that expects a rejection.
+    ///
+    /// Nearest printed card: Bringer of the Last Gift ("each player sacrifices
+    /// all other creatures they control. Then each player returns all creature
+    /// cards from their graveyard that weren't put there this way to the
+    /// battlefield."). SYNTHETIC: no printed card exhibits a cause-free
+    /// one-publisher reader over a sacrificed merged survivor.
+    #[test]
+    fn e1_one_publisher_finds_the_component() {
+        for token_topped in [false, true] {
+            let mut d = departed_merged(token_topped);
+            let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+            assert!(finds(&d, &reader, None), "token_topped={token_topped}");
+            assert_eq!(
+                tracked_set_found_objects(&d.state, d.set, Some(&reader), None),
+                vec![d.host, d.rider],
+                "members first, then the found component (token_topped={token_topped})"
+            );
+        }
+    }
+
+    /// CR 730.3c + CR 400.7 (U1): only a battlefield departure can be found. A
+    /// member whose recorded departure is from a graveyard has no components,
+    /// even when an object is co-pinned to that member's successor incarnation.
+    /// Revert sensitivity: dropping the battlefield-origin conjunct finds it.
+    ///
+    /// Nearest printed card: Doomsday ("Search your library and graveyard for
+    /// five cards and exile the rest. Put the chosen cards on top of your
+    /// library in any order. You lose half your life, rounded up."). SYNTHETIC:
+    /// the hostile origin is written by hand.
+    #[test]
+    fn u1_doomsday_witness_membership_form_a_graveyard_origin_finds_nothing() {
+        let mut d = departed_merged(false);
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        assert!(
+            finds(&d, &reader, None),
+            "control: the battlefield-origin member finds its component"
+        );
+        d.state
+            .tracked_set_member_origins
+            .get_mut(&d.set)
+            .and_then(|origins| origins.get_mut(&d.host))
+            .expect("the host has a recorded origin")
+            .departed_from = Zone::Graveyard;
+        assert!(!finds(&d, &reader, None));
+    }
+
+    /// CR 730.3c + CR 400.7 (U2): the enumeration form of U1: members only.
+    /// Nearest printed card: Doomsday (see U1). SYNTHETIC.
+    #[test]
+    fn u2_doomsday_witness_enumeration_form_returns_members_only() {
+        let mut d = departed_merged(false);
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        assert_eq!(
+            tracked_set_found_objects(&d.state, d.set, Some(&reader), None),
+            vec![d.host, d.rider],
+            "control: the battlefield-origin member enumerates its component"
+        );
+        d.state
+            .tracked_set_member_origins
+            .get_mut(&d.set)
+            .and_then(|origins| origins.get_mut(&d.host))
+            .expect("the host has a recorded origin")
+            .departed_from = Zone::Graveyard;
+        assert_eq!(
+            tracked_set_found_objects(&d.state, d.set, Some(&reader), None),
+            vec![d.host]
+        );
+    }
+
+    /// CR 730.3c + CR 400.7 (B2, U4): a component split at an EARLIER departure
+    /// of the same member id is not found. The host leaves with its rider (pin to
+    /// incarnation 1), returns, and is sacrificed again; the set's recorded
+    /// departure is the later one (successor incarnation 3), so the rider's pin
+    /// no longer matches. Revert sensitivity: an id-only match finds it.
+    ///
+    /// Nearest printed cards: Zombify ("Return target creature card from your
+    /// graveyard to the battlefield.") followed by Bringer of the Last Gift.
+    /// SYNTHETIC: the merge and the round trip are staged by hand.
+    #[test]
+    fn u4_b2_component_split_at_an_earlier_departure_is_not_found() {
+        let (mut state, host, rider, _p0) = two_creatures();
+        state.battlefield.retain(|&id| id != rider);
+        let mut events = Vec::new();
+        merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+        assert_eq!(
+            state.objects[&rider].split_from_merge_survivor,
+            Some(departure_successor(host, 0)),
+            "reach guard: the rider is pinned to the host's first departure"
+        );
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+        effects::publish_tracked_set_with_causes(
+            &mut state,
+            vec![(host, Some(ThisWayCause::Sacrificed))],
+        );
+        let set = state.chain_tracked_set_id.unwrap();
+        let reader = install_chain(&mut state, vec![sacrifice_effect(), reader_effect()]);
+        assert_eq!(
+            state.tracked_set_member_origins[&set][&host].departure_incarnation, 2,
+            "reach guard: the set records the second departure"
+        );
+
+        assert!(!tracked_set_finds_component(
+            &state,
+            set,
+            rider,
+            Some(&reader),
+            None
+        ));
+        assert_eq!(
+            tracked_set_found_objects(&state, set, Some(&reader), None),
+            vec![host]
+        );
+    }
+
+    /// CR 608.2c (U5): the E1 count. Two census publishers before the reader
+    /// (`Sacrifice`, `Mill`) mean the set is not known to be one action's
+    /// product, so no finding. Revert sensitivity: an ungated finding finds it.
+    ///
+    /// Nearest printed card: Bristlebud Farmer ("Whenever this creature attacks,
+    /// you may sacrifice a Food. If you do, mill three cards. You may put a
+    /// permanent card from among them into your hand."). SYNTHETIC: no printed
+    /// card exhibits the one-node-before count for a cause-free reader (its
+    /// reader binds the Mill's fresh set instead).
+    #[test]
+    fn u5_two_publishers_before_the_reader_do_not_find() {
+        let mut d = departed_merged(false);
+        let reader = install_chain(
+            &mut d.state,
+            vec![sacrifice_effect(), mill_effect(), reader_effect()],
+        );
+        assert!(!finds(&d, &reader, None));
+        assert_eq!(
+            tracked_set_found_objects(&d.state, d.set, Some(&reader), None),
+            vec![d.host]
+        );
+    }
+
+    /// CR 608.2c (U6): the one-publisher line finds (an over-strict gate fails).
+    /// Nearest printed card: Bringer of the Last Gift (see
+    /// `e1_one_publisher_finds_the_component`). SYNTHETIC.
+    #[test]
+    fn u6_one_publisher_before_the_reader_finds() {
+        let mut d = departed_merged(true);
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        assert!(finds(&d, &reader, None));
+    }
+
+    /// CR 608.2c (U7): the veto. A set holding a member the publisher's action did
+    /// not stamp was not produced solely by that action. Revert sensitivity: no
+    /// veto finds it.
+    ///
+    /// Nearest printed card: Bringer of the Last Gift. SYNTHETIC.
+    #[test]
+    fn u7_an_unstamped_member_vetoes_the_finding() {
+        let mut d = departed_merged(false);
+        let extra = ObjectId(777);
+        effects::publish_tracked_set(&mut d.state, vec![extra]);
+        assert!(
+            d.state.tracked_object_sets[&d.set].contains(&extra),
+            "reach guard: the unstamped member joined the same chain set"
+        );
+        assert!(
+            !d.state.tracked_set_member_causes[&d.set].contains_key(&extra),
+            "reach guard: the extra member carries no stamp"
+        );
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        assert!(!finds(&d, &reader, None));
+        let mut control = departed_merged(false);
+        let reader = install_chain(
+            &mut control.state,
+            vec![sacrifice_effect(), reader_effect()],
+        );
+        assert!(finds(&control, &reader, None), "control: no extra member");
+    }
+
+    /// CR 730.3c + CR 608.2c + CR 614.6 (U8, D4): a component inherits its
+    /// member's producer action. A reader bound to `Exiled` does not find a
+    /// component whose member was `Sacrificed`; a reader bound to `Sacrificed`
+    /// does. Revert sensitivity: no inheritance finds both.
+    ///
+    /// Nearest printed cards: Timothar, Baron of Bats ("...exile it. If you do,
+    /// create a 1/1 black Bat creature token with flying. It gains \"When this
+    /// token deals combat damage to a player, sacrifice it and return the exiled
+    /// card to the battlefield tapped.\"") and Living Death. SYNTHETIC.
+    #[test]
+    fn u8_a_component_inherits_its_members_producer_action() {
+        let mut d = departed_merged(true);
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        assert!(
+            !finds(&d, &reader, Some(&ThisWayCause::Exiled)),
+            "member Sacrificed, reader Exiled"
+        );
+        assert!(
+            finds(&d, &reader, Some(&ThisWayCause::Sacrificed)),
+            "member Sacrificed, reader Sacrificed"
+        );
+        assert_eq!(
+            tracked_set_found_objects(&d.state, d.set, Some(&reader), Some(&ThisWayCause::Exiled)),
+            vec![d.host],
+            "the enumeration form applies D4 to components"
+        );
+    }
+
+    /// CR 608.2c (U9): provenance. (a) A set id the reader carries that is not
+    /// this resolution's chain id is never admitted; (b) the chain id with no
+    /// resolution carrier (a stale chain) is never admitted. Revert sensitivity:
+    /// a gate without the rung or the carrier finds both.
+    ///
+    /// Nearest printed cards: Fortune, Loyal Steed ("Whenever Fortune attacks
+    /// while saddled, at end of combat, exile it and up to one creature that
+    /// saddled it this turn, then return those cards to the battlefield under
+    /// their owner's control.") for the carried id, and Voyager Staff ("Return
+    /// the exiled card to the battlefield under its owner's control at the
+    /// beginning of the next end step.") for the delayed bound id. SYNTHETIC.
+    #[test]
+    fn u9_carried_ids_and_stale_chains_are_never_admitted() {
+        let mut d = departed_merged(false);
+        let reader = install_chain(&mut d.state, vec![sacrifice_effect(), reader_effect()]);
+        assert!(
+            finds(&d, &reader, None),
+            "control: the rung and carrier hold"
+        );
+
+        // (a) A later resolution's chain: the set the reader carries predates it.
+        let mut carried = departed_merged(false);
+        let reader = install_chain(
+            &mut carried.state,
+            vec![sacrifice_effect(), reader_effect()],
+        );
+        carried.state.chain_tracked_set_id = Some(TrackedSetId(carried.set.0 + 1));
+        assert!(
+            !finds(&carried, &reader, None),
+            "(a) concrete id != chain id"
+        );
+        assert!(
+            !finds(&carried, &reader, Some(&ThisWayCause::Sacrificed)),
+            "(a) a cause-bound reader is still not admitted"
+        );
+
+        // (b) The chain id survives its resolution; the carrier does not.
+        let mut stale = departed_merged(false);
+        let reader = install_chain(&mut stale.state, vec![sacrifice_effect(), reader_effect()]);
+        stale.state.resolving_stack_entry = None;
+        assert!(!finds(&stale, &reader, None), "(b) no resolution carrier");
+        assert!(
+            !finds(&stale, &reader, Some(&ThisWayCause::Sacrificed)),
+            "(b) a cause-bound reader is still not admitted"
+        );
+        assert!(
+            tracked_set_found_objects(&stale.state, stale.set, None, None) == vec![stale.host],
+            "(b) no reader at all: raw members"
+        );
+    }
+
+    /// CR 400.7 + CR 730.3 (U10): the primitive and the per-set helper.
+    /// `departure_successor(id, k)` is `of(id, k + 1)`; the helper returns the
+    /// `(component, member)` pair with no provenance applied (no reader, no
+    /// carrier); a membership-only set (no recorded departure) returns empty
+    /// without scanning. Building-block row: no printed card.
+    #[test]
+    fn u10_primitive_and_per_set_helper() {
+        assert_eq!(
+            departure_successor(ObjectId(7), 4),
+            ObjectIncarnationRef::of(ObjectId(7), 5)
+        );
+        let d = departed_merged(false);
+        assert_eq!(
+            tracked_set_split_components(&d.state, d.set),
+            vec![(d.rider, d.host)],
+            "no reader and no carrier: the structural relation alone"
+        );
+
+        let mut membership_only = departed_merged(false);
+        effects::publish_tracked_set(&mut membership_only.state, vec![ObjectId(777)]);
+        let fresh = membership_only
+            .state
+            .chain_tracked_set_id
+            .expect("chain set");
+        membership_only
+            .state
+            .tracked_set_member_origins
+            .remove(&fresh);
+        assert_eq!(
+            tracked_set_split_components(&membership_only.state, fresh),
+            Vec::<(ObjectId, ObjectId)>::new(),
+            "the fast path: no battlefield-departure origin, no components"
+        );
+    }
+}
